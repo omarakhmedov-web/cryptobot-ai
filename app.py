@@ -1,37 +1,45 @@
+import os
 from flask import Flask, request
 import telegram
-import openai
-import os
+from openai import OpenAI
 
 app = Flask(__name__)
 
-TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
-OPENAI_API_KEY = os.environ['OPENAI_API_KEY']
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+PORT = int(os.environ.get("PORT", 10000))
 
 bot = telegram.Bot(token=TELEGRAM_TOKEN)
-openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-@app.route('/')
-def index():
-    return 'Bot is running!'
+@app.route("/")
+def root():
+    return "Bot is running!"
 
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    msg = data.get("message") or {}
 
-    if 'message' in data and 'text' in data['message']:
-        chat_id = data['message']['chat']['id']
-        text = data['message']['text']
+    chat = (msg.get("chat") or {}).get("id")
+    text = msg.get("text")
 
-        try:
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": text}]
-            )
-            reply = response['choices'][0]['message']['content']
-        except Exception as e:
-            reply = f"Error: {e}"
+    if not (chat and text):
+        return "ok"
 
-        bot.send_message(chat_id=chat_id, text=reply)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": text}],
+            temperature=0.7,
+        )
+        reply = resp.choices[0].message.content.strip()
+    except Exception as e:
+        reply = f"Error: {e}"
 
-    return 'ok'
+    bot.send_message(chat_id=chat, text=reply)
+    return "ok"
+
+if __name__ == "__main__":
+    # Локальный запуск / Render (без gunicorn) — ок.
+    app.run(host="0.0.0.0", port=PORT)
