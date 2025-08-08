@@ -1,40 +1,25 @@
-import os
 from flask import Flask, request
-import telegram
-from openai import OpenAI
+import telebot
+import os
+
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "твой_токен")
+bot = telebot.TeleBot(TOKEN)
 
 app = Flask(__name__)
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-
-bot = telegram.Bot(token=TELEGRAM_TOKEN)
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-@app.route("/")
-def root():
-    return "Bot is running!"
-
-@app.route("/webhook", methods=["POST"])
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json(silent=True) or {}
-    msg = data.get("message") or {}
+    if request.headers.get('content-type') == 'application/json':
+        json_str = request.get_data().decode('UTF-8')
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return ''
+    else:
+        return 'Unsupported Media Type', 415
 
-    chat = (msg.get("chat") or {}).get("id")
-    text = msg.get("text")
+@bot.message_handler(func=lambda message: True)
+def echo_all(message):
+    bot.reply_to(message, f"Ты написал: {message.text}")
 
-    if not (chat and text):
-        return "ok"
-
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": text}],
-            temperature=0.7,
-        )
-        reply = resp.choices[0].message.content.strip()
-    except Exception as e:
-        reply = f"Error: {e}"
-
-    bot.send_message(chat_id=chat, text=reply)
-    return "ok"
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
