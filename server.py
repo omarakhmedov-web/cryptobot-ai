@@ -43,3 +43,4 @@ def webhook():
 if __name__ == "__main__":
     # Локальный запуск / Render (без gunicorn) — ок.
     app.run(host="0.0.0.0", port=PORT)
+Rename app.py to server.py
