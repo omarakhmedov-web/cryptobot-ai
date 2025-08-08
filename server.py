@@ -1,6 +1,6 @@
 import os
 from flask import Flask, request
-import telegram
+import requests
 from openai import OpenAI
 
 app = Flask(__name__)
@@ -8,8 +8,11 @@ app = Flask(__name__)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
-bot = telegram.Bot(token=TELEGRAM_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+def tg_send_message(chat_id: int, text: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    requests.post(url, json={"chat_id": chat_id, "text": text})
 
 @app.route("/")
 def root():
@@ -36,5 +39,5 @@ def webhook():
     except Exception as e:
         reply = f"Error: {e}"
 
-    bot.send_message(chat_id=chat, text=reply)
+    tg_send_message(chat, reply)
     return "ok"
