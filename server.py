@@ -7,7 +7,6 @@ app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-PORT = int(os.environ.get("PORT", 10000))
 
 bot = telegram.Bot(token=TELEGRAM_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -39,8 +38,3 @@ def webhook():
 
     bot.send_message(chat_id=chat, text=reply)
     return "ok"
-
-if __name__ == "__main__":
-    # Локальный запуск / Render (без gunicorn) — ок.
-    app.run(host="0.0.0.0", port=PORT)
-Rename app.py to server.py
