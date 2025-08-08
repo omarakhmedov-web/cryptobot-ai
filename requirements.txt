@@ -2,4 +2,4 @@ pyTelegramBotAPI
 openai
 langdetect
 requests
-qunicorn
+gunicorn
