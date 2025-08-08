@@ -1,5 +1,4 @@
-flask
-openai>=1.0.0
-gunicorn
-requests
+pyTelegramBotAPI
+openai
 langdetect
+requests
