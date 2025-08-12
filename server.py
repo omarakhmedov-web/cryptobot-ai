@@ -1,204 +1,288 @@
-# server.py
 import os
-import json
 import re
+import json
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request
+from telegram import Bot, ParseMode
 from groq import Groq
 
 app = Flask(__name__)
 
 # --- ENV ---
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-PORT = int(os.environ.get("PORT", 10000))
+TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
+GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
+PORT             = int(os.environ.get("PORT", 10000))
 
-TELEGRAM_SEND_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+# НЕобязательные ключи (если нет — просто пропустим соответствующие проверки)
+ETHERSCAN_API_KEY   = os.environ.get("ETHERSCAN_API_KEY")
+BSCSCAN_API_KEY     = os.environ.get("BSCSCAN_API_KEY")
+POLYGONSCAN_API_KEY = os.environ.get("POLYGONSCAN_API_KEY")
 
-# --- ЯЗЫКИ / ТЕКСТЫ ---
+bot    = Bot(token=TELEGRAM_TOKEN)
+client = Groq(api_key=GROQ_API_KEY)  # без proxies и прочего — как и должно быть
+
+# --- Язык: простой, быстрый детектор по диапазонам Unicode ---
+def detect_lang(txt: str) -> str:
+    if not txt:
+        return "en"
+    # cyrillic
+    if re.search(r"[\u0400-\u04FF]", txt):
+        return "ru"
+    # arabic
+    if re.search(r"[\u0600-\u06FF]", txt):
+        return "ar"
+    # chinese/japanese/korean (очень грубо)
+    if re.search(r"[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]", txt):
+        return "zh"
+    # spanish/portuguese accents (латиница + диакритика) – оставить en, LLM переформулирует
+    return "en"
 
 WELCOME = {
     "en": (
-        "Hello! I'm *CryptoGuard*, your Web3 security assistant.\n\n"
-        "I can:\n"
-        "• Review token contracts (ownership, mint, fee, blacklist, honeypot, proxy, upgradability)\n"
-        "• Analyze deployer history & socials (Twitter/X, Discord, Telegram)\n"
-        "• Check liquidity locks, top holders, transfers & anomalies\n"
-        "• Explain risks and suggest safe next steps\n\n"
-        "_Send a contract address, token symbol, or ask anything about on-chain safety._"
+        "Hello! I'm CryptoGuard, your Web3 security assistant. "
+        "Send me a token/contract address (like `0x...`) and I'll run checks:\n"
+        "• Ownership/Mint/Fees/Blacklist/Pausable\n"
+        "• Proxy/Upgradeable, Deployer history & socials\n"
+        "• Liquidity locks, Top holders, Transfer anomalies\n"
+        "• Pools/Liquidity/Price/Volume from DexScreener\n\n"
+        "You can ask in any language — I’ll reply in that language."
     ),
     "ru": (
-        "Привет! Я *CryptoGuard* — ваш помощник по безопасности в Web3.\n\n"
-        "Я умею:\n"
-        "• Проверять смарт-контракты токенов (владение, mint, комиссии, blacklist, honeypot, proxy, апгрейды)\n"
-        "• Анализировать историю деплойера и соцсети (X/Twitter, Discord, Telegram)\n"
-        "• Смотреть локи ликвидности, крупных держателей, переводы и аномалии\n"
-        "• Объяснять риски и рекомендовать безопасные дальнейшие действия\n\n"
-        "_Пришлите адрес контракта, символ токена или любой вопрос про ончейн-безопасность._"
+        "Привет! Я CryptoGuard — помощник по безопасности Web3. "
+        "Отправь адрес контракта (например, `0x...`) и я выполню проверки:\n"
+        "• Владение/Минт/Комиссии/Чёрный список/Пауза\n"
+        "• Прокси/Апгрейд, история деплоя и соцсети\n"
+        "• Блокировки ликвидности, топ-холдеры, аномалии переводов\n"
+        "• Пулы/Ликвидность/Цена/Объём с DexScreener\n\n"
+        "Пиши на любом языке — отвечу на нём же."
     ),
-    "es": (
-        "¡Hola! Soy *CryptoGuard*, tu asistente de seguridad Web3.\n\n"
-        "Puedo:\n"
-        "• Auditar contratos de tokens (propiedad, mint, fee, blacklist, honeypot, proxy, upgradability)\n"
-        "• Analizar historial del deployer y redes sociales (X/Twitter, Discord, Telegram)\n"
-        "• Revisar locks de liquidez, mayores holders, transferencias y anomalías\n"
-        "• Explicar riesgos y sugerir próximos pasos seguros\n\n"
-        "_Envíame una dirección de contrato, símbolo del token o cualquier duda de seguridad on-chain._"
-    ),
-    "tr": (
-        "Merhaba! Ben *CryptoGuard*, Web3 güvenlik asistanınız.\n\n"
-        "Şunları yaparım:\n"
-        "• Token sözleşmesi denetimi (sahiplik, mint, ücret, blacklist, honeypot, proxy, yükseltilebilirlik)\n"
-        "• Dağıtıcı geçmişi ve sosyal hesaplar (X/Twitter, Discord, Telegram)\n"
-        "• Likidite kilitleri, büyük tutucular, transferler ve anormallikler\n"
-        "• Riskleri açıklar, güvenli sonraki adımlar öneririm\n\n"
-        "_Sözleşme adresi, token sembolü gönderin ya da zincir üzeri güvenlikle ilgili soru sorun._"
-    ),
-    "ar": (
-        "مرحباً! أنا *CryptoGuard*، مساعدك لأمان Web3.\n\n"
-        "أستطيع:\n"
-        "• تدقيق عقود التوكن (الملكية، السك، الرسوم، القائمة السوداء، honeypot، الوكيل، قابلية الترقية)\n"
-        "• تحليل سجل الناشر وحسابات التواصل (X/Twitter، ديسكورد، تيليجرام)\n"
-        "• فحص قفل السيولة، كبار الحائزين، التحويلات والشواذ\n"
-        "• شرح المخاطر واقتراح خطوات آمنة لاحقاً\n\n"
-        "_أرسل عنوان عقد، رمز توكن، أو أي سؤال حول أمان السلسلة._"
-    ),
-    "zh": (
-        "你好！我是 *CryptoGuard*，你的 Web3 安全助手。\n\n"
-        "我可以：\n"
-        "• 审查代币合约（所有权、铸币、手续费、黑名单、诱捕池、代理、可升级性）\n"
-        "• 分析部署者历史与社媒（X/Twitter、Discord、Telegram）\n"
-        "• 检查流动性锁仓、大额持仓、转账与异常\n"
-        "• 解释风险并给出安全建议\n\n"
-        "_发送合约地址、代币符号，或直接提问链上安全问题。_"
-    ),
+    "ar": "أرسل عنوان العقد (مثل 0x...) وسأقوم بفحوصات الأمان والشفافية والحوكمة والسيولة. يمكنني الرد بلغتك.",
+    "zh": "发送合约地址（如 0x...），我会进行所有权、代理、黑名单、流动性、池子、价格/成交量等检查。我会用你的语言回复。"
 }
 
-HELP_CAPS = {
-    "en": (
-        "*What I can do (Web3 safety):*\n"
-        "• Contract audit heuristics: ownership, mint, tax/fee, blacklist, honeypot, pausability, proxy, upgradeability\n"
-        "• Deployer history & social signals (Twitter/X, Discord, Telegram)\n"
-        "• Liquidity/LP: locks, burned LP, pool health, MEV risk\n"
-        "• Holders & transfers: top holders, distribution skew, suspicious patterns\n"
-        "• Risk explanation + safe next steps\n\n"
-        "_Tip: send a contract address to start._"
-    ),
-    "ru": (
-        "*Что я умею (безопасность Web3):*\n"
-        "• Евристики аудита контрактов: владение, mint, налог/fee, blacklist, honeypot, пауза, proxy, апгрейды\n"
-        "• История деплойера и сигналы соцсетей (X/Twitter, Discord, Telegram)\n"
-        "• Ликвидность/LP: локи, сожжённый LP, здоровье пула, риск MEV\n"
-        "• Держатели и переводы: топ-холдеры, перекос распределения, подозрительные паттерны\n"
-        "• Объяснение рисков + безопасные шаги\n\n"
-        "_Подсказка: пришлите адрес контракта для старта._"
-    ),
+# -------- Утилиты блокчейн-сканеров --------
+SCAN = {
+    "eth": {
+        "name": "Ethereum",
+        "base": "https://api.etherscan.io/api",
+        "key": ETHERSCAN_API_KEY
+    },
+    "bsc": {
+        "name": "BSC",
+        "base": "https://api.bscscan.com/api",
+        "key": BSCSCAN_API_KEY
+    },
+    "polygon": {
+        "name": "Polygon",
+        "base": "https://api.polygonscan.com/api",
+        "key": POLYGONSCAN_API_KEY
+    }
 }
 
-SYSTEM_PROMPT_TEMPLATE = (
-    "You are CryptoGuard, a pragmatic Web3 security assistant. "
-    "Answer *in language code: {lang}*. "
-    "Be concise, clear, and actionable. "
-    "When user provides a token/contract, outline key risk checks:\n"
-    "• Ownership, mint, fees/tax, blacklist/honeypot/pausable\n"
-    "• Proxy/upgradability; deployer history & socials\n"
-    "• Liquidity locks, top holders, transfer anomalies\n"
-    "If data is missing, say what you *need* to proceed. "
-    "Never promise on-chain actions. No financial advice."
-)
+def is_address(s: str) -> bool:
+    return bool(re.search(r"\b0x[a-fA-F0-9]{40}\b", s or ""))
 
-# --- ПРОСТОЙ ДЕТЕКТОР ЯЗЫКА (исправлено) ---
-def detect_lang(text: str) -> str:
-    if not text:
-        return "en"
-    t = (text or "").lower()
+def _scan_get(chain: str, module: str, action: str, params: dict) -> dict | None:
+    cfg = SCAN[chain]
+    if not cfg["key"]:
+        return None
+    payload = {"module": module, "action": action, "apikey": cfg["key"], **params}
+    try:
+        r = requests.get(cfg["base"], params=payload, timeout=12)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
 
-    # кириллица
-    if any(0x0430 <= ord(ch) <= 0x044F for ch in t):
-        return "ru"
-    # арабский
-    if any(0x0600 <= ord(ch) <= 0x06FF for ch in t):
-        return "ar"
-    # китайский / японский
-    if any(0x4E00 <= ord(ch) <= 0x9FFF for ch in t) or any(0x3040 <= ord(ch) <= 0x30FF for ch in t):
-        return "zh"
-    # турецкий
-    if any(ch in "çğıöşü" for ch in t):
-        return "tr"
-    # испанский
-    if any(ch in "ñáéíóúü" for ch in t):
-        return "es"
-    # по умолчанию
-    return "en"
+def get_token_standard_and_owner(chain: str, address: str) -> dict:
+    """Пробуем понять стандарт токена и владельца из ABI и некоторых эвристик."""
+    out = {
+        "chain": SCAN[chain]["name"],
+        "standard": None,
+        "owner": None,
+        "mint": None,
+        "fees_tax": None,
+        "blacklist_pause": None,
+        "proxy": None,
+        "deployer": None,
+        "socials": None
+    }
+    j = _scan_get(chain, "contract", "getabi", {"address": address})
+    if not j or j.get("status") != "1":
+        return out
+    try:
+        abi = json.loads(j["result"])
+    except Exception:
+        return out
 
-# --- КЛИЕНТ GROQ ---
-client = Groq(api_key=GROQ_API_KEY)
+    # простая эвристика по функциям
+    fnames = {item.get("name") for item in abi if item.get("type") == "function"}
+    if {"totalSupply", "balanceOf", "transfer"} & fnames:
+        out["standard"] = "ERC-20"
+    if {"ownerOf", "tokenURI"} & fnames:
+        out["standard"] = out["standard"] or "ERC-721/1155"
 
-def groq_reply(user_text: str, lang: str) -> str:
+    out["mint"] = "mint" in (fnames or set())
+    out["fees_tax"] = any(x in fnames for x in ["setTax", "taxFee", "setFees"])
+    out["blacklist_pause"] = any(x in fnames for x in ["blacklist", "addToBlacklist", "pause", "paused"])
+
+    # Владелец/деployer (часто owner() или owner) может быть
+    if "owner" in fnames:
+        out["owner"] = "function owner() present"
+    # Прокси
+    out["proxy"] = any(x in fnames for x in ["implementation", "upgradeTo", "proxyType"])
+
+    # Заглушки: deployer/socials — нужны отдельные эндпоинты/скан логов конкретной сети
+    return out
+
+def get_holders_and_liquidity(chain: str, address: str) -> dict:
+    """Пытаемся вытянуть топ-холдеров и lock-инфу, если скан поддерживает (часто платно)."""
+    # Большинство таких эндпоинтов — платные/про-аккаунт. Оставим «не публично».
+    return {
+        "top_holders": "Not publicly available",
+        "liquidity_locks": "Not publicly available",
+        "transfer_anomalies": "Not publicly available"
+    }
+
+def get_dexscreener(address: str) -> dict | None:
+    try:
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}", timeout=12)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not data.get("pairs"):
+            return None
+        best = max(data["pairs"], key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+        return {
+            "dex_chain": best.get("chainId"),
+            "pair": best.get("pairAddress"),
+            "dex": best.get("dexId"),
+            "liquidity_usd": best.get("liquidity", {}).get("usd"),
+            "fdv_usd": best.get("fdv"),
+            "price_usd": best.get("priceUsd"),
+            "volume24h": best.get("volume", {}).get("h24"),
+            "base_token": best.get("baseToken", {}).get("symbol"),
+            "quote_token": best.get("quoteToken", {}).get("symbol"),
+            "url": best.get("url"),
+        }
+    except Exception:
+        return None
+
+def summarize_with_llm(lang: str, sections: dict) -> str:
+    """Попросим LLM оформить отчет на языке пользователя."""
+    system = (
+        "You are CryptoGuard, a Web3 security assistant. Summarize token/contract checks "
+        "clearly and concisely for retail users. Use bullet points where useful. "
+        "Respond ONLY in the user's language."
+    )
+    content = {
+        "language": lang,
+        "sections": sections
+    }
     try:
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            temperature=0.2,
-            max_tokens=800,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT_TEMPLATE.format(lang=lang)},
-                {"role": "user", "content": user_text},
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(content, ensure_ascii=False)}
             ],
+            temperature=0.3,
         )
-        msg = resp.choices[0].message.content or ""
-        # Телеграм ограничение 4096
-        return msg[:4096]
-    except Exception as e:
-        if lang == "ru":
-            return f"Ошибка ответа модели: {e}"
-        return f"Model error: {e}"
-
-# --- ВСПОМОГАТЕЛЬНОЕ ОТПРАВЛЕНИЕ В ТГ ---
-def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown"):
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True,
-    }
-    try:
-        requests.post(TELEGRAM_SEND_URL, json=payload, timeout=15)
+        text = resp.choices[0].message.content.strip()
+        return text
     except Exception:
-        pass
+        # Фолбэк — простой форматированный текст на английском
+        parts = [f"*{k}*\n{json.dumps(v, ensure_ascii=False, indent=2)}" for k, v in sections.items()]
+        return "Token Report:\n" + "\n\n".join(parts)
 
-# --- ROUTES ---
-@app.get("/")
+def analyze_token(address: str, lang: str) -> str:
+    sections = {}
+    # 1) Попытка по сетям
+    chain_hits = []
+    for chain in ("eth", "bsc", "polygon"):
+        info = get_token_standard_and_owner(chain, address)
+        # если вообще ничего не пришло, пропускаем
+        if any(v is not None for v in info.values()):
+            chain_hits.append(info)
+
+    if chain_hits:
+        # Берем первый «наиболее заполненный» (просто по числу truthy полей)
+        best = max(chain_hits, key=lambda d: sum(1 for v in d.values() if v))
+        sections["On-chain checks"] = best
+        sections.update(get_holders_and_liquidity(
+            "eth" if best["chain"] == "Ethereum" else "bsc" if best["chain"] == "BSC" else "polygon",
+            address
+        ))
+    else:
+        sections["On-chain checks"] = {"note": "Explorers returned limited or no public data."}
+
+    # 2) DexScreener
+    ds = get_dexscreener(address)
+    sections["DEX/Liquidity"] = ds or {"note": "No active DEX pairs found or API returned none."}
+
+    # Итог — красиво упакуем LLM-ом на нужном языке
+    return summarize_with_llm(lang, sections)
+
+# --------- Маршруты ----------
+@app.route("/", methods=["GET"])
 def root():
-    return jsonify(ok=True, service="cryptoguard", version="1.0")
+    return "ok"
 
-@app.post("/webhook")
+@app.route("/health", methods=["GET"])
+def health():
+    return "ok"
+
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    update = request.get_json(silent=True) or {}
-    msg = update.get("message") or update.get("edited_message") or {}
-    chat = (msg.get("chat") or {}).get("id")
-    text = msg.get("text") or ""
+    data = request.get_json(force=True, silent=True) or {}
+    msg  = data.get("message") or data.get("edited_message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    text    = msg.get("text", "")
 
-    if not chat:
-        return jsonify(ok=True)
+    if not chat_id:
+        return "ok"
 
-    lang = detect_lang(text)
+    lang = detect_lang(text or "")
 
-    # /start и помощь
-    cmd = (text or "").strip().lower()
-    if cmd in ("/start", "start", "/help"):
-        tg_send(chat, WELCOME.get(lang, WELCOME["en"]))
-        tg_send(chat, HELP_CAPS.get(lang, HELP_CAPS["en"]))
-        return jsonify(ok=True)
+    # /start
+    if text and text.strip().lower().startswith(("/start", "start")):
+        bot.send_message(chat_id, WELCOME.get(lang, WELCOME["en"]), parse_mode=ParseMode.MARKDOWN)
+        return "ok"
 
-    # Короткий хелп по ключевым словам
-    if re.search(r"\b(help|помощ|справк|ayuda|yardım)\b", cmd):
-        tg_send(chat, HELP_CAPS.get(lang, HELP_CAPS["en"]))
-        return jsonify(ok=True)
+    # адрес токена?
+    m = re.search(r"\b0x[a-fA-F0-9]{40}\b", text or "")
+    if m:
+        addr = m.group(0)
+        try:
+            report = analyze_token(addr, lang)
+        except Exception as e:
+            report = ( "⚠️ Error while analyzing the token. "
+                       "Please try another address or later.\n\n"
+                       f"Details: {type(e).__name__}" )
+        bot.send_message(chat_id, report, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        return "ok"
 
-    # Основной ответ модели на языке пользователя
-    reply = groq_reply(text, lang)
-    tg_send(chat, reply)
-    return jsonify(ok=True)
+    # иначе — обычный вопрос → к LLM
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": (
+                    "You are CryptoGuard, a concise Web3 assistant. "
+                    "Answer ONLY in the user's language. If user asks to check a token, "
+                    "ask them to provide a contract address (0x...)."
+                )},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.5
+        )
+        reply = resp.choices[0].message.content.strip()
+    except Exception as e:
+        reply = f"Error: {type(e).__name__}. Please try again later."
+
+    bot.send_message(chat_id, reply, parse_mode=ParseMode.MARKDOWN)
+    return "ok"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
