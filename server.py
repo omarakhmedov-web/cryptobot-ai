@@ -1,134 +1,280 @@
-import os
+import os, re, json, time
+from typing import Dict, Any, Optional, Tuple
 from flask import Flask, request
-from telegram import Bot
+import requests
 from groq import Groq
 
 app = Flask(__name__)
 
-# ==== ENV ====
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
-PORT           = int(os.environ.get("PORT", 10000))
+# ---------- ENV ----------
+TELEGRAM_TOKEN      = os.environ["TELEGRAM_TOKEN"]
+GROQ_API_KEY        = os.environ["GROQ_API_KEY"]
+ETHERSCAN_API_KEY   = os.environ.get("ETHERSCAN_API_KEY", "")  # optional
+BSCSCAN_API_KEY     = os.environ.get("BSCSCAN_API_KEY", "")    # optional
+PORT                = int(os.environ.get("PORT", 10000))
 
-# ==== CLIENTS (ВАЖНО: без proxies, без session) ====
-bot    = Bot(token=TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
 
-# ---- очень простой детектор языка (по алфавиту) ----
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+def send_message(chat_id: int, text: str):
+    try:
+        requests.post(TELEGRAM_API,
+                      json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+                      timeout=10)
+    except Exception:
+        pass
+
+# ---------- Lang detect ----------
 def detect_lang(text: str) -> str:
-    if not text:
-        return "en"
+    if not text: return "en"
     t = text.strip().lower()
-    # кириллица
-    if any('а' <= ch <= 'я' or ch == 'ё' for ch in t):
-        return "ru"
-    # арабская вязь
-    if any('\u0600' <= ch <= '\u06FF' for ch in t):
-        return "ar"
-    # китайские иероглифы
-    if any('\u4e00' <= ch <= '\u9fff' for ch in t):
-        return "zh"
-    # турецкие диакритики
-    if any(ch in "çğıöşü" for ch in t):
-        return "tr"
+    if re.search(r"[а-яё]", t): return "ru"
+    if re.search(r"[؀-ۿ]", t):   return "ar"
+    if re.search(r"[\u4e00-\u9fff]", t): return "zh"
+    if any(ch in t for ch in "ığüşöç"):  return "tr"
     return "en"
 
-# ==== ПРИВЕТСТВИЕ ====
 WELCOME = {
-    "en": (
-        "👋 Hi! I'm <b>CryptoGuard</b>.\n\n"
-        "I can: \n"
-        "• sanity-check smart contracts & tokens (read-only)\n"
-        "• scan socials (Twitter/X, Discord) & GitHub activity\n"
-        "• flag common Web3 red flags (honeypot signs, fake mints, admin risks)\n"
-        "• explain risks in plain language and link to sources\n\n"
-        "Send a token address/CA, website or question."
-    ),
-    "ru": (
-        "👋 Привет! Я <b>CryptoGuard</b>.\n\n"
-        "Что умею:\n"
-        "• делать базовую проверку токенов/контрактов (только чтение)\n"
-        "• смотреть соцсети (Twitter/X, Discord) и активность GitHub\n"
-        "• отмечать типичные Web3-риски (honeypot, фейковые минта/админ-риски)\n"
-        "• объяснять понятным языком и давать источники\n\n"
-        "Пришли адрес токена/CA, сайт или вопрос."
-    ),
-    "tr": (
-        "👋 Merhaba! Ben <b>CryptoGuard</b>.\n\n"
-        "Neler yaparım:\n"
-        "• token/kontrat için temel kontroller (salt okunur)\n"
-        "• sosyal ağ taraması (Twitter/X, Discord), GitHub aktivitesi\n"
-        "• yaygın Web3 risklerini işaretleme\n"
-        "• açık dille riskleri anlatma ve kaynaklar\n\n"
-        "Bir token adresi/CA, web sitesi veya sorunuzu gönderin."
-    ),
-    "ar": "👋 أهلاً! أنا <b>CryptoGuard</b>… أرسل عنوان العقد/الموقع أو سؤالك.",
-    "zh": "👋 你好！我是 <b>CryptoGuard</b>。发送合约地址/网站或问题即可开始。",
+    "en": "Hi! I’m CryptoGuard. Paste a token/contract (0x...), tx hash or link — I’ll highlight common Web3 risks.",
+    "ru": "Привет! Я CryptoGuard. Вставьте токен/контракт (0x...), хеш транзакции или ссылку — отмечу типичные риски.",
+    "ar": "مرحبًا! أنا CryptoGuard. أرسل عقدًا (0x...) أو معاملة أو رابطًا — سأشير إلى المخاطر الشائعة.",
+    "zh": "你好！我是 CryptoGuard。贴上代币/合约（0x…）、交易哈希或链接——我会标出常见风险。",
+    "tr": "Selam! Ben CryptoGuard. Token/kontrat (0x…), tx hash veya bağlantı gönder—yaygın riskleri işaretlerim.",
 }
 
-def get_welcome(lang: str) -> str:
-    return WELCOME.get(lang, WELCOME["en"])
-
-# ==== СИСТЕМНЫЙ ПРОМПТ (мультиязык + Web3 компетенции) ====
 SYSTEM_PROMPT = (
-    "You are CryptoGuard, a Web3 risk assistant. "
-    "Capabilities: liquidity/volume sanity-checks; social checks (Twitter/X, Discord); "
-    "GitHub activity; contract/read-only audits; common Web3 red-flags. "
-    "You DO NOT run transactions or give financial advice. "
-    "When the user writes in some language, ALWAYS answer in that language. "
-    "Be concise unless asked for details. If user sends a link or CA address, "
-    "explain potential risks and what to verify (owner privileges, mint, taxes, liquidity locks), "
-    "and suggest public sources (Etherscan/BscScan/Solscan, DexScreener, DEXTools, DeFiLlama, RugDoc)."
+    "You are CryptoGuard, a Web3 security assistant. "
+    "You receive a raw technical summary (JSON-ish) of on-chain checks and should turn it into a clear, compact report. "
+    "Explain what each signal means and give practical DYOR tips. "
+    "NEVER ask for seed/private keys. Reply in the user's language (fallback {lang})."
 )
 
-# ==== ROUTES ====
-@app.route("/", methods=["GET"])
-def root():
-    return "ok"
+# ---------- Helpers: chain/address ----------
+ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json(force=True, silent=True) or {}
-    msg = data.get("message") or data.get("edited_message") or data.get("channel_post")
-    if not msg:
-        return "ok"
+def extract_address(text: str) -> Optional[str]:
+    m = ADDR_RE.search(text or "")
+    return m.group(0).lower() if m else None
 
-    chat_id = msg["chat"]["id"]
-    user_lang = (msg.get("from") or {}).get("language_code", "en")[:2]
-    text = (msg.get("text") or msg.get("caption") or "").strip()
+def detect_chain(text: str) -> str:
+    t = (text or "").lower()
+    if "bscscan" in t or "bnb" in t or " chain:bsc" in t: return "bsc"
+    if "etherscan" in t or "eth" in t or " chain:eth" in t: return "eth"
+    # по умолчанию Ethereum
+    return "eth"
 
-    # /start
-    if text.lower().startswith("/start"):
-        lang = detect_lang(text) or (user_lang or "en")
-        bot.send_message(chat_id=chat_id, text=get_welcome(lang), parse_mode="HTML")
-        return "ok"
+# ---------- APIs ----------
+ETHERSCAN_ENDPOINT = {
+    "eth": ("https://api.etherscan.io/api", ETHERSCAN_API_KEY),
+    "bsc": ("https://api.bscscan.com/api", BSCSCAN_API_KEY),
+}
 
-    # Определим язык из текста, если пусто — из профиля
-    lang = detect_lang(text) or (user_lang or "en")
+def etherscan_get_source(address: str, chain: str) -> Dict[str, Any]:
+    base, key = ETHERSCAN_ENDPOINT[chain]
+    if not key:
+        return {"ok": False, "error": "no_api_key"}
+    try:
+        r = requests.get(base, params={
+            "module":"contract","action":"getsourcecode","address":address,"apikey":key
+        }, timeout=15)
+        js = r.json()
+        result = (js.get("result") or [])
+        return {"ok": True, "result": result[0] if result else {}}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
-    # Подготавливаем сообщения для LLM
+def etherscan_creator(address: str, chain: str) -> Dict[str, Any]:
+    base, key = ETHERSCAN_ENDPOINT[chain]
+    if not key:
+        return {"ok": False, "error": "no_api_key"}
+    try:
+        r = requests.get(base, params={
+            "module":"contract","action":"getcontractcreation","contractaddresses":address,"apikey":key
+        }, timeout=15)
+        js = r.json()
+        result = (js.get("result") or [])
+        return {"ok": True, "result": result[0] if result else {}}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def etherscan_txs_by_creator(creator: str, chain: str, limit: int=20) -> Dict[str, Any]:
+    base, key = ETHERSCAN_ENDPOINT[chain]
+    if not key:
+        return {"ok": False, "error": "no_api_key"}
+    try:
+        r = requests.get(base, params={
+            "module":"account","action":"txlist","address":creator,
+            "startblock":0,"endblock":99999999,"page":1,"offset":limit,"sort":"desc",
+            "apikey":key
+        }, timeout=15)
+        return {"ok": True, "result": r.json().get("result", [])}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# Dexscreener — без ключа, очень полезно для ликвидности/возраста пары
+def dexscreener_token(address: str) -> Dict[str, Any]:
+    try:
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}", timeout=15)
+        return {"ok": True, "result": r.json().get("pairs", [])}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# ---------- Risk heuristics ----------
+def analyze_contract(address: str, chain: str) -> Dict[str, Any]:
+    # исходники/верификация/прокси
+    src = etherscan_get_source(address, chain)
+    creator = etherscan_creator(address, chain)
+
+    res: Dict[str, Any] = {
+        "address": address, "chain": chain,
+        "checks": []
+    }
+
+    if not src.get("ok"):
+        res["checks"].append({"id":"source", "status":"unknown", "note":"etherscan source unavailable", "detail":src.get("error")})
+    else:
+        s = src["result"] or {}
+        verified = bool(s.get("SourceCode"))
+        is_proxy = (s.get("Proxy") == "1")
+        impl     = s.get("Implementation") or ""
+        contract_name = s.get("ContractName") or ""
+        res["checks"].append({"id":"verified", "status":"pass" if verified else "fail",
+                              "note":"contract verified" if verified else "contract NOT verified",
+                              "meta":{"name":contract_name}})
+        if is_proxy:
+            res["checks"].append({"id":"proxy", "status":"warn",
+                                  "note":"proxy detected (upgradeable). Requires extra caution.",
+                                  "meta":{"implementation":impl}})
+        else:
+            res["checks"].append({"id":"proxy", "status":"pass", "note":"no proxy flag on explorer"})
+
+    # данные о деплойере и его «истории»
+    if not creator.get("ok"):
+        res["checks"].append({"id":"creator", "status":"unknown",
+                              "note":"creator info unavailable", "detail":creator.get("error")})
+    else:
+        cr = creator.get("result") or {}
+        deployer = cr.get("contractCreator") or cr.get("creatorAddress") or ""
+        txhash   = cr.get("txHash") or ""
+        res["checks"].append({"id":"creator", "status":"info",
+                              "note":"creator & deploy tx", "meta":{"creator":deployer, "tx":txhash}})
+        if deployer:
+            txs = etherscan_txs_by_creator(deployer, chain, 30)
+            many = len(txs.get("result", []))
+            # грубая эвристика: если у аккаунта десятки свежих токенов/созданий — возможно «фармят» монеты
+            res["checks"].append({"id":"creator_activity", "status":"warn" if many>20 else "pass",
+                                  "note":f"creator recent txs (last page): {many}"})
+
+    # Dexscreener — ликвидность/возраст пары
+    ds = dexscreener_token(address)
+    if not ds.get("ok"):
+        res["checks"].append({"id":"dexscreener", "status":"unknown", "note":"dexscreener unavailable", "detail":ds.get("error")})
+    else:
+        pairs = ds["result"]
+        best_liq = 0.0
+        youngest_days = None
+        for p in pairs:
+            liqusd = float(p.get("liquidity", {}).get("usd") or 0)
+            best_liq = max(best_liq, liqusdf:=liqusdf if (liqusdf:=liqusd) else liqusd) if 'liqusdf' in locals() else liqusd
+            ts = p.get("pairCreatedAt")
+            if ts:
+                age_days = max(0, (time.time() - (int(ts)/1000)) / 86400)
+                youngest_days = min(youngest_days, age_days) if youngest_days is not None else age_days
+        res["checks"].append({
+            "id":"liquidity",
+            "status":"fail" if best_liq<5000 else "warn" if best_liq<20000 else "pass",
+            "note":f"best liquidity ≈ ${int(best_liq):,}"
+        })
+        if youngest_days is not None:
+            res["checks"].append({
+                "id":"pair_age",
+                "status":"warn" if youngest_days<7 else "pass",
+                "note":f"youngest pair age ≈ {youngest_days:.1f} days"
+            })
+
+    return res
+
+# ---------- LLM render ----------
+def llm_render(lang: str, summary: Dict[str, Any]) -> str:
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": f"[language:{lang}] {text}"}
+        {"role":"system", "content": SYSTEM_PROMPT.format(lang=lang)},
+        {"role":"user", "content": json.dumps(summary, ensure_ascii=False)}
     ]
-
     try:
         resp = client.chat.completions.create(
-            model="llama-3.1-70b-versatile",  # актуальная крупная модель Groq
+            model="llama-3.1-8b-instant",
             messages=messages,
-            temperature=0.4,
+            temperature=0.2,
             max_tokens=900,
-            top_p=1.0,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        # если модель недоступна — вернём «сырой» отчёт
+        return f"[LLM error: {e}]\n\nRaw checks:\n{json.dumps(summary, ensure_ascii=False, indent=2)}"
+
+# ---------- Routes ----------
+@app.route("/", methods=["GET"])
+def root():
+    return "OK", 200
+
+@app.route("/webhook", methods=["GET","POST"])
+def webhook():
+    if request.method == "GET":
+        return "OK", 200
+
+    data = request.get_json(silent=True) or {}
+    msg  = (data.get("message") or data.get("edited_message")) or {}
+    chat = (msg.get("chat") or {})
+    chat_id = chat.get("id")
+    text = msg.get("text", "") or ""
+    if not chat_id:
+        return "ok", 200
+
+    if text.strip().lower().startswith("/start"):
+        lang = detect_lang((msg.get("from") or {}).get("language_code", "") or text)
+        send_message(chat_id, WELCOME.get(lang, WELCOME["en"]))
+        return "ok", 200
+
+    lang = detect_lang(text)
+    address = extract_address(text)
+    chain = detect_chain(text)
+
+    if address:
+        summary = analyze_contract(address, chain)
+        # отметим, если ключи сканеров не заданы
+        if not ETHERSCAN_API_KEY and chain == "eth":
+            summary.setdefault("notes", []).append("etherscan key missing -> limited checks")
+        if not BSCSCAN_API_KEY and chain == "bsc":
+            summary.setdefault("notes", []).append("bscscan key missing -> limited checks")
+        report = llm_render(lang, summary)
+        send_message(chat_id, report)
+        return "ok", 200
+
+    # если адреса нет — отправим в LLM общий вопрос/ответ про Web3, но с нашей безопасной ролью
+    messages = [
+        {"role":"system","content": SYSTEM_PROMPT.format(lang=lang)},
+        {"role":"user","content": text},
+    ]
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=messages,
+            temperature=0.3,
+            max_tokens=800,
         )
         reply = (resp.choices[0].message.content or "").strip()
-        if not reply:
-            reply = "⚠️ Empty response. Try asking again."
     except Exception as e:
-        reply = f"Error: {e}"
+        reply = {
+            "en": f"Model error: {e}\nPaste a contract (0x...) and I’ll analyze on-chain signals.",
+            "ru": f"Ошибка модели: {e}\nВставьте адрес контракта (0x...) — выполню on-chain проверку.",
+            "ar": f"خطأ في النموذج: {e}\nأرسل عنوان عقد (0x...) وسأجري فحصًا on-chain.",
+            "zh": f"模型错误：{e}\n贴上合约地址 (0x...)，我会做链上检查。",
+            "tr": f"Model hatası: {e}\nKontrat adresi (0x...) gönder, zincir üstü kontroller yapayım.",
+        }.get(lang, f"Model error: {e}")
 
-    bot.send_message(chat_id=chat_id, text=reply, parse_mode=None)
-    return "ok"
+    send_message(chat_id, reply)
+    return "ok", 200
 
 if __name__ == "__main__":
-    # локальный запуск (на Render запустит gunicorn)
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    app.run(host="0.0.0.0", port=PORT)
