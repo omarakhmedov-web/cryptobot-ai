@@ -1,184 +1,134 @@
-import os, re, requests
+import os
 from flask import Flask, request
-import telegram
+from telegram import Bot
+from groq import Groq
 
 app = Flask(__name__)
 
-# --- ENV ---
+# ==== ENV ====
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
-PORT = int(os.environ.get("PORT", 10000))
+PORT           = int(os.environ.get("PORT", 10000))
 
-bot = telegram.Bot(token=TELEGRAM_TOKEN)
+# ==== CLIENTS (ВАЖНО: без proxies, без session) ====
+bot    = Bot(token=TELEGRAM_TOKEN)
+client = Groq(api_key=GROQ_API_KEY)
 
-# Groq HTTP API
-GROQ_MODEL = "llama-3.1-8b-instant"
-GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_HEADERS = {
-    "Authorization": f"Bearer {GROQ_API_KEY}",
-    "Content-Type": "application/json",
-}
-
-# --- простой детектор языка ---
+# ---- очень простой детектор языка (по алфавиту) ----
 def detect_lang(text: str) -> str:
-    if not text: return "en"
-    t = text.lower()
-    if any("а" <= ch <= "я" or ch == "ё" for ch in t): return "ru"
-    if any("\u0600" <= ch <= "\u06FF" for ch in t):   return "ar"
-    if any("\u4e00" <= ch <= "\u9fff" for ch in t):    return "zh"
+    if not text:
+        return "en"
+    t = text.strip().lower()
+    # кириллица
+    if any('а' <= ch <= 'я' or ch == 'ё' for ch in t):
+        return "ru"
+    # арабская вязь
+    if any('\u0600' <= ch <= '\u06FF' for ch in t):
+        return "ar"
+    # китайские иероглифы
+    if any('\u4e00' <= ch <= '\u9fff' for ch in t):
+        return "zh"
+    # турецкие диакритики
+    if any(ch in "çğıöşü" for ch in t):
+        return "tr"
     return "en"
 
-# --- тексты ---
+# ==== ПРИВЕТСТВИЕ ====
 WELCOME = {
-    "en": "Hi! I’m CryptoGuard. I do quick Web3 due-diligence, red-flags and safety tips. Use /help to see commands.",
-    "ru": "Привет! Я CryptoGuard. Делаю экспресс-проверки Web3, подсвечиваю риски и даю советы по безопасности. Команда /help — список команд."
-}
-HELP = {
     "en": (
-        "Available commands:\n"
-        "• /help — this message\n"
-        "• /check <contract_or_url> — quick checklist for a token (EVM 0x...) or a website\n\n"
-        "Examples:\n"
-        "/check 0x0000000000000000000000000000000000000000\n"
-        "/check https://example.com\n"
+        "👋 Hi! I'm <b>CryptoGuard</b>.\n\n"
+        "I can: \n"
+        "• sanity-check smart contracts & tokens (read-only)\n"
+        "• scan socials (Twitter/X, Discord) & GitHub activity\n"
+        "• flag common Web3 red flags (honeypot signs, fake mints, admin risks)\n"
+        "• explain risks in plain language and link to sources\n\n"
+        "Send a token address/CA, website or question."
     ),
     "ru": (
-        "Доступные команды:\n"
-        "• /help — это сообщение\n"
-        "• /check <адрес_или_url> — экспресс-чеклист для токена (EVM 0x...) или сайта\n\n"
-        "Примеры:\n"
-        "/check 0x0000000000000000000000000000000000000000\n"
-        "/check https://example.com\n"
+        "👋 Привет! Я <b>CryptoGuard</b>.\n\n"
+        "Что умею:\n"
+        "• делать базовую проверку токенов/контрактов (только чтение)\n"
+        "• смотреть соцсети (Twitter/X, Discord) и активность GitHub\n"
+        "• отмечать типичные Web3-риски (honeypot, фейковые минта/админ-риски)\n"
+        "• объяснять понятным языком и давать источники\n\n"
+        "Пришли адрес токена/CA, сайт или вопрос."
     ),
-}
-SYSTEM_PROMPT = {
-    "en": (
-        "You are CryptoGuard, a Web3 safety assistant. "
-        "Capabilities: token/project checklists (docs, team, audits, vesting), socials sanity checks (X/Twitter, Discord, Telegram), "
-        "on-chain 'how-to-check' steps (holders, deployer history, top holders, liquidity locks, renounce status), "
-        "scam patterns (honeypot, fake airdrops, approval/security hygiene). "
-        "No direct on-chain access; provide clear, actionable steps. Be concise."
+    "tr": (
+        "👋 Merhaba! Ben <b>CryptoGuard</b>.\n\n"
+        "Neler yaparım:\n"
+        "• token/kontrat için temel kontroller (salt okunur)\n"
+        "• sosyal ağ taraması (Twitter/X, Discord), GitHub aktivitesi\n"
+        "• yaygın Web3 risklerini işaretleme\n"
+        "• açık dille riskleri anlatma ve kaynaklar\n\n"
+        "Bir token adresi/CA, web sitesi veya sorunuzu gönderin."
     ),
-    "ru": (
-        "Ты CryptoGuard — ассистент по безопасности Web3. "
-        "Возможности: чек-листы проверки токенов/проектов (доки, команда, аудит, вестинг), sanity-проверки соцсетей (X/Twitter, Discord, Telegram), "
-        "пошаговые ончейн-проверки (холдеры, история деплойера, топ-кошельки, локи ликвидности, статус renounce), "
-        "паттерны скама (honeypot, фейковые airdrop’ы, риски approvals). "
-        "Прямого ончейн-доступа нет; давай ясные, практичные шаги. Пиши кратко."
-    ),
+    "ar": "👋 أهلاً! أنا <b>CryptoGuard</b>… أرسل عنوان العقد/الموقع أو سؤالك.",
+    "zh": "👋 你好！我是 <b>CryptoGuard</b>。发送合约地址/网站或问题即可开始。",
 }
 
-# --- утилиты для /check ---
-EVM_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
-URL_RE = re.compile(r"^(https?://)?([a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}(/.*)?$")
+def get_welcome(lang: str) -> str:
+    return WELCOME.get(lang, WELCOME["en"])
 
-def build_check_response(target: str, lang: str) -> str:
-    is_evm = bool(EVM_RE.match(target))
-    is_url = bool(URL_RE.match(target))
-    if lang not in ("en", "ru"):
-        lang = "en"
-    if not (is_evm or is_url):
-        return "Invalid input. Send an EVM contract (0x...) or a URL." if lang=="en" \
-            else "Неверный ввод. Пришлите EVM-адрес контракта (0x...) или URL."
+# ==== СИСТЕМНЫЙ ПРОМПТ (мультиязык + Web3 компетенции) ====
+SYSTEM_PROMPT = (
+    "You are CryptoGuard, a Web3 risk assistant. "
+    "Capabilities: liquidity/volume sanity-checks; social checks (Twitter/X, Discord); "
+    "GitHub activity; contract/read-only audits; common Web3 red-flags. "
+    "You DO NOT run transactions or give financial advice. "
+    "When the user writes in some language, ALWAYS answer in that language. "
+    "Be concise unless asked for details. If user sends a link or CA address, "
+    "explain potential risks and what to verify (owner privileges, mint, taxes, liquidity locks), "
+    "and suggest public sources (Etherscan/BscScan/Solscan, DexScreener, DEXTools, DeFiLlama, RugDoc)."
+)
 
-    if is_evm:
-        return (
-            f"{'Quick token checklist' if lang=='en' else 'Экспресс-чеклист токена'}: {target}\n"
-            f"1) Explorer: verify source, mint/burn/blacklist, trade limits.\n"
-            f"2) Holders: top-10 concentration; team wallets; spikes.\n"
-            f"3) Liquidity: locks, LP owner, renounce status.\n"
-            f"4) Deployer: prior contracts, unusual transfers.\n"
-            f"5) Docs & socials: website, whitepaper, X/Discord/Telegram.\n"
-            f"6) Audits/KYC; vesting/allocations clarity.\n"
-            f"7) Test small tx; avoid unlimited approvals.\n"
-        ) if lang=="en" else (
-            f"Экспресс-чеклист токена: {target}\n"
-            f"1) Обозреватель: исходник, функции mint/burn/blacklist, лимиты.\n"
-            f"2) Холдеры: концентрация топ-10; кошельки команды; всплески.\n"
-            f"3) Ликвидность: локи, владелец LP, статус renounce.\n"
-            f"4) Деплойер: прошлые контракты, нетипичные переводы.\n"
-            f"5) Документация и соцсети: сайт, whitepaper, X/Discord/Telegram.\n"
-            f"6) Аудит/KYC; прозрачность вестинга/распределения.\n"
-            f"7) Тестируйте малой суммой; избегайте безлимитных approvals.\n"
-        )
-    else:
-        clean = target if target.startswith("http") else "https://" + target
-        return (
-            f"Website quick checks: {clean}\n"
-            f"1) Domain age/WHOIS; registrant mismatch.\n"
-            f"2) TLS valid; no mixed content; sane redirects.\n"
-            f"3) Official links consistent across docs/X/Discord.\n"
-            f"4) Team/audit verifiable; no stock photos.\n"
-            f"5) Wallet connect: spoof domains / fake signatures.\n"
-            f"6) Airdrop/claim: never ask seed/private key.\n"
-            f"7) Use scanners; cross-check in communities.\n"
-        ) if lang=="en" else (
-            f"Быстрые проверки сайта: {clean}\n"
-            f"1) Возраст домена/WHOIS; нет ли несоответствий.\n"
-            f"2) Валидный TLS; без смешанного контента; корректные редиректы.\n"
-            f"3) Согласованность «официальных ссылок» в доках/X/Discord.\n"
-            f"4) Команда/аудит проверяемы; не стоковые фото.\n"
-            f"5) Wallet-подключения: фишинговые домены/подписи.\n"
-            f"6) Airdrop/claim: сид/приватный ключ НИКОГДА.\n"
-            f"7) Сканы и независимые проверки в сообществах.\n"
-        )
-
-# --- маршруты ---
+# ==== ROUTES ====
 @app.route("/", methods=["GET"])
-def health():
-    return "✅ CryptoGuard is running."
+def root():
+    return "ok"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(silent=True) or {}
-    msg  = data.get("message") or data.get("edited_message") or {}
-    chat = (msg.get("chat") or {}).get("id")
-    text = (msg.get("text") or "").strip()
-    if not chat:
+    data = request.get_json(force=True, silent=True) or {}
+    msg = data.get("message") or data.get("edited_message") or data.get("channel_post")
+    if not msg:
         return "ok"
 
-    # /start, /help
+    chat_id = msg["chat"]["id"]
+    user_lang = (msg.get("from") or {}).get("language_code", "en")[:2]
+    text = (msg.get("text") or msg.get("caption") or "").strip()
+
+    # /start
     if text.lower().startswith("/start"):
-        lang = detect_lang(text)
-        bot.send_message(chat_id=chat, text=WELCOME.get(lang, WELCOME["en"]))
-        return "ok"
-    if text.lower().startswith("/help"):
-        lang = detect_lang(text)
-        bot.send_message(chat_id=chat, text=HELP.get(lang, HELP["en"]))
+        lang = detect_lang(text) or (user_lang or "en")
+        bot.send_message(chat_id=chat_id, text=get_welcome(lang), parse_mode="HTML")
         return "ok"
 
-    # /check
-    if text.lower().startswith("/check"):
-        lang = detect_lang(text)
-        parts = text.split(maxsplit=1)
-        if len(parts) == 1:
-            bot.send_message(chat_id=chat, text=("Send: /check <contract_or_url>" if lang=="en"
-                                                 else "Пришлите: /check <адрес_или_URL>"))
-            return "ok"
-        target = parts[1].strip()
-        bot.send_message(chat_id=chat, text=build_check_response(target, lang))
-        return "ok"
+    # Определим язык из текста, если пусто — из профиля
+    lang = detect_lang(text) or (user_lang or "en")
 
-    # обычный ответ через Groq HTTP API
-    lang = detect_lang(text)
-    system = SYSTEM_PROMPT.get(lang, SYSTEM_PROMPT["en"])
-    payload = {
-        "model": GROQ_MODEL,
-        "temperature": 0.4,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": text},
-        ],
-    }
+    # Подготавливаем сообщения для LLM
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": f"[language:{lang}] {text}"}
+    ]
+
     try:
-        r = requests.post(GROQ_URL, headers=GROQ_HEADERS, json=payload, timeout=30)
-        r.raise_for_status()
-        js = r.json()
-        reply = (js["choices"][0]["message"]["content"] or "").strip()
+        resp = client.chat.completions.create(
+            model="llama-3.1-70b-versatile",  # актуальная крупная модель Groq
+            messages=messages,
+            temperature=0.4,
+            max_tokens=900,
+            top_p=1.0,
+        )
+        reply = (resp.choices[0].message.content or "").strip()
         if not reply:
-            reply = "Sorry, I couldn’t generate an answer." if lang=="en" else "Не удалось сформировать ответ."
+            reply = "⚠️ Empty response. Try asking again."
     except Exception as e:
         reply = f"Error: {e}"
 
-    bot.send_message(chat_id=chat, text=reply)
+    bot.send_message(chat_id=chat_id, text=reply, parse_mode=None)
     return "ok"
+
+if __name__ == "__main__":
+    # локальный запуск (на Render запустит gunicorn)
+    app.run(host="0.0.0.0", port=PORT, debug=False)
