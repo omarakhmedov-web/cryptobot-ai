@@ -1,4 +1,4 @@
-flask>=2.2
-gunicorn>=21.2
-requests>=2.31
-groq>=0.11.0
+Flask==2.3.3
+python-telegram-bot==13.15
+groq==0.9.0
+gunicorn==21.2.0
