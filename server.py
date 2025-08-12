@@ -1,10 +1,6 @@
 import os
-import re
-import json
-from typing import Dict
-
-from flask import Flask, request
-import telegram
+from flask import Flask, request, jsonify
+import telegram  # python-telegram-bot v13.x
 from groq import Groq
 
 app = Flask(__name__)
@@ -12,174 +8,124 @@ app = Flask(__name__)
 # --- ENV ---
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
-GROQ_MODEL     = os.environ.get("GROQ_MODEL", "llama-3.1-70b-versatile")
 PORT           = int(os.environ.get("PORT", 10000))
 
-bot = telegram.Bot(token=TELEGRAM_TOKEN)
-client = Groq(api_key=GROQ_API_KEY)
+bot    = telegram.Bot(token=TELEGRAM_TOKEN)
+client = Groq(api_key=GROQ_API_KEY)   # без proxies и лишних параметров
 
-# --- простейшее «запоминание» языка (сбрасывается при рестарте) ---
-USER_LANG_PREF: Dict[int, str] = {}
-
-# --- определение языка по алфавиту + подсказки по словам ---
-CYRILLIC = re.compile(r"[А-Яа-яЁё]")
-ARABIC   = re.compile(r"[\u0600-\u06FF]")
-TURKIC_HINTS = {"bir", "bu", "ne", "sən", "siz", "daha", "bəli", "yox"}  # az/uz/tr общие слова
-
+# --- очень простой детектор языка (по алфавиту) ---
 def detect_lang(text: str) -> str:
     if not text:
         return "en"
-    t = text.strip()
-    if CYRILLIC.search(t):
-        # грубо: если много «ө,ұ,қ,ғ,ү» → каз/кирг; упрощаем до ru для диалогов
+    t = (text or "").lower()
+    # кириллица
+    if any("а" <= ch <= "я" for ch in t):
         return "ru"
-    if ARABIC.search(t):
+    # арабский
+    if any("\u0600" <= ch <= "\u06FF" for ch in t):
         return "ar"
-    lo = t.lower()
-    if any(w in lo.split() for w in TURKIC_HINTS):
-        return "az"  # условно; всё равно ответим в этом языке
-    # упрощённые еврозоны
-    if any(ch in lo for ch in "ñáéíóúü¡¿"):
-        return "es"
-    if any(ch in lo for ch in "çàâêîôûëïüœ"):
-        return "fr"
-    if any(ch in lo for ch in "äöüß"):
-        return "de"
-    if any(ch in lo for ch in "ãõç"):
-        return "pt"
-    if any(ch in lo for ch in "。？！，、；："):
+    # китайский/японский/корейский
+    if any("\u4e00" <= ord(ch) <= 0x9FFF for ch in t) or any("\u3040" <= ord(ch) <= 0x30FF for ch in t):
         return "zh"
-    if any(ch in lo for ch in "。！？〜"):
-        return "ja"
-    if any(ch in lo for ch in "가나다라마바사아자차카타파하"):
-        return "ko"
+    # турецкий
+    if any(ch in "çğıöşü" for ch in t):
+        return "tr"
+    # испанский
+    if any(ch in "ñáéíóúü" for ch in t):
+        return "es"
+    # fallback
     return "en"
 
-# --- локализованные приветствия/подсказки ---
+# --- приветствие на нескольких языках ---
 WELCOME = {
     "en": (
-        "Hello! I'm **CryptoGuard**, your Web3 security assistant. "
-        "Send me a token/contract/tx hash or project site, and I'll run checks "
-        "and explain risks in clear terms. Type /help for features."
+        "Hello! I'm CryptoGuard, your Web3 security assistant. I can:\n"
+        "• Analyze token contracts and holders\n"
+        "• Check deployer history, socials (X/TG/Discord), docs & audits\n"
+        "• Flag common Web3 red flags (mint/owner powers, honeypots, fees, trading locks)\n"
+        "• Summarize on-chain activity and give risk recommendations\n\n"
+        "Ask me anything or paste a token/tx/address/website."
     ),
     "ru": (
-        "Привет! Я **CryptoGuard** — ваш ассистент по безопасности Web3. "
-        "Пришлите адрес токена/контракта/tx или сайт проекта — запущу проверки "
-        "и по-человечески объясню риски. Команда /help — список возможностей."
+        "Привет! Я CryptoGuard — помощник по безопасности Web3. Я умею:\n"
+        "• Анализировать контракты токенов и холдеров\n"
+        "• Проверять историю деплойера, соцсети (X/TG/Discord), документацию и аудиты\n"
+        "• Выявлять частые риски Web3 (права владельца/минта, honeypot, комиссии, блокировки)\n"
+        "• Резюмировать ончейн-активность и давать рекомендации по рискам\n\n"
+        "Задайте вопрос или пришлите токен/транзакцию/адрес/сайт."
     ),
-    "es": "¡Hola! Soy **CryptoGuard**, tu asistente de seguridad Web3…",
-    "fr": "Salut ! Je suis **CryptoGuard**, votre assistant sécurité Web3…",
-    "de": "Hallo! Ich bin **CryptoGuard**, dein Web3-Sicherheitsassistent…",
-    "pt": "Olá! Eu sou o **CryptoGuard**, seu assistente de segurança Web3…",
-    "az": "Salam! Mən **CryptoGuard** — Web3 təhlükəsizlik köməkçinizəm…",
-    "ar": "مرحبًا! أنا **CryptoGuard**، مساعدك لأمان الويب٣…",
-    "zh": "你好！我是 **CryptoGuard**，你的 Web3 安全助手…",
-    "ja": "こんにちは！**CryptoGuard**、Web3 セキュリティ助手です…",
-    "ko": "안녕하세요! 저는 **CryptoGuard** 웹3 보안 도우미입니다…",
+    "es": "¡Hola! Soy CryptoGuard… (puedo analizar contratos, holders, redes sociales, auditorías y emitir alertas de riesgo).",
+    "tr": "Merhaba! Ben CryptoGuard… (token sözleşmeleri, sahipler, sosyal hesaplar, risk işaretleri vb.).",
+    "ar": "مرحبًا! أنا CryptoGuard… (تحليل العقود والحوامل، فحص التاريخ، الإبلاغ عن المخاطر).",
+    "zh": "你好！我是 CryptoGuard…（可分析合约与持币、检查社媒与审计、提示常见风险）。",
 }
 
-CAPABILITIES = {
-    "en": (
-        "I can:\n"
-        "• sanity-check token contracts (ownership, mint/blacklist, fees)\n"
-        "• scan socials/sites for red flags & impersonations\n"
-        "• summarize on-chain activity and top holders\n"
-        "• explain risks in plain language and suggest next steps\n"
-        "Ask in any language — I’ll reply in the same."
-    ),
-    "ru": (
-        "Я умею:\n"
-        "• проверять смарт-контракты токенов (владелец, mint/blacklist, комиссии)\n"
-        "• искать на сайтах/соцсетях «красные флаги» и фейки\n"
-        "• кратко разбирать ончейн-активность и крупных держателей\n"
-        "• объяснять риски простым языком и давать рекомендации\n"
-        "Пишите на любом языке — отвечу на нём же."
-    )
-}
+# --- SYSTEM prompt: Web3/security и мульти-язычность ---
+SYSTEM_PROMPT = """
+You are CryptoGuard, a rigorous Web3 security assistant.
+Capabilities: token-contract static review, deployer/holder analysis, on-chain tx reading,
+social/docs/audit checks (descriptive, not browsing), risk flags (honeypot, mint/owner powers,
+trading pause, blacklist/whitelist, high taxes/fees, proxy/upgradeability), and clear next steps.
 
-def localize(lang: str, table: Dict[str, str], fallback="en") -> str:
-    return table.get(lang) or table.get(lang.split("-")[0]) or table.get(fallback)
+Language policy: ALWAYS answer in the user's language. If user is mixed, prefer English.
+Be concise, structured, and add small bullet points. If user sends an address/hash/url, infer intent.
+If you are unsure, ask a brief clarifying question.
+"""
 
-# --- системный промпт на нужном языке (микро-локализация тональности) ---
-def system_prompt(lang: str) -> str:
-    base_en = (
-        "You are CryptoGuard, a Web3 security assistant. Be concise, friendly, and practical. "
-        "Analyze tokens, contracts, websites, socials, and on-chain activity. "
-        "Explain risks with simple language and concrete next steps. "
-        "Policy: never fabricate on-chain facts; state uncertainty; ask for missing hashes/links. "
-        f"Always respond in {lang}."
-    )
-    if lang == "ru":
-        return (
-            "Ты CryptoGuard — ассистент по безопасности Web3. Отвечай кратко, дружелюбно и по делу. "
-            "Проверяй токены/контракты/сайты/соцсети и ончейн-активность. Объясняй риски простым языком "
-            "и предлагай конкретные шаги. Правило: не выдумывай ончейн-факты; честно говори об "
-            "неопределённости; запрашивай недостающие хэши/ссылки. "
-            f"Всегда отвечай на языке: {lang}."
-        )
-    return base_en
+def welcome_for(lang: str) -> str:
+    return WELCOME.get(lang, WELCOME["en"])
 
-# --- утилита вызова модели ---
-def llm_reply(user_text: str, lang: str) -> str:
-    messages = [
-        {"role": "system", "content": system_prompt(lang)},
-        {"role": "user", "content": user_text},
-    ]
-    resp = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        temperature=0.4,
-        max_tokens=800,
-    )
-    return (resp.choices[0].message.content or "").strip()
-
-# --- маршруты ---
+# ---- routes ----
 @app.route("/", methods=["GET"])
-def root():
-    return "ok"
+def health():
+    return "OK", 200
+
+@app.route("/set_webhook", methods=["GET"])
+def set_webhook():
+    # Render сам подставит правильный https-домен сервиса
+    webhook_url = request.args.get("url")
+    if not webhook_url:
+        return jsonify({"ok": False, "error": "pass ?url=https://<your-app>.onrender.com/webhook"}), 400
+    bot.set_webhook(webhook_url)
+    return jsonify({"ok": True, "url": webhook_url})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True, silent=True) or {}
-    msg = data.get("message") or data.get("edited_message") or {}
-    chat = msg.get("chat") or {}
-    chat_id = chat.get("id")
+    msg  = (data.get("message") or data.get("edited_message") or {})
+    chat = msg.get("chat", {})
     text = (msg.get("text") or "").strip()
 
-    if not chat_id or not text:
-        return "ok"
-
-    # команда выбора языка: /lang ru  |  /lang en
-    if text.lower().startswith("/lang"):
-        parts = text.split()
-        if len(parts) >= 2:
-            USER_LANG_PREF[chat_id] = parts[1].lower()
-            bot.send_message(chat_id, f"✔ Язык сохранён: {USER_LANG_PREF[chat_id]}")
-        else:
-            bot.send_message(chat_id, "Пример: /lang en  или  /lang ru")
-        return "ok"
-
-    # /start и /help
+    # /start -> приветствие на языке пользователя
     if text.lower().startswith("/start"):
-        lang = USER_LANG_PREF.get(chat_id) or detect_lang(text)
-        bot.send_message(chat_id, localize(lang, WELCOME))
+        lang = detect_lang(text)
+        bot.send_message(chat_id=chat["id"], text=welcome_for(lang))
         return "ok"
 
-    if text.lower().startswith("/help"):
-        lang = USER_LANG_PREF.get(chat_id) or detect_lang(text)
-        bot.send_message(chat_id, localize(lang, CAPABILITIES))
-        return "ok"
+    lang = detect_lang(text) or "en"
 
-    # обычное сообщение
-    lang = USER_LANG_PREF.get(chat_id) or detect_lang(text)
+    # соберём сообщение для модели
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",    "content": f"[language={lang}] {text}"},
+    ]
+
     try:
-        reply = llm_reply(text, lang)
+        resp = client.chat.completions.create(
+            model="llama-3.1-70b-instruct",   # актуальная мощная модель
+            messages=messages,
+            temperature=0.3,
+            max_tokens=800,
+        )
+        reply = (resp.choices[0].message.content or "").strip()
         if not reply:
-            reply = localize(lang, {"en": "I couldn’t generate a reply.", "ru": "Не удалось сгенерировать ответ."})
-        bot.send_message(chat_id, reply, parse_mode="Markdown")
+            reply = "Sorry, I couldn't generate a reply."
     except Exception as e:
-        bot.send_message(chat_id, f"Error: {type(e).__name__}: {e}")
+        reply = f"Error: {e}"
+
+    bot.send_message(chat_id=chat.get("id"), text=reply)
     return "ok"
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
