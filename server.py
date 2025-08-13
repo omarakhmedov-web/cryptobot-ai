@@ -5,33 +5,48 @@ import requests
 from flask import Flask, request, jsonify, abort
 from pydantic import BaseModel, HttpUrl, ValidationError
 
-# ============== Config ==============
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # any random string
-SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # optional
-STRICT_MODE = os.getenv("STRICT_MODE", "true").lower() == "true"
+# ============== Config (lazy, без assert) ==============
+def getenv_strip(key: str, default: str = "") -> str:
+    v = os.getenv(key, default)
+    return v.strip() if isinstance(v, str) else v
+
+TELEGRAM_BOT_TOKEN = getenv_strip("TELEGRAM_BOT_TOKEN", "")
+APP_BASE_URL       = getenv_strip("APP_BASE_URL", "")
+WEBHOOK_SECRET     = getenv_strip("WEBHOOK_SECRET", "")
+SERPAPI_KEY        = getenv_strip("SERPAPI_KEY", "")
+OPENAI_API_KEY     = getenv_strip("OPENAI_API_KEY", "")
+STRICT_MODE        = getenv_strip("STRICT_MODE", "true").lower() == "true"
 
 # Donations
-ETH_DONATION = os.getenv("ETH_DONATION", "")
-TON_DONATION = os.getenv("TON_DONATION", "")
-SOL_DONATION = os.getenv("SOL_DONATION", "")
+ETH_DONATION = getenv_strip("ETH_DONATION", "")
+TON_DONATION = getenv_strip("TON_DONATION", "")
+SOL_DONATION = getenv_strip("SOL_DONATION", "")
 
 COINGECKO_API = "https://api.coingecko.com/api/v3"
-
-assert TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN is required"
-assert APP_BASE_URL, "APP_BASE_URL is required"
-assert WEBHOOK_SECRET, "WEBHOOK_SECRET is required"
 
 # ============== Logging ==============
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("cryptobot-ai")
 
+# Поможем глазами увидеть, что env реально подхватились (без утечки секретов)
+def mask(s: str, show: int = 5) -> str:
+    if not s: return "(empty)"
+    return s[:show] + "…" + f"({len(s)} chars)"
+
+log.info("ENV check: TELEGRAM_BOT_TOKEN=%s | APP_BASE_URL=%s | WEBHOOK_SECRET=%s",
+         mask(TELEGRAM_BOT_TOKEN), APP_BASE_URL or "(empty)", mask(WEBHOOK_SECRET))
+
 # ============== Telegram helpers ==============
-TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+def tg_api_base() -> str | None:
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 def tg_send(chat_id: int, text: str, reply_to: int | None = None, disable_preview: bool = False):
+    api = tg_api_base()
+    if not api:
+        log.error("TELEGRAM_BOT_TOKEN missing at send time; message not sent.")
+        return
     try:
         payload = {
             "chat_id": chat_id,
@@ -41,7 +56,7 @@ def tg_send(chat_id: int, text: str, reply_to: int | None = None, disable_previe
         }
         if reply_to:
             payload["reply_to_message_id"] = reply_to
-        requests.post(f"{TG_API}/sendMessage", json=payload, timeout=20)
+        requests.post(f"{api}/sendMessage", json=payload, timeout=20)
     except Exception as e:
         log.exception("sendMessage failed: %s", e)
 
@@ -173,20 +188,43 @@ app = Flask(__name__)
 def health():
     return {"ok": True, "time": now_baku_iso()}
 
+@app.get("/diag/env")
+def diag_env():
+    # Безопасная диагностика наличия env (секреты не показываем)
+    return {
+        "TELEGRAM_BOT_TOKEN_set": bool(TELEGRAM_BOT_TOKEN),
+        "APP_BASE_URL_set": bool(APP_BASE_URL),
+        "WEBHOOK_SECRET_set": bool(WEBHOOK_SECRET),
+        "SERPAPI_KEY_set": bool(SERPAPI_KEY),
+        "ETH_DONATION_set": bool(ETH_DONATION),
+        "TON_DONATION_set": bool(TON_DONATION),
+        "SOL_DONATION_set": bool(SOL_DONATION),
+        "STRICT_MODE": STRICT_MODE,
+        "time": now_baku_iso(),
+    }
+
 # -------- Telegram webhook --------
-@app.post(f"/webhook/{WEBHOOK_SECRET}")
+@app.post(f"/webhook/{WEBHOOK_SECRET or 'missing-secret'}")
 def webhook():
+    # Блокируем, если критичных env нет (но без падения импорта)
+    if not TELEGRAM_BOT_TOKEN:
+        return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN missing"}), 503
+
+    api = tg_api_base()
+    if not api:
+        return jsonify({"ok": False, "error": "Telegram API base missing"}), 503
+
     upd = request.get_json(force=True, silent=True) or {}
     log.info("update: %s", json.dumps(upd)[:1000])
 
-    # 1) CallbackQuery: обработка кнопок "Copy ..."
+    # 1) CallbackQuery: кнопки "Copy …"
     if "callback_query" in upd:
         cq = upd["callback_query"]
         data = cq.get("data", "")
         if data.startswith("copy:"):
             addr = data.split("copy:", 1)[1]
             try:
-                requests.post(f"{TG_API}/answerCallbackQuery", json={
+                requests.post(f"{api}/answerCallbackQuery", json={
                     "callback_query_id": cq["id"],
                     "text": f"Copied: {addr}",
                     "show_alert": False
@@ -207,7 +245,7 @@ def webhook():
         tg_send(chat_id, "Send a text message.")
         return jsonify({"ok": True})
 
-    # Commands
+    # Команды
     if text.startswith("/start"):
         tg_send(chat_id,
                 "Welcome to CryptoBot AI.\n"
@@ -241,7 +279,7 @@ def webhook():
                              "url": f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={quote(SOL_DONATION)}"}])
 
         try:
-            requests.post(f"{TG_API}/sendMessage", json={
+            requests.post(f"{api}/sendMessage", json={
                 "chat_id": chat_id,
                 "text": "\n".join(lines),
                 "parse_mode": "Markdown",
@@ -302,7 +340,6 @@ def webhook():
             answer["confidence"] = 0.5
 
         elif "site" in text.lower() or "http" in text.lower() or "www." in text.lower():
-            # quick site-related search
             sources = web_search(text)
             if sources:
                 answer["answer"] = "Top related sources:"
@@ -319,7 +356,6 @@ def webhook():
             answer["confidence"] = 0.6
 
         else:
-            # generic factual → search if needed
             if "search" in tools:
                 sources = web_search(text)
                 if sources:
@@ -343,10 +379,7 @@ def webhook():
             "checked_at": now_baku_iso()
         }
 
-    # strict sources policy
     answer = enforce_sources(answer)
-
-    # optional LLM polish (keeps EN & short)
     if prefer_english(text):
         answer = llm_polish_english(answer)
 
@@ -356,12 +389,30 @@ def webhook():
 # -------- Webhook setup helper --------
 @app.post("/set_webhook")
 def set_webhook():
+    # Защита простым заголовком
     key = request.headers.get("X-Setup-Secret")
-    if key != WEBHOOK_SECRET:
+    expected = WEBHOOK_SECRET
+    if not expected:
+        return jsonify({"ok": False, "error": "WEBHOOK_SECRET missing"}), 400
+    if key != expected:
         abort(403)
+
+    if not APP_BASE_URL:
+        return jsonify({"ok": False, "error": "APP_BASE_URL missing"}), 400
+    if not TELEGRAM_BOT_TOKEN:
+        return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN missing"}), 400
+
+    api = tg_api_base()
+    if not api:
+        return jsonify({"ok": False, "error": "Telegram API base missing"}), 400
+
     url = f"{APP_BASE_URL}/webhook/{WEBHOOK_SECRET}"
-    r = requests.get(f"{TG_API}/setWebhook", params={"url": url}, timeout=20)
-    return r.json(), r.status_code
+    r = requests.get(f"{api}/setWebhook", params={"url": url}, timeout=20)
+    try:
+        jr = r.json()
+    except Exception:
+        jr = {"status_code": r.status_code, "text": r.text}
+    return jr, r.status_code
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
