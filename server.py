@@ -1,122 +1,269 @@
-# server.py
-import os
-import re
+import os, re, json
 from flask import Flask, request
 from telegram import Bot
 from groq import Groq
+import requests
 
 app = Flask(__name__)
 
-# === ENV ===
+# ========= ENV =========
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
-MODEL          = os.getenv("MODEL", "llama-3.1-8b-instant")   # безопасный дефолт
-PORT           = int(os.environ.get("PORT", 10000))
+ETHERSCAN_KEY  = os.getenv("ETHERSCAN_API_KEY", "")  # обязательный для ончейн-проверки
+
+# Модель для краткого ИИ-резюме
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 bot    = Bot(token=TELEGRAM_TOKEN)
-client = Groq(api_key=GROQ_API_KEY)  # ВАЖНО: без proxies и без позиционных kwargs
+client = Groq(api_key=GROQ_API_KEY)
 
-# --- очень простой, устойчивый детектор языка (по юникод-диапазонам) ---
+# ========= Мультиязычность =========
 LANG_RE = {
-    "ru": r"[\u0400-\u04FF]",        # кириллица
-    "zh": r"[\u4E00-\u9FFF]",        # китайские иероглифы
-    "ar": r"[\u0600-\u06FF]",        # арабское письмо
-    "tr": r"[çğıöşüİĞÖŞÜ]",          # турецкие буквы
+    "ar": re.compile(r"[\u0600-\u06FF]"),
+    "ru": re.compile(r"[\u0400-\u04FF]"),
 }
-def detect_lang(text: str) -> str:
-    if not text:
-        return "en"
-    t = text.strip().lower()
-    for code, pat in LANG_RE.items():
-        if re.search(pat, t):
-            return code
-    # латиница: если много ascii – считаем английским
-    ascii_ratio = sum(1 for ch in t if 'a' <= ch <= 'z') / max(1, len(t))
-    return "en" if ascii_ratio > 0.5 else "en"
-
 WELCOME = {
-    "en": "Hello! I'm CryptoGuard, your Web3 security assistant. Send a contract address or token address and say what you want to check.",
-    "ru": "Привет! Я CryptoGuard — помощник по безопасности в Web3. Отправьте адрес контракта или токена и напишите, что проверить.",
-    "tr": "Merhaba! Ben CryptoGuard. Bir sözleşme ya da token adresi gönderin ve neyi kontrol etmemi istediğinizi yazın.",
-    "zh": "你好！我是 CryptoGuard。请发送合约或代币地址，并说明需要检查的内容。",
-    "ar": "مرحبًا! أنا CryptoGuard. أرسل عنوان العقد أو الرمز وأخبرني بما تريد التحقق منه.",
+    "en": "Welcome to CryptoGuard. Send me a contract address (0x...) and I’ll run a basic on-chain check (Etherscan).",
+    "ru": "Добро пожаловать в CryptoGuard. Отправьте адрес контракта (0x...), и я выполню базовую ончейн-проверку (Etherscan).",
+    "ar": "مرحبًا بك في CryptoGuard. أرسل عنوان عقد (0x...) وسأجري فحصًا أساسيًا على السلسلة (Etherscan).",
 }
+FALLBACK = {
+    "en": "Please send a contract address (0x...).",
+    "ru": "Пожалуйста, отправьте адрес контракта (0x...).",
+    "ar": "من فضلك أرسل عنوان عقد (0x...).",
+}
+REPORT_LABELS = {
+    "en": {
+        "network": "Network",
+        "address": "Address",
+        "name": "Contract name",
+        "verified": "Source verified",
+        "proxy": "Proxy",
+        "impl": "Implementation",
+        "compiler": "Compiler",
+        "funcs": "Detected functions",
+        "error": "Could not fetch data from Etherscan. Check ETHERSCAN_API_KEY and the address.",
+    },
+    "ru": {
+        "network": "Сеть",
+        "address": "Адрес",
+        "name": "Имя контракта",
+        "verified": "Исходник верифицирован",
+        "proxy": "Proxy",
+        "impl": "Implementation",
+        "compiler": "Компилятор",
+        "funcs": "Обнаруженные функции",
+        "error": "Не удалось получить данные с Etherscan. Проверьте ETHERSCAN_API_KEY и адрес.",
+    },
+    "ar": {
+        "network": "الشبكة",
+        "address": "العنوان",
+        "name": "اسم العقد",
+        "verified": "المصدر مُوثَّق",
+        "proxy": "بروكسي",
+        "impl": "العنوان التنفيذي",
+        "compiler": "المترجم",
+        "funcs": "الدوال المكتشفة",
+        "error": "تعذر جلب البيانات من Etherscan. تحقق من ETHERSCAN_API_KEY والعنوان.",
+    },
+}
+
+def pick_lang(text: str, tg_lang_code: str | None) -> str:
+    # 1) язык профиля Telegram, если есть
+    if tg_lang_code:
+        if tg_lang_code.startswith("ru"): return "ru"
+        if tg_lang_code.startswith("ar"): return "ar"
+    # 2) по символам
+    if text:
+        if LANG_RE["ar"].search(text): return "ar"
+        if LANG_RE["ru"].search(text): return "ru"
+    # 3) по умолчанию
+    return "en"
+
+# ========= Ончейн-проверка (Etherscan) =========
+ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+
+def etherscan_call(action: str, params: dict) -> dict:
+    if not ETHERSCAN_KEY:
+        return {"ok": False, "error": "ETHERSCAN_API_KEY is not set"}
+    base = "https://api.etherscan.io/api"
+    query = {"module": "contract", "action": action, "apikey": ETHERSCAN_KEY, **params}
+    try:
+        r = requests.get(base, params=query, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        # Etherscan возвращает status="1" при успехе
+        if data.get("status") == "1":
+            return {"ok": True, "result": data.get("result")}
+        return {"ok": False, "error": data.get("message", "etherscan error"), "raw": data}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def detect_capabilities_from_abi(abi_json: str) -> dict:
+    caps = {
+        "has_owner": False, "has_transfer_ownership": False,
+        "has_pause": False, "has_blacklist": False,
+        "has_mint": False, "has_burn": False,
+    }
+    try:
+        abi = json.loads(abi_json)
+    except Exception:
+        return caps
+
+    def has(fname: str) -> bool:
+        f = fname.lower()
+        for item in abi:
+            if item.get("type") != "function": 
+                continue
+            if item.get("name", "").lower() == f:
+                return True
+        return False
+
+    caps["has_owner"]              = has("owner") or has("getOwner")
+    caps["has_transfer_ownership"] = has("transferOwnership")
+    caps["has_pause"]              = has("pause") or has("paused") or has("unpause")
+    caps["has_blacklist"]          = has("blacklist") or has("isBlacklisted")
+    caps["has_mint"]               = has("mint")
+    caps["has_burn"]               = has("burn")
+    return caps
+
+def analyze_eth_contract(address: str) -> dict:
+    facts = {"network": "ethereum", "address": address}
+
+    src = etherscan_call("getsourcecode", {"address": address})
+    if src["ok"] and src["result"]:
+        info = src["result"][0]
+        facts["contractName"]    = info.get("ContractName") or ""
+        facts["isProxy"]         = (info.get("Proxy") == "1")
+        facts["implementation"]  = info.get("Implementation") or ""
+        facts["sourceVerified"]  = bool(info.get("SourceCode"))
+        facts["compilerVersion"] = info.get("CompilerVersion") or ""
+    else:
+        facts["error_source"] = src.get("error", "unknown")
+
+    abi = etherscan_call("getabi", {"address": address})
+    if abi["ok"]:
+        caps = detect_capabilities_from_abi(abi["result"])
+        facts["abi_present"] = True
+        facts.update(caps)
+    else:
+        facts["error_abi"] = abi.get("error", "unknown")
+
+    return facts
+
+def format_report(facts: dict, lang: str) -> str:
+    L = REPORT_LABELS.get(lang, REPORT_LABELS["en"])
+    # Если оба провалились
+    if "error_source" in facts and "error_abi" in facts:
+        return L["error"]
+
+    lines = []
+    lines.append(f"🔎 {L['network']}: {facts.get('network','?')}  |  {L['address']}: `{facts['address']}`")
+    if facts.get("contractName"):
+        lines.append(f"• {L['name']}: **{facts['contractName']}**")
+    if "sourceVerified" in facts:
+        lines.append(f"• {L['verified']}: **{'yes' if lang=='en' else ('да' if lang=='ru' else 'نعم') if facts['sourceVerified'] else ('no' if lang=='en' else ('нет' if lang=='ru' else 'لا'))}**")
+    if "isProxy" in facts:
+        lines.append(f"• {L['proxy']}: **{'yes' if lang=='en' else ('да' if lang=='ru' else 'نعم') if facts['isProxy'] else ('no' if lang=='en' else ('нет' if lang=='ru' else 'لا'))}**")
+    if facts.get("implementation"):
+        lines.append(f"• {L['impl']}: `{facts['implementation']}`")
+    if facts.get("compilerVersion"):
+        lines.append(f"• {L['compiler']}: {facts['compilerVersion']}")
+
+    # функции
+    caps = []
+    if facts.get("has_owner"): caps.append("owner")
+    if facts.get("has_transfer_ownership"): caps.append("transferOwnership")
+    if facts.get("has_pause"): caps.append("pause")
+    if facts.get("has_blacklist"): caps.append("blacklist")
+    if facts.get("has_mint"): caps.append("mint")
+    if facts.get("has_burn"): caps.append("burn")
+    if caps:
+        lines.append(f"• {L['funcs']}: " + ", ".join(caps))
+
+    return "\n".join(lines)
+
+def reply_text(chat_id: int, text: str):
+    try:
+        bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    except Exception:
+        bot.send_message(chat_id=chat_id, text=text)
 
 SYSTEM_PROMPT = (
-    "You are CryptoGuard, a Web3 security assistant. Be concise and practical. "
-    "When the user provides a token/contract address, draft a risk-oriented checklist and explain findings. "
-    "Cover: ownership/mint/fees/blacklist or pause; proxy/upgradability; deployer history & socials; "
-    "liquidity locks & top holders; transfer anomalies; common Web3 red flags; simple next steps. "
-    "If on-chain APIs are not available here, clearly say that data is not publicly available and list what is needed. "
-    "Never invent on-chain facts."
+    "You are CryptoGuard, a Web3 security assistant. "
+    "User may speak English, Russian or Arabic. Reply in user's language. "
+    "Use the provided on-chain facts to write a short, cautious summary. "
+    "If data is missing, say so. Never invent specifics."
 )
 
-def reply_text(chat_id: int, text: str) -> None:
-    try:
-        bot.send_message(chat_id=chat_id, text=text)
-    except Exception as e:
-        # не падаем из-за телеграм-сбоев
-        print("Telegram send error:", e)
-
+# ========= Routes =========
 @app.route("/", methods=["GET"])
 def index():
     return "ok"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True, silent=True) or {}
-    msg  = data.get("message") or data.get("edited_message") or {}
-    chat = msg.get("chat") or {}
-    chat_id = chat.get("id")
+    data     = request.get_json(force=True, silent=True) or {}
+    msg      = data.get("message") or data.get("edited_message") or {}
+    chat     = msg.get("chat") or {}
+    chat_id  = chat.get("id")
+    text     = (msg.get("text") or msg.get("caption") or "").strip()
+    from_obj = msg.get("from") or {}
+    tg_lang  = from_obj.get("language_code")
+
     if not chat_id:
         return "ok"
 
-    text = (msg.get("text") or msg.get("caption") or "").strip()
+    lang = pick_lang(text, tg_lang)
 
-    # /start — приветствие
+    # адрес контракта?
+    m = ADDR_RE.search(text)
+    if m:
+        addr   = m.group(0)
+        facts  = analyze_eth_contract(addr)
+        report = format_report(facts, lang)
+
+        # краткое резюме ИИ на нужном языке
+        try:
+            # Подсказываем модели язык.
+            lang_hint = {"en": "English", "ru": "Russian", "ar": "Arabic"}[lang]
+            prompt = (
+                f"Language: {lang_hint}.\n"
+                f"Summarize for a user these on-chain facts and highlight obvious risks if any:\n\n{report}"
+            )
+            summary = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=220,
+            ).choices[0].message.content.strip()
+            reply_text(chat_id, report + "\n\n" + "—" * 20 + "\n" + summary)
+        except Exception:
+            reply_text(chat_id, report)
+        return "ok"
+
+    # /start
     if text.startswith("/start"):
-        lang = "en"
         reply_text(chat_id, WELCOME.get(lang, WELCOME["en"]))
         return "ok"
 
-    # авто-язык
-    lang = detect_lang(text)
-    welcome_fallback = WELCOME.get(lang, WELCOME["en"])
-
-    # если пользователь прислал совсем короткое сообщение
-    if not text or len(text) < 2:
-        reply_text(chat_id, welcome_fallback)
-        return "ok"
-
-    # диалог для модели
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + f" Always reply in {lang}."},
-        {"role": "user",   "content": text},
-    ]
-
+    # Общий диалог через Groq (в языке пользователя)
     try:
-        resp = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
+        lang_hint = {"en": "English", "ru": "Russian", "ar": "Arabic"}[lang]
+        prompt = f"Language: {lang_hint}. Answer briefly and helpfully.\nUser: {text or 'hi'}"
+        out = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0.3,
-        )
-        # библиотека Groq возвращает message.content
-        content = (resp.choices[0].message.content or "").strip()
-        if not content:
-            content = welcome_fallback
-        reply_text(chat_id, content)
-    except Exception as e:
-        # показываем аккуратную ошибку пользователю и печатаем в логи
-        print("LLM error:", e)
-        reply_text(
-            chat_id,
-            WELCOME.get(lang, WELCOME["en"]) +
-            ("\n\n— (Внутренняя ошибка модели; попробуйте повторить запрос через минуту.)" if lang == "ru"
-             else "\n\n— (Internal model error; please try again in a minute.)")
-        )
-
+            max_tokens=300,
+        ).choices[0].message.content.strip()
+        reply_text(chat_id, out)
+    except Exception:
+        reply_text(chat_id, FALLBACK.get(lang, FALLBACK["en"]))
     return "ok"
-
-if __name__ == "__main__":
-    # локальный запуск (на Render используется gunicorn)
-    app.run(host="0.0.0.0", port=PORT)
