@@ -1,5 +1,6 @@
-import os, re, json, logging, io
+import os, re, json, logging, io, time, pathlib
 from collections import deque, defaultdict
+from datetime import datetime
 
 from flask import Flask, request, jsonify
 import requests
@@ -7,37 +8,49 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from groq import Groq
 import qrcode
 
+# -------------------- App / Logging --------------------
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# ========= ENV =========
+# -------------------- ENV --------------------
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
 ETHERSCAN_API_KEY  = os.getenv("ETHERSCAN_API_KEY", "")
+SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")          # для онлайн-поиска
 MODEL              = os.getenv("MODEL", "llama-3.1-8b-instant")
 WEBHOOK_SECRET     = os.getenv("WEBHOOK_SECRET", "").strip()
 
-# Приоритет языка
-DEFAULT_LANG       = os.getenv("DEFAULT_LANG", "en").lower()  # en по умолчанию
+# Язык по умолчанию и приоритет
+DEFAULT_LANG       = os.getenv("DEFAULT_LANG", "en").lower()  # en by default
 
-# Донаты
+# Донаты / Кнопки
 ETH_DONATE_ADDRESS = os.getenv("ETH_DONATE_ADDRESS", "0x212f595E42B93646faFE7Fdfa3c330649FA7407E")
 TON_DONATE_ADDRESS = os.getenv("TON_DONATE_ADDRESS", "UQBoAzy9RkbfasGEYwHVRNbWzYNU7JszD0WG9lz8ReFFtESP")
 KOFI_LINK_BASE     = os.getenv("KOFI_LINK", "https://ko-fi.com/CryptoNomad")
 KOFI_UTM_SOURCE    = os.getenv("KOFI_UTM_SOURCE", "telegram_bot")
 DONATE_STICKY      = os.getenv("DONATE_STICKY", "1") in ("1", "true", "True")
 
-bot    = Bot(token=TELEGRAM_TOKEN)
-client = Groq(api_key=GROQ_API_KEY)   # без proxies
+# Память
+HIST_MAX           = int(os.getenv("HISTORY_MAX", "6"))  # короткая диалоговая память
+DATA_DIR           = os.getenv("DATA_DIR", "/tmp/cryptobot_data")  # Render: временное хранилище ок
+MEMORY_FILE        = os.getenv("MEMORY_FILE", "memory.json")
 
-# ========= МУЛЬТИЯЗЫЧНОСТЬ =========
+# Готовим каталог и файл памяти
+pathlib.Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+MEMORY_PATH = pathlib.Path(DATA_DIR) / MEMORY_FILE
+
+# -------------------- Clients --------------------
+bot    = Bot(token=TELEGRAM_TOKEN)
+client = Groq(api_key=GROQ_API_KEY)  # НИКАКИХ proxies
+
+# -------------------- Language / Texts --------------------
 EN_RE = re.compile(r"[A-Za-z]")
 LANG_RE = {
     "ru": re.compile(r"[А-Яа-яЁё]"),
     "ar": re.compile(r"[\u0600-\u06FF]"),
 }
 WELCOME = {
-    "en": "Welcome to CryptoGuard. Send me a contract address (0x…) and I’ll run a basic on-chain check (Etherscan).",
+    "en": "Welcome to CryptoGuard. Send a contract address (0x…) and I’ll run a basic on-chain check (Etherscan).",
     "ru": "Добро пожаловать в CryptoGuard. Отправь адрес контракта (0x…), и я выполню базовую ончейн-проверку (Etherscan).",
     "ar": "مرحبًا في CryptoGuard. أرسل عنوان العقد (0x…) وسأجري فحصًا أساسيًا على السلسلة (Etherscan).",
 }
@@ -60,30 +73,25 @@ REPORT_LABELS = {
 
 ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
-# Базовый системный промпт (язык добавляем динамически)
 SYSTEM_PROMPT_BASE = (
-    "You are CryptoBot AI — a concise Web3 security assistant. "
-    "STRICT RULES: (1) If user sends an Ethereum address (0x...), do NOT guess — run an Etherscan check. "
-    "(2) For general questions, answer briefly and practically. "
-    "(3) If data is missing (chain, address, explorer), say what is needed in ONE short line. "
-    "(4) Never invent on-chain facts or metrics."
+    "You are CryptoBot AI — a concise Web3 assistant.\n"
+    "RULES:\n"
+    "1) If user sends an Ethereum address (0x...), do NOT guess — run an Etherscan check and summarize.\n"
+    "2) For general questions, answer briefly and practically.\n"
+    "3) If data is missing (chain, address, explorer), say what is needed in ONE short line.\n"
+    "4) Never invent on-chain facts or metrics.\n"
+    "5) If fresh web snippets are provided, rely on them and cite time (e.g., 'as of <date>')."
 )
 
 def detect_lang(text: str, _tg_lang: str | None) -> str:
-    """
-    Приоритеты:
-    1) Если в текущем сообщении есть латиница — en.
-    2) Иначе если кириллица — ru; арабская вязь — ar.
-    3) Иначе DEFAULT_LANG (en).
-    (Игнорируем системный язык Telegram, чтобы не залипать на нём.)
-    """
+    """Приоритет: латиница → en; иначе ru/ar по алфавиту; иначе DEFAULT_LANG."""
     t = text or ""
     if EN_RE.search(t): return "en"
     if LANG_RE["ru"].search(t): return "ru"
     if LANG_RE["ar"].search(t): return "ar"
     return DEFAULT_LANG
 
-# ========= DONATE =========
+# -------------------- Donate UI --------------------
 def kofi_link_with_utm() -> str:
     sep = "&" if "?" in KOFI_LINK_BASE else "?"
     return f"{KOFI_LINK_BASE}{sep}utm_source={KOFI_UTM_SOURCE}"
@@ -136,14 +144,42 @@ def send_qr(chat_id: int, label: str, value: str):
     bio.seek(0)
     bot.send_photo(chat_id=chat_id, photo=bio, caption=f"{label}: `{value}`", parse_mode="Markdown")
 
-# ========= ПАМЯТЬ ЧАТА =========
-HIST_MAX = int(os.getenv("HISTORY_MAX", "6"))
-history: dict[int, deque] = defaultdict(lambda: deque(maxlen=HIST_MAX))
+# -------------------- Persistent Memory --------------------
+# Структура файла: {"chats": { "<chat_id>": {"history":[["user","..."],["assistant","..."], ...] }}}
+memory_cache = {"chats": {}}
+
+def load_memory():
+    global memory_cache
+    try:
+        if MEMORY_PATH.exists():
+            memory_cache = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+            if "chats" not in memory_cache:
+                memory_cache["chats"] = {}
+    except Exception as e:
+        app.logger.warning(f"load_memory error: {e}")
+        memory_cache = {"chats": {}}
+
+def save_memory():
+    try:
+        MEMORY_PATH.write_text(json.dumps(memory_cache, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        app.logger.warning(f"save_memory error: {e}")
+
+def get_history(chat_id: int) -> deque:
+    load_memory()
+    node = memory_cache["chats"].setdefault(str(chat_id), {"history": []})
+    # гарантируем ограничение длины
+    dq = deque(node.get("history", []), maxlen=HIST_MAX)
+    node["history"] = list(dq)
+    return dq
 
 def remember(chat_id: int, role: str, content: str):
-    history[chat_id].append((role, content))
+    dq = get_history(chat_id)
+    dq.append([role, content])
+    memory_cache["chats"][str(chat_id)]["history"] = list(dq)
+    save_memory()
 
-# ========= ETHERSCAN =========
+# -------------------- Etherscan --------------------
 def etherscan_call(action: str, params: dict) -> dict:
     if not ETHERSCAN_API_KEY:
         return {"ok": False, "error": "ETHERSCAN_API_KEY is not set"}
@@ -228,21 +264,87 @@ def format_report(facts: dict, lang: str) -> str:
         lines.append(f"🧰 {L['funcs']}: " + ", ".join(funcs))
     return "\n".join(lines)
 
-# ========= AI =========
+# -------------------- Fresh Web Search (SerpAPI) --------------------
+# Включается, если SERPAPI_KEY присутствует и запрос «требует свежести».
+FRESH_TRIGGERS = re.compile(
+    r"\b(today|now|latest|news|price|prices|update|updated|2024|2025|rate|inflation|btc|eth)\b",
+    re.IGNORECASE
+)
+
+def needs_fresh_search(text: str) -> bool:
+    return bool(text) and bool(FRESH_TRIGGERS.search(text))
+
+def serpapi_search(query: str, lang: str) -> list:
+    """Возвращает список кратких сниппетов: [{'title':..,'link':..,'snippet':..}]"""
+    if not SERPAPI_KEY:
+        return []
+    try:
+        params = {
+            "engine": "google",
+            "q": query,
+            "api_key": SERPAPI_KEY,
+            "hl": "en" if lang == "en" else ("ru" if lang == "ru" else "ar"),
+            "num": "5",
+        }
+        resp = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
+        data = resp.json()
+        results = []
+        for item in (data.get("organic_results") or [])[:5]:
+            results.append({
+                "title": item.get("title"),
+                "link": item.get("link"),
+                "snippet": item.get("snippet"),
+            })
+        return results
+    except Exception as e:
+        app.logger.warning(f"serpapi_search error: {e}")
+        return []
+
+def compose_snippets_text(snips: list, lang: str) -> str:
+    if not snips:
+        return ""
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    header = {
+        "en": f"Fresh web snippets (UTC {date_str}):",
+        "ru": f"Свежие сниппеты из веба (UTC {date_str}):",
+        "ar": f"ملخصات حديثة من الويب (UTC {date_str}):",
+    }.get(lang, f"Fresh web snippets (UTC {date_str}):")
+    lines = [header]
+    for s in snips:
+        t = s.get("title") or ""
+        l = s.get("link") or ""
+        p = s.get("snippet") or ""
+        lines.append(f"- {t} — {p} ({l})")
+    return "\n".join(lines)
+
+# -------------------- AI --------------------
 def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
     try:
-        # Жёстко фиксируем язык ответа
+        # Строго фиксируем язык
         system_for_lang = SYSTEM_PROMPT_BASE + f" Always reply ONLY in {lang.upper()}. Do not translate or duplicate in other languages."
+
         msgs = [{"role": "system", "content": system_for_lang}]
-        for role, content in history[chat_id]:
+
+        # Подмешиваем краткую историю (из файла памяти)
+        hist = get_history(chat_id)
+        for role, content in hist:
             msgs.append({"role": role, "content": content})
+
+        # Если нужны свежие данные и есть SERPAPI_KEY — добавляем контекст
+        if needs_fresh_search(user_text) and SERPAPI_KEY:
+            snips = serpapi_search(user_text, lang)
+            snippets_text = compose_snippets_text(snips, lang)
+            if snippets_text:
+                msgs.append({"role": "system", "content": snippets_text})
+
+        # Текущее сообщение
         msgs.append({"role": "user", "content": user_text})
 
         resp = client.chat.completions.create(
             model=MODEL,
             messages=msgs,
             temperature=0.15,
-            max_tokens=600,
+            max_tokens=650,
         )
         content = (resp.choices[0].message.content or "").strip()
         remember(chat_id, "user", user_text)
@@ -252,7 +354,7 @@ def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
         app.logger.exception(f"Groq error: {e}")
         return "Internal model error, please try again in a minute."
 
-# ========= ROUTES =========
+# -------------------- Routes --------------------
 @app.route("/", methods=["GET"])
 def index():
     return "ok"
@@ -269,13 +371,12 @@ def webhook():
 
     update = request.get_json(force=True, silent=True) or {}
 
-    # ----- callback кнопки -----
+    # Callback кнопки
     if "callback_query" in update:
         cq = update["callback_query"]
         data = cq.get("data") or ""
         chat_id = cq.get("message", {}).get("chat", {}).get("id")
-        lang = detect_lang("", (cq.get("from", {}) or {}).get("language_code"))
-
+        # язык по умолчанию (кнопки нейтральные)
         try:
             if data == "qr_eth":
                 send_qr(chat_id, "ETH", ETH_DONATE_ADDRESS)
@@ -295,7 +396,7 @@ def webhook():
             app.logger.exception(f"callback error: {e}")
         return "ok"
 
-    # ----- обычные сообщения -----
+    # Обычные сообщения
     msg = update.get("message") or update.get("edited_message") or {}
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
@@ -303,13 +404,13 @@ def webhook():
         return "ok"
 
     text = (msg.get("text") or msg.get("caption") or "").strip()
-    # игнорируем системный язык Telegram; детектим по тексту/DEFAULT_LANG
+    # игнорируем системный язык Telegram; детектим по тексту
     lang = detect_lang(text, None)
     t_low = (text or "").lower()
 
     # Команды
     if t_low in ("/start", "start"):
-        start_lang = DEFAULT_LANG  # привет на языке по умолчанию
+        start_lang = DEFAULT_LANG
         bot.send_message(
             chat_id=chat_id,
             text=WELCOME.get(start_lang, WELCOME["en"]),
@@ -323,7 +424,7 @@ def webhook():
         send_donate_message(chat_id, lang)
         return "ok"
 
-    # Адрес контракта → отчёт
+    # Адрес контракта → отчёт Etherscan
     m = ADDR_RE.search(text)
     if m:
         address = m.group(0)
@@ -339,13 +440,13 @@ def webhook():
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
 
-    # Обычный AI-ответ
+    # Обычный AI-ответ (с онлайн-поиском при необходимости и персистентной памятью)
     answer = ai_reply(text, lang, chat_id)
     bot.send_message(chat_id=chat_id, text=answer,
                      reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
     return "ok"
 
-# Локальный запуск
+# -------------------- Local run --------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
