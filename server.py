@@ -1,465 +1,367 @@
-import os, re, json, logging, io, pathlib, html
-from collections import deque, defaultdict
-from datetime import datetime
-
-from flask import Flask, request, jsonify
+import os, json, re, logging
+from datetime import datetime, timezone
+from typing import List, Dict, Any
 import requests
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from groq import Groq
-import qrcode
+from flask import Flask, request, jsonify, abort
+from pydantic import BaseModel, HttpUrl, ValidationError
 
-# -------------------- App / Logging --------------------
-app = Flask(__name__)
+# ============== Config ==============
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # any random string
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # optional
+STRICT_MODE = os.getenv("STRICT_MODE", "true").lower() == "true"
+
+# Donations
+ETH_DONATION = os.getenv("ETH_DONATION", "")
+TON_DONATION = os.getenv("TON_DONATION", "")
+SOL_DONATION = os.getenv("SOL_DONATION", "")
+
+COINGECKO_API = "https://api.coingecko.com/api/v3"
+
+assert TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN is required"
+assert APP_BASE_URL, "APP_BASE_URL is required"
+assert WEBHOOK_SECRET, "WEBHOOK_SECRET is required"
+
+# ============== Logging ==============
 logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("cryptobot-ai")
 
-# -------------------- ENV --------------------
-TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
-GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
-ETHERSCAN_API_KEY  = os.getenv("ETHERSCAN_API_KEY", "")
-SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")          # если нет — используем DuckDuckGo fallback
-MODEL              = os.getenv("MODEL", "llama-3.1-8b-instant")
-WEBHOOK_SECRET     = os.getenv("WEBHOOK_SECRET", "").strip()
+# ============== Telegram helpers ==============
+TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Язык по умолчанию и приоритет (английский)
-DEFAULT_LANG       = os.getenv("DEFAULT_LANG", "en").lower()
-
-# Донаты / Кнопки
-ETH_DONATE_ADDRESS = os.getenv("ETH_DONATE_ADDRESS", "0x212f595E42B93646faFE7Fdfa3c330649FA7407E")
-TON_DONATE_ADDRESS = os.getenv("TON_DONATE_ADDRESS", "UQBoAzy9RkbfasGEYwHVRNbWzYNU7JszD0WG9lz8ReFFtESP")
-KOFI_LINK_BASE     = os.getenv("KOFI_LINK", "https://ko-fi.com/CryptoNomad")
-KOFI_UTM_SOURCE    = os.getenv("KOFI_UTM_SOURCE", "telegram_bot")
-DONATE_STICKY      = os.getenv("DONATE_STICKY", "1") in ("1", "true", "True")
-
-# Память (персистентная на диск)
-HIST_MAX           = int(os.getenv("HISTORY_MAX", "6"))
-DATA_DIR           = os.getenv("DATA_DIR", "/tmp/cryptobot_data")
-MEMORY_FILE        = os.getenv("MEMORY_FILE", "memory.json")
-pathlib.Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
-MEMORY_PATH = pathlib.Path(DATA_DIR) / MEMORY_FILE
-
-# -------------------- Clients --------------------
-bot    = Bot(token=TELEGRAM_TOKEN)
-client = Groq(api_key=GROQ_API_KEY)  # без proxies
-
-# -------------------- Language / Texts --------------------
-EN_RE = re.compile(r"[A-Za-z]")
-LANG_RE = {
-    "ru": re.compile(r"[А-Яа-яЁё]"),
-    "ar": re.compile(r"[\u0600-\u06FF]"),
-}
-WELCOME = {
-    "en": "Welcome to CryptoGuard. Send a contract address (0x…) and I’ll run a basic on-chain check (Etherscan).",
-    "ru": "Добро пожаловать в CryptoGuard. Отправь адрес контракта (0x…), и я выполню базовую ончейн-проверку (Etherscan).",
-    "ar": "مرحبًا في CryptoGuard. أرسل عنوان العقد (0x…) وسأجري فحصًا أساسيًا على السلسلة (Etherscan).",
-}
-FALLBACK = {
-    "en": "Please send a contract address (0x…) or ask a question.",
-    "ru": "Отправьте адрес контракта (0x…) или задайте вопрос.",
-    "ar": "أرسل عنوان عقد (0x…) أو اطرح سؤالًا.",
-}
-REPORT_LABELS = {
-    "en": {"network":"Network","address":"Address","name":"Contract name","sourceverified":"Source verified",
-           "impl":"Implementation","proxy":"Proxy","compiler":"Compiler","funcs":"Detected functions",
-           "error":"Could not fetch data from Etherscan. Check ETHERSCAN_API_KEY and the address."},
-    "ru": {"network":"Сеть","address":"Адрес","name":"Имя контракта","sourceverified":"Исходник верифицирован",
-           "impl":"Реализация","proxy":"Прокси","compiler":"Компайлер","funcs":"Обнаруженные функции",
-           "error":"Не удалось получить данные Etherscan. Проверь ETHERSCAN_API_KEY и адрес."},
-    "ar": {"network":"الشبكة","address":"العنوان","name":"اسم العقد","sourceverified":"المصدر مُتحقق",
-           "impl":"Implementation","proxy":"Proxy","compiler":"Compiler","funcs":"الوظائف المكتشفة",
-           "error":"تعذّر جلب بيانات Etherscan. تحقّق من ETHERSCAN_API_KEY والعنوان."},
-}
-ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
-
-SYSTEM_PROMPT_BASE = (
-    "You are CryptoBot AI — a concise Web3 assistant.\n"
-    "RULES:\n"
-    "1) If user sends an Ethereum address (0x...), do NOT guess — run an Etherscan check and summarize.\n"
-    "2) For general questions, answer briefly and practically.\n"
-    "3) If data is missing (chain, address, explorer), say what is needed in ONE short line.\n"
-    "4) Never invent on-chain facts or metrics.\n"
-    "5) If fresh web snippets are provided, rely on them and cite time (e.g., 'as of <date>')."
-)
-
-def detect_lang(text: str, _tg_lang: str | None) -> str:
-    """Приоритет: латиница → en; иначе ru/ar; иначе DEFAULT_LANG."""
-    t = text or ""
-    if EN_RE.search(t): return "en"
-    if LANG_RE["ru"].search(t): return "ru"
-    if LANG_RE["ar"].search(t): return "ar"
-    return DEFAULT_LANG
-
-# -------------------- Donate UI --------------------
-def kofi_link_with_utm() -> str:
-    sep = "&" if "?" in KOFI_LINK_BASE else "?"
-    return f"{KOFI_LINK_BASE}{sep}utm_source={KOFI_UTM_SOURCE}"
-
-def build_donate_keyboard() -> InlineKeyboardMarkup:
-    eth_url = f"https://etherscan.io/address/{ETH_DONATE_ADDRESS}"
-    ton_url = f"https://tonviewer.com/{TON_DONATE_ADDRESS}"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 Ethereum (ETH)", url=eth_url)],
-        [InlineKeyboardButton("🔵 TON", url=ton_url)],
-        [InlineKeyboardButton("☕ Ko-fi", url=kofi_link_with_utm())],
-        [
-            InlineKeyboardButton("📷 QR ETH", callback_data="qr_eth"),
-            InlineKeyboardButton("📷 QR TON", callback_data="qr_ton"),
-        ],
-        [
-            InlineKeyboardButton("📋 ETH", callback_data="addr_eth"),
-            InlineKeyboardButton("📋 TON", callback_data="addr_ton"),
-        ],
-    ])
-
-def send_donate_message(chat_id: int, lang: str):
-    texts = {
-        "en": ("Support the project:\n\n"
-               f"ETH: `{ETH_DONATE_ADDRESS}`\n"
-               f"TON: `{TON_DONATE_ADDRESS}`\n\n"
-               "Ko-fi via the button below."),
-        "ru": ("Поддержать проект:\n\n"
-               f"ETH: `{ETH_DONATE_ADDRESS}`\n"
-               f"TON: `{TON_DONATE_ADDRESS}`\n\n"
-               "Ko-fi — кнопка ниже."),
-        "ar": ("لدعم المشروع:\n\n"
-               f"ETH: `{ETH_DONATE_ADDRESS}`\n"
-               f"TON: `{TON_DONATE_ADDRESS}`\n\n"
-               "Ko-fi من الزر أدناه."),
-    }
-    bot.send_message(
-        chat_id=chat_id,
-        text=texts.get(lang, texts["en"]),
-        reply_markup=build_donate_keyboard(),
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
-
-def send_qr(chat_id: int, label: str, value: str):
-    img = qrcode.make(value)
-    bio = io.BytesIO()
-    bio.name = f"{label}.png"
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    bot.send_photo(chat_id=chat_id, photo=bio, caption=f"{label}: `{value}`", parse_mode="Markdown")
-
-# -------------------- Persistent Memory --------------------
-# Структура файла: {"chats": { "<chat_id>": {"history":[["user","..."],["assistant","..."], ...] }}}
-memory_cache = {"chats": {}}
-
-def load_memory():
-    global memory_cache
+def tg_send(chat_id: int, text: str, reply_to: int | None = None, disable_preview: bool = False):
     try:
-        if MEMORY_PATH.exists():
-            memory_cache = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-            if "chats" not in memory_cache:
-                memory_cache["chats"] = {}
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": disable_preview,
+        }
+        if reply_to:
+            payload["reply_to_message_id"] = reply_to
+        requests.post(f"{TG_API}/sendMessage", json=payload, timeout=20)
     except Exception as e:
-        app.logger.warning(f"load_memory error: {e}")
-        memory_cache = {"chats": {}}
+        log.exception("sendMessage failed: %s", e)
 
-def save_memory():
+# ============== Schema & formatting ==============
+class Source(BaseModel):
+    title: str
+    url: HttpUrl
+
+class BotAnswer(BaseModel):
+    answer: str
+    details: List[str] = []
+    sources: List[Source] = []
+    confidence: float = 0.5
+    checked_at: str | None = None  # ISO (we label GMT+4 in output)
+
+def format_answer(data: Dict[str, Any]) -> str:
     try:
-        MEMORY_PATH.write_text(json.dumps(memory_cache, ensure_ascii=False), encoding="utf-8")
-    except Exception as e:
-        app.logger.warning(f"save_memory error: {e}")
+        a = BotAnswer(**data)
+    except ValidationError as e:
+        return f"*Internal schema error*: `{e}`"
 
-def get_history(chat_id: int) -> deque:
-    load_memory()
-    node = memory_cache["chats"].setdefault(str(chat_id), {"history": []})
-    dq = deque(node.get("history", []), maxlen=HIST_MAX)
-    node["history"] = list(dq)
-    return dq
-
-def remember(chat_id: int, role: str, content: str):
-    dq = get_history(chat_id)
-    dq.append([role, content])
-    memory_cache["chats"][str(chat_id)]["history"] = list(dq)
-    save_memory()
-
-# -------------------- Etherscan --------------------
-def etherscan_call(action: str, params: dict) -> dict:
-    if not ETHERSCAN_API_KEY:
-        return {"ok": False, "error": "ETHERSCAN_API_KEY is not set"}
-    base = "https://api.etherscan.io/api"
-    query = {"module": "contract", "action": action, "apikey": ETHERSCAN_API_KEY}
-    query.update(params)
-    try:
-        r = requests.get(base, params=query, timeout=15)
-        data = r.json()
-        if str(data.get("status")) != "1":
-            return {"ok": False, "error": "etherscan error", "raw": data}
-        return {"ok": True, "data": data.get("result")}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-def has_fn(abi: list, name: str) -> bool:
-    for item in abi or []:
-        if item.get("type") != "function": 
-            continue
-        if item.get("name", "").lower() == name.lower():
-            return True
-    return False
-
-def detect_caps_from_abi(abi_json: str) -> dict:
-    try:
-        abi = json.loads(abi_json or "[]")
-    except Exception:
-        return {"ok": False, "caps": {}}
-    caps = {
-        "has_owner": has_fn(abi, "owner"),
-        "has_transferownership": has_fn(abi, "transferOwnership"),
-        "has_pause": (has_fn(abi, "pause") or has_fn(abi, "unpause")),
-        "has_blacklist": (has_fn(abi, "blacklist") or has_fn(abi, "unblacklist")),
-        "has_mint": has_fn(abi, "mint"),
-        "has_burn": has_fn(abi, "burn"),
-    }
-    return {"ok": True, "caps": caps}
-
-def analyze_eth_contract(address: str) -> dict:
-    facts = {"network": "ethereum", "address": address}
-    res = etherscan_call("getsourcecode", {"address": address})
-    if not res.get("ok"):
-        facts["error"] = res.get("error")
-        return facts
-
-    info = (res["data"] or [{}])[0]
-    facts["name"]            = info.get("ContractName") or info.get("Proxy") or "unknown"
-    facts["sourceverified"]  = bool(info.get("SourceCode"))
-    facts["impl"]            = info.get("Implementation") or ""
-    facts["proxy"]           = (info.get("Proxy") == "1")
-    facts["compilerVersion"] = info.get("CompilerVersion") or ""
-    abi_json                 = info.get("ABI") or "[]"
-
-    caps_res = detect_caps_from_abi(abi_json)
-    facts["caps"]        = (caps_res.get("caps") or {})
-    facts["abi_present"] = bool(abi_json and abi_json != "Contract source code not verified")
-    return facts
-
-def format_report(facts: dict, lang: str) -> str:
-    L = REPORT_LABELS.get(lang, REPORT_LABELS["en"])
-    if "error" in facts and not facts.get("abi_present"):
-        return L["error"]
-    lines = []
-    lines.append(f"🧭 {L['network']}: {facts.get('network')}")
-    lines.append(f"🔗 {L['address']}: {facts.get('address')}")
-    if facts.get("name"):            lines.append(f"🏷️ {L['name']}: {facts.get('name')}")
-    if facts.get("sourceverified"):  lines.append(f"✅ {L['sourceverified']}: ✅")
-    if facts.get("proxy"):           lines.append(f"🧩 {L['proxy']}: ✅")
-    if facts.get("impl"):            lines.append(f"🧷 {L['impl']}: {facts.get('impl')}")
-    if facts.get("compilerVersion"): lines.append(f"🧪 {L['compiler']}: {facts.get('compilerVersion')}")
-    caps = facts.get("caps") or {}
-    funcs = []
-    if caps.get("has_owner"):              funcs.append("owner()")
-    if caps.get("has_transferownership"):  funcs.append("transferOwnership()")
-    if caps.get("has_pause"):              funcs.append("pause()/unpause()")
-    if caps.get("has_blacklist"):          funcs.append("blacklist()")
-    if caps.get("has_mint"):               funcs.append("mint()")
-    if caps.get("has_burn"):               funcs.append("burn()")
-    if funcs:
-        lines.append(f"🧰 {L['funcs']}: " + ", ".join(funcs))
+    lines = [a.answer]
+    if a.details:
+        lines += [""] + [f"• {x}" for x in a.details]
+    if a.sources:
+        lines += ["", "*Sources:*"] + [f"- [{s.title}]({s.url})" for s in a.sources]
+    if a.checked_at:
+        lines += [f"\n_Last updated_: {a.checked_at} (GMT+4)"]
+    lines += [f"_Confidence_: {a.confidence:.2f}"]
     return "\n".join(lines)
 
-# -------------------- Fresh Web Search --------------------
-FRESH_TRIGGERS = re.compile(
-    r"\b(today|now|latest|news|price|prices|update|updated|2024|2025|rate|inflation|btc|eth|ton|market)\b",
-    re.IGNORECASE
-)
+def enforce_sources(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    if STRICT_MODE and not candidate.get("sources"):
+        candidate["answer"] = "I cannot verify this with reliable sources."
+        candidate.setdefault("details", []).append("Try refining the request or allow me to search the web.")
+        candidate["confidence"] = 0.2
+    return candidate
 
-def needs_fresh_search(text: str) -> bool:
-    return bool(text) and bool(FRESH_TRIGGERS.search(text))
+# ============== Utils ==============
+CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
-def serpapi_search(query: str, lang: str) -> list:
-    """SerpAPI → [{'title','link','snippet'}]"""
+def now_baku_iso() -> str:
+    # Render dynos run UTC; display local label GMT+4 (Asia/Baku)
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+def prefer_english(user_text: str) -> bool:
+    # EN по умолчанию; RU только при явном запросе (force_ru=true)
+    if "force_ru=true" in user_text.lower():
+        return False
+    return True
+
+# ============== Tools ==============
+def web_search(query: str) -> List[Dict[str, str]]:
     if not SERPAPI_KEY:
         return []
+    url = "https://serpapi.com/search.json"
+    params = {"q": query, "engine": "google", "num": 5, "api_key": SERPAPI_KEY}
+    r = requests.get(url, params=params, timeout=25)
+    r.raise_for_status()
+    items = r.json().get("organic_results", [])[:5]
+    res = []
+    for x in items:
+        link = x.get("link")
+        title = x.get("title")
+        if link and title:
+            res.append({"title": title, "url": link})
+    return res
+
+def price_feed_coingecko(coin_id: str) -> Dict[str, Any]:
+    r = requests.get(f"{COINGECKO_API}/simple/price",
+                     params={"ids": coin_id, "vs_currencies": "usd", "include_24hr_vol": "true"},
+                     timeout=20)
+    r.raise_for_status()
+    jd = r.json().get(coin_id, {})
+    return {"price_usd": jd.get("usd"), "vol_24h": jd.get("usd_24h_vol")}
+
+def token_info_stub(contract: str, chain: str) -> Dict[str, Any]:
+    # Заглушка: для реальных данных подключи Etherscan/BscScan/Solscan
+    return {"contract": contract, "chain": chain, "decimals": None, "name": None, "symbol": None}
+
+def route_tools(text: str) -> List[str]:
+    q = text.lower()
+    tools: List[str] = []
+    if any(k in q for k in ["price", "quote", "liquidity", "volume"]):
+        tools.append("price")
+    if any(k in q for k in ["contract", "address", "token", "decimals", "supply"]):
+        tools.append("token")
+    if any(k in q for k in ["is this scam", "legit", "trust", "review", "site", "twitter", "discord"]):
+        tools.append("search")
+    if not tools and any(k in q for k in ["who", "what", "when", "where", "news", "faq", "how"]):
+        tools.append("search")
+    return list(dict.fromkeys(tools))
+
+# ============== Optional OpenAI polish (keeps EN, short) ==============
+def llm_polish_english(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not OPENAI_API_KEY:
+        return data
     try:
-        params = {
-            "engine": "google",
-            "q": query,
-            "api_key": SERPAPI_KEY,
-            "hl": "en" if lang == "en" else ("ru" if lang == "ru" else "ar"),
-            "num": "5",
-        }
-        resp = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
-        data = resp.json()
-        results = []
-        for item in (data.get("organic_results") or [])[:5]:
-            results.append({
-                "title": item.get("title"),
-                "link": item.get("link"),
-                "snippet": item.get("snippet"),
-            })
-        return results
-    except Exception as e:
-        app.logger.warning(f"serpapi_search error: {e}")
-        return []
-
-def duckduckgo_fallback(query: str) -> list:
-    """DuckDuckGo html fallback без ключей (упрощённый парсинг)."""
-    try:
-        url = "https://html.duckduckgo.com/html/"
-        resp = requests.post(url, data={"q": query}, timeout=20,
-                             headers={"User-Agent":"Mozilla/5.0"})
-        html_text = resp.text
-        results = []
-        link_pat = re.compile(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.I|re.S)
-        snip_pat = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.I|re.S)
-        links = link_pat.findall(html_text)[:5]
-        snips = snip_pat.findall(html_text)[:5]
-        for i, (href, title_html) in enumerate(links):
-            title = html.unescape(re.sub("<.*?>", "", title_html)).strip()
-            snippet = ""
-            if i < len(snips):
-                snippet = html.unescape(re.sub("<.*?>", "", snips[i])).strip()
-            results.append({"title": title, "link": href, "snippet": snippet})
-        return results
-    except Exception as e:
-        app.logger.warning(f"duckduckgo_fallback error: {e}")
-        return []
-
-def compose_snippets_text(snips: list, lang: str) -> str:
-    if not snips:
-        return ""
-    date_str = datetime.utcnow().strftime("%Y-%m-%d")
-    header = {
-        "en": f"Fresh web snippets (UTC {date_str}):",
-        "ru": f"Свежие сниппеты из веба (UTC {date_str}):",
-        "ar": f"ملخصات حديثة من الويب (UTC {date_str}):",
-    }.get(lang, f"Fresh web snippets (UTC {date_str}):")
-    lines = [header]
-    for s in snips:
-        t = s.get("title") or ""
-        l = s.get("link") or ""
-        p = s.get("snippet") or ""
-        lines.append(f"- {t} — {p} ({l})")
-    return "\n".join(lines)
-
-# -------------------- AI --------------------
-def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
-    try:
-        system_for_lang = SYSTEM_PROMPT_BASE + f" Always reply ONLY in {lang.upper()}. Do not translate or duplicate in other languages."
-        msgs = [{"role": "system", "content": system_for_lang}]
-
-        # История из персистентной памяти
-        hist = get_history(chat_id)
-        for role, content in hist:
-            msgs.append({"role": role, "content": content})
-
-        # Веб-контекст: сперва SerpAPI, если нет/ошибка — DuckDuckGo fallback
-        if needs_fresh_search(user_text):
-            snips = serpapi_search(user_text, lang)
-            if not snips:
-                snips = duckduckgo_fallback(user_text)
-            snippets_text = compose_snippets_text(snips, lang)
-            if snippets_text:
-                msgs.append({"role": "system", "content": snippets_text})
-
-        msgs.append({"role": "user", "content": user_text})
-
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        system = (
+            "You are a precise assistant. Output must be short, structured, in EN. "
+            "Do not invent sources. Use bullet points. No philosophy."
+        )
+        content = json.dumps(data, ensure_ascii=False)
         resp = client.chat.completions.create(
-            model=MODEL,
-            messages=msgs,
-            temperature=0.15,
-            max_tokens=650,
+            model="gpt-4o-mini",
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"Rewrite this JSON into clearer English but keep fields: {content}"}
+            ]
         )
-        content = (resp.choices[0].message.content or "").strip()
-        remember(chat_id, "user", user_text)
-        remember(chat_id, "assistant", content)
-        return content
+        txt = resp.choices[0].message.content.strip()
+        if txt.startswith("{") and txt.endswith("}"):
+            data2 = json.loads(txt)
+            if not data2.get("sources"):
+                data2["sources"] = data.get("sources", [])
+            return data2
+        return data
     except Exception as e:
-        app.logger.exception(f"Groq error: {e}")
-        return "Internal model error, please try again in a minute."
+        log.warning("OpenAI polish skipped: %s", e)
+        return data
 
-# -------------------- Routes --------------------
-@app.route("/", methods=["GET"])
-def index():
-    return "ok"
+# ============== App ==============
+app = Flask(__name__)
 
-@app.route("/webhook", methods=["POST", "GET"])
+@app.get("/healthz")
+def health():
+    return {"ok": True, "time": now_baku_iso()}
+
+# -------- Telegram webhook --------
+@app.post(f"/webhook/{WEBHOOK_SECRET}")
 def webhook():
-    if request.method == "GET":
-        return "ok"
+    upd = request.get_json(force=True, silent=True) or {}
+    log.info("update: %s", json.dumps(upd)[:1000])
 
-    if WEBHOOK_SECRET:
-        header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if header_secret != WEBHOOK_SECRET:
-            return jsonify({"ok": False, "error": "bad secret"}), 403
+    # 1) CallbackQuery: обработка кнопок "Copy ..."
+    if "callback_query" in upd:
+        cq = upd["callback_query"]
+        data = cq.get("data", "")
+        if data.startswith("copy:"):
+            addr = data.split("copy:", 1)[1]
+            try:
+                requests.post(f"{TG_API}/answerCallbackQuery", json={
+                    "callback_query_id": cq["id"],
+                    "text": f"Copied: {addr}",
+                    "show_alert": False
+                }, timeout=20)
+            except Exception as e:
+                log.exception("answerCallbackQuery failed: %s", e)
+        return jsonify({"ok": True})
 
-    update = request.get_json(force=True, silent=True) or {}
+    # 2) Обычные сообщения
+    msg = upd.get("message") or upd.get("edited_message")
+    if not msg:
+        return jsonify({"ok": True})
 
-    # Callback кнопки
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        data = cq.get("data") or ""
-        chat_id = cq.get("message", {}).get("chat", {}).get("id")
-        try:
-            if data == "qr_eth":
-                send_qr(chat_id, "ETH", ETH_DONATE_ADDRESS)
-                bot.answer_callback_query(cq.get("id"), text="QR ETH sent")
-            elif data == "qr_ton":
-                send_qr(chat_id, "TON", TON_DONATE_ADDRESS)
-                bot.answer_callback_query(cq.get("id"), text="QR TON sent")
-            elif data == "addr_eth":
-                bot.send_message(chat_id=chat_id, text=f"ETH: `{ETH_DONATE_ADDRESS}`", parse_mode="Markdown")
-                bot.answer_callback_query(cq.get("id"), text="ETH address sent")
-            elif data == "addr_ton":
-                bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown")
-                bot.answer_callback_query(cq.get("id"), text="TON address sent")
-            else:
-                bot.answer_callback_query(cq.get("id"))
-        except Exception as e:
-            app.logger.exception(f"callback error: {e}")
-        return "ok"
+    chat_id = msg["chat"]["id"]
+    text = (msg.get("text") or "").strip()
 
-    # Обычные сообщения
-    msg = update.get("message") or update.get("edited_message") or {}
-    chat = msg.get("chat") or {}
-    chat_id = chat.get("id")
-    if not chat_id:
-        return "ok"
-
-    text = (msg.get("text") or msg.get("caption") or "").strip()
-    lang = detect_lang(text, None)
-    t_low = (text or "").lower()
-
-    # Команды
-    if t_low in ("/start", "start"):
-        start_lang = DEFAULT_LANG
-        bot.send_message(
-            chat_id=chat_id,
-            text=WELCOME.get(start_lang, WELCOME["en"]),
-            reply_markup=build_donate_keyboard() if DONATE_STICKY else None
-        )
-        if not DONATE_STICKY:
-            send_donate_message(chat_id, start_lang)
-        return "ok"
-
-    if t_low in ("/donate", "donate", "донат", "/tip", "tip"):
-        send_donate_message(chat_id, lang)
-        return "ok"
-
-    # Адрес контракта → отчёт Etherscan
-    m = ADDR_RE.search(text)
-    if m:
-        address = m.group(0)
-        facts = analyze_eth_contract(address)
-        report = format_report(facts, lang)
-        bot.send_message(chat_id=chat_id, text=report,
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-        return "ok"
-
-    # Пусто
     if not text:
-        bot.send_message(chat_id=chat_id, text=FALLBACK.get(lang, FALLBACK["en"]),
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-        return "ok"
+        tg_send(chat_id, "Send a text message.")
+        return jsonify({"ok": True})
 
-    # Обычный AI-ответ
-    answer = ai_reply(text, lang, chat_id)
-    bot.send_message(chat_id=chat_id, text=answer,
-                     reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-    return "ok"
+    # Commands
+    if text.startswith("/start"):
+        tg_send(chat_id,
+                "Welcome to CryptoBot AI.\n"
+                "- Default language: EN\n"
+                "- Use /donate to get addresses (ETH/TON/SOL)\n"
+                "- Ask me about prices, tokens, sites. I’ll fetch sources.")
+        return jsonify({"ok": True})
 
-# -------------------- Local run --------------------
+    if text.startswith("/donate"):
+        from urllib.parse import quote
+
+        lines = ["*Support the project*"]
+        buttons: List[List[Dict[str, Any]]] = []
+
+        if ETH_DONATION:
+            lines.append(f"• ETH/ERC-20: `{ETH_DONATION}`")
+            buttons.append([{"text": "Copy ETH", "callback_data": f"copy:{ETH_DONATION}"}])
+            buttons.append([{"text": "QR ETH",
+                             "url": f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={quote(ETH_DONATION)}"}])
+
+        if TON_DONATION:
+            lines.append(f"• TON: `{TON_DONATION}`")
+            buttons.append([{"text": "Copy TON", "callback_data": f"copy:{TON_DONATION}"}])
+            buttons.append([{"text": "QR TON",
+                             "url": f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={quote(TON_DONATION)}"}])
+
+        if SOL_DONATION:
+            lines.append(f"• SOL: `{SOL_DONATION}`")
+            buttons.append([{"text": "Copy SOL", "callback_data": f"copy:{SOL_DONATION}"}])
+            buttons.append([{"text": "QR SOL",
+                             "url": f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={quote(SOL_DONATION)}"}])
+
+        try:
+            requests.post(f"{TG_API}/sendMessage", json={
+                "chat_id": chat_id,
+                "text": "\n".join(lines),
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True,
+                "reply_markup": {"inline_keyboard": buttons}
+            }, timeout=20)
+        except Exception as e:
+            log.exception("sendMessage failed: %s", e)
+
+        return jsonify({"ok": True})
+
+    if text.startswith("/help"):
+        tg_send(chat_id,
+                "Examples:\n"
+                "- price btc\n- token 0x... on Ethereum\n- is this site legit: example.com\n- how to create a wallet")
+        return jsonify({"ok": True})
+
+    # -------- Router --------
+    tools = route_tools(text)
+
+    answer: Dict[str, Any] = {
+        "answer": "Here is what I found:",
+        "details": [],
+        "sources": [],
+        "confidence": 0.6,
+        "checked_at": now_baku_iso()
+    }
+
+    try:
+        # --- Simple patterns ---
+        if text.lower().startswith("price "):
+            coin = text.split(maxsplit=1)[1].strip().lower()
+            pf = price_feed_coingecko(coin)
+            price = pf.get("price_usd")
+            vol = pf.get("vol_24h")
+            if price is not None:
+                answer["answer"] = f"{coin.upper()} price: ${price:,.4f}"
+                if vol is not None:
+                    answer["details"].append(f"24h volume: ${vol:,.0f}")
+                answer["sources"].append({"title": "CoinGecko Simple Price", "url": "https://www.coingecko.com/"})
+                answer["confidence"] = 0.8
+            else:
+                answer["answer"] = f"Price not found for '{coin}'."
+                answer["confidence"] = 0.3
+
+        elif text.lower().startswith("token "):
+            # token <contract> [on <chain>]
+            parts = text.split()
+            contract = parts[1] if len(parts) > 1 else ""
+            chain = "ethereum"
+            if " on " in text.lower():
+                chain = text.lower().split(" on ", 1)[1].strip()
+            ti = token_info_stub(contract, chain)
+            answer["answer"] = f"Token info (stub) for {contract} on {chain}:"
+            for k, v in ti.items():
+                answer["details"].append(f"{k}: {v}")
+            answer["sources"].append({"title": "(Add Etherscan/Solscan later)", "url": "https://etherscan.io/"})
+            answer["confidence"] = 0.5
+
+        elif "site" in text.lower() or "http" in text.lower() or "www." in text.lower():
+            # quick site-related search
+            sources = web_search(text)
+            if sources:
+                answer["answer"] = "Top related sources:"
+                answer["sources"] = sources
+                answer["confidence"] = 0.7
+            else:
+                answer["answer"] = "No sources found."
+                answer["confidence"] = 0.3
+
+        elif "how to" in text.lower() or "guide" in text.lower():
+            sources = web_search(text)
+            answer["answer"] = "Here are relevant guides:"
+            answer["sources"] = sources
+            answer["confidence"] = 0.6
+
+        else:
+            # generic factual → search if needed
+            if "search" in tools:
+                sources = web_search(text)
+                if sources:
+                    answer["answer"] = "Sources that match your query:"
+                    answer["sources"] = sources
+                    answer["confidence"] = 0.6
+                else:
+                    answer["answer"] = "I couldn't find reliable sources."
+                    answer["confidence"] = 0.3
+            else:
+                answer["answer"] = "Tell me the coin (e.g., `price btc`) or paste a contract (e.g., `token 0x... on Ethereum`)."
+                answer["confidence"] = 0.4
+
+    except Exception as e:
+        log.exception("processing error: %s", e)
+        answer = {
+            "answer": "Internal error while fetching data.",
+            "details": [str(e)],
+            "sources": [],
+            "confidence": 0.2,
+            "checked_at": now_baku_iso()
+        }
+
+    # strict sources policy
+    answer = enforce_sources(answer)
+
+    # optional LLM polish (keeps EN & short)
+    if prefer_english(text):
+        answer = llm_polish_english(answer)
+
+    tg_send(chat_id, format_answer(answer), reply_to=msg.get("message_id"))
+    return jsonify({"ok": True})
+
+# -------- Webhook setup helper --------
+@app.post("/set_webhook")
+def set_webhook():
+    key = request.headers.get("X-Setup-Secret")
+    if key != WEBHOOK_SECRET:
+        abort(403)
+    url = f"{APP_BASE_URL}/webhook/{WEBHOOK_SECRET}"
+    r = requests.get(f"{TG_API}/setWebhook", params={"url": url}, timeout=20)
+    return r.json(), r.status_code
+
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
