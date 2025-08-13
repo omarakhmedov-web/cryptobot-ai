@@ -1,4 +1,4 @@
-import os, re, json, logging, io, time, pathlib
+import os, re, json, logging, io, pathlib, html
 from collections import deque, defaultdict
 from datetime import datetime
 
@@ -16,12 +16,12 @@ logging.basicConfig(level=logging.INFO)
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
 ETHERSCAN_API_KEY  = os.getenv("ETHERSCAN_API_KEY", "")
-SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")          # для онлайн-поиска
+SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")          # если нет — используем DuckDuckGo fallback
 MODEL              = os.getenv("MODEL", "llama-3.1-8b-instant")
 WEBHOOK_SECRET     = os.getenv("WEBHOOK_SECRET", "").strip()
 
-# Язык по умолчанию и приоритет
-DEFAULT_LANG       = os.getenv("DEFAULT_LANG", "en").lower()  # en by default
+# Язык по умолчанию и приоритет (английский)
+DEFAULT_LANG       = os.getenv("DEFAULT_LANG", "en").lower()
 
 # Донаты / Кнопки
 ETH_DONATE_ADDRESS = os.getenv("ETH_DONATE_ADDRESS", "0x212f595E42B93646faFE7Fdfa3c330649FA7407E")
@@ -30,18 +30,16 @@ KOFI_LINK_BASE     = os.getenv("KOFI_LINK", "https://ko-fi.com/CryptoNomad")
 KOFI_UTM_SOURCE    = os.getenv("KOFI_UTM_SOURCE", "telegram_bot")
 DONATE_STICKY      = os.getenv("DONATE_STICKY", "1") in ("1", "true", "True")
 
-# Память
-HIST_MAX           = int(os.getenv("HISTORY_MAX", "6"))  # короткая диалоговая память
-DATA_DIR           = os.getenv("DATA_DIR", "/tmp/cryptobot_data")  # Render: временное хранилище ок
+# Память (персистентная на диск)
+HIST_MAX           = int(os.getenv("HISTORY_MAX", "6"))
+DATA_DIR           = os.getenv("DATA_DIR", "/tmp/cryptobot_data")
 MEMORY_FILE        = os.getenv("MEMORY_FILE", "memory.json")
-
-# Готовим каталог и файл памяти
 pathlib.Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 MEMORY_PATH = pathlib.Path(DATA_DIR) / MEMORY_FILE
 
 # -------------------- Clients --------------------
 bot    = Bot(token=TELEGRAM_TOKEN)
-client = Groq(api_key=GROQ_API_KEY)  # НИКАКИХ proxies
+client = Groq(api_key=GROQ_API_KEY)  # без proxies
 
 # -------------------- Language / Texts --------------------
 EN_RE = re.compile(r"[A-Za-z]")
@@ -70,7 +68,6 @@ REPORT_LABELS = {
            "impl":"Implementation","proxy":"Proxy","compiler":"Compiler","funcs":"الوظائف المكتشفة",
            "error":"تعذّر جلب بيانات Etherscan. تحقّق من ETHERSCAN_API_KEY والعنوان."},
 }
-
 ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 SYSTEM_PROMPT_BASE = (
@@ -84,7 +81,7 @@ SYSTEM_PROMPT_BASE = (
 )
 
 def detect_lang(text: str, _tg_lang: str | None) -> str:
-    """Приоритет: латиница → en; иначе ru/ar по алфавиту; иначе DEFAULT_LANG."""
+    """Приоритет: латиница → en; иначе ru/ar; иначе DEFAULT_LANG."""
     t = text or ""
     if EN_RE.search(t): return "en"
     if LANG_RE["ru"].search(t): return "ru"
@@ -168,7 +165,6 @@ def save_memory():
 def get_history(chat_id: int) -> deque:
     load_memory()
     node = memory_cache["chats"].setdefault(str(chat_id), {"history": []})
-    # гарантируем ограничение длины
     dq = deque(node.get("history", []), maxlen=HIST_MAX)
     node["history"] = list(dq)
     return dq
@@ -242,7 +238,6 @@ def format_report(facts: dict, lang: str) -> str:
     L = REPORT_LABELS.get(lang, REPORT_LABELS["en"])
     if "error" in facts and not facts.get("abi_present"):
         return L["error"]
-
     lines = []
     lines.append(f"🧭 {L['network']}: {facts.get('network')}")
     lines.append(f"🔗 {L['address']}: {facts.get('address')}")
@@ -251,7 +246,6 @@ def format_report(facts: dict, lang: str) -> str:
     if facts.get("proxy"):           lines.append(f"🧩 {L['proxy']}: ✅")
     if facts.get("impl"):            lines.append(f"🧷 {L['impl']}: {facts.get('impl')}")
     if facts.get("compilerVersion"): lines.append(f"🧪 {L['compiler']}: {facts.get('compilerVersion')}")
-
     caps = facts.get("caps") or {}
     funcs = []
     if caps.get("has_owner"):              funcs.append("owner()")
@@ -264,10 +258,9 @@ def format_report(facts: dict, lang: str) -> str:
         lines.append(f"🧰 {L['funcs']}: " + ", ".join(funcs))
     return "\n".join(lines)
 
-# -------------------- Fresh Web Search (SerpAPI) --------------------
-# Включается, если SERPAPI_KEY присутствует и запрос «требует свежести».
+# -------------------- Fresh Web Search --------------------
 FRESH_TRIGGERS = re.compile(
-    r"\b(today|now|latest|news|price|prices|update|updated|2024|2025|rate|inflation|btc|eth)\b",
+    r"\b(today|now|latest|news|price|prices|update|updated|2024|2025|rate|inflation|btc|eth|ton|market)\b",
     re.IGNORECASE
 )
 
@@ -275,7 +268,7 @@ def needs_fresh_search(text: str) -> bool:
     return bool(text) and bool(FRESH_TRIGGERS.search(text))
 
 def serpapi_search(query: str, lang: str) -> list:
-    """Возвращает список кратких сниппетов: [{'title':..,'link':..,'snippet':..}]"""
+    """SerpAPI → [{'title','link','snippet'}]"""
     if not SERPAPI_KEY:
         return []
     try:
@@ -300,6 +293,29 @@ def serpapi_search(query: str, lang: str) -> list:
         app.logger.warning(f"serpapi_search error: {e}")
         return []
 
+def duckduckgo_fallback(query: str) -> list:
+    """DuckDuckGo html fallback без ключей (упрощённый парсинг)."""
+    try:
+        url = "https://html.duckduckgo.com/html/"
+        resp = requests.post(url, data={"q": query}, timeout=20,
+                             headers={"User-Agent":"Mozilla/5.0"})
+        html_text = resp.text
+        results = []
+        link_pat = re.compile(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.I|re.S)
+        snip_pat = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.I|re.S)
+        links = link_pat.findall(html_text)[:5]
+        snips = snip_pat.findall(html_text)[:5]
+        for i, (href, title_html) in enumerate(links):
+            title = html.unescape(re.sub("<.*?>", "", title_html)).strip()
+            snippet = ""
+            if i < len(snips):
+                snippet = html.unescape(re.sub("<.*?>", "", snips[i])).strip()
+            results.append({"title": title, "link": href, "snippet": snippet})
+        return results
+    except Exception as e:
+        app.logger.warning(f"duckduckgo_fallback error: {e}")
+        return []
+
 def compose_snippets_text(snips: list, lang: str) -> str:
     if not snips:
         return ""
@@ -320,24 +336,23 @@ def compose_snippets_text(snips: list, lang: str) -> str:
 # -------------------- AI --------------------
 def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
     try:
-        # Строго фиксируем язык
         system_for_lang = SYSTEM_PROMPT_BASE + f" Always reply ONLY in {lang.upper()}. Do not translate or duplicate in other languages."
-
         msgs = [{"role": "system", "content": system_for_lang}]
 
-        # Подмешиваем краткую историю (из файла памяти)
+        # История из персистентной памяти
         hist = get_history(chat_id)
         for role, content in hist:
             msgs.append({"role": role, "content": content})
 
-        # Если нужны свежие данные и есть SERPAPI_KEY — добавляем контекст
-        if needs_fresh_search(user_text) and SERPAPI_KEY:
+        # Веб-контекст: сперва SerpAPI, если нет/ошибка — DuckDuckGo fallback
+        if needs_fresh_search(user_text):
             snips = serpapi_search(user_text, lang)
+            if not snips:
+                snips = duckduckgo_fallback(user_text)
             snippets_text = compose_snippets_text(snips, lang)
             if snippets_text:
                 msgs.append({"role": "system", "content": snippets_text})
 
-        # Текущее сообщение
         msgs.append({"role": "user", "content": user_text})
 
         resp = client.chat.completions.create(
@@ -376,7 +391,6 @@ def webhook():
         cq = update["callback_query"]
         data = cq.get("data") or ""
         chat_id = cq.get("message", {}).get("chat", {}).get("id")
-        # язык по умолчанию (кнопки нейтральные)
         try:
             if data == "qr_eth":
                 send_qr(chat_id, "ETH", ETH_DONATE_ADDRESS)
@@ -404,7 +418,6 @@ def webhook():
         return "ok"
 
     text = (msg.get("text") or msg.get("caption") or "").strip()
-    # игнорируем системный язык Telegram; детектим по тексту
     lang = detect_lang(text, None)
     t_low = (text or "").lower()
 
@@ -440,7 +453,7 @@ def webhook():
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
 
-    # Обычный AI-ответ (с онлайн-поиском при необходимости и персистентной памятью)
+    # Обычный AI-ответ
     answer = ai_reply(text, lang, chat_id)
     bot.send_message(chat_id=chat_id, text=answer,
                      reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
