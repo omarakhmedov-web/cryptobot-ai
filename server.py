@@ -17,6 +17,9 @@ ETHERSCAN_API_KEY  = os.getenv("ETHERSCAN_API_KEY", "")
 MODEL              = os.getenv("MODEL", "llama-3.1-8b-instant")
 WEBHOOK_SECRET     = os.getenv("WEBHOOK_SECRET", "").strip()
 
+# Приоритет языка
+DEFAULT_LANG       = os.getenv("DEFAULT_LANG", "en").lower()  # en по умолчанию
+
 # Донаты
 ETH_DONATE_ADDRESS = os.getenv("ETH_DONATE_ADDRESS", "0x212f595E42B93646faFE7Fdfa3c330649FA7407E")
 TON_DONATE_ADDRESS = os.getenv("TON_DONATE_ADDRESS", "UQBoAzy9RkbfasGEYwHVRNbWzYNU7JszD0WG9lz8ReFFtESP")
@@ -28,6 +31,7 @@ bot    = Bot(token=TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)   # без proxies
 
 # ========= МУЛЬТИЯЗЫЧНОСТЬ =========
+EN_RE = re.compile(r"[A-Za-z]")
 LANG_RE = {
     "ru": re.compile(r"[А-Яа-яЁё]"),
     "ar": re.compile(r"[\u0600-\u06FF]"),
@@ -56,24 +60,28 @@ REPORT_LABELS = {
 
 ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
-SYSTEM_PROMPT = (
+# Базовый системный промпт (язык добавляем динамически)
+SYSTEM_PROMPT_BASE = (
     "You are CryptoBot AI — a concise Web3 security assistant. "
-    "User may speak English/Russian/Arabic; reply in the user's language. "
-    "STRICT RULES: (1) If user sends an Ethereum address (0x...), do NOT guess — run Etherscan check. "
+    "STRICT RULES: (1) If user sends an Ethereum address (0x...), do NOT guess — run an Etherscan check. "
     "(2) For general questions, answer briefly and practically. "
     "(3) If data is missing (chain, address, explorer), say what is needed in ONE short line. "
     "(4) Never invent on-chain facts or metrics."
 )
 
-def detect_lang(text: str, tg_lang: str | None) -> str:
-    if tg_lang:
-        if tg_lang.startswith("ru"): return "ru"
-        if tg_lang.startswith("ar"): return "ar"
-        if tg_lang.startswith("en"): return "en"
-    if text:
-        if LANG_RE["ru"].search(text): return "ru"
-        if LANG_RE["ar"].search(text): return "ar"
-    return "en"
+def detect_lang(text: str, _tg_lang: str | None) -> str:
+    """
+    Приоритеты:
+    1) Если в текущем сообщении есть латиница — en.
+    2) Иначе если кириллица — ru; арабская вязь — ar.
+    3) Иначе DEFAULT_LANG (en).
+    (Игнорируем системный язык Telegram, чтобы не залипать на нём.)
+    """
+    t = text or ""
+    if EN_RE.search(t): return "en"
+    if LANG_RE["ru"].search(t): return "ru"
+    if LANG_RE["ar"].search(t): return "ar"
+    return DEFAULT_LANG
 
 # ========= DONATE =========
 def kofi_link_with_utm() -> str:
@@ -121,7 +129,6 @@ def send_donate_message(chat_id: int, lang: str):
     )
 
 def send_qr(chat_id: int, label: str, value: str):
-    """Генерирует PNG-QR и отправляет как фото."""
     img = qrcode.make(value)
     bio = io.BytesIO()
     bio.name = f"{label}.png"
@@ -129,16 +136,9 @@ def send_qr(chat_id: int, label: str, value: str):
     bio.seek(0)
     bot.send_photo(chat_id=chat_id, photo=bio, caption=f"{label}: `{value}`", parse_mode="Markdown")
 
-# ========= КОРОТКАЯ ПАМЯТЬ =========
+# ========= ПАМЯТЬ ЧАТА =========
 HIST_MAX = int(os.getenv("HISTORY_MAX", "6"))
 history: dict[int, deque] = defaultdict(lambda: deque(maxlen=HIST_MAX))
-
-def build_messages(lang: str, user_text: str, chat_id: int):
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for role, content in history[chat_id]:
-        msgs.append({"role": role, "content": content})
-    msgs.append({"role": "user", "content": user_text})
-    return msgs
 
 def remember(chat_id: int, role: str, content: str):
     history[chat_id].append((role, content))
@@ -231,7 +231,13 @@ def format_report(facts: dict, lang: str) -> str:
 # ========= AI =========
 def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
     try:
-        msgs = build_messages(lang, user_text, chat_id)
+        # Жёстко фиксируем язык ответа
+        system_for_lang = SYSTEM_PROMPT_BASE + f" Always reply ONLY in {lang.upper()}. Do not translate or duplicate in other languages."
+        msgs = [{"role": "system", "content": system_for_lang}]
+        for role, content in history[chat_id]:
+            msgs.append({"role": role, "content": content})
+        msgs.append({"role": "user", "content": user_text})
+
         resp = client.chat.completions.create(
             model=MODEL,
             messages=msgs,
@@ -263,7 +269,7 @@ def webhook():
 
     update = request.get_json(force=True, silent=True) or {}
 
-    # ----- обработка callback кнопок -----
+    # ----- callback кнопки -----
     if "callback_query" in update:
         cq = update["callback_query"]
         data = cq.get("data") or ""
@@ -297,16 +303,20 @@ def webhook():
         return "ok"
 
     text = (msg.get("text") or msg.get("caption") or "").strip()
-    tg_lang = (msg.get("from", {}) or {}).get("language_code")
-    lang = detect_lang(text, tg_lang)
-    t_low = text.lower()
+    # игнорируем системный язык Telegram; детектим по тексту/DEFAULT_LANG
+    lang = detect_lang(text, None)
+    t_low = (text or "").lower()
 
     # Команды
     if t_low in ("/start", "start"):
-        bot.send_message(chat_id=chat_id, text=WELCOME.get(lang, WELCOME["en"]),
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+        start_lang = DEFAULT_LANG  # привет на языке по умолчанию
+        bot.send_message(
+            chat_id=chat_id,
+            text=WELCOME.get(start_lang, WELCOME["en"]),
+            reply_markup=build_donate_keyboard() if DONATE_STICKY else None
+        )
         if not DONATE_STICKY:
-            send_donate_message(chat_id, lang)
+            send_donate_message(chat_id, start_lang)
         return "ok"
 
     if t_low in ("/donate", "donate", "донат", "/tip", "tip"):
