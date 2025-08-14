@@ -1,4 +1,4 @@
-import os, re, json, logging, io, pathlib, html
+import os, re, json, logging, io, pathlib, html, time
 from collections import deque, defaultdict
 from datetime import datetime
 
@@ -30,7 +30,7 @@ KOFI_LINK_BASE     = os.getenv("KOFI_LINK", "https://ko-fi.com/CryptoNomad")
 KOFI_UTM_SOURCE    = os.getenv("KOFI_UTM_SOURCE", "telegram_bot")
 DONATE_STICKY      = os.getenv("DONATE_STICKY", "1") in ("1", "true", "True")
 
-# [SOL] новый адрес Solana
+# Solana
 SOL_DONATE_ADDRESS = os.getenv("SOL_DONATE_ADDRESS", "X8HAPHLbh7gF2kHCepCixsHkRwix4M34me8gNzhak1z")
 
 # Память (персистентная на диск)
@@ -99,21 +99,21 @@ def kofi_link_with_utm() -> str:
 def build_donate_keyboard() -> InlineKeyboardMarkup:
     eth_url = f"https://etherscan.io/address/{ETH_DONATE_ADDRESS}"
     ton_url = f"https://tonviewer.com/{TON_DONATE_ADDRESS}"
-    sol_url = f"https://solscan.io/account/{SOL_DONATE_ADDRESS}"  # [SOL]
+    sol_url = f"https://solscan.io/account/{SOL_DONATE_ADDRESS}"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💎 Ethereum (ETH)", url=eth_url)],
         [InlineKeyboardButton("🔵 TON", url=ton_url)],
-        [InlineKeyboardButton("🟣 Solana (SOL)", url=sol_url)],              # [SOL]
+        [InlineKeyboardButton("🟣 Solana (SOL)", url=sol_url)],
         [InlineKeyboardButton("☕ Ko-fi", url=kofi_link_with_utm())],
         [
             InlineKeyboardButton("📷 QR ETH", callback_data="qr_eth"),
             InlineKeyboardButton("📷 QR TON", callback_data="qr_ton"),
-            InlineKeyboardButton("📷 QR SOL", callback_data="qr_sol"),       # [SOL]
+            InlineKeyboardButton("📷 QR SOL", callback_data="qr_sol"),
         ],
         [
             InlineKeyboardButton("📋 ETH", callback_data="addr_eth"),
             InlineKeyboardButton("📋 TON", callback_data="addr_ton"),
-            InlineKeyboardButton("📋 SOL", callback_data="addr_sol"),        # [SOL]
+            InlineKeyboardButton("📋 SOL", callback_data="addr_sol"),
         ],
     ])
 
@@ -122,17 +122,17 @@ def send_donate_message(chat_id: int, lang: str):
         "en": ("Support the project:\n\n"
                f"ETH: `{ETH_DONATE_ADDRESS}`\n"
                f"TON: `{TON_DONATE_ADDRESS}`\n"
-               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"   # [SOL]
+               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"
                "Ko-fi via the button below."),
         "ru": ("Поддержать проект:\n\n"
                f"ETH: `{ETH_DONATE_ADDRESS}`\n"
                f"TON: `{TON_DONATE_ADDRESS}`\n"
-               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"   # [SOL]
+               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"
                "Ko-fi — кнопка ниже."),
         "ar": ("لدعم المشروع:\n\n"
                f"ETH: `{ETH_DONATE_ADDRESS}`\n"
                f"TON: `{TON_DONATE_ADDRESS}`\n"
-               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"   # [SOL]
+               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"
                "Ko-fi من الزر أدناه."),
     }
     bot.send_message(
@@ -152,7 +152,7 @@ def send_qr(chat_id: int, label: str, value: str):
     bot.send_photo(chat_id=chat_id, photo=bio, caption=f"{label}: `{value}`", parse_mode="Markdown")
 
 # -------------------- Persistent Memory --------------------
-# Структура файла: {"chats": { "<chat_id>": {"history":[["user","..."],["assistant","..."], ...] }}}
+# {"chats": { "<chat_id>": {"history":[["user","..."],["assistant","..."]] }}}
 memory_cache = {"chats": {}}
 
 def load_memory():
@@ -278,7 +278,6 @@ def needs_fresh_search(text: str) -> bool:
     return bool(text) and bool(FRESH_TRIGGERS.search(text))
 
 def serpapi_search(query: str, lang: str) -> list:
-    """SerpAPI → [{'title','link','snippet'}]"""
     if not SERPAPI_KEY:
         return []
     try:
@@ -304,7 +303,6 @@ def serpapi_search(query: str, lang: str) -> list:
         return []
 
 def duckduckgo_fallback(query: str) -> list:
-    """DuckDuckGo html fallback без ключей (упрощённый парсинг)."""
     try:
         url = "https://html.duckduckgo.com/html/"
         resp = requests.post(url, data={"q": query}, timeout=20,
@@ -343,18 +341,116 @@ def compose_snippets_text(snips: list, lang: str) -> str:
         lines.append(f"- {t} — {p} ({l})")
     return "\n".join(lines)
 
+# -------------------- [PRICE] CoinGecko: точные цены в USD без ключей --------------------
+PRICE_TRIGGERS = re.compile(
+    r"\b(price|prices|rate|курс|цена|стоимость|сколько\s+стоит|quote|update price)\b",
+    re.IGNORECASE
+)
+SYMBOL_TO_CG = {
+    "BTC":"bitcoin","XBT":"bitcoin",
+    "ETH":"ethereum",
+    "SOL":"solana",
+    "TON":"the-open-network",
+    "USDT":"tether",
+    "USDC":"usd-coin",
+    "BNB":"binancecoin",
+    "ARB":"arbitrum",
+    "OP":"optimism",
+    "ADA":"cardano",
+    "XRP":"ripple",
+    "AVAX":"avalanche-2",
+    "TRX":"tron",
+    "DOGE":"dogecoin",
+    "MATIC":"matic-network",
+    "SUI":"sui",
+    "APT":"aptos",
+}
+TICKER_RE = re.compile(
+    r"(?:(?<=\$)|\b)([A-Z]{2,6}|btc|eth|sol|ton|usdt|usdc|bnb|arb|op|ada|xrp|avax|trx|doge|matic|sui|apt)\b",
+    re.IGNORECASE
+)
+def is_price_query(text: str) -> bool:
+    if not text: return False
+    return bool(PRICE_TRIGGERS.search(text)) or bool(TICKER_RE.search(text))
+def _cg_ids_from_text(text: str) -> list:
+    syms = set(m.group(1).upper() for m in TICKER_RE.finditer(text or ""))
+    if not syms:
+        return ["bitcoin","ethereum","solana","the-open-network"]
+    ids, seen = [], set()
+    for s in syms:
+        cid = SYMBOL_TO_CG.get(s) or next((v for k,v in SYMBOL_TO_CG.items() if k.lower()==s.lower()), None)
+        if cid and cid not in seen:
+            seen.add(cid); ids.append(cid)
+    return ids
+_cg_cache = {"t":0, "key":"", "data":{}}
+def _cg_cache_get(key: str):
+    if time.time() - _cg_cache["t"] < 60 and _cg_cache["key"] == key:
+        return _cg_cache["data"]
+    return None
+def _cg_cache_set(key: str, data: dict):
+    _cg_cache.update({"t": time.time(), "key": key, "data": data})
+def coingecko_prices(coin_ids: list, vs="usd") -> dict:
+    coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
+    coin_ids_str = ",".join(coin_ids)
+    cache_key = f"{coin_ids_str}:{vs}"
+    cached = _cg_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {
+        "ids": coin_ids_str,
+        "vs_currencies": vs,
+        "include_24hr_change": "true",
+        "include_last_updated_at": "true",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
+        r.raise_for_status()
+        data = r.json() or {}
+        _cg_cache_set(cache_key, data)
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
+    if "error" in data:
+        return {"en":"Price fetch error.","ru":"Ошибка получения цены.","ar":"خطأ بجلب السعر."}.get(lang, "Price fetch error.")
+    name_map = {
+        "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
+        "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","arbitrum":"ARB","optimism":"OP",
+        "cardano":"ADA","ripple":"XRP","avalanche-2":"AVAX","tron":"TRX","dogecoin":"DOGE","matic-network":"MATIC",
+        "sui":"SUI","apt":"APT"
+    }
+    lines = {"en":["🔔 Spot prices (USD):"],"ru":["🔔 Спот-цены (USD):"],"ar":["🔔 الأسعار الفورية (USD):"]}.get(lang, ["🔔 Spot prices (USD):"])
+    order = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin"]
+    for k in order + [k for k in data.keys() if k not in order]:
+        if k not in data: continue
+        item = data[k]; price = item.get(vs); chg = item.get(f"{vs}_24h_change")
+        sym = name_map.get(k, k)
+        if price is None: continue
+        chg_s = ""
+        if isinstance(chg, (int,float)):
+            sign = "▲" if chg >= 0 else "▼"
+            chg_s = f"  {sign}{abs(chg):.2f}%/24h"
+        lines.append(f"{sym}: ${price:,.4f}{chg_s}")
+    if len(lines) == 1:
+        return {"en":"No price data.","ru":"Нет данных по ценам.","ar":"لا توجد بيانات أسعار."}.get(lang, "No price data.")
+    try:
+        all_ts = [v.get("last_updated_at") for v in data.values() if isinstance(v, dict) and v.get("last_updated_at")]
+        if all_ts:
+            dt = datetime.utcfromtimestamp(max(all_ts)).strftime("%Y-%m-%d %H:%M UTC")
+            lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}.","ar":f"\nحتى {dt}."}.get(lang, f"\nAs of {dt}."))
+    except Exception:
+        pass
+    return "\n".join(lines)
+
 # -------------------- AI --------------------
 def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
     try:
         system_for_lang = SYSTEM_PROMPT_BASE + f" Always reply ONLY in {lang.upper()}. Do not translate or duplicate in other languages."
         msgs = [{"role": "system", "content": system_for_lang}]
-
-        # История из персистентной памяти
         hist = get_history(chat_id)
         for role, content in hist:
             msgs.append({"role": role, "content": content})
-
-        # Веб-контекст: сперва SerpAPI, если нет/ошибка — DuckDuckGo fallback
         if needs_fresh_search(user_text):
             snips = serpapi_search(user_text, lang)
             if not snips:
@@ -362,14 +458,9 @@ def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
             snippets_text = compose_snippets_text(snips, lang)
             if snippets_text:
                 msgs.append({"role": "system", "content": snippets_text})
-
         msgs.append({"role": "user", "content": user_text})
-
         resp = client.chat.completions.create(
-            model=MODEL,
-            messages=msgs,
-            temperature=0.15,
-            max_tokens=650,
+            model=MODEL, messages=msgs, temperature=0.15, max_tokens=650,
         )
         content = (resp.choices[0].message.content or "").strip()
         remember(chat_id, "user", user_text)
@@ -403,23 +494,17 @@ def webhook():
         chat_id = cq.get("message", {}).get("chat", {}).get("id")
         try:
             if data == "qr_eth":
-                send_qr(chat_id, "ETH", ETH_DONATE_ADDRESS)
-                bot.answer_callback_query(cq.get("id"), text="QR ETH sent")
+                send_qr(chat_id, "ETH", ETH_DONATE_ADDRESS); bot.answer_callback_query(cq.get("id"), text="QR ETH sent")
             elif data == "qr_ton":
-                send_qr(chat_id, "TON", TON_DONATE_ADDRESS)
-                bot.answer_callback_query(cq.get("id"), text="QR TON sent")
-            elif data == "qr_sol":  # [SOL]
-                send_qr(chat_id, "SOL", SOL_DONATE_ADDRESS)
-                bot.answer_callback_query(cq.get("id"), text="QR SOL sent")
+                send_qr(chat_id, "TON", TON_DONATE_ADDRESS); bot.answer_callback_query(cq.get("id"), text="QR TON sent")
+            elif data == "qr_sol":
+                send_qr(chat_id, "SOL", SOL_DONATE_ADDRESS); bot.answer_callback_query(cq.get("id"), text="QR SOL sent")
             elif data == "addr_eth":
-                bot.send_message(chat_id=chat_id, text=f"ETH: `{ETH_DONATE_ADDRESS}`", parse_mode="Markdown")
-                bot.answer_callback_query(cq.get("id"), text="ETH address sent")
+                bot.send_message(chat_id=chat_id, text=f"ETH: `{ETH_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="ETH address sent")
             elif data == "addr_ton":
-                bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown")
-                bot.answer_callback_query(cq.get("id"), text="TON address sent")
-            elif data == "addr_sol":  # [SOL]
-                bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown")
-                bot.answer_callback_query(cq.get("id"), text="SOL address sent")
+                bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="TON address sent")
+            elif data == "addr_sol":
+                bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="SOL address sent")
             else:
                 bot.answer_callback_query(cq.get("id"))
         except Exception as e:
@@ -440,11 +525,8 @@ def webhook():
     # Команды
     if t_low in ("/start", "start"):
         start_lang = DEFAULT_LANG
-        bot.send_message(
-            chat_id=chat_id,
-            text=WELCOME.get(start_lang, WELCOME["en"]),
-            reply_markup=build_donate_keyboard() if DONATE_STICKY else None
-        )
+        bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
+                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         if not DONATE_STICKY:
             send_donate_message(chat_id, start_lang)
         return "ok"
@@ -454,11 +536,21 @@ def webhook():
         return "ok"
 
     # Адрес контракта → отчёт Etherscan
-    if ADDR_RE.search(text):
-        address = ADDR_RE.search(text).group(0)
+    m = ADDR_RE.search(text)
+    if m:
+        address = m.group(0)
         facts = analyze_eth_contract(address)
         report = format_report(facts, lang)
         bot.send_message(chat_id=chat_id, text=report,
+                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+        return "ok"
+
+    # [PRICE] Быстрый ответ через CoinGecko (USD; экономим SerpAPI/LLM)
+    if is_price_query(text):
+        ids = _cg_ids_from_text(text)
+        data = coingecko_prices(ids, vs="usd")
+        msg_out = format_prices_message(data, lang=lang, vs="usd")
+        bot.send_message(chat_id=chat_id, text=msg_out,
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
 
