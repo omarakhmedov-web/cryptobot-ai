@@ -22,7 +22,7 @@ SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")          # если нет —
 MODEL              = os.getenv("MODEL", "llama-3.1-8b-instant")
 WEBHOOK_SECRET     = os.getenv("WEBHOOK_SECRET", "").strip()
 
-# Язык по умолчанию (приоритет английский)
+# Язык по умолчанию
 DEFAULT_LANG       = os.getenv("DEFAULT_LANG", "en").lower()
 
 # Донаты / Кнопки
@@ -46,17 +46,52 @@ client = Groq(api_key=GROQ_API_KEY)  # без proxies
 
 # -------------------- Language / Texts --------------------
 EN_RE = re.compile(r"[A-Za-z]")
-LANG_RE = {"ru": re.compile(r"[А-Яа-яЁё]"), "ar": re.compile(r"[\u0600-\u06FF]")}
+LANG_RE = {"ru": re.compile(r"[А-Яа-яЁё]")}
+
+# Универсальное приветствие (полная версия для /start)
 WELCOME = {
-    "en": "Welcome to CryptoGuard. Send a contract address (0x…) and I’ll run a basic on-chain check (Etherscan).",
-    "ru": "Добро пожаловать в CryptoGuard. Отправь адрес контракта (0x…), и я выполню базовую ончейн-проверку (Etherscan).",
-    "ar": "مرحبًا في CryptoGuard. أرسل عنوان العقد (0x…) وسأجري فحصًا أساسيًا على السلسلة (Etherscan).",
+    "en": (
+        "🤖 Welcome to CryptoBot AI — your compact Web3 assistant.\n\n"
+        "I can:\n"
+        "• Answer crypto/Web3 questions.\n"
+        "• Show live prices, top-10 coins, gas fees, BTC dominance, Fear & Greed.\n"
+        "• Coming soon: Ethereum contract checks via Etherscan*.\n\n"
+        "💎 Support the project so it can grow, improve, and stay online 24/7 for everyone’s benefit.\n"
+        "Your help adds new features, integrations, and smarter answers. Every contribution matters! ☕💙\n\n"
+        "*Etherscan features will be available once we get the API key — your support helps make it happen!"
+    ),
+    "ru": (
+        "🤖 Добро пожаловать в CryptoBot AI — вашего компактного помощника в мире Web3.\n\n"
+        "Я умею:\n"
+        "• Отвечать на вопросы о криптовалютах и Web3.\n"
+        "• Показывать цены в реальном времени, топ-10 монет, газ, доминацию BTC, индекс страха и жадности.\n"
+        "• Скоро: проверка контрактов Ethereum через Etherscan*.\n\n"
+        "💎 Поддержите проект, чтобы он развивался, совершенствовался и всегда был на связи 24/7 на благо людей.\n"
+        "Ваша помощь добавит новые функции, интеграции и сделает ответы умнее. Каждый вклад важен! ☕💙\n\n"
+        "*Функции Etherscan будут доступны, как только мы получим API-ключ — ваша поддержка поможет это сделать!"
+    ),
 }
-FALLBACK = {
-    "en": "Please send a contract address (0x…) or ask a question.",
-    "ru": "Отправьте адрес контракта (0x…) или задайте вопрос.",
-    "ar": "أرسل عنوان عقد (0x…) أو اطرح سؤالًا.",
+
+# Мотивирующий текст для /donate (без списка возможностей)
+DONATE_TEXT = {
+    "en": (
+        "💎 Support CryptoBot AI so it can grow, improve, and stay online 24/7 for everyone’s benefit.\n\n"
+        "Your donation helps to:\n"
+        "• Keep the bot running reliably without downtime.\n"
+        "• Add new features and integrations (Etherscan, analytics, alerts).\n"
+        "• Make answers smarter and more useful for the crypto community.\n\n"
+        "Every contribution matters — thank you! ☕💙"
+    ),
+    "ru": (
+        "💎 Поддержите CryptoBot AI, чтобы он развивался, совершенствовался и всегда был на связи 24/7 на благо людей.\n\n"
+        "Ваш вклад помогает:\n"
+        "• Обеспечивать стабильную работу бота без простоев.\n"
+        "• Добавлять новые функции и интеграции (Etherscan, аналитика, уведомления).\n"
+        "• Делать ответы умнее и полезнее для крипто-сообщества.\n\n"
+        "Каждый вклад важен — спасибо! ☕💙"
+    ),
 }
+
 REPORT_LABELS = {
     "en": {"network":"Network","address":"Address","name":"Contract name","sourceverified":"Source verified",
            "impl":"Implementation","proxy":"Proxy","compiler":"Compiler","funcs":"Detected functions",
@@ -64,9 +99,6 @@ REPORT_LABELS = {
     "ru": {"network":"Сеть","address":"Адрес","name":"Имя контракта","sourceverified":"Исходник верифицирован",
            "impl":"Реализация","proxy":"Прокси","compiler":"Компайлер","funcs":"Обнаруженные функции",
            "error":"Не удалось получить данные Etherscan. Проверь ETHERSCAN_API_KEY и адрес."},
-    "ar": {"network":"الشبكة","address":"العنوان","name":"اسم العقد","sourceverified":"المصدر مُتحقق",
-           "impl":"Implementation","proxy":"Proxy","compiler":"Compiler","funcs":"الوظائف المكتشفة",
-           "error":"تعذّر جلب بيانات Etherscan. تحقّق من ETHERSCAN_API_KEY والعنوان."},
 }
 ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
@@ -82,7 +114,7 @@ SYSTEM_PROMPT_BASE = (
 
 # -------------------- Persistent Memory --------------------
 # Структура: {
-#   "chats": {"<chat_id>":{"history":[...], "lang_override":"en|ru|ar"}},
+#   "chats": {"<chat_id>":{"history":[...], "lang_override":"en|ru"}},
 #   "price_tokens":{"<chat_id>":{"<token>":[ids...]}}
 # }
 memory_cache = {"chats": {}, "price_tokens": {}}
@@ -158,12 +190,11 @@ def resolve_price_ids(chat_id: int, token: str) -> list[str]:
 def detect_lang(text: str, _tg_lang: str | None, chat_id: int | None = None) -> str:
     if chat_id is not None:
         over = get_lang_override(chat_id)
-        if over in ("en", "ru", "ar"):
+        if over in ("en", "ru"):
             return over
     t = text or ""
     if EN_RE.search(t): return "en"
     if LANG_RE["ru"].search(t): return "ru"
-    if LANG_RE["ar"].search(t): return "ar"
     return DEFAULT_LANG
 
 # -------------------- Donate UI --------------------
@@ -193,26 +224,10 @@ def build_donate_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def send_donate_message(chat_id: int, lang: str):
-    texts = {
-        "en": ("Support the project:\n\n"
-               f"ETH: `{ETH_DONATE_ADDRESS}`\n"
-               f"TON: `{TON_DONATE_ADDRESS}`\n"
-               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"
-               "Ko-fi via the button below."),
-        "ru": ("Поддержать проект:\n\n"
-               f"ETH: `{ETH_DONATE_ADDRESS}`\n"
-               f"TON: `{TON_DONATE_ADDRESS}`\n"
-               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"
-               "Ko-fi — кнопка ниже."),
-        "ar": ("لدعم المشروع:\n\n"
-               f"ETH: `{ETH_DONATE_ADDRESS}`\n"
-               f"TON: `{TON_DONATE_ADDRESS}`\n"
-               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"
-               "Ko-fi من الزر أدناه."),
-    }
+    text = DONATE_TEXT.get(lang, DONATE_TEXT["en"])
     bot.send_message(
         chat_id=chat_id,
-        text=texts.get(lang, texts["en"]),
+        text=text,
         reply_markup=build_donate_keyboard(),
         parse_mode="Markdown",
         disable_web_page_preview=True,
@@ -321,8 +336,13 @@ def serpapi_search(query: str, lang: str) -> list:
     if not SERPAPI_KEY:
         return []
     try:
-        params = {"engine": "google", "q": query, "api_key": SERPAPI_KEY,
-                  "hl": "en" if lang == "en" else ("ru" if lang == "ru" else "ar"), "num": "5"}
+        params = {
+            "engine": "google",
+            "q": query,
+            "api_key": SERPAPI_KEY,
+            "hl": "en" if lang == "en" else "ru",
+            "num": "5"
+        }
         resp = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
         data = resp.json()
         results = []
@@ -340,7 +360,6 @@ def duckduckgo_fallback(query: str) -> list:
         html_text = resp.text
         results = []
         link_pat = re.compile(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.I|re.S)
-        # FIX: корректный флаг re.S
         snip_pat = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.I|re.S)
         links = link_pat.findall(html_text)[:5]
         snips = snip_pat.findall(html_text)[:5]
@@ -359,8 +378,7 @@ def compose_snippets_text(snips: list, lang: str) -> str:
     if not snips: return ""
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
     header = {"en": f"Fresh web snippets (UTC {date_str}):",
-              "ru": f"Свежие сниппеты из веба (UTC {date_str}):",
-              "ar": f"ملخصات حديثة من الويب (UTC {date_str}):"}.get(lang, f"Fresh web snippets (UTC {date_str}):")
+              "ru": f"Свежие сниппеты из веба (UTC {date_str}):"}.get(lang, f"Fresh web snippets (UTC {date_str}):")
     lines = [header]
     for s in snips:
         t = s.get("title") or ""; l = s.get("link") or ""; p = s.get("snippet") or ""
@@ -436,14 +454,14 @@ def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
 
 def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
     if "error" in data:
-        return {"en":"Price fetch error.","ru":"Ошибка получения цены.","ar":"خطأ بجلب السعر."}.get(lang, "Price fetch error.")
+        return {"en":"Price fetch error.","ru":"Ошибка получения цены."}.get(lang, "Price fetch error.")
     name_map = {
         "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
         "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","arbitrum":"ARB","optimism":"OP",
         "cardano":"ADA","ripple":"XRP","avalanche-2":"AVAX","tron":"TRX","dogecoin":"DOGE","matic-network":"MATIC",
         "sui":"SUI","apt":"APT"
     }
-    lines = {"en":["🔔 Spot prices (USD):"],"ru":["🔔 Спот-цены (USD):"],"ar":["🔔 الأسعار الفورية (USD):"]}.get(lang, ["🔔 Spot prices (USD):"])
+    lines = {"en":["🔔 Spot prices (USD):"],"ru":["🔔 Спот-цены (USD):"]}.get(lang, ["🔔 Spot prices (USD):"])
     order = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin"]
     for k in order + [k for k in data.keys() if k not in order]:
         if k not in data: continue
@@ -459,19 +477,19 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
             chg_s = f"  {sign}{abs(chg):.2f}%/24h"
         lines.append(f"{sym}: ${price:,.4f}{chg_s}")
     if len(lines) == 1:
-        return {"en":"No price data.","ru":"Нет данных по ценам.","ar":"لا توجد بيانات أسعار."}.get(lang, "No price data.")
+        return {"en":"No price data.","ru":"Нет данных по ценам."}.get(lang, "No price data.")
     try:
         all_ts = [v.get("last_updated_at") for v in data.values() if isinstance(v, dict) and v.get("last_updated_at")]
         if all_ts:
             dt = datetime.utcfromtimestamp(max(all_ts)).strftime("%Y-%m-%d %H:%M UTC")
-            lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}.","ar":f"\nحتى {dt}."}.get(lang, f"\nAs of {dt}."))
+            lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}."}.get(lang, f"\nAs of {dt}."))
     except Exception:
         pass
     return "\n".join(lines)
 
 # UI для цен
 def _t_refresh(lang: str) -> str:
-    return {"en":"🔄 Refresh","ru":"🔄 Обновить","ar":"🔄 تحديث"}.get(lang, "🔄 Refresh")
+    return {"en":"🔄 Refresh","ru":"🔄 Обновить"}.get(lang, "🔄 Refresh")
 
 def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     token = store_price_ids(chat_id, ids)
@@ -498,13 +516,12 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
         return (
-            {"en":"No market data.","ru":"Нет рыночных данных.","ar":"لا توجد بيانات سوق."}.get(lang, "No market data."),
+            {"en":"No market data.","ru":"Нет рыночных данных."}.get(lang, "No market data."),
             []
         )
     lines = {
         "en": ["🏆 Top-10 by market cap (USD):"],
         "ru": ["🏆 Топ-10 по капитализации (USD):"],
-        "ar": ["🏆 أعلى 10 بالقيمة السوقية (USD):"],
     }.get(lang, ["🏆 Top-10 by market cap (USD):"])
     ids = []
     for i, c in enumerate(mkts, start=1):
@@ -518,7 +535,7 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
         lines.append(f"{i}. {sym}: ${price:,.4f}{chg_s}")
         ids.append(c.get("id"))
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}.","ar":f"\nحتى {dt}."}.get(lang, f"\nAs of {dt}."))
+    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}."}.get(lang, f"\nAs of {dt}."))
     return ("\n".join(lines), ids)
 
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
@@ -585,12 +602,11 @@ def get_eth_gas() -> dict:
 
 def format_gas_message(data: dict, lang: str) -> str:
     if "error" in data:
-        return {"en":"Gas data unavailable.","ru":"Данные по газу недоступны.","ar":"بيانات الغاز غير متاحة."}.get(lang, "Gas data unavailable.")
+        return {"en":"Gas data unavailable.","ru":"Данные по газу недоступны."}.get(lang, "Gas data unavailable.")
     src = data.get("source", "n/a")
     lines = {
         "en": ["⛽ Ethereum gas (gwei):"],
         "ru": ["⛽ Газ Ethereum (gwei):"],
-        "ar": ["⛽ غاز إيثريوم (gwei):"],
     }.get(lang, ["⛽ Ethereum gas (gwei):"])
     lines.append(f"Safe: {data.get('safe'):.1f}")
     lines.append(f"Propose: {data.get('propose'):.1f}")
@@ -599,8 +615,7 @@ def format_gas_message(data: dict, lang: str) -> str:
         lines.append(f"Base fee: {data.get('base'):.1f}")
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     lines.append({"en":f"\nSource: {src}. As of {dt}.",
-                  "ru":f"\nИсточник: {src}. По состоянию на {dt}.",
-                  "ar":f"\nالمصدر: {src}. حتى {dt}."}.get(lang, f"\nSource: {src}. As of {dt}."))
+                  "ru":f"\nИсточник: {src}. По состоянию на {dt}."}.get(lang, f"\nSource: {src}. As of {dt}."))
     return "\n".join(lines)
 
 def build_gas_keyboard(lang: str) -> InlineKeyboardMarkup:
@@ -622,8 +637,7 @@ def fetch_fear_greed() -> dict:
 def format_fear_greed(d: dict, lang: str) -> str:
     if "error" in d or not d.get("value"):
         return {"en":"Fear & Greed data unavailable.",
-                "ru":"Индекс страха и жадности недоступен.",
-                "ar":"بيانات مؤشر الخوف والطمع غير متاحة."}.get(lang, "Fear & Greed data unavailable.")
+                "ru":"Индекс страха и жадности недоступен."}.get(lang, "Fear & Greed data unavailable.")
     val = d["value"]
     cls = d.get("classification","")
     try:
@@ -632,9 +646,8 @@ def format_fear_greed(d: dict, lang: str) -> str:
     except Exception:
         dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     hdr = {"en":"😨/😎 Crypto Fear & Greed Index:",
-           "ru":"😨/😎 Индекс страха и жадности:",
-           "ar":"😨/😎 مؤشر الخوف والطمع:"}.get(lang, "😨/😎 Crypto Fear & Greed Index:")
-    return f"{hdr}\n{val} ({cls})\n\n" + {"en":f"As of {dt}.","ru":f"По состоянию на {dt}.","ar":f"حتى {dt}."}.get(lang, f"As of {dt}.")
+           "ru":"😨/😎 Индекс страха и жадности:"}.get(lang, "😨/😎 Crypto Fear & Greed Index:")
+    return f"{hdr}\n{val} ({cls})\n\n" + {"en":f"As of {dt}.","ru":f"По состоянию на {dt}."}.get(lang, f"As of {dt}.")
 
 def build_fng_keyboard(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data="fng:r")]])
@@ -652,21 +665,18 @@ def fetch_btc_dominance() -> dict:
 def format_btc_dominance(d: dict, lang: str) -> str:
     if "error" in d or d.get("dominance") is None:
         return {"en":"BTC dominance unavailable.",
-                "ru":"Доминация BTC недоступна.",
-                "ar":"هيمنة BTC غير متاحة."}.get(lang, "BTC dominance unavailable.")
+                "ru":"Доминация BTC недоступна."}.get(lang, "BTC dominance unavailable.")
     dom = float(d["dominance"])
     mcap = d.get("mcap_usd")
     lines = {
         "en": [f"🟧 BTC dominance: {dom:.2f}%"],
         "ru": [f"🟧 Доминация BTC: {dom:.2f}%"],
-        "ar": [f"🟧 هيمنة BTC: {dom:.2f}%"],
     }.get(lang, [f"🟧 BTC dominance: {dom:.2f}%"])
     if isinstance(mcap, (int, float)):
         lines.append({"en":f"Total crypto mcap: ${mcap:,.0f}",
-                      "ru":f"Общая капитализация рынка: ${mcap:,.0f}",
-                      "ar":f"القيمة السوقية الإجمالية: ${mcap:,.0f}"}[lang])
+                      "ru":f"Общая капитализация рынка: ${mcap:,.0f}"}[lang])
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}.","ar":f"\nحتى {dt}."}.get(lang, f"\nAs of {dt}."))
+    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}."}.get(lang, f"\nAs of {dt}."))
     return "\n".join(lines)
 
 def build_btcdom_keyboard(lang: str) -> InlineKeyboardMarkup:
@@ -834,14 +844,14 @@ def webhook():
             send_donate_message(chat_id, start_lang)
         return "ok"
 
-    # Принудительная установка языка: /lang en|ru|ar
+    # Принудительная установка языка: /lang en|ru
     if t_low.startswith("/lang"):
         parts = t_low.split()
-        if len(parts) >= 2 and parts[1] in ("en","ru","ar"):
+        if len(parts) >= 2 and parts[1] in ("en","ru"):
             set_lang_override(chat_id, parts[1])
-            bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен.","ar":"تم ضبط اللغة."}.get(parts[1], "Language set."))
+            bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}.get(parts[1], "Language set."))
         else:
-            bot.send_message(chat_id=chat_id, text="Usage: /lang en | ru | ar")
+            bot.send_message(chat_id=chat_id, text="Usage: /lang en | ru")
         return "ok"
 
     # Донаты
@@ -907,7 +917,9 @@ def webhook():
 
     # Пусто
     if not text:
-        bot.send_message(chat_id=chat_id, text=FALLBACK.get(lang, FALLBACK["en"]),
+        # На случай пустого текста просто покажем приветствие по текущему языку
+        start_lang = get_lang_override(chat_id) or DEFAULT_LANG
+        bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
 
