@@ -1,5 +1,5 @@
 import os, re, json, logging, io, pathlib, html, time
-from collections import deque, defaultdict
+from collections import deque
 from datetime import datetime
 
 from flask import Flask, request, jsonify
@@ -341,11 +341,15 @@ def compose_snippets_text(snips: list, lang: str) -> str:
         lines.append(f"- {t} — {p} ({l})")
     return "\n".join(lines)
 
-# -------------------- [PRICE] CoinGecko: точные цены в USD без ключей --------------------
+# -------------------- [PRICE] CoinGecko: точные цены в USD + /price + Refresh --------------------
+# Расширенные триггеры RU/EN
 PRICE_TRIGGERS = re.compile(
-    r"\b(price|prices|rate|курс|цена|стоимость|сколько\s+стоит|quote|update price)\b",
+    r"(?:\b|_)(?:price|prices|rate|quote|update\s*price)\b"
+    r"|(?:\b|_)(?:курс|котировк|котировки|цена|цены|стоимость|сколько\s+стоит|сколько\s+сейчас)\b"
+    r"|(?:\b|_)(?:сейчас|на\s+данный\s+момент|прямо\s+сейчас|now|at\s+the\s+moment)\b",
     re.IGNORECASE
 )
+
 SYMBOL_TO_CG = {
     "BTC":"bitcoin","XBT":"bitcoin",
     "ETH":"ethereum",
@@ -369,11 +373,21 @@ TICKER_RE = re.compile(
     r"(?:(?<=\$)|\b)([A-Z]{2,6}|btc|eth|sol|ton|usdt|usdc|bnb|arb|op|ada|xrp|avax|trx|doge|matic|sui|apt)\b",
     re.IGNORECASE
 )
+
 def is_price_query(text: str) -> bool:
     if not text: return False
     return bool(PRICE_TRIGGERS.search(text)) or bool(TICKER_RE.search(text))
+
 def _cg_ids_from_text(text: str) -> list:
+    t = (text or "").lower()
+    ask_all = any(w in t for w in ("все", "всё", "all"))
+    default_top = [
+        "bitcoin","ethereum","solana","the-open-network",
+        "tether","usd-coin","binancecoin","ripple","cardano","dogecoin"
+    ]
     syms = set(m.group(1).upper() for m in TICKER_RE.finditer(text or ""))
+    if ask_all and not syms:
+        return default_top
     if not syms:
         return ["bitcoin","ethereum","solana","the-open-network"]
     ids, seen = [], set()
@@ -382,6 +396,8 @@ def _cg_ids_from_text(text: str) -> list:
         if cid and cid not in seen:
             seen.add(cid); ids.append(cid)
     return ids
+
+# простое кэширование на 60 сек
 _cg_cache = {"t":0, "key":"", "data":{}}
 def _cg_cache_get(key: str):
     if time.time() - _cg_cache["t"] < 60 and _cg_cache["key"] == key:
@@ -389,6 +405,7 @@ def _cg_cache_get(key: str):
     return None
 def _cg_cache_set(key: str, data: dict):
     _cg_cache.update({"t": time.time(), "key": key, "data": data})
+
 def coingecko_prices(coin_ids: list, vs="usd") -> dict:
     coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
     coin_ids_str = ",".join(coin_ids)
@@ -411,6 +428,7 @@ def coingecko_prices(coin_ids: list, vs="usd") -> dict:
         return data
     except Exception as e:
         return {"error": str(e)}
+
 def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
     if "error" in data:
         return {"en":"Price fetch error.","ru":"Ошибка получения цены.","ar":"خطأ بجلب السعر."}.get(lang, "Price fetch error.")
@@ -424,9 +442,11 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
     order = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin"]
     for k in order + [k for k in data.keys() if k not in order]:
         if k not in data: continue
-        item = data[k]; price = item.get(vs); chg = item.get(f"{vs}_24h_change")
-        sym = name_map.get(k, k)
+        item = data[k]; price = item.get(vs)
         if price is None: continue
+        sym = name_map.get(k, k)
+        # Если хотите без 24h %, оставьте только price:
+        chg = item.get(f"{vs}_24h_change")
         chg_s = ""
         if isinstance(chg, (int,float)):
             sign = "▲" if chg >= 0 else "▼"
@@ -443,14 +463,24 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
         pass
     return "\n".join(lines)
 
+# Кнопка Refresh
+def _t_refresh(lang: str) -> str:
+    return {"en":"🔄 Refresh","ru":"🔄 Обновить","ar":"🔄 تحديث"}.get(lang, "🔄 Refresh")
+
+def build_price_keyboard(ids: list, lang: str) -> InlineKeyboardMarkup:
+    ids_short = ",".join(ids)[:60]  # ограничиваем длину callback_data
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"price_refresh:{ids_short}")]])
+
 # -------------------- AI --------------------
 def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
     try:
         system_for_lang = SYSTEM_PROMPT_BASE + f" Always reply ONLY in {lang.upper()}. Do not translate or duplicate in other languages."
         msgs = [{"role": "system", "content": system_for_lang}]
+        # История
         hist = get_history(chat_id)
         for role, content in hist:
             msgs.append({"role": role, "content": content})
+        # Свежие сниппеты по триггерам
         if needs_fresh_search(user_text):
             snips = serpapi_search(user_text, lang)
             if not snips:
@@ -505,6 +535,22 @@ def webhook():
                 bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="TON address sent")
             elif data == "addr_sol":
                 bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="SOL address sent")
+            elif data.startswith("price_refresh:"):
+                ids_csv = data.split(":", 1)[1].strip()
+                ids = [x for x in ids_csv.split(",") if x]
+                lang_cq = DEFAULT_LANG
+                data_now = coingecko_prices(ids, vs="usd")
+                msg_now = format_prices_message(data_now, lang=lang_cq, vs="usd")
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg_now,
+                        reply_markup=build_price_keyboard(ids, lang_cq)
+                    )
+                except Exception:
+                    bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(ids, lang_cq))
+                bot.answer_callback_query(cq.get("id"), text="Updated")
             else:
                 bot.answer_callback_query(cq.get("id"))
         except Exception as e:
@@ -535,6 +581,16 @@ def webhook():
         send_donate_message(chat_id, lang)
         return "ok"
 
+    # [PRICE_CMD] /price BTC ETH SOL ...
+    if t_low.startswith("/price"):
+        tail = text.split(None, 1)[1] if len(text.split()) > 1 else ""
+        query_text = tail or "BTC ETH SOL TON"
+        ids = _cg_ids_from_text(query_text)
+        data = coingecko_prices(ids, vs="usd")
+        msg_out = format_prices_message(data, lang=lang, vs="usd")
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(ids, lang))
+        return "ok"
+
     # Адрес контракта → отчёт Etherscan
     m = ADDR_RE.search(text)
     if m:
@@ -550,8 +606,7 @@ def webhook():
         ids = _cg_ids_from_text(text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out,
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(ids, lang))
         return "ok"
 
     # Пусто
