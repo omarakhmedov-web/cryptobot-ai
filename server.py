@@ -1,6 +1,7 @@
 import os, re, json, logging, io, pathlib, html, time, uuid
 from collections import deque
 from datetime import datetime
+from decimal import Decimal
 
 from flask import Flask, request, jsonify, Response
 import requests
@@ -15,15 +16,18 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # -------------------- ENV --------------------
-TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
-GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
-ETHERSCAN_API_KEY  = os.getenv("ETHERSCAN_API_KEY", "")
-SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")          # если нет — используем DuckDuckGo fallback
-MODEL              = os.getenv("MODEL", "llama-3.1-8b-instant")
-WEBHOOK_SECRET     = os.getenv("WEBHOOK_SECRET", "").strip()
+TELEGRAM_TOKEN       = os.environ["TELEGRAM_TOKEN"]
+GROQ_API_KEY         = os.environ["GROQ_API_KEY"]
+ETHERSCAN_API_KEY    = os.getenv("ETHERSCAN_API_KEY", "").strip()
+POLYGONSCAN_API_KEY  = os.getenv("POLYGONSCAN_API_KEY", "").strip()
+BSCSCAN_API_KEY      = os.getenv("BSCSCAN_API_KEY", "").strip()
+ALCHEMY_API_KEY      = os.getenv("ALCHEMY_API_KEY", "").strip()   # <— NEW: for balances/txs
+SERPAPI_KEY          = os.getenv("SERPAPI_KEY", "")          # если нет — используем DuckDuckGo fallback
+MODEL                = os.getenv("MODEL", "llama-3.1-8b-instant")
+WEBHOOK_SECRET       = os.getenv("WEBHOOK_SECRET", "").strip()
 
 # Язык по умолчанию
-DEFAULT_LANG       = os.getenv("DEFAULT_LANG", "en").lower()
+DEFAULT_LANG         = os.getenv("DEFAULT_LANG", "en").lower()
 
 # Донаты / Кнопки
 ETH_DONATE_ADDRESS = os.getenv("ETH_DONATE_ADDRESS", "0x212f595E42B93646faFE7Fdfa3c330649FA7407E")
@@ -55,20 +59,20 @@ WELCOME = {
         "I can:\n"
         "• Answer crypto/Web3 questions.\n"
         "• Show live prices, top-10 coins, gas fees, BTC dominance, Fear & Greed.\n"
-        "• Coming soon: Ethereum contract checks via Etherscan*.\n\n"
+        "• Contract checks via block explorers (Etherscan/PolygonScan/BscScan) — auto-selected.\n"
+        "• Balances & recent transactions via Alchemy.\n\n"
         "💎 Support the project so it can grow, improve, and stay online 24/7 for everyone’s benefit.\n"
-        "Your help adds new features, integrations, and smarter answers. Every contribution matters! ☕💙\n\n"
-        "*Etherscan features will be available once we get the API key — your support helps make it happen!"
+        "Your help adds new features, integrations, and smarter answers. Every contribution matters! ☕💙"
     ),
     "ru": (
         "🤖 Добро пожаловать в CryptoBot AI — вашего компактного помощника в мире Web3.\n\n"
         "Я умею:\n"
         "• Отвечать на вопросы о криптовалютах и Web3.\n"
         "• Показывать цены в реальном времени, топ-10 монет, газ, доминацию BTC, индекс страха и жадности.\n"
-        "• Скоро: проверка контрактов Ethereum через Etherscan*.\n\n"
+        "• Проверять контракты через блок-эксплореры (Etherscan/PolygonScan/BscScan) — автоматический выбор.\n"
+        "• Показывать баланс и последние транзакции через Alchemy.\n\n"
         "💎 Поддержите проект, чтобы он развивался, совершенствовался и всегда был на связи 24/7 на благо людей.\n"
-        "Ваша помощь добавит новые функции, интеграции и сделает ответы умнее. Каждый вклад важен! ☕💙\n\n"
-        "*Функции Etherscan будут доступны, как только мы получим API-ключ — ваша поддержка поможет это сделать!"
+        "Ваша помощь добавит новые функции, интеграции и сделает ответы умнее. Каждый вклад важен! ☕💙"
     ),
 }
 
@@ -78,7 +82,7 @@ DONATE_TEXT = {
         "💎 Support CryptoBot AI so it can grow, improve, and stay online 24/7 for everyone’s benefit.\n\n"
         "Your donation helps to:\n"
         "• Keep the bot running reliably without downtime.\n"
-        "• Add new features and integrations (Etherscan, analytics, alerts).\n"
+        "• Add new features and integrations (Etherscan/PolygonScan/BscScan, Alchemy analytics, alerts).\n"
         "• Make answers smarter and more useful for the crypto community.\n\n"
         "Every contribution matters — thank you! ☕💙"
     ),
@@ -86,7 +90,7 @@ DONATE_TEXT = {
         "💎 Поддержите CryptoBot AI, чтобы он развивался, совершенствовался и всегда был на связи 24/7 на благо людей.\n\n"
         "Ваш вклад помогает:\n"
         "• Обеспечивать стабильную работу бота без простоев.\n"
-        "• Добавлять новые функции и интеграции (Etherscan, аналитика, уведомления).\n"
+        "• Добавлять новые функции и интеграции (Etherscan/PolygonScan/BscScan, Alchemy аналитика, уведомления).\n"
         "• Делать ответы умнее и полезнее для крипто-сообщества.\n\n"
         "Каждый вклад важен — спасибо! ☕💙"
     ),
@@ -95,17 +99,17 @@ DONATE_TEXT = {
 REPORT_LABELS = {
     "en": {"network":"Network","address":"Address","name":"Contract name","sourceverified":"Source verified",
            "impl":"Implementation","proxy":"Proxy","compiler":"Compiler","funcs":"Detected functions",
-           "error":"Could not fetch data from Etherscan. Check ETHERSCAN_API_KEY and the address."},
+           "via":"Data source","error":"Could not fetch data from explorers. Add API keys or check the address."},
     "ru": {"network":"Сеть","address":"Адрес","name":"Имя контракта","sourceverified":"Исходник верифицирован",
            "impl":"Реализация","proxy":"Прокси","compiler":"Компайлер","funcs":"Обнаруженные функции",
-           "error":"Не удалось получить данные Etherscan. Проверь ETHERSCAN_API_KEY и адрес."},
+           "via":"Источник","error":"Не удалось получить данные у блок-эксплореров. Добавьте API ключи или проверьте адрес."},
 }
 ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 SYSTEM_PROMPT_BASE = (
     "You are CryptoBot AI — a concise Web3 assistant.\n"
     "RULES:\n"
-    "1) If user sends an Ethereum address (0x...), do NOT guess — run an Etherscan check and summarize.\n"
+    "1) If user sends an Ethereum address (0x...), do NOT guess — run an explorer check and summarize.\n"
     "2) For general questions, answer briefly and practically.\n"
     "3) If data is missing (chain, address, explorer), say what is needed in ONE short line.\n"
     "4) Never invent on-chain facts or metrics.\n"
@@ -271,22 +275,152 @@ def send_qr(chat_id: int, label: str, value: str):
     bio.seek(0)
     bot.send_photo(chat_id=chat_id, photo=bio, caption=f"{label}: `{value}`", parse_mode="Markdown")
 
-# -------------------- Etherscan --------------------
-def etherscan_call(action: str, params: dict) -> dict:
-    if not ETHERSCAN_API_KEY:
-        return {"ok": False, "error": "ETHERSCAN_API_KEY is not set"}
-    base = "https://api.etherscan.io/api"
-    query = {"module": "contract", "action": action, "apikey": ETHERSCAN_API_KEY}
-    query.update(params)
-    try:
-        r = requests.get(base, params=query, timeout=15)
-        data = r.json()
-        if str(data.get("status")) != "1":
-            return {"ok": False, "error": "etherscan error", "raw": data}
-        return {"ok": True, "data": data.get("result")}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+# -------------------- Explorers (auto select) --------------------
+EXPLORERS = [
+    {"name": "Etherscan", "base": "https://api.etherscan.io/api", "key": ETHERSCAN_API_KEY, "module": "contract"},
+    {"name": "PolygonScan", "base": "https://api.polygonscan.com/api", "key": POLYGONSCAN_API_KEY, "module": "contract"},
+    {"name": "BscScan", "base": "https://api.bscscan.com/api", "key": BSCSCAN_API_KEY, "module": "contract"},
+]
 
+def pick_explorer() -> dict | None:
+    for ex in EXPLORERS:
+        if ex["key"]:
+            return ex
+    return None
+
+def explorer_getsourcecode(address: str) -> dict:
+    """
+    Try explorers in order. Returns dict:
+    {ok:bool, data:<result or None>, source:<name or None>, error:<str or None>, raw:<raw json>}
+    """
+    for ex in EXPLORERS:
+        if not ex["key"]:
+            continue
+        try:
+            q = {"module": ex["module"], "action": "getsourcecode", "address": address, "apikey": ex["key"]}
+            r = requests.get(ex["base"], params=q, timeout=15)
+            j = r.json()
+            if str(j.get("status")) == "1":
+                return {"ok": True, "data": (j.get("result") or [{}])[0], "source": ex["name"], "raw": j}
+        except Exception as e:
+            app.logger.warning(f"explorer_getsourcecode error via {ex['name']}: {e}")
+    return {"ok": False, "error": "no_explorer_ok", "source": None, "raw": None}
+
+# -------------------- Alchemy helpers --------------------
+def get_alchemy_rpc_url() -> str | None:
+    if not ALCHEMY_API_KEY:
+        return None
+    return f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}"
+
+def _rpc(payload: dict) -> dict:
+    url = get_alchemy_rpc_url()
+    if not url:
+        return {"error": "ALCHEMY_API_KEY missing"}
+    try:
+        resp = requests.post(url, json=payload, timeout=20, headers={"Content-Type":"application/json"})
+        return resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def _to_eth(wei_hex_or_int) -> Decimal:
+    try:
+        if isinstance(wei_hex_or_int, str):
+            wei = int(wei_hex_or_int, 16) if wei_hex_or_int.startswith("0x") else int(wei_hex_or_int)
+        else:
+            wei = int(wei_hex_or_int or 0)
+        return Decimal(wei) / Decimal(10**18)
+    except Exception:
+        return Decimal(0)
+
+def _short(addr: str) -> str:
+    if not addr or len(addr) < 10: return addr
+    return f"{addr[:6]}…{addr[-4:]}"
+
+def alchemy_get_eth_balance(address: str) -> dict:
+    j = _rpc({"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":[address,"latest"]})
+    if "error" in j:
+        return {"ok": False, "error": j.get("error")}
+    val = j.get("result")
+    return {"ok": True, "eth": _to_eth(val)}
+
+def alchemy_get_erc20_balances(address: str) -> dict:
+    # Docs: alchemy_getTokenBalances (returns list of contract addresses + token balances (in hex))
+    j = _rpc({"jsonrpc":"2.0","id":1,"method":"alchemy_getTokenBalances","params":[address]})
+    if "error" in j:
+        return {"ok": False, "error": j.get("error")}
+    res = j.get("result") or {}
+    out = []
+    for t in (res.get("tokenBalances") or [])[:15]:
+        contract = t.get("contractAddress")
+        tokenBalHex = t.get("tokenBalance")
+        out.append({"contract": contract, "balance_hex": tokenBalHex})
+    return {"ok": True, "tokens": out}
+
+def alchemy_get_asset_transfers(address: str, max_count: int = 10) -> dict:
+    # Docs: alchemy_getAssetTransfers with category ["external","internal","erc20","erc721","erc1155"]
+    params = [{
+        "fromBlock": "0x0",
+        "toBlock": "latest",
+        "toAddress": address,
+        "category": ["external","internal","erc20","erc721","erc1155"],
+        "withMetadata": True,
+        "excludeZeroValue": True,
+        "maxCount": hex(max_count)
+    }]
+    j_in = _rpc({"jsonrpc":"2.0","id":1,"method":"alchemy_getAssetTransfers","params": params})
+    if "error" in j_in:
+        return {"ok": False, "error": j_in.get("error")}
+    in_tx = (j_in.get("result") or {}).get("transfers", [])
+
+    params_out = [{
+        "fromBlock": "0x0",
+        "toBlock": "latest",
+        "fromAddress": address,
+        "category": ["external","internal","erc20","erc721","erc1155"],
+        "withMetadata": True,
+        "excludeZeroValue": True,
+        "maxCount": hex(max_count)
+    }]
+    j_out = _rpc({"jsonrpc":"2.0","id":1,"method":"alchemy_getAssetTransfers","params": params_out})
+    if "error" in j_out:
+        return {"ok": False, "error": j_out.get("error")}
+    out_tx = (j_out.get("result") or {}).get("transfers", [])
+
+    txs = (in_tx + out_tx)[:max_count]
+    # Normalize
+    norm = []
+    for t in txs:
+        try:
+            ts = t.get("metadata", {}).get("blockTimestamp")
+            # ts is ISO string like "2025-08-14T12:34:56Z"
+            date_s = ts.replace("T", " ").replace("Z","") if ts else ""
+            frm = t.get("from")
+            to  = t.get("to")
+            val = t.get("value")
+            asset = t.get("asset")
+            cat = t.get("category")
+            # status not directly available; mark external as success by default
+            success = True
+            # value might be None for NFTs; if numeric, show
+            val_str = ""
+            if isinstance(val, (int, float, str)):
+                val_str = str(val)
+            elif val is None and asset:
+                val_str = asset
+            norm.append({
+                "date": date_s,
+                "from": frm,
+                "to": to,
+                "value": val_str,
+                "asset": asset or "",
+                "category": cat or "",
+                "status": "✅" if success else "❌"
+            })
+        except Exception:
+            continue
+    return {"ok": True, "txs": norm}
+
+# -------------------- Etherscan/Explorers: contract analysis --------------------
 def has_fn(abi: list, name: str) -> bool:
     for item in abi or []:
         if item.get("type") != "function":
@@ -312,18 +446,19 @@ def detect_caps_from_abi(abi_json: str) -> dict:
 
 def analyze_eth_contract(address: str) -> dict:
     facts = {"network": "ethereum", "address": address}
-    res = etherscan_call("getsourcecode", {"address": address})
+    res = explorer_getsourcecode(address)
     if not res.get("ok"):
-        facts["error"] = res.get("error")
+        facts["error"] = res.get("error") or "explorer_error"
         return facts
+    info = (res.get("data") or {})
 
-    info = (res["data"] or [{}])[0]
     facts["name"]            = info.get("ContractName") or info.get("Proxy") or "unknown"
     facts["sourceverified"]  = bool(info.get("SourceCode"))
     facts["impl"]            = info.get("Implementation") or ""
     facts["proxy"]           = (info.get("Proxy") == "1")
     facts["compilerVersion"] = info.get("CompilerVersion") or ""
     abi_json                 = info.get("ABI") or "[]"
+    facts["via"]             = res.get("source") or ""
 
     caps_res = detect_caps_from_abi(abi_json)
     facts["caps"]        = (caps_res.get("caps") or {})
@@ -352,6 +487,8 @@ def format_report(facts: dict, lang: str) -> str:
     if caps.get("has_burn"):               funcs.append("burn()")
     if funcs:
         lines.append(f"🧰 {L['funcs']}: " + ", ".join(funcs))
+    if facts.get("via"):
+        lines.append(f"🔎 {L['via']}: {facts.get('via')}")
     return "\n".join(lines)
 
 # -------------------- Fresh Web Search --------------------
@@ -945,7 +1082,65 @@ def webhook():
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_btcdom_keyboard(cur_lang))
         return "ok"
 
-    # Адрес контракта → отчёт Etherscan
+    # /balance <address>
+    if t_low.startswith("/balance"):
+        parts = text.split()
+        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+            bot.send_message(chat_id=chat_id, text={"en":"Usage: /balance <ETH address>","ru":"Использование: /balance <ETH адрес>"}.get(cur_lang, "Usage: /balance <ETH address>"))
+            return "ok"
+        addr = parts[1]
+        if not ALCHEMY_API_KEY:
+            bot.send_message(chat_id=chat_id, text={"en":"Balances are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Баланс временно недоступен (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
+            return "ok"
+        eth_bal = alchemy_get_eth_balance(addr)
+        if not eth_bal.get("ok"):
+            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch balance.","ru":"Не удалось получить баланс."}.get(cur_lang, ""))
+            return "ok"
+        tokens = alchemy_get_erc20_balances(addr)
+        lines = {"en":[f"💰 Balance for {_short(addr)}:"],
+                 "ru":[f"💰 Баланс {_short(addr)}:"]}.get(cur_lang, [f"💰 Balance for {_short(addr)}:"])
+        lines.append(f"ETH: {eth_bal.get('eth')}")
+        if tokens.get("ok"):
+            # show first up to 10 tokens (contract only; no decimals without metadata)
+            tlist = tokens.get("tokens") or []
+            if tlist:
+                lines.append({"en":"ERC-20 (raw, first 10):","ru":"ERC-20 (сырые, первые 10):"}.get(cur_lang,"ERC-20:"))
+                for t in tlist[:10]:
+                    lines.append(f"- {t.get('contract')} : {t.get('balance_hex')}")
+        bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        return "ok"
+
+    # /txs <address>
+    if t_low.startswith("/txs"):
+        parts = text.split()
+        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+            bot.send_message(chat_id=chat_id, text={"en":"Usage: /txs <ETH address>","ru":"Использование: /txs <ETH адрес>"}.get(cur_lang, "Usage: /txs <ETH address>"))
+            return "ok"
+        addr = parts[1]
+        if not ALCHEMY_API_KEY:
+            bot.send_message(chat_id=chat_id, text={"en":"Transactions are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Транзакции временно недоступны (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
+            return "ok"
+        hist = alchemy_get_asset_transfers(addr, max_count=10)
+        if not hist.get("ok"):
+            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch transactions.","ru":"Не удалось получить транзакции."}.get(cur_lang, ""))
+            return "ok"
+        rows = hist.get("txs") or []
+        if not rows:
+            bot.send_message(chat_id=chat_id, text={"en":"No recent transfers found.","ru":"Недавние переводы не найдены."}.get(cur_lang, ""))
+            return "ok"
+        # Build compact table
+        if cur_lang == "ru":
+            header = "# | Дата (UTC)        | От → Кому                | Значение | Статус"
+        else:
+            header = "# | Date (UTC)        | From → To                | Value | Status"
+        lines = [header]
+        for i, r in enumerate(rows, start=1):
+            ln = f"{i} | {str(r.get('date'))[:16]:16} | {_short(r.get('from') or '')} → {_short(r.get('to') or '')} | {r.get('value') or ''} | {r.get('status')}"
+            lines.append(ln)
+        bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        return "ok"
+
+    # Адрес контракта → отчёт из блок-эксплорера
     m = ADDR_RE.search(text)
     if m:
         address = m.group(0)
