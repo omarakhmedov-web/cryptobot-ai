@@ -78,8 +78,91 @@ SYSTEM_PROMPT_BASE = (
     "5) If fresh web snippets are provided, rely on them and cite time (e.g., 'as of <date>')."
 )
 
-def detect_lang(text: str, _tg_lang: str | None) -> str:
+# -------------------- Persistent Memory --------------------
+# Структура: {
+#   "chats": {"<chat_id>":{"history":[...], "lang_override":"en|ru|ar"}},
+#   "price_tokens":{"<chat_id>":{"<token>":[ids...]}}
+# }
+memory_cache = {"chats": {}, "price_tokens": {}}
+
+def load_memory():
+    global memory_cache
+    try:
+        if MEMORY_PATH.exists():
+            memory_cache = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+            memory_cache.setdefault("chats", {})
+            memory_cache.setdefault("price_tokens", {})
+    except Exception as e:
+        app.logger.warning(f"load_memory error: {e}")
+        memory_cache = {"chats": {}, "price_tokens": {}}
+
+def save_memory():
+    try:
+        MEMORY_PATH.write_text(json.dumps(memory_cache, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        app.logger.warning(f"save_memory error: {e}")
+
+def get_history(chat_id: int) -> deque:
+    load_memory()
+    node = memory_cache["chats"].setdefault(str(chat_id), {"history": []})
+    dq = deque(node.get("history", []), maxlen=HIST_MAX)
+    node["history"] = list(dq)
+    return dq
+
+def remember(chat_id: int, role: str, content: str):
+    dq = get_history(chat_id)
+    dq.append([role, content])
+    memory_cache["chats"][str(chat_id)]["history"] = list(dq)
+    save_memory()
+
+def set_lang_override(chat_id: int, lang: str | None):
+    load_memory()
+    node = memory_cache["chats"].setdefault(str(chat_id), {"history": []})
+    if lang:
+        node["lang_override"] = lang
+    else:
+        node.pop("lang_override", None)
+    save_memory()
+
+def get_lang_override(chat_id: int) -> str | None:
+    load_memory()
+    return memory_cache.get("chats", {}).get(str(chat_id), {}).get("lang_override")
+
+# --------- Mapping для коротких callback токенов (исправление Button_data_invalid) ---------
+def _prune_tokens(tokens_by_chat: dict, keep_last: int = 25):
+    # ограничим кол-во токенов на чат для экономии памяти
+    if len(tokens_by_chat) > keep_last:
+        drop = list(tokens_by_chat.keys())[:-keep_last]
+        for k in drop:
+            tokens_by_chat.pop(k, None)
+
+def store_price_ids(chat_id: int, ids: list[str]) -> str:
+    """Сохраняет список coin IDs за коротким токеном для данного чата."""
+    load_memory()
+    chat_key = str(chat_id)
+    price_root = memory_cache.setdefault("price_tokens", {})
+    tokens_by_chat = price_root.setdefault(chat_key, {})
+    token = uuid.uuid4().hex[:10]
+    tokens_by_chat[token] = ids
+    _prune_tokens(tokens_by_chat, keep_last=25)
+    save_memory()
+    return token
+
+def resolve_price_ids(chat_id: int, token: str) -> list[str]:
+    load_memory()
+    return (memory_cache.get("price_tokens", {})
+                         .get(str(chat_id), {})
+                         .get(token, []))
+
+# -------------------- Language detect with override --------------------
+def detect_lang(text: str, _tg_lang: str | None, chat_id: int | None = None) -> str:
+    # если пользователь задал принудительный язык — используем его
+    if chat_id is not None:
+        over = get_lang_override(chat_id)
+        if over in ("en", "ru", "ar"):
+            return over
     t = text or ""
+    # приоритет английского в смешанных сообщениях
     if EN_RE.search(t): return "en"
     if LANG_RE["ru"].search(t): return "ru"
     if LANG_RE["ar"].search(t): return "ar"
@@ -144,56 +227,6 @@ def send_qr(chat_id: int, label: str, value: str):
     img.save(bio, format="PNG")
     bio.seek(0)
     bot.send_photo(chat_id=chat_id, photo=bio, caption=f"{label}: `{value}`", parse_mode="Markdown")
-
-# -------------------- Persistent Memory --------------------
-# Структура: {"chats": {"<chat_id>":{"history":[...]}}, "price_tokens":{"<chat_id>":{"token":[ids]}}}
-memory_cache = {"chats": {}, "price_tokens": {}}
-
-def load_memory():
-    global memory_cache
-    try:
-        if MEMORY_PATH.exists():
-            memory_cache = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-            memory_cache.setdefault("chats", {})
-            memory_cache.setdefault("price_tokens", {})
-    except Exception as e:
-        app.logger.warning(f"load_memory error: {e}")
-        memory_cache = {"chats": {}, "price_tokens": {}}
-
-def save_memory():
-    try:
-        MEMORY_PATH.write_text(json.dumps(memory_cache, ensure_ascii=False), encoding="utf-8")
-    except Exception as e:
-        app.logger.warning(f"save_memory error: {e}")
-
-def get_history(chat_id: int) -> deque:
-    load_memory()
-    node = memory_cache["chats"].setdefault(str(chat_id), {"history": []})
-    dq = deque(node.get("history", []), maxlen=HIST_MAX)
-    node["history"] = list(dq)
-    return dq
-
-def remember(chat_id: int, role: str, content: str):
-    dq = get_history(chat_id)
-    dq.append([role, content])
-    memory_cache["chats"][str(chat_id)]["history"] = list(dq)
-    save_memory()
-
-# --------- Mapping для коротких callback токенов (исправление Button_data_invalid) ---------
-def store_price_ids(chat_id: int, ids: list[str]) -> str:
-    """Сохраняет список coin IDs за коротким токеном для данного чата."""
-    load_memory()
-    tokens_by_chat = memory_cache.setdefault("price_tokens", {}).setdefault(str(chat_id), {})
-    token = uuid.uuid4().hex[:10]
-    tokens_by_chat[token] = ids
-    save_memory()
-    return token
-
-def resolve_price_ids(chat_id: int, token: str) -> list[str]:
-    load_memory()
-    return (memory_cache.get("price_tokens", {})
-                         .get(str(chat_id), {})
-                         .get(token, []))
 
 # -------------------- Etherscan --------------------
 def etherscan_call(action: str, params: dict) -> dict:
@@ -265,7 +298,7 @@ def format_report(facts: dict, lang: str) -> str:
     if facts.get("sourceverified"):  lines.append(f"✅ {L['sourceverified']}: ✅")
     if facts.get("proxy"):           lines.append(f"🧩 {L['proxy']}: ✅")
     if facts.get("impl"):            lines.append(f"🧷 {L['impl']}: {facts.get('impl')}")
-    if facts.get("compilerVersion"): lines.append(f"🧪 {L['compiler']}: {facts.get('compilerVersion')}")
+    if facts.get("compilerVersion"): lines.append(f"🧪 {L['compiler']}: {facts.get('CompilerVersion')}")
     caps = facts.get("caps") or {}
     funcs = []
     if caps.get("has_owner"):              funcs.append("owner()")
@@ -309,7 +342,8 @@ def duckduckgo_fallback(query: str) -> list:
         html_text = resp.text
         results = []
         link_pat = re.compile(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.I|re.S)
-        snip_pat = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.I|re/S)
+        # FIX: было re/S -> падает. Должно быть re.S
+        snip_pat = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.I|re.S)
         links = link_pat.findall(html_text)[:5]
         snips = snip_pat.findall(html_text)[:5]
         for i, (href, title_html) in enumerate(links):
@@ -445,6 +479,208 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     # короткий callback_data строго < 64 bytes
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
+# -------------------- TOP-10 (новое) --------------------
+def coingecko_top_market(cap_n: int = 10) -> list[dict]:
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": str(cap_n),
+            "page": "1",
+            "price_change_percentage": "24h"
+        }
+        r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
+        r.raise_for_status()
+        return r.json() or []
+    except Exception as e:
+        app.logger.warning(f"coingecko_top_market error: {e}")
+        return []
+
+def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
+    if not mkts:
+        return (
+            {"en":"No market data.","ru":"Нет рыночных данных.","ar":"لا توجد بيانات سوق."}.get(lang, "No market data."),
+            []
+        )
+    lines = {
+        "en": ["🏆 Top-10 by market cap (USD):"],
+        "ru": ["🏆 Топ-10 по капитализации (USD):"],
+        "ar": ["🏆 أعلى 10 بالقيمة السوقية (USD):"],
+    }.get(lang, ["🏆 Top-10 by market cap (USD):"])
+    ids = []
+    for i, c in enumerate(mkts, start=1):
+        sym = (c.get("symbol") or "").upper()
+        price = c.get("current_price")
+        chg = c.get("price_change_percentage_24h")
+        chg_s = ""
+        if isinstance(chg, (int, float)):
+            sign = "▲" if chg >= 0 else "▼"
+            chg_s = f"  {sign}{abs(chg):.2f}%/24h"
+        lines.append(f"{i}. {sym}: ${price:,.4f}{chg_s}")
+        ids.append(c.get("id"))
+    try:
+        dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}.","ar":f"\nحتى {dt}."}.get(lang, f"\nAs of {dt}."))
+    except Exception:
+        pass
+    return ("\n".join(lines), ids)
+
+def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
+    token = store_price_ids(chat_id, ids)
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
+
+# -------------------- GAS / FEAR-GREED / BTC DOM — NEW --------------------
+def fetch_gas_etherscan() -> dict | None:
+    if not ETHERSCAN_API_KEY:
+        return None
+    try:
+        url = "https://api.etherscan.io/api"
+        params = {"module": "gastracker", "action": "gasoracle", "apikey": ETHERSCAN_API_KEY}
+        r = requests.get(url, params=params, timeout=10)
+        j = r.json()
+        result = j.get("result") or {}
+        # возвращаем средние значения в gwei
+        return {
+            "source": "etherscan",
+            "safe": float(result.get("SafeGasPrice")),
+            "propose": float(result.get("ProposeGasPrice")),
+            "fast": float(result.get("FastGasPrice")),
+            "base": float(result.get("suggestedBaseFee", 0))
+        }
+    except Exception:
+        return None
+
+def fetch_gas_ethgasstation() -> dict | None:
+    # ethgasstation выдаёт *10* gwei
+    try:
+        url = "https://ethgasstation.info/json/ethgasAPI.json"
+        r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json()
+        return {
+            "source": "ethgasstation",
+            "safe": float(j.get("safeLow", 0))/10.0,
+            "propose": float(j.get("average", 0))/10.0,
+            "fast": float(j.get("fast", 0))/10.0,
+            "base": float(j.get("average", 0))/10.0
+        }
+    except Exception:
+        return None
+
+def fetch_gas_etherchain() -> dict | None:
+    # альтернативный публичный fallback (GasNow-совместимый)
+    try:
+        url = "https://etherchain.org/api/gasnow"
+        r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json().get("data", {})
+        # значения в wei
+        to_gwei = lambda wei: float(wei)/1e9 if wei is not None else None
+        return {
+            "source": "etherchain",
+            "safe": to_gwei(j.get("slow")),
+            "propose": to_gwei(j.get("standard")),
+            "fast": to_gwei(j.get("rapid")),
+            "base": to_gwei(j.get("standard"))
+        }
+    except Exception:
+        return None
+
+def get_eth_gas() -> dict:
+    # порядок: Etherscan (если есть ключ) → EthGasStation → Etherchain
+    for fn in (fetch_gas_etherscan, fetch_gas_ethgasstation, fetch_gas_etherchain):
+        data = fn()
+        if data and data.get("propose"):
+            return data
+    return {"error": "gas_unavailable"}
+
+def format_gas_message(data: dict, lang: str) -> str:
+    if "error" in data:
+        return {"en":"Gas data unavailable.","ru":"Данные по газу недоступны.","ar":"بيانات الغاز غير متاحة."}.get(lang, "Gas data unavailable.")
+    src = data.get("source","n/a")
+    lines = {
+        "en": ["⛽ Ethereum gas (gwei):"],
+        "ru": ["⛽ Газ Ethereum (gwei):"],
+        "ar": ["⛽ غاز إيثريوم (gwei):"],
+    }.get(lang, ["⛽ Ethereum gas (gwei):"])
+    lines.append(f"Safe: {data.get('safe'):.1f}")
+    lines.append(f"Propose: {data.get('propose'):.1f}")
+    lines.append(f"Fast: {data.get('fast'):.1f}")
+    if data.get("base") is not None:
+        lines.append(f"Base fee: {data.get('base'):.1f}")
+    dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    lines.append({"en":f"\nSource: {src}. As of {dt}.",
+                  "ru":f"\nИсточник: {src}. По состоянию на {dt}.",
+                  "ar":f"\nالمصدر: {src}. حتى {dt}."}.get(lang, f"\nSource: {src}. As of {dt}."))
+    return "\n".join(lines)
+
+def build_gas_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data="gas:r")]])
+
+def fetch_fear_greed() -> dict:
+    try:
+        r = requests.get("https://api.alternative.me/fng/", timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json()
+        item = (j.get("data") or [{}])[0]
+        return {
+            "value": item.get("value"),
+            "classification": item.get("value_classification"),
+            "timestamp": item.get("timestamp")
+        }
+    except Exception:
+        return {"error":"fng_unavailable"}
+
+def format_fear_greed(d: dict, lang: str) -> str:
+    if "error" in d or not d.get("value"):
+        return {"en":"Fear & Greed data unavailable.",
+                "ru":"Индекс страха и жадности недоступен.",
+                "ar":"بيانات مؤشر الخوف والطمع غير متاحة."}.get(lang, "Fear & Greed data unavailable.")
+    val = d["value"]; cls = d.get("classification","")
+    try:
+        ts = int(d.get("timestamp") or 0)
+        dt = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC") if ts else datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    hdr = {"en":"😨/😎 Crypto Fear & Greed Index:",
+           "ru":"😨/😎 Индекс страха и жадности:",
+           "ar":"😨/😎 مؤشر الخوف والطمع:"}.get(lang, "😨/😎 Crypto Fear & Greed Index:")
+    return f"{hdr}\n{val} ({cls})\n\n" + {"en":f"As of {dt}.","ru":f"По состоянию на {dt}.","ar":f"حتى {dt}."}.get(lang, f"As of {dt}.")
+
+def build_fng_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data="fng:r")]])
+
+def fetch_btc_dominance() -> dict:
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/global", timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json().get("data", {})
+        dom = (j.get("market_cap_percentage") or {}).get("btc")
+        mcap = (j.get("total_market_cap") or {}).get("usd")
+        return {"dominance": dom, "mcap_usd": mcap}
+    except Exception:
+        return {"error":"btcdom_unavailable"}
+
+def format_btc_dominance(d: dict, lang: str) -> str:
+    if "error" in d or d.get("dominance") is None:
+        return {"en":"BTC dominance unavailable.",
+                "ru":"Доминация BTC недоступна.",
+                "ar":"هيمنة BTC غير متاحة."}.get(lang, "BTC dominance unavailable.")
+    dom = float(d["dominance"])
+    mcap = d.get("mcap_usd")
+    lines = {
+        "en": [f"🟧 BTC dominance: {dom:.2f}%"],
+        "ru": [f"🟧 Доминация BTC: {dom:.2f}%"],
+        "ar": [f"🟧 هيمنة BTC: {dom:.2f}%"],
+    }.get(lang, [f"🟧 BTC dominance: {dom:.2f}%"])
+    if isinstance(mcap, (int, float)):
+        lines.append({"en":f"Total crypto mcap: ${mcap:,.0f}",
+                      "ru":f"Общая капитализация рынка: ${mcap:,.0f}",
+                      "ar":f"القيمة السوقية الإجمالية: ${mcap:,.0f}"}[lang])
+    dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}.","ar":f"\nحتى {dt}."}.get(lang, f"\nAs of {dt}."))
+    return "\n".join(lines)
+
+def build_btcdom_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data="bdm:r")]])
+
 # -------------------- AI --------------------
 def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
     try:
@@ -507,10 +743,12 @@ def webhook():
                 bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="TON address sent")
             elif data == "addr_sol":
                 bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="SOL address sent")
+
+            # Refresh для цен (price/top10)
             elif data.startswith("prf:"):
                 token = data.split(":", 1)[1].strip()
                 ids = resolve_price_ids(chat_id, token) or ["bitcoin","ethereum","solana","the-open-network"]
-                lang_cq = DEFAULT_LANG
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 data_now = coingecko_prices(ids, vs="usd")
                 msg_now = format_prices_message(data_now, lang=lang_cq, vs="usd")
                 try:
@@ -523,10 +761,63 @@ def webhook():
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
+
+            # Refresh для GAS
+            elif data == "gas:r":
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                gas = get_eth_gas()
+                msg = format_gas_message(gas, lang_cq)
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg,
+                        reply_markup=build_gas_keyboard(lang_cq)
+                    )
+                except Exception:
+                    bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_gas_keyboard(lang_cq))
+                bot.answer_callback_query(cq.get("id"), text="Updated")
+
+            # Refresh для Fear&Greed
+            elif data == "fng:r":
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                d = fetch_fear_greed()
+                msg = format_fear_greed(d, lang_cq)
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg,
+                        reply_markup=build_fng_keyboard(lang_cq)
+                    )
+                except Exception:
+                    bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_fng_keyboard(lang_cq))
+                bot.answer_callback_query(cq.get("id"), text="Updated")
+
+            # Refresh для BTC dominance
+            elif data == "bdm:r":
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                d = fetch_btc_dominance()
+                msg = format_btc_dominance(d, lang_cq)
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg,
+                        reply_markup=build_btcdom_keyboard(lang_cq)
+                    )
+                except Exception:
+                    bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_btcdom_keyboard(lang_cq))
+                bot.answer_callback_query(cq.get("id"), text="Updated")
+
             else:
                 bot.answer_callback_query(cq.get("id"))
         except Exception as e:
             app.logger.exception(f"callback error: {e}")
+            try:
+                bot.answer_callback_query(cq.get("id"), text="Error", show_alert=False)
+            except Exception:
+                pass
         return "ok"
 
     # Обычные сообщения
@@ -537,18 +828,29 @@ def webhook():
         return "ok"
 
     text = (msg.get("text") or msg.get("caption") or "").strip()
-    lang = detect_lang(text, None)
-    t_low = (text or "").lower()
 
-    # Команды
+    # Команды /start
+    t_low = (text or "").lower()
     if t_low in ("/start", "start"):
-        start_lang = DEFAULT_LANG
+        start_lang = get_lang_override(chat_id) or DEFAULT_LANG
         bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         if not DONATE_STICKY:
             send_donate_message(chat_id, start_lang)
         return "ok"
 
+    # Принудительная установка языка: /lang en|ru|ar
+    if t_low.startswith("/lang"):
+        parts = t_low.split()
+        if len(parts) >= 2 and parts[1] in ("en","ru","ar"):
+            set_lang_override(chat_id, parts[1])
+            bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен.","ar":"تم ضبط اللغة."}.get(parts[1], "Language set."))
+        else:
+            bot.send_message(chat_id=chat_id, text="Usage: /lang en | ru | ar")
+        return "ok"
+
+    # Донаты
+    lang = detect_lang(text, None, chat_id)
     if t_low in ("/donate", "donate", "донат", "/tip", "tip"):
         send_donate_message(chat_id, lang)
         return "ok"
@@ -561,6 +863,34 @@ def webhook():
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=lang, vs="usd")
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, lang))
+        return "ok"
+
+    # /top10 — рынок
+    if t_low.startswith("/top10"):
+        mkts = coingecko_top_market(10)
+        msg_out, ids = format_top10(mkts, lang=lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang))
+        return "ok"
+
+    # --- NEW: /gas ---
+    if t_low.startswith("/gas"):
+        gas = get_eth_gas()
+        msg_out = format_gas_message(gas, lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_gas_keyboard(lang))
+        return "ok"
+
+    # --- NEW: /feargreed ---
+    if t_low.startswith("/feargreed") or t_low == "/fng":
+        d = fetch_fear_greed()
+        msg_out = format_fear_greed(d, lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_fng_keyboard(lang))
+        return "ok"
+
+    # --- NEW: /btcdom ---
+    if t_low.startswith("/btcdom"):
+        d = fetch_btc_dominance()
+        msg_out = format_btc_dominance(d, lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_btcdom_keyboard(lang))
         return "ok"
 
     # Адрес контракта → отчёт Etherscan
