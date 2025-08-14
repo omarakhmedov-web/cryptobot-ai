@@ -30,6 +30,9 @@ KOFI_LINK_BASE     = os.getenv("KOFI_LINK", "https://ko-fi.com/CryptoNomad")
 KOFI_UTM_SOURCE    = os.getenv("KOFI_UTM_SOURCE", "telegram_bot")
 DONATE_STICKY      = os.getenv("DONATE_STICKY", "1") in ("1", "true", "True")
 
+# [SOL] новый адрес Solana
+SOL_DONATE_ADDRESS = os.getenv("SOL_DONATE_ADDRESS", "X8HAPHLbh7gF2kHCepCixsHkRwix4M34me8gNzhak1z")
+
 # Память (персистентная на диск)
 HIST_MAX           = int(os.getenv("HISTORY_MAX", "6"))
 DATA_DIR           = os.getenv("DATA_DIR", "/tmp/cryptobot_data")
@@ -96,17 +99,21 @@ def kofi_link_with_utm() -> str:
 def build_donate_keyboard() -> InlineKeyboardMarkup:
     eth_url = f"https://etherscan.io/address/{ETH_DONATE_ADDRESS}"
     ton_url = f"https://tonviewer.com/{TON_DONATE_ADDRESS}"
+    sol_url = f"https://solscan.io/account/{SOL_DONATE_ADDRESS}"  # [SOL]
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💎 Ethereum (ETH)", url=eth_url)],
         [InlineKeyboardButton("🔵 TON", url=ton_url)],
+        [InlineKeyboardButton("🟣 Solana (SOL)", url=sol_url)],              # [SOL]
         [InlineKeyboardButton("☕ Ko-fi", url=kofi_link_with_utm())],
         [
             InlineKeyboardButton("📷 QR ETH", callback_data="qr_eth"),
             InlineKeyboardButton("📷 QR TON", callback_data="qr_ton"),
+            InlineKeyboardButton("📷 QR SOL", callback_data="qr_sol"),       # [SOL]
         ],
         [
             InlineKeyboardButton("📋 ETH", callback_data="addr_eth"),
             InlineKeyboardButton("📋 TON", callback_data="addr_ton"),
+            InlineKeyboardButton("📋 SOL", callback_data="addr_sol"),        # [SOL]
         ],
     ])
 
@@ -114,15 +121,18 @@ def send_donate_message(chat_id: int, lang: str):
     texts = {
         "en": ("Support the project:\n\n"
                f"ETH: `{ETH_DONATE_ADDRESS}`\n"
-               f"TON: `{TON_DONATE_ADDRESS}`\n\n"
+               f"TON: `{TON_DONATE_ADDRESS}`\n"
+               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"   # [SOL]
                "Ko-fi via the button below."),
         "ru": ("Поддержать проект:\n\n"
                f"ETH: `{ETH_DONATE_ADDRESS}`\n"
-               f"TON: `{TON_DONATE_ADDRESS}`\n\n"
+               f"TON: `{TON_DONATE_ADDRESS}`\n"
+               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"   # [SOL]
                "Ko-fi — кнопка ниже."),
         "ar": ("لدعم المشروع:\n\n"
                f"ETH: `{ETH_DONATE_ADDRESS}`\n"
-               f"TON: `{TON_DONATE_ADDRESS}`\n\n"
+               f"TON: `{TON_DONATE_ADDRESS}`\n"
+               f"SOL: `{SOL_DONATE_ADDRESS}`\n\n"   # [SOL]
                "Ko-fi من الزر أدناه."),
     }
     bot.send_message(
@@ -193,7 +203,7 @@ def etherscan_call(action: str, params: dict) -> dict:
 
 def has_fn(abi: list, name: str) -> bool:
     for item in abi or []:
-        if item.get("type") != "function": 
+        if item.get("type") != "function":
             continue
         if item.get("name", "").lower() == name.lower():
             return True
@@ -398,12 +408,18 @@ def webhook():
             elif data == "qr_ton":
                 send_qr(chat_id, "TON", TON_DONATE_ADDRESS)
                 bot.answer_callback_query(cq.get("id"), text="QR TON sent")
+            elif data == "qr_sol":  # [SOL]
+                send_qr(chat_id, "SOL", SOL_DONATE_ADDRESS)
+                bot.answer_callback_query(cq.get("id"), text="QR SOL sent")
             elif data == "addr_eth":
                 bot.send_message(chat_id=chat_id, text=f"ETH: `{ETH_DONATE_ADDRESS}`", parse_mode="Markdown")
                 bot.answer_callback_query(cq.get("id"), text="ETH address sent")
             elif data == "addr_ton":
                 bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown")
                 bot.answer_callback_query(cq.get("id"), text="TON address sent")
+            elif data == "addr_sol":  # [SOL]
+                bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown")
+                bot.answer_callback_query(cq.get("id"), text="SOL address sent")
             else:
                 bot.answer_callback_query(cq.get("id"))
         except Exception as e:
@@ -438,9 +454,8 @@ def webhook():
         return "ok"
 
     # Адрес контракта → отчёт Etherscan
-    m = ADDR_RE.search(text)
-    if m:
-        address = m.group(0)
+    if ADDR_RE.search(text):
+        address = ADDR_RE.search(text).group(0)
         facts = analyze_eth_contract(address)
         report = format_report(facts, lang)
         bot.send_message(chat_id=chat_id, text=report,
