@@ -1,4 +1,4 @@
-import os, re, json, logging, io, pathlib, html, time
+import os, re, json, logging, io, pathlib, html, time, uuid
 from collections import deque
 from datetime import datetime
 
@@ -20,7 +20,7 @@ SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")          # если нет —
 MODEL              = os.getenv("MODEL", "llama-3.1-8b-instant")
 WEBHOOK_SECRET     = os.getenv("WEBHOOK_SECRET", "").strip()
 
-# Язык по умолчанию и приоритет (английский)
+# Язык по умолчанию (приоритет английский)
 DEFAULT_LANG       = os.getenv("DEFAULT_LANG", "en").lower()
 
 # Донаты / Кнопки
@@ -29,8 +29,6 @@ TON_DONATE_ADDRESS = os.getenv("TON_DONATE_ADDRESS", "UQBoAzy9RkbfasGEYwHVRNbWzY
 KOFI_LINK_BASE     = os.getenv("KOFI_LINK", "https://ko-fi.com/CryptoNomad")
 KOFI_UTM_SOURCE    = os.getenv("KOFI_UTM_SOURCE", "telegram_bot")
 DONATE_STICKY      = os.getenv("DONATE_STICKY", "1") in ("1", "true", "True")
-
-# Solana
 SOL_DONATE_ADDRESS = os.getenv("SOL_DONATE_ADDRESS", "X8HAPHLbh7gF2kHCepCixsHkRwix4M34me8gNzhak1z")
 
 # Память (персистентная на диск)
@@ -46,10 +44,7 @@ client = Groq(api_key=GROQ_API_KEY)  # без proxies
 
 # -------------------- Language / Texts --------------------
 EN_RE = re.compile(r"[A-Za-z]")
-LANG_RE = {
-    "ru": re.compile(r"[А-Яа-яЁё]"),
-    "ar": re.compile(r"[\u0600-\u06FF]"),
-}
+LANG_RE = {"ru": re.compile(r"[А-Яа-яЁё]"), "ar": re.compile(r"[\u0600-\u06FF]")}
 WELCOME = {
     "en": "Welcome to CryptoGuard. Send a contract address (0x…) and I’ll run a basic on-chain check (Etherscan).",
     "ru": "Добро пожаловать в CryptoGuard. Отправь адрес контракта (0x…), и я выполню базовую ончейн-проверку (Etherscan).",
@@ -84,7 +79,6 @@ SYSTEM_PROMPT_BASE = (
 )
 
 def detect_lang(text: str, _tg_lang: str | None) -> str:
-    """Приоритет: латиница → en; иначе ru/ar; иначе DEFAULT_LANG."""
     t = text or ""
     if EN_RE.search(t): return "en"
     if LANG_RE["ru"].search(t): return "ru"
@@ -152,19 +146,19 @@ def send_qr(chat_id: int, label: str, value: str):
     bot.send_photo(chat_id=chat_id, photo=bio, caption=f"{label}: `{value}`", parse_mode="Markdown")
 
 # -------------------- Persistent Memory --------------------
-# {"chats": { "<chat_id>": {"history":[["user","..."],["assistant","..."]] }}}
-memory_cache = {"chats": {}}
+# Структура: {"chats": {"<chat_id>":{"history":[...]}}, "price_tokens":{"<chat_id>":{"token":[ids]}}}
+memory_cache = {"chats": {}, "price_tokens": {}}
 
 def load_memory():
     global memory_cache
     try:
         if MEMORY_PATH.exists():
             memory_cache = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-            if "chats" not in memory_cache:
-                memory_cache["chats"] = {}
+            memory_cache.setdefault("chats", {})
+            memory_cache.setdefault("price_tokens", {})
     except Exception as e:
         app.logger.warning(f"load_memory error: {e}")
-        memory_cache = {"chats": {}}
+        memory_cache = {"chats": {}, "price_tokens": {}}
 
 def save_memory():
     try:
@@ -184,6 +178,22 @@ def remember(chat_id: int, role: str, content: str):
     dq.append([role, content])
     memory_cache["chats"][str(chat_id)]["history"] = list(dq)
     save_memory()
+
+# --------- Mapping для коротких callback токенов (исправление Button_data_invalid) ---------
+def store_price_ids(chat_id: int, ids: list[str]) -> str:
+    """Сохраняет список coin IDs за коротким токеном для данного чата."""
+    load_memory()
+    tokens_by_chat = memory_cache.setdefault("price_tokens", {}).setdefault(str(chat_id), {})
+    token = uuid.uuid4().hex[:10]
+    tokens_by_chat[token] = ids
+    save_memory()
+    return token
+
+def resolve_price_ids(chat_id: int, token: str) -> list[str]:
+    load_memory()
+    return (memory_cache.get("price_tokens", {})
+                         .get(str(chat_id), {})
+                         .get(token, []))
 
 # -------------------- Etherscan --------------------
 def etherscan_call(action: str, params: dict) -> dict:
@@ -273,7 +283,6 @@ FRESH_TRIGGERS = re.compile(
     r"\b(today|now|latest|news|price|prices|update|updated|2024|2025|rate|inflation|btc|eth|ton|market)\b",
     re.IGNORECASE
 )
-
 def needs_fresh_search(text: str) -> bool:
     return bool(text) and bool(FRESH_TRIGGERS.search(text))
 
@@ -281,22 +290,13 @@ def serpapi_search(query: str, lang: str) -> list:
     if not SERPAPI_KEY:
         return []
     try:
-        params = {
-            "engine": "google",
-            "q": query,
-            "api_key": SERPAPI_KEY,
-            "hl": "en" if lang == "en" else ("ru" if lang == "ru" else "ar"),
-            "num": "5",
-        }
+        params = {"engine": "google", "q": query, "api_key": SERPAPI_KEY,
+                  "hl": "en" if lang == "en" else ("ru" if lang == "ru" else "ar"), "num": "5"}
         resp = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
         data = resp.json()
         results = []
         for item in (data.get("organic_results") or [])[:5]:
-            results.append({
-                "title": item.get("title"),
-                "link": item.get("link"),
-                "snippet": item.get("snippet"),
-            })
+            results.append({"title": item.get("title"), "link": item.get("link"), "snippet": item.get("snippet")})
         return results
     except Exception as e:
         app.logger.warning(f"serpapi_search error: {e}")
@@ -305,12 +305,11 @@ def serpapi_search(query: str, lang: str) -> list:
 def duckduckgo_fallback(query: str) -> list:
     try:
         url = "https://html.duckduckgo.com/html/"
-        resp = requests.post(url, data={"q": query}, timeout=20,
-                             headers={"User-Agent":"Mozilla/5.0"})
+        resp = requests.post(url, data={"q": query}, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
         html_text = resp.text
         results = []
         link_pat = re.compile(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.I|re.S)
-        snip_pat = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.I|re.S)
+        snip_pat = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.I|re/S)
         links = link_pat.findall(html_text)[:5]
         snips = snip_pat.findall(html_text)[:5]
         for i, (href, title_html) in enumerate(links):
@@ -325,60 +324,39 @@ def duckduckgo_fallback(query: str) -> list:
         return []
 
 def compose_snippets_text(snips: list, lang: str) -> str:
-    if not snips:
-        return ""
+    if not snips: return ""
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
-    header = {
-        "en": f"Fresh web snippets (UTC {date_str}):",
-        "ru": f"Свежие сниппеты из веба (UTC {date_str}):",
-        "ar": f"ملخصات حديثة من الويب (UTC {date_str}):",
-    }.get(lang, f"Fresh web snippets (UTC {date_str}):")
+    header = {"en": f"Fresh web snippets (UTC {date_str}):",
+              "ru": f"Свежие сниппеты из веба (UTC {date_str}):",
+              "ar": f"ملخصات حديثة من الويب (UTC {date_str}):"}.get(lang, f"Fresh web snippets (UTC {date_str}):")
     lines = [header]
     for s in snips:
-        t = s.get("title") or ""
-        l = s.get("link") or ""
-        p = s.get("snippet") or ""
+        t = s.get("title") or ""; l = s.get("link") or ""; p = s.get("snippet") or ""
         lines.append(f"- {t} — {p} ({l})")
     return "\n".join(lines)
 
-# -------------------- [PRICE] CoinGecko: точные цены в USD + /price + Refresh --------------------
-# Расширенные триггеры RU/EN
+# -------------------- [PRICE] CoinGecko + /price + Refresh --------------------
 PRICE_TRIGGERS = re.compile(
     r"(?:\b|_)(?:price|prices|rate|quote|update\s*price)\b"
     r"|(?:\b|_)(?:курс|котировк|котировки|цена|цены|стоимость|сколько\s+стоит|сколько\s+сейчас)\b"
     r"|(?:\b|_)(?:сейчас|на\s+данный\s+момент|прямо\s+сейчас|now|at\s+the\s+moment)\b",
     re.IGNORECASE
 )
-
 SYMBOL_TO_CG = {
-    "BTC":"bitcoin","XBT":"bitcoin",
-    "ETH":"ethereum",
-    "SOL":"solana",
-    "TON":"the-open-network",
-    "USDT":"tether",
-    "USDC":"usd-coin",
-    "BNB":"binancecoin",
-    "ARB":"arbitrum",
-    "OP":"optimism",
-    "ADA":"cardano",
-    "XRP":"ripple",
-    "AVAX":"avalanche-2",
-    "TRX":"tron",
-    "DOGE":"dogecoin",
-    "MATIC":"matic-network",
-    "SUI":"sui",
-    "APT":"aptos",
+    "BTC":"bitcoin","XBT":"bitcoin", "ETH":"ethereum", "SOL":"solana", "TON":"the-open-network",
+    "USDT":"tether","USDC":"usd-coin","BNB":"binancecoin","ARB":"arbitrum","OP":"optimism",
+    "ADA":"cardano","XRP":"ripple","AVAX":"avalanche-2","TRX":"tron","DOGE":"dogecoin",
+    "MATIC":"matic-network","SUI":"sui","APT":"aptos",
 }
 TICKER_RE = re.compile(
     r"(?:(?<=\$)|\b)([A-Z]{2,6}|btc|eth|sol|ton|usdt|usdc|bnb|arb|op|ada|xrp|avax|trx|doge|matic|sui|apt)\b",
     re.IGNORECASE
 )
-
 def is_price_query(text: str) -> bool:
     if not text: return False
     return bool(PRICE_TRIGGERS.search(text)) or bool(TICKER_RE.search(text))
 
-def _cg_ids_from_text(text: str) -> list:
+def _cg_ids_from_text(text: str) -> list[str]:
     t = (text or "").lower()
     ask_all = any(w in t for w in ("все", "всё", "all"))
     default_top = [
@@ -397,7 +375,7 @@ def _cg_ids_from_text(text: str) -> list:
             seen.add(cid); ids.append(cid)
     return ids
 
-# простое кэширование на 60 сек
+# кэш 60 секунд
 _cg_cache = {"t":0, "key":"", "data":{}}
 def _cg_cache_get(key: str):
     if time.time() - _cg_cache["t"] < 60 and _cg_cache["key"] == key:
@@ -406,7 +384,7 @@ def _cg_cache_get(key: str):
 def _cg_cache_set(key: str, data: dict):
     _cg_cache.update({"t": time.time(), "key": key, "data": data})
 
-def coingecko_prices(coin_ids: list, vs="usd") -> dict:
+def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
     coin_ids_str = ",".join(coin_ids)
     cache_key = f"{coin_ids_str}:{vs}"
@@ -414,12 +392,7 @@ def coingecko_prices(coin_ids: list, vs="usd") -> dict:
     if cached is not None:
         return cached
     url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {
-        "ids": coin_ids_str,
-        "vs_currencies": vs,
-        "include_24hr_change": "true",
-        "include_last_updated_at": "true",
-    }
+    params = {"ids": coin_ids_str, "vs_currencies": vs, "include_24hr_change": "true", "include_last_updated_at": "true"}
     try:
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
@@ -445,7 +418,6 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
         item = data[k]; price = item.get(vs)
         if price is None: continue
         sym = name_map.get(k, k)
-        # Если хотите без 24h %, оставьте только price:
         chg = item.get(f"{vs}_24h_change")
         chg_s = ""
         if isinstance(chg, (int,float)):
@@ -463,13 +435,15 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
         pass
     return "\n".join(lines)
 
-# Кнопка Refresh
+# UI для цен
 def _t_refresh(lang: str) -> str:
     return {"en":"🔄 Refresh","ru":"🔄 Обновить","ar":"🔄 تحديث"}.get(lang, "🔄 Refresh")
 
-def build_price_keyboard(ids: list, lang: str) -> InlineKeyboardMarkup:
-    ids_short = ",".join(ids)[:60]  # ограничиваем длину callback_data
-    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"price_refresh:{ids_short}")]])
+def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
+    # сохраняем ids в памяти и возвращаем короткий токен
+    token = store_price_ids(chat_id, ids)
+    # короткий callback_data строго < 64 bytes
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 # -------------------- AI --------------------
 def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
@@ -489,9 +463,7 @@ def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
             if snippets_text:
                 msgs.append({"role": "system", "content": snippets_text})
         msgs.append({"role": "user", "content": user_text})
-        resp = client.chat.completions.create(
-            model=MODEL, messages=msgs, temperature=0.15, max_tokens=650,
-        )
+        resp = client.chat.completions.create(model=MODEL, messages=msgs, temperature=0.15, max_tokens=650)
         content = (resp.choices[0].message.content or "").strip()
         remember(chat_id, "user", user_text)
         remember(chat_id, "assistant", content)
@@ -535,9 +507,9 @@ def webhook():
                 bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="TON address sent")
             elif data == "addr_sol":
                 bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="SOL address sent")
-            elif data.startswith("price_refresh:"):
-                ids_csv = data.split(":", 1)[1].strip()
-                ids = [x for x in ids_csv.split(",") if x]
+            elif data.startswith("prf:"):
+                token = data.split(":", 1)[1].strip()
+                ids = resolve_price_ids(chat_id, token) or ["bitcoin","ethereum","solana","the-open-network"]
                 lang_cq = DEFAULT_LANG
                 data_now = coingecko_prices(ids, vs="usd")
                 msg_now = format_prices_message(data_now, lang=lang_cq, vs="usd")
@@ -546,10 +518,10 @@ def webhook():
                         chat_id=chat_id,
                         message_id=cq.get("message", {}).get("message_id"),
                         text=msg_now,
-                        reply_markup=build_price_keyboard(ids, lang_cq)
+                        reply_markup=build_price_keyboard(chat_id, ids, lang_cq)
                     )
                 except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(ids, lang_cq))
+                    bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
             else:
                 bot.answer_callback_query(cq.get("id"))
@@ -581,14 +553,14 @@ def webhook():
         send_donate_message(chat_id, lang)
         return "ok"
 
-    # [PRICE_CMD] /price BTC ETH SOL ...
+    # /price BTC ETH SOL ...
     if t_low.startswith("/price"):
         tail = text.split(None, 1)[1] if len(text.split()) > 1 else ""
         query_text = tail or "BTC ETH SOL TON"
         ids = _cg_ids_from_text(query_text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(ids, lang))
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, lang))
         return "ok"
 
     # Адрес контракта → отчёт Etherscan
@@ -601,12 +573,12 @@ def webhook():
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
 
-    # [PRICE] Быстрый ответ через CoinGecko (USD; экономим SerpAPI/LLM)
+    # [PRICE] Быстрый ответ через CoinGecko (USD; без расхода SerpAPI/LLM)
     if is_price_query(text):
         ids = _cg_ids_from_text(text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(ids, lang))
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, lang))
         return "ok"
 
     # Пусто
