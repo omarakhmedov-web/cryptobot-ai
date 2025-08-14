@@ -197,6 +197,36 @@ def detect_lang(text: str, _tg_lang: str | None, chat_id: int | None = None) -> 
     if LANG_RE["ru"].search(t): return "ru"
     return DEFAULT_LANG
 
+def maybe_set_language_from_text(t_low: str) -> str | None:
+    """
+    Возвращает 'en' | 'ru' | None на основе свободной фразы пользователя.
+    """
+    if not t_low:
+        return None
+    # Английский
+    if re.search(r"\b(set|switch|change)\s+(the\s+)?language\s+to\s+english\b", t_low):
+        return "en"
+    if re.search(r"\blanguage\s*:\s*en\b", t_low) or re.search(r"\blang\s*en\b", t_low):
+        return "en"
+    if re.search(r"\benglish\b", t_low) and not re.search(r"\brussian|русск", t_low):
+        return "en"
+    if t_low.strip() in ("en", "eng", "english please", "please english"):
+        return "en"
+    if re.search(r"\bна\s+английск\w*\b", t_low) or re.search(r"\bсделай\s+английск\w*\b", t_low):
+        return "en"
+
+    # Русский
+    if re.search(r"\b(set|switch|change)\s+(the\s+)?language\s+to\s+russian\b", t_low):
+        return "ru"
+    if re.search(r"\blanguage\s*:\s*ru\b", t_low) or re.search(r"\blang\s*ru\b", t_low):
+        return "ru"
+    if re.search(r"\bрусск\w*\b", t_low) or re.search(r"\bна\s+русском\b", t_low) or re.search(r"\bсделай\s+русск\w*\b", t_low):
+        return "ru"
+    if t_low.strip() in ("ru", "russian", "по русски", "по-русски"):
+        return "ru"
+
+    return None
+
 # -------------------- Donate UI --------------------
 def kofi_link_with_utm() -> str:
     sep = "&" if "?" in KOFI_LINK_BASE else "?"
@@ -834,14 +864,22 @@ def webhook():
 
     text = (msg.get("text") or msg.get("caption") or "").strip()
     t_low = (text or "").lower()
+    cur_lang = get_lang_override(chat_id) or detect_lang(text, None, chat_id)
 
-    # Команды /start
+    # Команды /start и без слэша
     if t_low in ("/start", "start"):
         start_lang = get_lang_override(chat_id) or DEFAULT_LANG
         bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         if not DONATE_STICKY:
             send_donate_message(chat_id, start_lang)
+        return "ok"
+
+    # Натуральное переключение языка без слэша
+    lang_nl = maybe_set_language_from_text(t_low)
+    if lang_nl in ("en", "ru"):
+        set_lang_override(chat_id, lang_nl)
+        bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}[lang_nl])
         return "ok"
 
     # Принудительная установка языка: /lang en|ru
@@ -854,10 +892,20 @@ def webhook():
             bot.send_message(chat_id=chat_id, text="Usage: /lang en | ru")
         return "ok"
 
-    # Донаты
-    lang = detect_lang(text, None, chat_id)
+    # Донаты (и без слэша тоже)
     if t_low in ("/donate", "donate", "донат", "/tip", "tip"):
-        send_donate_message(chat_id, lang)
+        send_donate_message(chat_id, cur_lang)
+        return "ok"
+
+    # TOP-10 — натуральные фразы без слэша
+    if (
+        t_low.strip() in ("top10", "top ten", "top-ten", "top coins") or
+        re.search(r"\btop\s*-?\s*10\b", t_low) or
+        re.search(r"\bshow\s+top\s+coins\b", t_low)
+    ):
+        mkts = coingecko_top_market(10)
+        msg_out, ids = format_top10(mkts, lang=cur_lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
         return "ok"
 
     # /price BTC ETH SOL ...
@@ -866,35 +914,35 @@ def webhook():
         query_text = tail or "BTC ETH SOL TON"
         ids = _cg_ids_from_text(query_text)
         data = coingecko_prices(ids, vs="usd")
-        msg_out = format_prices_message(data, lang=lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, lang))
+        msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
         return "ok"
 
-    # /top10
+    # /top10 (оставляем совместимость)
     if t_low.startswith("/top10"):
         mkts = coingecko_top_market(10)
-        msg_out, ids = format_top10(mkts, lang=lang)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang))
+        msg_out, ids = format_top10(mkts, lang=cur_lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
         return "ok"
 
-    # /gas
+    # /gas и без слэша
     if t_low.startswith("/gas") or t_low == "gas":
-        msg_out = format_gas_message(get_eth_gas(), lang)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_gas_keyboard(lang))
+        msg_out = format_gas_message(get_eth_gas(), cur_lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_gas_keyboard(cur_lang))
         return "ok"
 
-    # /feargreed | /fng
+    # /feargreed | /fng и без слэша
     if t_low.startswith("/feargreed") or t_low == "/fng" or t_low == "feargreed" or t_low == "fng":
         d = fetch_fear_greed()
-        msg_out = format_fear_greed(d, lang)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_fng_keyboard(lang))
+        msg_out = format_fear_greed(d, cur_lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_fng_keyboard(cur_lang))
         return "ok"
 
-    # /btcdom
+    # /btcdom и без слэша
     if t_low.startswith("/btcdom") or t_low == "btcdom":
         d = fetch_btc_dominance()
-        msg_out = format_btc_dominance(d, lang)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_btcdom_keyboard(lang))
+        msg_out = format_btc_dominance(d, cur_lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_btcdom_keyboard(cur_lang))
         return "ok"
 
     # Адрес контракта → отчёт Etherscan
@@ -902,17 +950,17 @@ def webhook():
     if m:
         address = m.group(0)
         facts = analyze_eth_contract(address)
-        report = format_report(facts, lang)
+        report = format_report(facts, cur_lang)
         bot.send_message(chat_id=chat_id, text=report,
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
 
-    # Быстрый ответ цен через CoinGecko
+    # Быстрый ответ цен через CoinGecko (натуральные фразы)
     if is_price_query(text):
         ids = _cg_ids_from_text(text)
         data = coingecko_prices(ids, vs="usd")
-        msg_out = format_prices_message(data, lang=lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, lang))
+        msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
         return "ok"
 
     # Пусто
@@ -924,7 +972,7 @@ def webhook():
         return "ok"
 
     # Обычный AI-ответ
-    answer = ai_reply(text, lang, chat_id)
+    answer = ai_reply(text, cur_lang, chat_id)
     bot.send_message(chat_id=chat_id, text=answer,
                      reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
     return "ok"
