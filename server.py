@@ -1,12 +1,14 @@
-import os, re, json, logging, io, pathlib, html, time, uuid 
+import os, re, json, logging, io, pathlib, html, time, uuid
 from collections import deque
 from datetime import datetime
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import requests
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from groq import Groq
 import qrcode
+
+APP_START_TS = time.time()
 
 # -------------------- App / Logging --------------------
 app = Flask(__name__)
@@ -128,17 +130,14 @@ def get_lang_override(chat_id: int) -> str | None:
     load_memory()
     return memory_cache.get("chats", {}).get(str(chat_id), {}).get("lang_override")
 
-# --------- Mapping для коротких callback токенов (исправление Button_data_invalid) ---------
+# --------- Mapping для коротких callback токенов ---------
 def _prune_tokens(tokens_by_chat: dict, keep_last: int = 25):
-    # ограничим кол-во токенов на чат для экономии памяти
     if len(tokens_by_chat) > keep_last:
-        # dict в Py3.7+ упорядочен по вставке — обрежем старые
         drop = list(tokens_by_chat.keys())[:-keep_last]
         for k in drop:
             tokens_by_chat.pop(k, None)
 
 def store_price_ids(chat_id: int, ids: list[str]) -> str:
-    """Сохраняет список coin IDs за коротким токеном для данного чата."""
     load_memory()
     chat_key = str(chat_id)
     price_root = memory_cache.setdefault("price_tokens", {})
@@ -157,13 +156,11 @@ def resolve_price_ids(chat_id: int, token: str) -> list[str]:
 
 # -------------------- Language detect with override --------------------
 def detect_lang(text: str, _tg_lang: str | None, chat_id: int | None = None) -> str:
-    # если пользователь задал принудительный язык — используем его
     if chat_id is not None:
         over = get_lang_override(chat_id)
         if over in ("en", "ru", "ar"):
             return over
     t = text or ""
-    # приоритет английского в смешанных сообщениях
     if EN_RE.search(t): return "en"
     if LANG_RE["ru"].search(t): return "ru"
     if LANG_RE["ar"].search(t): return "ar"
@@ -343,7 +340,7 @@ def duckduckgo_fallback(query: str) -> list:
         html_text = resp.text
         results = []
         link_pat = re.compile(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.I|re.S)
-        # FIX: было re/S -> падает. Должно быть re.S
+        # FIX: корректный флаг re.S
         snip_pat = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.I|re.S)
         links = link_pat.findall(html_text)[:5]
         snips = snip_pat.findall(html_text)[:5]
@@ -477,12 +474,10 @@ def _t_refresh(lang: str) -> str:
     return {"en":"🔄 Refresh","ru":"🔄 Обновить","ar":"🔄 تحديث"}.get(lang, "🔄 Refresh")
 
 def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
-    # сохраняем ids в памяти и возвращаем короткий токен
     token = store_price_ids(chat_id, ids)
-    # короткий callback_data строго < 64 bytes
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
-# -------------------- TOP-10 (новое) --------------------
+# -------------------- TOP-10 --------------------
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
@@ -522,20 +517,15 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
             chg_s = f"  {sign}{abs(chg):.2f}%/24h"
         lines.append(f"{i}. {sym}: ${price:,.4f}{chg_s}")
         ids.append(c.get("id"))
-    # добавим «as of»
-    try:
-        dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-        lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}.","ar":f"\nحتى {dt}."}.get(lang, f"\nAs of {dt}."))
-    except Exception:
-        pass
+    dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}.","ar":f"\nحتى {dt}."}.get(lang, f"\nAs of {dt}."))
     return ("\n".join(lines), ids)
 
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
-    # используем тот же механизм коротких токенов и refresh, чтобы обновлять цифры у топ-10
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
-# -------------------- GAS / FEAR & GREED / BTC DOM — NEW --------------------
+# -------------------- GAS / F&G / BTC DOM --------------------
 def fetch_gas_etherscan() -> dict | None:
     if not ETHERSCAN_API_KEY:
         return None
@@ -687,11 +677,9 @@ def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
     try:
         system_for_lang = SYSTEM_PROMPT_BASE + f" Always reply ONLY in {lang.upper()}. Do not translate or duplicate in other languages."
         msgs = [{"role": "system", "content": system_for_lang}]
-        # История
         hist = get_history(chat_id)
         for role, content in hist:
             msgs.append({"role": role, "content": content})
-        # Свежие сниппеты по триггерам
         if needs_fresh_search(user_text):
             snips = serpapi_search(user_text, lang)
             if not snips:
@@ -709,11 +697,21 @@ def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
         app.logger.exception(f"Groq error: {e}")
         return "Internal model error, please try again in a minute."
 
-# -------------------- Routes --------------------
-@app.route("/", methods=["GET"])
+# -------------------- Warm-up / Health --------------------
+@app.route("/", methods=["GET", "HEAD"])
 def index():
-    return "ok"
+    # быстрый ответ для пингеров
+    return Response("ok", status=200, mimetype="text/plain")
 
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    return jsonify({"ok": True, "since": int(APP_START_TS), "uptime_sec": int(time.time() - APP_START_TS)})
+
+@app.route("/uptime", methods=["GET"])
+def uptime():
+    return Response(str(int(time.time() - APP_START_TS)), status=200, mimetype="text/plain")
+
+# -------------------- Telegram Webhook --------------------
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
     if request.method == "GET":
@@ -745,7 +743,6 @@ def webhook():
             elif data == "addr_sol":
                 bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="SOL address sent")
 
-            # Refresh для цен (price/top10)
             elif data.startswith("prf:"):
                 token = data.split(":", 1)[1].strip()
                 ids = resolve_price_ids(chat_id, token) or ["bitcoin","ethereum","solana","the-open-network"]
@@ -763,7 +760,6 @@ def webhook():
                     bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
-            # Refresh для GAS
             elif data == "gas:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 gas = get_eth_gas()
@@ -779,7 +775,6 @@ def webhook():
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_gas_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
-            # Refresh для Fear & Greed
             elif data == "fng:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 d = fetch_fear_greed()
@@ -795,7 +790,6 @@ def webhook():
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_fng_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
-            # Refresh для BTC dominance
             elif data == "bdm:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 d = fetch_btc_dominance()
@@ -829,9 +823,9 @@ def webhook():
         return "ok"
 
     text = (msg.get("text") or msg.get("caption") or "").strip()
+    t_low = (text or "").lower()
 
     # Команды /start
-    t_low = (text or "").lower()
     if t_low in ("/start", "start"):
         start_lang = get_lang_override(chat_id) or DEFAULT_LANG
         bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
@@ -866,27 +860,27 @@ def webhook():
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, lang))
         return "ok"
 
-    # /top10 — новый быстрый топ рынка
+    # /top10
     if t_low.startswith("/top10"):
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang))
         return "ok"
 
-    # --- NEW: /gas (и без слэша "gas") ---
+    # /gas
     if t_low.startswith("/gas") or t_low == "gas":
         msg_out = format_gas_message(get_eth_gas(), lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_gas_keyboard(lang))
         return "ok"
 
-    # --- NEW: /feargreed | /fng (и без слэша) ---
+    # /feargreed | /fng
     if t_low.startswith("/feargreed") or t_low == "/fng" or t_low == "feargreed" or t_low == "fng":
         d = fetch_fear_greed()
         msg_out = format_fear_greed(d, lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_fng_keyboard(lang))
         return "ok"
 
-    # --- NEW: /btcdom (и без слэша "btcdom") ---
+    # /btcdom
     if t_low.startswith("/btcdom") or t_low == "btcdom":
         d = fetch_btc_dominance()
         msg_out = format_btc_dominance(d, lang)
@@ -903,7 +897,7 @@ def webhook():
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
 
-    # [PRICE] Быстрый ответ через CoinGecko (USD; без расхода SerpAPI/LLM)
+    # Быстрый ответ цен через CoinGecko
     if is_price_query(text):
         ids = _cg_ids_from_text(text)
         data = coingecko_prices(ids, vs="usd")
