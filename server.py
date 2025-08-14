@@ -1,4 +1,4 @@
-import os, re, json, logging, io, pathlib, html, time, uuid
+import os, re, json, logging, io, pathlib, html, time, uuid 
 from collections import deque
 from datetime import datetime
 
@@ -450,8 +450,10 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
     order = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin"]
     for k in order + [k for k in data.keys() if k not in order]:
         if k not in data: continue
-        item = data[k]; price = item.get(vs)
-        if price is None: continue
+        item = data[k]
+        price = item.get(vs)
+        if price is None:
+            continue
         sym = name_map.get(k, k)
         chg = item.get(f"{vs}_24h_change")
         chg_s = ""
@@ -533,6 +535,153 @@ def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
+# -------------------- GAS / FEAR & GREED / BTC DOM — NEW --------------------
+def fetch_gas_etherscan() -> dict | None:
+    if not ETHERSCAN_API_KEY:
+        return None
+    try:
+        url = "https://api.etherscan.io/api"
+        params = {"module": "gastracker", "action": "gasoracle", "apikey": ETHERSCAN_API_KEY}
+        r = requests.get(url, params=params, timeout=10)
+        j = r.json()
+        res = j.get("result") or {}
+        return {
+            "source": "etherscan",
+            "safe": float(res.get("SafeGasPrice")),
+            "propose": float(res.get("ProposeGasPrice")),
+            "fast": float(res.get("FastGasPrice")),
+            "base": float(res.get("suggestedBaseFee", 0))
+        }
+    except Exception:
+        return None
+
+def fetch_gas_ethgasstation() -> dict | None:
+    try:
+        url = "https://ethgasstation.info/json/ethgasAPI.json"
+        r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json()
+        return {
+            "source": "ethgasstation",
+            "safe": float(j.get("safeLow", 0))/10.0,
+            "propose": float(j.get("average", 0))/10.0,
+            "fast": float(j.get("fast", 0))/10.0,
+            "base": float(j.get("average", 0))/10.0
+        }
+    except Exception:
+        return None
+
+def fetch_gas_etherchain() -> dict | None:
+    try:
+        url = "https://etherchain.org/api/gasnow"
+        r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json().get("data", {})
+        to_gwei = lambda wei: float(wei)/1e9 if wei is not None else None
+        return {
+            "source": "etherchain",
+            "safe": to_gwei(j.get("slow")),
+            "propose": to_gwei(j.get("standard")),
+            "fast": to_gwei(j.get("rapid")),
+            "base": to_gwei(j.get("standard"))
+        }
+    except Exception:
+        return None
+
+def get_eth_gas() -> dict:
+    for fn in (fetch_gas_etherscan, fetch_gas_ethgasstation, fetch_gas_etherchain):
+        data = fn()
+        if data and data.get("propose"):
+            return data
+    return {"error": "gas_unavailable"}
+
+def format_gas_message(data: dict, lang: str) -> str:
+    if "error" in data:
+        return {"en":"Gas data unavailable.","ru":"Данные по газу недоступны.","ar":"بيانات الغاز غير متاحة."}.get(lang, "Gas data unavailable.")
+    src = data.get("source", "n/a")
+    lines = {
+        "en": ["⛽ Ethereum gas (gwei):"],
+        "ru": ["⛽ Газ Ethereum (gwei):"],
+        "ar": ["⛽ غاز إيثريوم (gwei):"],
+    }.get(lang, ["⛽ Ethereum gas (gwei):"])
+    lines.append(f"Safe: {data.get('safe'):.1f}")
+    lines.append(f"Propose: {data.get('propose'):.1f}")
+    lines.append(f"Fast: {data.get('fast'):.1f}")
+    if data.get("base") is not None:
+        lines.append(f"Base fee: {data.get('base'):.1f}")
+    dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    lines.append({"en":f"\nSource: {src}. As of {dt}.",
+                  "ru":f"\nИсточник: {src}. По состоянию на {dt}.",
+                  "ar":f"\nالمصدر: {src}. حتى {dt}."}.get(lang, f"\nSource: {src}. As of {dt}."))
+    return "\n".join(lines)
+
+def build_gas_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data="gas:r")]])
+
+def fetch_fear_greed() -> dict:
+    try:
+        r = requests.get("https://api.alternative.me/fng/", timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json()
+        item = (j.get("data") or [{}])[0]
+        return {
+            "value": item.get("value"),
+            "classification": item.get("value_classification"),
+            "timestamp": item.get("timestamp")
+        }
+    except Exception:
+        return {"error": "fng_unavailable"}
+
+def format_fear_greed(d: dict, lang: str) -> str:
+    if "error" in d or not d.get("value"):
+        return {"en":"Fear & Greed data unavailable.",
+                "ru":"Индекс страха и жадности недоступен.",
+                "ar":"بيانات مؤشر الخوف والطمع غير متاحة."}.get(lang, "Fear & Greed data unavailable.")
+    val = d["value"]
+    cls = d.get("classification","")
+    try:
+        ts = int(d.get("timestamp") or 0)
+        dt = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC") if ts else datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    hdr = {"en":"😨/😎 Crypto Fear & Greed Index:",
+           "ru":"😨/😎 Индекс страха и жадности:",
+           "ar":"😨/😎 مؤشر الخوف والطمع:"}.get(lang, "😨/😎 Crypto Fear & Greed Index:")
+    return f"{hdr}\n{val} ({cls})\n\n" + {"en":f"As of {dt}.","ru":f"По состоянию на {dt}.","ar":f"حتى {dt}."}.get(lang, f"As of {dt}.")
+
+def build_fng_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data="fng:r")]])
+
+def fetch_btc_dominance() -> dict:
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/global", timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json().get("data", {})
+        dom = (j.get("market_cap_percentage") or {}).get("btc")
+        mcap = (j.get("total_market_cap") or {}).get("usd")
+        return {"dominance": dom, "mcap_usd": mcap}
+    except Exception:
+        return {"error": "btcdom_unavailable"}
+
+def format_btc_dominance(d: dict, lang: str) -> str:
+    if "error" in d or d.get("dominance") is None:
+        return {"en":"BTC dominance unavailable.",
+                "ru":"Доминация BTC недоступна.",
+                "ar":"هيمنة BTC غير متاحة."}.get(lang, "BTC dominance unavailable.")
+    dom = float(d["dominance"])
+    mcap = d.get("mcap_usd")
+    lines = {
+        "en": [f"🟧 BTC dominance: {dom:.2f}%"],
+        "ru": [f"🟧 Доминация BTC: {dom:.2f}%"],
+        "ar": [f"🟧 هيمنة BTC: {dom:.2f}%"],
+    }.get(lang, [f"🟧 BTC dominance: {dom:.2f}%"])
+    if isinstance(mcap, (int, float)):
+        lines.append({"en":f"Total crypto mcap: ${mcap:,.0f}",
+                      "ru":f"Общая капитализация рынка: ${mcap:,.0f}",
+                      "ar":f"القيمة السوقية الإجمالية: ${mcap:,.0f}"}[lang])
+    dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}.","ar":f"\nحتى {dt}."}.get(lang, f"\nAs of {dt}."))
+    return "\n".join(lines)
+
+def build_btcdom_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data="bdm:r")]])
+
 # -------------------- AI --------------------
 def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
     try:
@@ -595,6 +744,8 @@ def webhook():
                 bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="TON address sent")
             elif data == "addr_sol":
                 bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="SOL address sent")
+
+            # Refresh для цен (price/top10)
             elif data.startswith("prf:"):
                 token = data.split(":", 1)[1].strip()
                 ids = resolve_price_ids(chat_id, token) or ["bitcoin","ethereum","solana","the-open-network"]
@@ -611,6 +762,55 @@ def webhook():
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
+
+            # Refresh для GAS
+            elif data == "gas:r":
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                gas = get_eth_gas()
+                msg = format_gas_message(gas, lang_cq)
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg,
+                        reply_markup=build_gas_keyboard(lang_cq)
+                    )
+                except Exception:
+                    bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_gas_keyboard(lang_cq))
+                bot.answer_callback_query(cq.get("id"), text="Updated")
+
+            # Refresh для Fear & Greed
+            elif data == "fng:r":
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                d = fetch_fear_greed()
+                msg = format_fear_greed(d, lang_cq)
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg,
+                        reply_markup=build_fng_keyboard(lang_cq)
+                    )
+                except Exception:
+                    bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_fng_keyboard(lang_cq))
+                bot.answer_callback_query(cq.get("id"), text="Updated")
+
+            # Refresh для BTC dominance
+            elif data == "bdm:r":
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                d = fetch_btc_dominance()
+                msg = format_btc_dominance(d, lang_cq)
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg,
+                        reply_markup=build_btcdom_keyboard(lang_cq)
+                    )
+                except Exception:
+                    bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_btcdom_keyboard(lang_cq))
+                bot.answer_callback_query(cq.get("id"), text="Updated")
+
             else:
                 bot.answer_callback_query(cq.get("id"))
         except Exception as e:
@@ -671,6 +871,26 @@ def webhook():
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang))
+        return "ok"
+
+    # --- NEW: /gas (и без слэша "gas") ---
+    if t_low.startswith("/gas") or t_low == "gas":
+        msg_out = format_gas_message(get_eth_gas(), lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_gas_keyboard(lang))
+        return "ok"
+
+    # --- NEW: /feargreed | /fng (и без слэша) ---
+    if t_low.startswith("/feargreed") or t_low == "/fng" or t_low == "feargreed" or t_low == "fng":
+        d = fetch_fear_greed()
+        msg_out = format_fear_greed(d, lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_fng_keyboard(lang))
+        return "ok"
+
+    # --- NEW: /btcdom (и без слэша "btcdom") ---
+    if t_low.startswith("/btcdom") or t_low == "btcdom":
+        d = fetch_btc_dominance()
+        msg_out = format_btc_dominance(d, lang)
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_btcdom_keyboard(lang))
         return "ok"
 
     # Адрес контракта → отчёт Etherscan
