@@ -1048,6 +1048,21 @@ def webhook_with_secret(secret):
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_fng_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
             elif data == "bdm:r":
+            elif data.startswith("top10:"):
+                period = data.split(":")[1]
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                mkts = coingecko_top_market(10, change_period=period)
+                msg_out, ids = format_top10(mkts, lang=lang_cq)
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg_out,
+                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
+                    )
+                except Exception:
+                    bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
+                bot.answer_callback_query(cq.get("id"), text=f"Top-10: {period}")
                         elif data.startswith("top10:"):
                 period = data.split(":")[1]
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
