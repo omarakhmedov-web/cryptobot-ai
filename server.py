@@ -1008,8 +1008,7 @@ def webhook():
         start_lang = get_lang_override(chat_id) or DEFAULT_LANG
         bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-        if not DONATE_STICKY:
-            send_donate_message(chat_id, start_lang)
+        send_donate_message(chat_id, start_lang)
         return "ok"
 
     # Натуральное переключение языка без слэша
@@ -1140,6 +1139,27 @@ def webhook():
         bot.send_message(chat_id=chat_id, text="\n".join(lines))
         return "ok"
 
+
+# /check <address>
+if t_low.startswith("/check"):
+    parts = text.split()
+    if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+        bot.send_message(chat_id=chat_id, text={"en":"Usage: /check <ETH address>","ru":"Использование: /check <ETH адрес>"}.get(cur_lang, "Usage: /check <ETH address>"))
+        return "ok"
+    addr = parts[1]
+    try:
+        from server_contract_check import check_contract, format_check_report
+        facts = check_contract(addr, alchemy_key=ALCHEMY_API_KEY,
+                               etherscan_key=ETHERSCAN_API_KEY,
+                               polygonscan_key=POLYGONSCAN_API_KEY,
+                               bscscan_key=BSCSCAN_API_KEY)
+        report = format_check_report(facts, cur_lang)
+    except Exception as e:
+        report = {"en":"Internal error during /check.","ru":"Внутренняя ошибка при /check."}.get(cur_lang, "Internal error during /check.")
+    bot.send_message(chat_id=chat_id, text=report,
+                     reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+    return "ok"
+
     # Адрес контракта → отчёт из блок-эксплорера
     m = ADDR_RE.search(text)
     if m:
@@ -1176,3 +1196,237 @@ def webhook():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
+
+# ===== server_contract_check integrated below =====
+
+
+import os, re, json, time, hashlib
+from decimal import Decimal
+from datetime import datetime
+import requests
+
+ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+
+# EIP-1967 implementation slot = keccak256("eip1967.proxy.implementation") - 1
+EIP1967_IMPL_SLOT = int("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", 16)
+
+def _alchemy_url(api_key: str | None) -> str | None:
+    if not api_key:
+        return None
+    return f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
+
+def _rpc(url: str, method: str, params: list) -> dict:
+    try:
+        r = requests.post(url, json={"jsonrpc":"2.0","id":1,"method":method,"params":params}, timeout=20, headers={"Content-Type":"application/json"})
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def _hex_to_bytes(x: str) -> bytes:
+    x = x or ""
+    if x.startswith("0x"):
+        x = x[2:]
+    if len(x) % 2 == 1:
+        x = "0"+x
+    try:
+        return bytes.fromhex(x)
+    except Exception:
+        return b""
+
+def _parse_abi_string(output_hex: str) -> str | None:
+    b = _hex_to_bytes(output_hex)
+    if len(b) < 64:
+        return None
+    # first 32 bytes = offset (skip), next 32 = length, then data
+    try:
+        length = int.from_bytes(b[32:64], "big")
+        data = b[64:64+length]
+        return data.decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+
+def _parse_abi_uint(output_hex: str) -> int | None:
+    b = _hex_to_bytes(output_hex)
+    if len(b) < 32:
+        return None
+    return int.from_bytes(b[-32:], "big")
+
+def _parse_abi_bool(output_hex: str) -> bool | None:
+    n = _parse_abi_uint(output_hex)
+    if n is None: return None
+    return bool(n)
+
+def _eth_call(url: str, to_addr: str, data_hex: str) -> str | None:
+    j = _rpc(url, "eth_call", [{"to": to_addr, "data": data_hex}, "latest"])
+    if "error" in j:
+        return None
+    return j.get("result")
+
+def _name(url: str, addr: str) -> str | None:
+    # function selector for name(): 0x06fdde03
+    out = _eth_call(url, addr, "0x06fdde03")
+    return _parse_abi_string(out) if out else None
+
+def _symbol(url: str, addr: str) -> str | None:
+    # 0x95d89b41
+    out = _eth_call(url, addr, "0x95d89b41")
+    return _parse_abi_string(out) if out else None
+
+def _decimals(url: str, addr: str) -> int | None:
+    # 0x313ce567
+    out = _eth_call(url, addr, "0x313ce567")
+    return _parse_abi_uint(out) if out else None
+
+def _supports_interface(url: str, addr: str, iid_hex: str) -> bool | None:
+    # supportsInterface(bytes4) => 0x01ffc9a7 + 28 zero bytes + 4 byte interface id
+    data = "0x01ffc9a7" + "0"*56 + iid_hex.replace("0x","").lower()
+    out = _eth_call(url, addr, data)
+    return _parse_abi_bool(out) if out else None
+
+def _eip1967_impl(url: str, addr: str) -> str | None:
+    slot_hex = hex(EIP1967_IMPL_SLOT)
+    j = _rpc(url, "eth_getStorageAt", [addr, slot_hex, "latest"])
+    if "error" in j:
+        return None
+    res = j.get("result") or ""
+    b = _hex_to_bytes(res)
+    if len(b) < 32:
+        return None
+    impl_bytes = b[-20:]
+    impl = "0x" + impl_bytes.hex()
+    if impl.lower() == "0x0000000000000000000000000000000000000000":
+        return None
+    return impl
+
+def _getsourcecode_any(address: str, etherscan_key: str|None, polygonscan_key: str|None, bscscan_key: str|None) -> dict:
+    # Try explorers in order; return first success
+    sources = []
+    if etherscan_key:
+        sources.append(("Etherscan","https://api.etherscan.io/api", etherscan_key))
+    if polygonscan_key:
+        sources.append(("PolygonScan","https://api.polygonscan.com/api", polygonscan_key))
+    if bscscan_key:
+        sources.append(("BscScan","https://api.bscscan.com/api", bscscan_key))
+    for name, base, key in sources:
+        try:
+            q = {"module":"contract","action":"getsourcecode","address":address,"apikey":key}
+            r = requests.get(base, params=q, timeout=15)
+            j = r.json()
+            if str(j.get("status")) == "1":
+                data = (j.get("result") or [{}])[0]
+                return {"ok": True, "source": name, "data": data}
+        except Exception:
+            continue
+    return {"ok": False}
+
+def check_contract(address: str, alchemy_key: str|None, etherscan_key: str|None=None, polygonscan_key: str|None=None, bscscan_key: str|None=None) -> dict:
+    addr = address.strip()
+    if not ADDR_RE.fullmatch(addr):
+        return {"ok": False, "error":"bad_address"}
+    url = _alchemy_url(alchemy_key)
+    facts = {"ok": True, "network":"ethereum", "address": addr, "via": ["on-chain"]}
+
+    if url:
+        try:
+            nm = _name(url, addr)
+            if nm: facts["name"] = nm
+        except Exception: pass
+        try:
+            sb = _symbol(url, addr)
+            if sb: facts["symbol"] = sb
+        except Exception: pass
+        try:
+            dc = _decimals(url, addr)
+            if dc is not None: facts["decimals"] = dc
+        except Exception: pass
+        # ERC-165
+        try:
+            erc721 = _supports_interface(url, addr, "0x80ac58cd")
+            if erc721 is not None:
+                facts.setdefault("erc165", {})["erc721"] = bool(erc721)
+        except Exception: pass
+        try:
+            erc1155 = _supports_interface(url, addr, "0xd9b67a26")
+            if erc1155 is not None:
+                facts.setdefault("erc165", {})["erc1155"] = bool(erc1155)
+        except Exception: pass
+        # EIP-1967 proxy
+        try:
+            impl = _eip1967_impl(url, addr)
+            if impl:
+                facts["proxy"] = True
+                facts["implementation"] = impl
+            else:
+                facts["proxy"] = False
+        except Exception: pass
+
+    # Optional enrichment from explorers
+    exp = _getsourcecode_any(addr, etherscan_key, polygonscan_key, bscscan_key)
+    if exp.get("ok"):
+        data = exp.get("data") or {}
+        facts["via"].append(exp.get("source"))
+        if not facts.get("name"):
+            facts["name"] = data.get("ContractName") or data.get("Proxy") or ""
+        if data.get("CompilerVersion"):
+            facts["compilerVersion"] = data.get("CompilerVersion")
+        if data.get("SourceCode"):
+            facts["sourceverified"] = True
+        if data.get("Implementation") and not facts.get("implementation"):
+            facts["implementation"] = data.get("Implementation")
+        if data.get("Proxy") in ("1", 1, True):
+            facts["proxy"] = True
+
+    return facts
+
+def format_check_report(facts: dict, lang: str) -> str:
+    L = {
+        "en": {
+            "hdr":"🔎 Contract quick check:",
+            "network":"Network","address":"Address",
+            "name":"Name","symbol":"Symbol","decimals":"Decimals",
+            "erc165":"ERC-165","erc721":"ERC-721","erc1155":"ERC-1155",
+            "proxy":"Proxy","impl":"Implementation","via":"Via",
+            "error":"Internal error or bad address."
+        },
+        "ru": {
+            "hdr":"🔎 Быстрая проверка контракта:",
+            "network":"Сеть","address":"Адрес",
+            "name":"Имя","symbol":"Символ","decimals":"Десятичные",
+            "erc165":"ERC-165","erc721":"ERC-721","erc1155":"ERC-1155",
+            "proxy":"Прокси","impl":"Реализация","via":"Источник",
+            "error":"Внутренняя ошибка или неверный адрес."
+        }
+    }.get(lang, {
+        "hdr":"🔎 Contract quick check:",
+        "network":"Network","address":"Address",
+        "name":"Name","symbol":"Symbol","decimals":"Decimals",
+        "erc165":"ERC-165","erc721":"ERC-721","erc1155":"ERC-1155",
+        "proxy":"Proxy","impl":"Implementation","via":"Via",
+        "error":"Internal error or bad address."
+    })
+    if not facts or not facts.get("ok"):
+        return L["error"]
+    lines = [L["hdr"]]
+    lines.append(f"🧭 {L['network']}: {facts.get('network','ethereum')}")
+    lines.append(f"🔗 {L['address']}: {facts.get('address','')}")
+    if facts.get("name"):     lines.append(f"🏷️ {L['name']}: {facts.get('name')}")
+    if facts.get("symbol"):   lines.append(f"💠 {L['symbol']}: {facts.get('symbol')}")
+    if facts.get("decimals") is not None: lines.append(f"🔢 {L['decimals']}: {facts.get('decimals')}")
+    if "erc165" in facts:
+        e = facts.get("erc165", {})
+        lines.append(f"🧪 {L['erc165']}: {L['erc721']}={'✅' if e.get('erc721') else '❌'}, {L['erc1155']}={'✅' if e.get('erc1155') else '❌'}")
+    if "proxy" in facts:
+        lines.append(f"🧩 {L['proxy']}: {'✅' if facts.get('proxy') else '❌'}")
+    if facts.get("implementation"):
+        lines.append(f"🧷 {L['impl']}: {facts.get('implementation')}")
+    if facts.get("compilerVersion"):
+        lines.append(f"🧪 Compiler: {facts.get('compilerVersion')}")
+    if facts.get("sourceverified"):
+        lines.append("✅ Source verified")
+    if facts.get("via"):
+        lines.append(f"🔎 {L['via']}: " + ", ".join(facts.get("via")))
+    dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    lines.append(f"
+As of {dt}." if lang == "en" else f"\nПо состоянию на {dt}.")
+    return "\n".join(lines)
