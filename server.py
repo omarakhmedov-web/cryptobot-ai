@@ -26,8 +26,6 @@ SERPAPI_KEY          = os.getenv("SERPAPI_KEY", "")          # если нет �
 MODEL                = os.getenv("MODEL", "llama-3.1-8b-instant")
 WEBHOOK_SECRET       = os.getenv("WEBHOOK_SECRET", "").strip()
 
-
-SKIP_WEBHOOK_HEADER = False  # internal flag to bypass header check when delegating
 # Язык по умолчанию
 DEFAULT_LANG         = os.getenv("DEFAULT_LANG", "en").lower()
 
@@ -891,108 +889,321 @@ def uptime():
     return Response(str(int(time.time() - APP_START_TS)), status=200, mimetype="text/plain")
 
 # -------------------- Telegram Webhook --------------------
+
 @app.route("/webhook/<secret>", methods=["POST","GET"])
 def webhook_with_secret(secret):
+    # Non-invasive: allow GET for quick 200 check
     if request.method == "GET":
         return "ok"
+    # Path-secret authorization (URL contains secret)
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
         return jsonify({"ok": False, "error": "bad secret"}), 403
-    global SKIP_WEBHOOK_HEADER
-    SKIP_WEBHOOK_HEADER = True
-    try:
-        resp = webhook()
-    finally:
-        SKIP_WEBHOOK_HEADER = False
-    return resp
-
+    
+    
+        update = request.get_json(force=True, silent=True) or {}
+    
+        # Callback кнопки
+        if "callback_query" in update:
+            cq = update["callback_query"]
+            data = cq.get("data") or ""
+            chat_id = cq.get("message", {}).get("chat", {}).get("id")
+            try:
+                if data == "qr_eth":
+                    send_qr(chat_id, "ETH", ETH_DONATE_ADDRESS); bot.answer_callback_query(cq.get("id"), text="QR ETH sent")
+                elif data == "qr_ton":
+                    send_qr(chat_id, "TON", TON_DONATE_ADDRESS); bot.answer_callback_query(cq.get("id"), text="QR TON sent")
+                elif data == "qr_sol":
+                    send_qr(chat_id, "SOL", SOL_DONATE_ADDRESS); bot.answer_callback_query(cq.get("id"), text="QR SOL sent")
+                elif data == "addr_eth":
+                    bot.send_message(chat_id=chat_id, text=f"ETH: `{ETH_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="ETH address sent")
+                elif data == "addr_ton":
+                    bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="TON address sent")
+                elif data == "addr_sol":
+                    bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="SOL address sent")
+    
+                elif data.startswith("prf:"):
+                    token = data.split(":", 1)[1].strip()
+                    ids = resolve_price_ids(chat_id, token) or ["bitcoin","ethereum","solana","the-open-network"]
+                    lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                    data_now = coingecko_prices(ids, vs="usd")
+                    msg_now = format_prices_message(data_now, lang=lang_cq, vs="usd")
+                    try:
+                        bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=cq.get("message", {}).get("message_id"),
+                            text=msg_now,
+                            reply_markup=build_price_keyboard(chat_id, ids, lang_cq)
+                        )
+                    except Exception:
+                        bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
+                    bot.answer_callback_query(cq.get("id"), text="Updated")
+    
+                elif data == "gas:r":
+                    lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                    gas = get_eth_gas()
+                    msg = format_gas_message(gas, lang_cq)
+                    try:
+                        bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=cq.get("message", {}).get("message_id"),
+                            text=msg,
+                            reply_markup=build_gas_keyboard(lang_cq)
+                        )
+                    except Exception:
+                        bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_gas_keyboard(lang_cq))
+                    bot.answer_callback_query(cq.get("id"), text="Updated")
+    
+                elif data == "fng:r":
+                    lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                    d = fetch_fear_greed()
+                    msg = format_fear_greed(d, lang_cq)
+                    try:
+                        bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=cq.get("message", {}).get("message_id"),
+                            text=msg,
+                            reply_markup=build_fng_keyboard(lang_cq)
+                        )
+                    except Exception:
+                        bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_fng_keyboard(lang_cq))
+                    bot.answer_callback_query(cq.get("id"), text="Updated")
+    
+                elif data == "bdm:r":
+                    lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                    d = fetch_btc_dominance()
+                    msg = format_btc_dominance(d, lang_cq)
+                    try:
+                        bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=cq.get("message", {}).get("message_id"),
+                            text=msg,
+                            reply_markup=build_btcdom_keyboard(lang_cq)
+                        )
+                    except Exception:
+                        bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_btcdom_keyboard(lang_cq))
+                    bot.answer_callback_query(cq.get("id"), text="Updated")
+    
+                else:
+                    bot.answer_callback_query(cq.get("id"))
+            except Exception as e:
+                app.logger.exception(f"callback error: {e}")
+                try:
+                    bot.answer_callback_query(cq.get("id"), text="Error", show_alert=False)
+                except Exception:
+                    pass
+            return "ok"
+    
+        # Обычные сообщения
+        msg = update.get("message") or update.get("edited_message") or {}
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        if not chat_id:
+            return "ok"
+    
+        text = (msg.get("text") or msg.get("caption") or "").strip()
+        t_low = (text or "").lower()
+        cur_lang = get_lang_override(chat_id) or detect_lang(text, None, chat_id)
+    
+        # Команды /start и без слэша
+        if t_low in ("/start", "start"):
+            start_lang = get_lang_override(chat_id) or DEFAULT_LANG
+            bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
+                             reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+            send_donate_message(chat_id, start_lang)
+            return "ok"
+    
+        # Натуральное переключение языка без слэша
+        lang_nl = maybe_set_language_from_text(t_low)
+        if lang_nl in ("en", "ru"):
+            set_lang_override(chat_id, lang_nl)
+            bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}[lang_nl])
+            return "ok"
+    
+        # Принудительная установка языка: /lang en|ru
+        if t_low.startswith("/lang"):
+            parts = t_low.split()
+            if len(parts) >= 2 and parts[1] in ("en","ru"):
+                set_lang_override(chat_id, parts[1])
+                bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}.get(parts[1], "Language set."))
+            else:
+                bot.send_message(chat_id=chat_id, text="Usage: /lang en | ru")
+            return "ok"
+    
+        # Донаты (и без слэша тоже)
+        if t_low in ("/donate", "donate", "донат", "/tip", "tip"):
+            send_donate_message(chat_id, cur_lang)
+            return "ok"
+    
+        # TOP-10 — натуральные фразы без слэша
+        if (
+            t_low.strip() in ("top10", "top ten", "top-ten", "top coins") or
+            re.search(r"\btop\s*-?\s*10\b", t_low) or
+            re.search(r"\bshow\s+top\s+coins\b", t_low)
+        ):
+            mkts = coingecko_top_market(10)
+            msg_out, ids = format_top10(mkts, lang=cur_lang)
+            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
+            return "ok"
+    
+        # /price BTC ETH SOL ...
+        if t_low.startswith("/price"):
+            tail = text.split(None, 1)[1] if len(text.split()) > 1 else ""
+            query_text = tail or "BTC ETH SOL TON"
+            ids = _cg_ids_from_text(query_text)
+            data = coingecko_prices(ids, vs="usd")
+            msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
+            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+            return "ok"
+    
+        # /top10 (оставляем совместимость)
+        if t_low.startswith("/top10"):
+            mkts = coingecko_top_market(10)
+            msg_out, ids = format_top10(mkts, lang=cur_lang)
+            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
+            return "ok"
+    
+        # /gas и без слэша
+        if t_low.startswith("/gas") or t_low == "gas":
+            msg_out = format_gas_message(get_eth_gas(), cur_lang)
+            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_gas_keyboard(cur_lang))
+            return "ok"
+    
+        # /feargreed | /fng и без слэша
+        if t_low.startswith("/feargreed") or t_low == "/fng" or t_low == "feargreed" or t_low == "fng":
+            d = fetch_fear_greed()
+            msg_out = format_fear_greed(d, cur_lang)
+            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_fng_keyboard(cur_lang))
+            return "ok"
+    
+        # /btcdom и без слэша
+        if t_low.startswith("/btcdom") or t_low == "btcdom":
+            d = fetch_btc_dominance()
+            msg_out = format_btc_dominance(d, cur_lang)
+            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_btcdom_keyboard(cur_lang))
+            return "ok"
+    
+        # /balance <address>
+        if t_low.startswith("/balance"):
+            parts = text.split()
+            if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+                bot.send_message(chat_id=chat_id, text={"en":"Usage: /balance <ETH address>","ru":"Использование: /balance <ETH адрес>"}.get(cur_lang, "Usage: /balance <ETH address>"))
+                return "ok"
+            addr = parts[1]
+            if not ALCHEMY_API_KEY:
+                bot.send_message(chat_id=chat_id, text={"en":"Balances are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Баланс временно недоступен (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
+                return "ok"
+            eth_bal = alchemy_get_eth_balance(addr)
+            if not eth_bal.get("ok"):
+                bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch balance.","ru":"Не удалось получить баланс."}.get(cur_lang, ""))
+                return "ok"
+            tokens = alchemy_get_erc20_balances(addr)
+            lines = {"en":[f"💰 Balance for {_short(addr)}:"],
+                     "ru":[f"💰 Баланс {_short(addr)}:"]}.get(cur_lang, [f"💰 Balance for {_short(addr)}:"])
+            lines.append(f"ETH: {eth_bal.get('eth')}")
+            if tokens.get("ok"):
+                # show first up to 10 tokens (contract only; no decimals without metadata)
+                tlist = tokens.get("tokens") or []
+                if tlist:
+                    lines.append({"en":"ERC-20 (raw, first 10):","ru":"ERC-20 (сырые, первые 10):"}.get(cur_lang,"ERC-20:"))
+                    for t in tlist[:10]:
+                        lines.append(f"- {t.get('contract')} : {t.get('balance_hex')}")
+            bot.send_message(chat_id=chat_id, text="\n".join(lines))
+            return "ok"
+    
+        # /txs <address>
+        if t_low.startswith("/txs"):
+            parts = text.split()
+            if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+                bot.send_message(chat_id=chat_id, text={"en":"Usage: /txs <ETH address>","ru":"Использование: /txs <ETH адрес>"}.get(cur_lang, "Usage: /txs <ETH address>"))
+                return "ok"
+            addr = parts[1]
+            if not ALCHEMY_API_KEY:
+                bot.send_message(chat_id=chat_id, text={"en":"Transactions are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Транзакции временно недоступны (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
+                return "ok"
+            hist = alchemy_get_asset_transfers(addr, max_count=10)
+            if not hist.get("ok"):
+                bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch transactions.","ru":"Не удалось получить транзакции."}.get(cur_lang, ""))
+                return "ok"
+            rows = hist.get("txs") or []
+            if not rows:
+                bot.send_message(chat_id=chat_id, text={"en":"No recent transfers found.","ru":"Недавние переводы не найдены."}.get(cur_lang, ""))
+                return "ok"
+            # Build compact table
+            if cur_lang == "ru":
+                header = "# | Дата (UTC)        | От → Кому                | Значение | Статус"
+            else:
+                header = "# | Date (UTC)        | From → To                | Value | Status"
+            lines = [header]
+            for i, r in enumerate(rows, start=1):
+                ln = f"{i} | {str(r.get('date'))[:16]:16} | {_short(r.get('from') or '')} → {_short(r.get('to') or '')} | {r.get('value') or ''} | {r.get('status')}"
+                lines.append(ln)
+            bot.send_message(chat_id=chat_id, text="\n".join(lines))
+            return "ok"
+    
+        
+        # /check <address>
+        if t_low.startswith("/check"):
+            parts = text.split()
+            if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+                bot.send_message(chat_id=chat_id, text={"en":"Usage: /check <ETH address>","ru":"Использование: /check <ETH адрес>"}.get(cur_lang, "Usage: /check <ETH address>"))
+                return "ok"
+            addr = parts[1]
+            try:
+                from server_contract_check import check_contract, format_check_report
+                facts = check_contract(addr, alchemy_key=ALCHEMY_API_KEY,
+                                       etherscan_key=ETHERSCAN_API_KEY,
+                                       polygonscan_key=POLYGONSCAN_API_KEY,
+                                       bscscan_key=BSCSCAN_API_KEY)
+                report = format_check_report(facts, cur_lang)
+            except Exception as e:
+                report = {"en":"Internal error during /check.","ru":"Внутренняя ошибка при /check."}.get(cur_lang, "Internal error during /check.")
+            bot.send_message(chat_id=chat_id, text=report,
+                             reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+            return "ok"
+    
+        # Адрес контракта → отчёт из блок-эксплорера
+        m = ADDR_RE.search(text)
+        if m:
+            address = m.group(0)
+            facts = analyze_eth_contract(address)
+            report = format_report(facts, cur_lang)
+            bot.send_message(chat_id=chat_id, text=report,
+                             reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+            return "ok"
+    
+        # Быстрый ответ цен через CoinGecko (натуральные фразы)
+        if is_price_query(text):
+            ids = _cg_ids_from_text(text)
+            data = coingecko_prices(ids, vs="usd")
+            msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
+            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+            return "ok"
+    
+        # Пусто
+        if not text:
+            # На случай пустого текста просто покажем приветствие по текущему языку
+            start_lang = get_lang_override(chat_id) or DEFAULT_LANG
+            bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
+                             reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+            return "ok"
+    
+        # Обычный AI-ответ
+        answer = ai_reply(text, cur_lang, chat_id)
+        bot.send_message(chat_id=chat_id, text=answer,
+                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+        return "ok"
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
     if request.method == "GET":
         return "ok"
 
-    if WEBHOOK_SECRET and not SKIP_WEBHOOK_HEADER:
+    if WEBHOOK_SECRET:
         header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if header_secret != WEBHOOK_SECRET:
             return jsonify({"ok": False, "error": "bad secret"}), 403
 
     update = request.get_json(force=True, silent=True) or {}
 
-
-
-    # /prices — alias to CoinGecko spot prices (default set)
-
-    if t_low.startswith("/prices"):
-
-        ids = ["bitcoin","ethereum","solana","the-open-network"]
-
-        data = coingecko_prices(ids, vs="usd")
-
-        msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
-
-        return "ok"
-
-
-    # /check 0x... — on-chain quick check with optional explorer enrichment
-
-    if t_low.startswith("/check"):
-
-        parts = (text or "").split()
-
-        if len(parts) >= 2 and ADDR_RE.match(parts[1]):
-
-            addr = parts[1]
-
-            if not ALCHEMY_API_KEY:
-
-                # fallback: explorers only
-
-                facts = {"ok": True, "network":"ethereum", "address": addr, "via": []}
-
-                exp = explorer_getsourcecode(addr)
-
-                if exp and exp.get("ok"):
-
-                    facts["via"].append(exp.get("source"))
-
-                    data = exp.get("data") or {}
-
-                    facts["name"] = data.get("ContractName") or ""
-
-                    if data.get("CompilerVersion"): facts["compilerVersion"]=data.get("CompilerVersion")
-
-                    if data.get("SourceCode"): facts["sourceverified"]=True
-
-                    if data.get("Implementation"): 
-
-                        facts["implementation"]=data.get("Implementation"); facts["proxy"]=True
-
-                    rep = format_quick_check_report(facts, cur_lang)
-
-                    bot.send_message(chat_id=chat_id, text=rep)
-
-                    return "ok"
-
-                else:
-
-                    bot.send_message(chat_id=chat_id, text={"en":"Set ALCHEMY_API_KEY for on-chain checks or add explorer keys.","ru":"Установите ALCHEMY_API_KEY для ончейн-проверок или добавьте ключи эксплореров."}.get(cur_lang,""))
-
-                    return "ok"
-
-            facts = quick_check_contract(addr)
-
-            rep = format_quick_check_report(facts, cur_lang)
-
-            bot.send_message(chat_id=chat_id, text=rep)
-
-            return "ok"
-
-        else:
-
-            bot.send_message(chat_id=chat_id, text={"en":"Usage: /check 0x...","ru":"Использование: /check 0x..."}.get(cur_lang,"Usage: /check 0x..."))
-
-            return "ok"
     # Callback кнопки
     if "callback_query" in update:
         cq = update["callback_query"]
@@ -1100,8 +1311,7 @@ def webhook():
         start_lang = get_lang_override(chat_id) or DEFAULT_LANG
         bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-        if not DONATE_STICKY:
-            send_donate_message(chat_id, start_lang)
+        send_donate_message(chat_id, start_lang)
         return "ok"
 
     # Натуральное переключение языка без слэша
@@ -1232,6 +1442,27 @@ def webhook():
         bot.send_message(chat_id=chat_id, text="\n".join(lines))
         return "ok"
 
+    
+    # /check <address>
+    if t_low.startswith("/check"):
+        parts = text.split()
+        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+            bot.send_message(chat_id=chat_id, text={"en":"Usage: /check <ETH address>","ru":"Использование: /check <ETH адрес>"}.get(cur_lang, "Usage: /check <ETH address>"))
+            return "ok"
+        addr = parts[1]
+        try:
+            from server_contract_check import check_contract, format_check_report
+            facts = check_contract(addr, alchemy_key=ALCHEMY_API_KEY,
+                                   etherscan_key=ETHERSCAN_API_KEY,
+                                   polygonscan_key=POLYGONSCAN_API_KEY,
+                                   bscscan_key=BSCSCAN_API_KEY)
+            report = format_check_report(facts, cur_lang)
+        except Exception as e:
+            report = {"en":"Internal error during /check.","ru":"Внутренняя ошибка при /check."}.get(cur_lang, "Internal error during /check.")
+        bot.send_message(chat_id=chat_id, text=report,
+                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+        return "ok"
+
     # Адрес контракта → отчёт из блок-эксплорера
     m = ADDR_RE.search(text)
     if m:
@@ -1268,3 +1499,239 @@ def webhook():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
+
+# ===== server_contract_check integrated below =====
+
+
+import os, re, json, time, hashlib
+from decimal import Decimal
+from datetime import datetime
+import requests
+
+ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+
+# EIP-1967 implementation slot = keccak256("eip1967.proxy.implementation") - 1
+EIP1967_IMPL_SLOT = int("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", 16)
+
+def _alchemy_url(api_key: str | None) -> str | None:
+    if not api_key:
+        return None
+    return f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
+
+def _rpc(url: str, method: str, params: list) -> dict:
+    try:
+        r = requests.post(url, json={"jsonrpc":"2.0","id":1,"method":method,"params":params}, timeout=20, headers={"Content-Type":"application/json"})
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def _hex_to_bytes(x: str) -> bytes:
+    x = x or ""
+    if x.startswith("0x"):
+        x = x[2:]
+    if len(x) % 2 == 1:
+        x = "0"+x
+    try:
+        return bytes.fromhex(x)
+    except Exception:
+        return b""
+
+def _parse_abi_string(output_hex: str) -> str | None:
+    b = _hex_to_bytes(output_hex)
+    if len(b) < 64:
+        return None
+    # first 32 bytes = offset (skip), next 32 = length, then data
+    try:
+        length = int.from_bytes(b[32:64], "big")
+        data = b[64:64+length]
+        return data.decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+
+def _parse_abi_uint(output_hex: str) -> int | None:
+    b = _hex_to_bytes(output_hex)
+    if len(b) < 32:
+        return None
+    return int.from_bytes(b[-32:], "big")
+
+def _parse_abi_bool(output_hex: str) -> bool | None:
+    n = _parse_abi_uint(output_hex)
+    if n is None: return None
+    return bool(n)
+
+def _eth_call(url: str, to_addr: str, data_hex: str) -> str | None:
+    j = _rpc(url, "eth_call", [{"to": to_addr, "data": data_hex}, "latest"])
+    if "error" in j:
+        return None
+    return j.get("result")
+
+def _name(url: str, addr: str) -> str | None:
+    # function selector for name(): 0x06fdde03
+    out = _eth_call(url, addr, "0x06fdde03")
+    return _parse_abi_string(out) if out else None
+
+def _symbol(url: str, addr: str) -> str | None:
+    # 0x95d89b41
+    out = _eth_call(url, addr, "0x95d89b41")
+    return _parse_abi_string(out) if out else None
+
+def _decimals(url: str, addr: str) -> int | None:
+    # 0x313ce567
+    out = _eth_call(url, addr, "0x313ce567")
+    return _parse_abi_uint(out) if out else None
+
+def _supports_interface(url: str, addr: str, iid_hex: str) -> bool | None:
+    # supportsInterface(bytes4) => 0x01ffc9a7 + 28 zero bytes + 4 byte interface id
+    data = "0x01ffc9a7" + "0"*56 + iid_hex.replace("0x","").lower()
+    out = _eth_call(url, addr, data)
+    return _parse_abi_bool(out) if out else None
+
+def _eip1967_impl(url: str, addr: str) -> str | None:
+    slot_hex = hex(EIP1967_IMPL_SLOT)
+    j = _rpc(url, "eth_getStorageAt", [addr, slot_hex, "latest"])
+    if "error" in j:
+        return None
+    res = j.get("result") or ""
+    b = _hex_to_bytes(res)
+    if len(b) < 32:
+        return None
+    impl_bytes = b[-20:]
+    impl = "0x" + impl_bytes.hex()
+    if impl.lower() == "0x0000000000000000000000000000000000000000":
+        return None
+    return impl
+
+def _getsourcecode_any(address: str, etherscan_key: str|None, polygonscan_key: str|None, bscscan_key: str|None) -> dict:
+    # Try explorers in order; return first success
+    sources = []
+    if etherscan_key:
+        sources.append(("Etherscan","https://api.etherscan.io/api", etherscan_key))
+    if polygonscan_key:
+        sources.append(("PolygonScan","https://api.polygonscan.com/api", polygonscan_key))
+    if bscscan_key:
+        sources.append(("BscScan","https://api.bscscan.com/api", bscscan_key))
+    for name, base, key in sources:
+        try:
+            q = {"module":"contract","action":"getsourcecode","address":address,"apikey":key}
+            r = requests.get(base, params=q, timeout=15)
+            j = r.json()
+            if str(j.get("status")) == "1":
+                data = (j.get("result") or [{}])[0]
+                return {"ok": True, "source": name, "data": data}
+        except Exception:
+            continue
+    return {"ok": False}
+
+def check_contract(address: str, alchemy_key: str|None, etherscan_key: str|None=None, polygonscan_key: str|None=None, bscscan_key: str|None=None) -> dict:
+    addr = address.strip()
+    if not ADDR_RE.fullmatch(addr):
+        return {"ok": False, "error":"bad_address"}
+    url = _alchemy_url(alchemy_key)
+    facts = {"ok": True, "network":"ethereum", "address": addr, "via": ["on-chain"]}
+
+    if url:
+        try:
+            nm = _name(url, addr)
+            if nm: facts["name"] = nm
+        except Exception: pass
+        try:
+            sb = _symbol(url, addr)
+            if sb: facts["symbol"] = sb
+        except Exception: pass
+        try:
+            dc = _decimals(url, addr)
+            if dc is not None: facts["decimals"] = dc
+        except Exception: pass
+        # ERC-165
+        try:
+            erc721 = _supports_interface(url, addr, "0x80ac58cd")
+            if erc721 is not None:
+                facts.setdefault("erc165", {})["erc721"] = bool(erc721)
+        except Exception: pass
+        try:
+            erc1155 = _supports_interface(url, addr, "0xd9b67a26")
+            if erc1155 is not None:
+                facts.setdefault("erc165", {})["erc1155"] = bool(erc1155)
+        except Exception: pass
+        # EIP-1967 proxy
+        try:
+            impl = _eip1967_impl(url, addr)
+            if impl:
+                facts["proxy"] = True
+                facts["implementation"] = impl
+            else:
+                facts["proxy"] = False
+        except Exception: pass
+
+    # Optional enrichment from explorers
+    exp = _getsourcecode_any(addr, etherscan_key, polygonscan_key, bscscan_key)
+    if exp.get("ok"):
+        data = exp.get("data") or {}
+        facts["via"].append(exp.get("source"))
+        if not facts.get("name"):
+            facts["name"] = data.get("ContractName") or data.get("Proxy") or ""
+        if data.get("CompilerVersion"):
+            facts["compilerVersion"] = data.get("CompilerVersion")
+        if data.get("SourceCode"):
+            facts["sourceverified"] = True
+        if data.get("Implementation") and not facts.get("implementation"):
+            facts["implementation"] = data.get("Implementation")
+        if data.get("Proxy") in ("1", 1, True):
+            facts["proxy"] = True
+
+    return facts
+
+def format_check_report(facts: dict, lang: str) -> str:
+    L = {
+        "en": {
+            "hdr":"🔎 Contract quick check:",
+            "network":"Network","address":"Address",
+            "name":"Name","symbol":"Symbol","decimals":"Decimals",
+            "erc165":"ERC-165","erc721":"ERC-721","erc1155":"ERC-1155",
+            "proxy":"Proxy","impl":"Implementation","via":"Via",
+            "error":"Internal error or bad address."
+        },
+        "ru": {
+            "hdr":"🔎 Быстрая проверка контракта:",
+            "network":"Сеть","address":"Адрес",
+            "name":"Имя","symbol":"Символ","decimals":"Десятичные",
+            "erc165":"ERC-165","erc721":"ERC-721","erc1155":"ERC-1155",
+            "proxy":"Прокси","impl":"Реализация","via":"Источник",
+            "error":"Внутренняя ошибка или неверный адрес."
+        }
+    }.get(lang, {
+        "hdr":"🔎 Contract quick check:",
+        "network":"Network","address":"Address",
+        "name":"Name","symbol":"Symbol","decimals":"Decimals",
+        "erc165":"ERC-165","erc721":"ERC-721","erc1155":"ERC-1155",
+        "proxy":"Proxy","impl":"Implementation","via":"Via",
+        "error":"Internal error or bad address."
+    })
+    if not facts or not facts.get("ok"):
+        return L["error"]
+    lines = [L["hdr"]]
+    lines.append(f"🧭 {L['network']}: {facts.get('network','ethereum')}")
+    lines.append(f"🔗 {L['address']}: {facts.get('address','')}")
+    if facts.get("name"):     lines.append(f"🏷️ {L['name']}: {facts.get('name')}")
+    if facts.get("symbol"):   lines.append(f"💠 {L['symbol']}: {facts.get('symbol')}")
+    if facts.get("decimals") is not None: lines.append(f"🔢 {L['decimals']}: {facts.get('decimals')}")
+    if "erc165" in facts:
+        e = facts.get("erc165", {})
+        lines.append(f"🧪 {L['erc165']}: {L['erc721']}={'✅' if e.get('erc721') else '❌'}, {L['erc1155']}={'✅' if e.get('erc1155') else '❌'}")
+    if "proxy" in facts:
+        lines.append(f"🧩 {L['proxy']}: {'✅' if facts.get('proxy') else '❌'}")
+    if facts.get("implementation"):
+        lines.append(f"🧷 {L['impl']}: {facts.get('implementation')}")
+    if facts.get("compilerVersion"):
+        lines.append(f"🧪 Compiler: {facts.get('compilerVersion')}")
+    if facts.get("sourceverified"):
+        lines.append("✅ Source verified")
+    if facts.get("via"):
+        lines.append(f"🔎 {L['via']}: " + ", ".join(facts.get("via")))
+    dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    if lang == "en":
+        lines.append(f"\nAs of {dt}.")
+    else:
+        lines.append(f"\nПо состоянию на {dt}.")
+    return "\n".join(lines)
