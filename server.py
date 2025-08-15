@@ -917,6 +917,82 @@ def webhook():
 
     update = request.get_json(force=True, silent=True) or {}
 
+
+
+    # /prices — alias to CoinGecko spot prices (default set)
+
+    if t_low.startswith("/prices"):
+
+        ids = ["bitcoin","ethereum","solana","the-open-network"]
+
+        data = coingecko_prices(ids, vs="usd")
+
+        msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
+
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+
+        return "ok"
+
+
+    # /check 0x... — on-chain quick check with optional explorer enrichment
+
+    if t_low.startswith("/check"):
+
+        parts = (text or "").split()
+
+        if len(parts) >= 2 and ADDR_RE.match(parts[1]):
+
+            addr = parts[1]
+
+            if not ALCHEMY_API_KEY:
+
+                # fallback: explorers only
+
+                facts = {"ok": True, "network":"ethereum", "address": addr, "via": []}
+
+                exp = explorer_getsourcecode(addr)
+
+                if exp and exp.get("ok"):
+
+                    facts["via"].append(exp.get("source"))
+
+                    data = exp.get("data") or {}
+
+                    facts["name"] = data.get("ContractName") or ""
+
+                    if data.get("CompilerVersion"): facts["compilerVersion"]=data.get("CompilerVersion")
+
+                    if data.get("SourceCode"): facts["sourceverified"]=True
+
+                    if data.get("Implementation"): 
+
+                        facts["implementation"]=data.get("Implementation"); facts["proxy"]=True
+
+                    rep = format_quick_check_report(facts, cur_lang)
+
+                    bot.send_message(chat_id=chat_id, text=rep)
+
+                    return "ok"
+
+                else:
+
+                    bot.send_message(chat_id=chat_id, text={"en":"Set ALCHEMY_API_KEY for on-chain checks or add explorer keys.","ru":"Установите ALCHEMY_API_KEY для ончейн-проверок или добавьте ключи эксплореров."}.get(cur_lang,""))
+
+                    return "ok"
+
+            facts = quick_check_contract(addr)
+
+            rep = format_quick_check_report(facts, cur_lang)
+
+            bot.send_message(chat_id=chat_id, text=rep)
+
+            return "ok"
+
+        else:
+
+            bot.send_message(chat_id=chat_id, text={"en":"Usage: /check 0x...","ru":"Использование: /check 0x..."}.get(cur_lang,"Usage: /check 0x..."))
+
+            return "ok"
     # Callback кнопки
     if "callback_query" in update:
         cq = update["callback_query"]
