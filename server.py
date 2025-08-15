@@ -1427,5 +1427,8 @@ def format_check_report(facts: dict, lang: str) -> str:
     if facts.get("via"):
         lines.append(f"🔎 {L['via']}: " + ", ".join(facts.get("via")))
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines.append(("\nAs of {dt}." if lang == "en" else "\nПо состоянию на {dt}.").format(dt=dt))
+    if lang == "en":
+        lines.append(f"\nAs of {dt}.")
+    else:
+        lines.append(f"\nПо состоянию на {dt}.")
     return "\n".join(lines)
