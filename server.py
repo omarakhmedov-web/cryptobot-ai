@@ -663,23 +663,15 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 # -------------------- TOP-10 --------------------
-
-def coingecko_top_market(cap_n: int = 10, period: str = "24h") -> list[dict]:
-    """
-    period: one of {"24h","7d","30d"}. Defaults to "24h".
-    """
+def coingecko_top_market(cap_n: int = 10) -> list[dict]:
     try:
-        period = (period or "24h").lower()
-        if period not in {"24h","7d","30d"}:
-            period = "24h"
         url = "https://api.coingecko.com/api/v3/coins/markets"
-        # CoinGecko supports: 1h,24h,7d,14d,30d,200d,1y
         params = {
             "vs_currency": "usd",
             "order": "market_cap_desc",
             "per_page": str(cap_n),
             "page": "1",
-            "price_change_percentage": period
+            "price_change_percentage": "24h"
         }
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
@@ -688,51 +680,35 @@ def coingecko_top_market(cap_n: int = 10, period: str = "24h") -> list[dict]:
         app.logger.warning(f"coingecko_top_market error: {e}")
         return []
 
-
-def format_top10(mkts: list[dict], lang: str = "en", period: str = "24h") -> tuple[str, list[str]]:
+def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
         return (
             {"en":"No market data.","ru":"Нет рыночных данных."}.get(lang, "No market data."),
             []
         )
-    # Label for period
-    p_label = {"24h": "24h", "7d": "7d", "30d": "30d"}.get((period or "24h").lower(), "24h")
     lines = {
-        "en": [f"🏆 Top-10 by market cap (USD), change {p_label}:"],
-        "ru": [f"🏆 Топ-10 по капитализации (USD), изм. {p_label}:"],
-    }.get(lang, [f"🏆 Top-10 by market cap (USD), change {p_label}:"])
+        "en": ["🏆 Top-10 by market cap (USD):"],
+        "ru": ["🏆 Топ-10 по капитализации (USD):"],
+    }.get(lang, ["🏆 Top-10 by market cap (USD):"])
     ids = []
-    # Which change key to use
-    chg_key = {
-        "24h": "price_change_percentage_24h",
-        "7d": "price_change_percentage_7d_in_currency",
-        "30d": "price_change_percentage_30d_in_currency",
-    }.get((period or "24h").lower(), "price_change_percentage_24h")
     for i, c in enumerate(mkts, start=1):
         sym = (c.get("symbol") or "").upper()
         price = c.get("current_price")
-        chg = c.get(chg_key)
+        chg = c.get("price_change_percentage_24h")
         chg_s = ""
         if isinstance(chg, (int, float)):
             sign = "▲" if chg >= 0 else "▼"
-            chg_s = f"  {sign}{abs(chg):.2f}%/{p_label}"
+            chg_s = f"  {sign}{abs(chg):.2f}%/24h"
         lines.append(f"{i}. {sym}: ${price:,.4f}{chg_s}")
         ids.append(c.get("id"))
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines.append({"en":f"
-As of {dt}.","ru":f"
-По состоянию на {dt}."}.get(lang, f"
-As of {dt}."))
-    return ("
-".join(lines), ids)
+    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}."}.get(lang, f"\nAs of {dt}."))
+    return ("\n".join(lines), ids)
+
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     token = store_price_ids(chat_id, ids)
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("24h", callback_data="t10:24h"),
-         InlineKeyboardButton("7d", callback_data="t10:7d"),
-         InlineKeyboardButton("30d", callback_data="t10:30d")],
-        [InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]
-    ])
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
+
 # -------------------- GAS / F&G / BTC DOM --------------------
 
 def fetch_gas_alchemy() -> dict | None:
@@ -1071,8 +1047,7 @@ def webhook_with_secret(secret):
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_fng_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
-            
-elif data == "bdm:r":
+            elif data == "bdm:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 d = fetch_btc_dominance()
                 msg = format_btc_dominance(d, lang_cq)
@@ -1085,24 +1060,6 @@ elif data == "bdm:r":
                     )
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_btcdom_keyboard(lang_cq))
-                bot.answer_callback_query(cq.get("id"), text="Updated")
-            elif data.startswith("t10:"):
-                # timeframe for Top-10
-                tf = data.split(":",1)[1].strip().lower() or "24h"
-                if tf not in ("24h","7d","30d"):
-                    tf = "24h"
-                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                mkts = coingecko_top_market(10, period=tf)
-                msg_out, ids = format_top10(mkts, lang=lang_cq, period=tf)
-                try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg_out,
-                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
-                    )
-                except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
             else:
                 bot.answer_callback_query(cq.get("id"))
@@ -1136,8 +1093,7 @@ elif data == "bdm:r":
         bot.send_message(chat_id=chat_id, text="Thanks for considering a donation! Use the Donate button below.")
         return "ok"
 
-    
-# Top-10
+    # Top-10
     if (
         t_low.strip() in ("top10", "top ten", "top-ten", "top coins") or
         re.search(r"\btop\s*-?\s*10\b", t_low) or
@@ -1148,14 +1104,6 @@ elif data == "bdm:r":
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
         return "ok"
 
-
-    # Short timeframe commands like /24h /7d /30d (apply to Top-10)
-    if t_low in ("/24","/24h","24h","/7d","7d","/30d","30d"):
-        tf = "24h" if "24" in t_low else ("7d" if "7d" in t_low else "30d")
-        mkts = coingecko_top_market(10, period=tf)
-        msg_out, ids = format_top10(mkts, lang=cur_lang, period=tf)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
-        return "ok"
     # /price
     if t_low.startswith("/price"):
         tail = text.split(None, 1)[1] if len(text.split()) > 1 else ""
@@ -1363,8 +1311,7 @@ def webhook():
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_fng_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
-            
-elif data == "bdm:r":
+            elif data == "bdm:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 d = fetch_btc_dominance()
                 msg = format_btc_dominance(d, lang_cq)
@@ -1379,24 +1326,6 @@ elif data == "bdm:r":
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_btcdom_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
-            elif data.startswith("t10:"):
-                # timeframe for Top-10
-                tf = data.split(":",1)[1].strip().lower() or "24h"
-                if tf not in ("24h","7d","30d"):
-                    tf = "24h"
-                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                mkts = coingecko_top_market(10, period=tf)
-                msg_out, ids = format_top10(mkts, lang=lang_cq, period=tf)
-                try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg_out,
-                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
-                    )
-                except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
-                bot.answer_callback_query(cq.get("id"), text="Updated")
             else:
                 bot.answer_callback_query(cq.get("id"))
         except Exception as e:
