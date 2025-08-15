@@ -55,7 +55,7 @@ LANG_RE = {"ru": re.compile(r"[А-Яа-яЁё]")}
 # Универсальное приветствие (полная версия для /start)
 WELCOME = {
     "en": (
-        "🤖 Welcome to CryptoBot AI — your compact Web3 assistant.\n\n"
+        "🤖 Welcome to GuardexBot — your compact Web3 assistant.\n\n"
         "I can:\n"
         "• Answer crypto/Web3 questions.\n"
         "• Show live prices, top-10 coins, gas fees, BTC dominance, Fear & Greed.\n"
@@ -65,7 +65,7 @@ WELCOME = {
         "Your help adds new features, integrations, and smarter answers. Every contribution matters! ☕💙"
     ),
     "ru": (
-        "🤖 Добро пожаловать в CryptoBot AI — вашего компактного помощника в мире Web3.\n\n"
+        "🤖 Добро пожаловать в GuardexBot — вашего компактного помощника в мире Web3.\n\n"
         "Я умею:\n"
         "• Отвечать на вопросы о криптовалютах и Web3.\n"
         "• Показывать цены в реальном времени, топ-10 монет, газ, доминацию BTC, индекс страха и жадности.\n"
@@ -79,7 +79,7 @@ WELCOME = {
 # Мотивирующий текст для /donate (без списка возможностей)
 DONATE_TEXT = {
     "en": (
-        "💎 Support CryptoBot AI so it can grow, improve, and stay online 24/7 for everyone’s benefit.\n\n"
+        "💎 Support GuardexBot so it can grow, improve, and stay online 24/7 for everyone’s benefit.\n\n"
         "Your donation helps to:\n"
         "• Keep the bot running reliably without downtime.\n"
         "• Add new features and integrations (Etherscan/PolygonScan/BscScan, Alchemy analytics, alerts).\n"
@@ -87,7 +87,7 @@ DONATE_TEXT = {
         "Every contribution matters — thank you! ☕💙"
     ),
     "ru": (
-        "💎 Поддержите CryptoBot AI, чтобы он развивался, совершенствовался и всегда был на связи 24/7 на благо людей.\n\n"
+        "💎 Поддержите GuardexBot, чтобы он развивался, совершенствовался и всегда был на связи 24/7 на благо людей.\n\n"
         "Ваш вклад помогает:\n"
         "• Обеспечивать стабильную работу бота без простоев.\n"
         "• Добавлять новые функции и интеграции (Etherscan/PolygonScan/BscScan, Alchemy аналитика, уведомления).\n"
@@ -107,7 +107,7 @@ REPORT_LABELS = {
 ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 SYSTEM_PROMPT_BASE = (
-    "You are CryptoBot AI — a concise Web3 assistant.\n"
+    "You are GuardexBot — a concise Web3 assistant.\n"
     "RULES:\n"
     "1) If user sends an Ethereum address (0x...), do NOT guess — run an explorer check and summarize.\n"
     "2) For general questions, answer briefly and practically.\n"
