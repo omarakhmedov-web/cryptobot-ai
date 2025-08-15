@@ -663,7 +663,7 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 # -------------------- TOP-10 --------------------
-def coingecko_top_market(cap_n: int = 10, change_period: str = "24h") -> list[dict]:
+def coingecko_top_market(cap_n: int = 10) -> list[dict]:
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
@@ -671,7 +671,7 @@ def coingecko_top_market(cap_n: int = 10, change_period: str = "24h") -> list[di
             "order": "market_cap_desc",
             "per_page": str(cap_n),
             "page": "1",
-            "price_change_percentage": change_period
+            "price_change_percentage": "24h"
         }
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
@@ -1048,61 +1048,6 @@ def webhook_with_secret(secret):
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_fng_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
             elif data == "bdm:r":
-            elif data.startswith("top10:"):
-        period = data.split(":")[1]
-        lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-        mkts = coingecko_top_market(10, change_period=period)
-        msg_out, ids = format_top10(mkts, lang=lang_cq)
-        try:
-            bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=cq.get("message", {}).get("message_id"),
-                text=msg_out,
-                reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
-            )
-        except Exception:
-            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
-        bot.answer_callback_query(cq.get("id"), text=f"Top-10: {period}")
-                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                mkts = coingecko_top_market(10, change_period=period)
-                msg_out, ids = format_top10(mkts, lang=lang_cq)
-                try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg_out,
-                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
-                    )
-                except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
-                bot.answer_callback_query(cq.get("id"), text=f"Top-10: {period}")
-                try:
-                    lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                    mkts = coingecko_top_market(10, change_period=period)
-                    msg_out, ids = format_top10(mkts, lang=lang_cq)
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg_out,
-                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
-                    )
-                except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
-                bot.answer_callback_query(cq.get("id"), text=f"Top-10: {period}")
-                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                mkts = coingecko_top_market(10, change_period=period)
-                msg_out, ids = format_top10(mkts, lang=lang_cq)
-                try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg_out,
-                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
-                    )
-                except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
-                bot.answer_callback_query(cq.get("id"), text=f"Top-10: {period}")
-
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 d = fetch_btc_dominance()
                 msg = format_btc_dominance(d, lang_cq)
@@ -1367,20 +1312,6 @@ def webhook():
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
             elif data == "bdm:r":
-                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                mkts = coingecko_top_market(10, change_period=period)
-                msg_out, ids = format_top10(mkts, lang=lang_cq)
-                try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg_out,
-                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
-                    )
-                except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
-                bot.answer_callback_query(cq.get("id"), text=f"Top-10: {period}")
-
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 d = fetch_btc_dominance()
                 msg = format_btc_dominance(d, lang_cq)
