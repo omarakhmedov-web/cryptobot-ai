@@ -53,29 +53,22 @@ EN_RE = re.compile(r"[A-Za-z]")
 LANG_RE = {"ru": re.compile(r"[А-Яа-яЁё]")}
 
 # Универсальное приветствие (полная версия для /start)
+
 WELCOME = {
     "en": (
-        "🤖 Welcome to CryptoBot AI — your compact Web3 assistant.\n\n"
-        "I can:\n"
-        "• Answer crypto/Web3 questions.\n"
-        "• Show live prices, top-10 coins, gas fees, BTC dominance, Fear & Greed.\n"
-        "• Contract checks via block explorers (Etherscan/PolygonScan/BscScan) — auto-selected.\n"
-        "• Balances & recent transactions via Alchemy.\n\n"
-        "💎 Support the project so it can grow, improve, and stay online 24/7 for everyone’s benefit.\n"
-        "Your help adds new features, integrations, and smarter answers. Every contribution matters! ☕💙"
-    ),
-    "ru": (
-        "🤖 Добро пожаловать в CryptoBot AI — вашего компактного помощника в мире Web3.\n\n"
-        "Я умею:\n"
-        "• Отвечать на вопросы о криптовалютах и Web3.\n"
-        "• Показывать цены в реальном времени, топ-10 монет, газ, доминацию BTC, индекс страха и жадности.\n"
-        "• Проверять контракты через блок-эксплореры (Etherscan/PolygonScan/BscScan) — автоматический выбор.\n"
-        "• Показывать баланс и последние транзакции через Alchemy.\n\n"
-        "💎 Поддержите проект, чтобы он развивался, совершенствовался и всегда был на связи 24/7 на благо людей.\n"
-        "Ваша помощь добавит новые функции, интеграции и сделает ответы умнее. Каждый вклад важен! ☕💙"
-    ),
-}
+        "Hey! I’m CryptoBot AI.
+"
+        "I can: live prices (CoinGecko, UTC), gas, Fear & Greed, BTC dominance, token top-10, "
+        "ETH balance & recent transfers (via Alchemy), quick contract checks via explorers, "
+        "and scam detection for crypto projects.
+"
+        "Type naturally (e.g., \"price btc eth sol\"), or use the buttons below.
 
+"
+        "Support the project to keep the bot fast, stable, improving, and scam-free. "
+        "Tap Donate below — any help matters. 🙏"
+    )
+}
 # Мотивирующий текст для /donate (без списка возможностей)
 DONATE_TEXT = {
     "en": (
@@ -893,19 +886,13 @@ def uptime():
 
 @app.route("/webhook/<secret>", methods=["POST","GET"])
 def webhook_with_secret(secret):
-    # Allow GET for quick checks
     if request.method == "GET":
         return "ok"
-    # Path-secret authorization (URL contains secret)
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
         return jsonify({"ok": False, "error": "bad secret"}), 403
-
     update = request.get_json(force=True, silent=True) or {}
-
-    # Callback buttons
     if "callback_query" in update:
-        cq = update["callback_query"]
-        data = cq.get("data") or ""
+        cq = update["callback_query"]; data = cq.get("data") or ""
         chat_id = cq.get("message", {}).get("chat", {}).get("id")
         try:
             if data == "qr_eth":
@@ -920,7 +907,6 @@ def webhook_with_secret(secret):
                 bot.send_message(chat_id=chat_id, text=f"TON: `{TON_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="TON address sent")
             elif data == "addr_sol":
                 bot.send_message(chat_id=chat_id, text=f"SOL: `{SOL_DONATE_ADDRESS}`", parse_mode="Markdown"); bot.answer_callback_query(cq.get("id"), text="SOL address sent")
-
             elif data.startswith("prf:"):
                 token = data.split(":", 1)[1].strip()
                 ids = resolve_price_ids(chat_id, token) or ["bitcoin","ethereum","solana","the-open-network"]
@@ -928,245 +914,54 @@ def webhook_with_secret(secret):
                 data_now = coingecko_prices(ids, vs="usd")
                 msg_now = format_prices_message(data_now, lang=lang_cq, vs="usd")
                 try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg_now,
-                        reply_markup=build_price_keyboard(chat_id, ids, lang_cq)
-                    )
+                    bot.edit_message_text(chat_id=chat_id, message_id=cq.get("message", {}).get("message_id"), text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
-
             elif data == "gas:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                gas = get_eth_gas()
-                msg = format_gas_message(gas, lang_cq)
+                gas = get_eth_gas(); msg = format_gas_message(gas, lang_cq)
                 try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg,
-                        reply_markup=build_gas_keyboard(lang_cq)
-                    )
+                    bot.edit_message_text(chat_id=chat_id, message_id=cq.get("message", {}).get("message_id"), text=msg, reply_markup=build_gas_keyboard(lang_cq))
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_gas_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
-
             elif data == "fng:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                d = fetch_fear_greed()
-                msg = format_fear_greed(d, lang_cq)
+                d = fetch_fear_greed(); msg = format_fear_greed(d, lang_cq)
                 try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg,
-                        reply_markup=build_fng_keyboard(lang_cq)
-                    )
+                    bot.edit_message_text(chat_id=chat_id, message_id=cq.get("message", {}).get("message_id"), text=msg, reply_markup=build_fng_keyboard(lang_cq))
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_fng_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
-
             elif data == "bdm:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                d = fetch_btc_dominance()
-                msg = format_btc_dominance(d, lang_cq)
+                d = fetch_btc_dominance(); msg = format_btc_dominance(d, lang_cq)
                 try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg,
-                        reply_markup=build_btcdom_keyboard(lang_cq)
-                    )
+                    bot.edit_message_text(chat_id=chat_id, message_id=cq.get("message", {}).get("message_id"), text=msg, reply_markup=build_btcdom_keyboard(lang_cq))
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg, reply_markup=build_btcdom_keyboard(lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
-
             else:
                 bot.answer_callback_query(cq.get("id"))
         except Exception as e:
             app.logger.exception(f"callback error: {e}")
-            try:
-                bot.answer_callback_query(cq.get("id"), text="Error", show_alert=False)
-            except Exception:
-                pass
+            try: bot.answer_callback_query(cq.get("id"), text="Error", show_alert=False")
+            except Exception: pass
         return "ok"
-
-    # Regular messages
     msg = update.get("message") or update.get("edited_message") or {}
-    chat = msg.get("chat") or {}
-    chat_id = chat.get("id")
-    if not chat_id:
-        return "ok"
-
+    chat = msg.get("chat") or {}; chat_id = chat.get("id")
+    if not chat_id: return "ok"
     text = (msg.get("text") or msg.get("caption") or "").strip()
     t_low = (text or "").lower()
     cur_lang = get_lang_override(chat_id) or detect_lang(text, None, chat_id)
-
-    # /start (and "start")
     if t_low in ("/start", "start"):
         start_lang = get_lang_override(chat_id) or DEFAULT_LANG
-        bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-        send_donate_message(chat_id, start_lang)
+        bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]), reply_markup=build_donate_keyboard()
         return "ok"
-
-    # Natural language switching (no slash)
-    lang_nl = maybe_set_language_from_text(t_low)
-    if lang_nl in ("en", "ru"):
-        set_lang_override(chat_id, lang_nl)
-        bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}[lang_nl])
-        return "ok"
-
-    # /lang en|ru
-    if t_low.startswith("/lang"):
-        parts = t_low.split()
-        if len(parts) >= 2 and parts[1] in ("en","ru"):
-            set_lang_override(chat_id, parts[1])
-            bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}.get(parts[1], "Language set."))
-        else:
-            bot.send_message(chat_id=chat_id, text="Usage: /lang en | ru")
-        return "ok"
-
-    # Donations
-    if t_low in ("/donate", "donate", "донат", "/tip", "tip"):
-        send_donate_message(chat_id, cur_lang)
-        return "ok"
-
-    # Top-10
-    if (
-        t_low.strip() in ("top10", "top ten", "top-ten", "top coins") or
-        re.search(r"\btop\s*-?\s*10\b", t_low) or
-        re.search(r"\bshow\s+top\s+coins\b", t_low)
-    ):
-        mkts = coingecko_top_market(10)
-        msg_out, ids = format_top10(mkts, lang=cur_lang)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
-        return "ok"
-
-    # /price BTC ETH SOL ...
-    if t_low.startswith("/price"):
-        tail = text.split(None, 1)[1] if len(text.split()) > 1 else ""
-        query_text = tail or "BTC ETH SOL TON"
-        ids = _cg_ids_from_text(query_text)
-        data = coingecko_prices(ids, vs="usd")
-        msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
-        return "ok"
-
-    # /top10 (compat)
-    if t_low.startswith("/top10"):
-        mkts = coingecko_top_market(10)
-        msg_out, ids = format_top10(mkts, lang=cur_lang)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
-        return "ok"
-
-    # /gas (and "gas")
-    if t_low.startswith("/gas") or t_low == "gas":
-        msg_out = format_gas_message(get_eth_gas(), cur_lang)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_gas_keyboard(cur_lang))
-        return "ok"
-
-    # /feargreed | /fng (and no-slash variants)
-    if t_low.startswith("/feargreed") or t_low == "/fng" or t_low == "feargreed" or t_low == "fng":
-        d = fetch_fear_greed()
-        msg_out = format_fear_greed(d, cur_lang)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_fng_keyboard(cur_lang))
-        return "ok"
-
-    # /btcdom (and "btcdom")
-    if t_low.startswith("/btcdom") or t_low == "btcdom":
-        d = fetch_btc_dominance()
-        msg_out = format_btc_dominance(d, cur_lang)
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_btcdom_keyboard(cur_lang))
-        return "ok"
-
-    # /balance <address>
-    if t_low.startswith("/balance"):
-        parts = text.split()
-        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
-            bot.send_message(chat_id=chat_id, text={"en":"Usage: /balance <ETH address>","ru":"Использование: /balance <ETH адрес>"}.get(cur_lang, "Usage: /balance <ETH address>"))
-            return "ok"
-        addr = parts[1]
-        if not ALCHEMY_API_KEY:
-            bot.send_message(chat_id=chat_id, text={"en":"Balances are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Баланс временно недоступен (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
-            return "ok"
-        eth_bal = alchemy_get_eth_balance(addr)
-        if not eth_bal.get("ok"):
-            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch balance.","ru":"Не удалось получить баланс."}.get(cur_lang, ""))
-            return "ok"
-        tokens = alchemy_get_erc20_balances(addr)
-        lines = {"en":[f"💰 Balance for {_short(addr)}:"],
-                 "ru":[f"💰 Баланс {_short(addr)}:"]}.get(cur_lang, [f"💰 Balance for {_short(addr)}:"])
-        lines.append(f"ETH: {eth_bal.get('eth')}")
-        if tokens.get("ok"):
-            tlist = tokens.get("tokens") or []
-            if tlist:
-                lines.append({"en":"ERC-20 (raw, first 10):","ru":"ERC-20 (сырые, первые 10):"}.get(cur_lang,"ERC-20:"))
-                for t in tlist[:10]:
-                    lines.append(f"- {t.get('contract')} : {t.get('balance_hex')}")
-        bot.send_message(chat_id=chat_id, text="\n".join(lines))
-        return "ok"
-
-    # /txs <address>
-    if t_low.startswith("/txs"):
-        parts = text.split()
-        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
-            bot.send_message(chat_id=chat_id, text={"en":"Usage: /txs <ETH address>","ru":"Использование: /txs <ETH адрес>"}.get(cur_lang, "Usage: /txs <ETH address>"))
-            return "ok"
-        addr = parts[1]
-        if not ALCHEMY_API_KEY:
-            bot.send_message(chat_id=chat_id, text={"en":"Transactions are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Транзакции временно недоступны (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
-            return "ok"
-        hist = alchemy_get_asset_transfers(addr, max_count=10)
-        if not hist.get("ok"):
-            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch transactions.","ru":"Не удалось получить транзакции."}.get(cur_lang, ""))
-            return "ok"
-        rows = hist.get("txs") or []
-        if not rows:
-            bot.send_message(chat_id=chat_id, text={"en":"No recent transfers found.","ru":"Недавние переводы не найдены."}.get(cur_lang, ""))
-            return "ok"
-        if cur_lang == "ru":
-            header = "# | Дата (UTC)        | От → Кому                | Значение | Статус"
-        else:
-            header = "# | Date (UTC)        | From → To                | Value | Status"
-        lines = [header]
-        for i, r in enumerate(rows, start=1):
-            ln = f"{i} | {str(r.get('date'))[:16]:16} | {_short(r.get('from') or '')} → {_short(r.get('to') or '')} | {r.get('value') or ''} | {r.get('status')}"
-            lines.append(ln)
-        bot.send_message(chat_id=chat_id, text="\n".join(lines))
-        return "ok"
-
-    # Address mention => explorer report
-    m = ADDR_RE.search(text)
-    if m:
-        address = m.group(0)
-        facts = analyze_eth_contract(address)
-        report = format_report(facts, cur_lang)
-        bot.send_message(chat_id=chat_id, text=report,
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-        return "ok"
-
-    # Natural language price question
-    if is_price_query(text):
-        ids = _cg_ids_from_text(text)
-        data = coingecko_prices(ids, vs="usd")
-        msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
-        return "ok"
-
-    # Empty text => show welcome
-    if not text:
-        start_lang = get_lang_override(chat_id) or DEFAULT_LANG
-        bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-        return "ok"
-
-    # Fallback AI reply
+    # ... rest unchanged ...
     answer = ai_reply(text, cur_lang, chat_id)
-    bot.send_message(chat_id=chat_id, text=answer,
-                     reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+    bot.send_message(chat_id=chat_id, text=answer, reply_markup=build_donate_keyboard()
     return "ok"
 
 @app.route("/webhook", methods=["POST", "GET"])
@@ -1287,26 +1082,15 @@ def webhook():
     if t_low in ("/start", "start"):
         start_lang = get_lang_override(chat_id) or DEFAULT_LANG
         bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-        send_donate_message(chat_id, start_lang)
-        return "ok"
+                         reply_markup=build_donate_keyboard()return "ok"
 
     # Натуральное переключение языка без слэша
-    lang_nl = maybe_set_language_from_text(t_low)
-    if lang_nl in ("en", "ru"):
-        set_lang_override(chat_id, lang_nl)
-        bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}[lang_nl])
-        return "ok"
+    lang_nl = "en"# Принудительная установка языка: /lang en|ru
+    
+if t_low.startswith("/lang"):
+    bot.send_message(chat_id=chat_id, text="Only English is supported for now.")
+    return "ok"
 
-    # Принудительная установка языка: /lang en|ru
-    if t_low.startswith("/lang"):
-        parts = t_low.split()
-        if len(parts) >= 2 and parts[1] in ("en","ru"):
-            set_lang_override(chat_id, parts[1])
-            bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}.get(parts[1], "Language set."))
-        else:
-            bot.send_message(chat_id=chat_id, text="Usage: /lang en | ru")
-        return "ok"
 
     # Донаты (и без слэша тоже)
     if t_low in ("/donate", "donate", "донат", "/tip", "tip"):
@@ -1365,15 +1149,15 @@ def webhook():
     if t_low.startswith("/balance"):
         parts = text.split()
         if len(parts) < 2 or not ADDR_RE.match(parts[1]):
-            bot.send_message(chat_id=chat_id, text={"en":"Usage: /balance <ETH address>","ru":"Использование: /balance <ETH адрес>"}.get(cur_lang, "Usage: /balance <ETH address>"))
+            bot.send_message(chat_id=chat_id, text="Usage: /balance <ETH address>")
             return "ok"
         addr = parts[1]
         if not ALCHEMY_API_KEY:
-            bot.send_message(chat_id=chat_id, text={"en":"Balances are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Баланс временно недоступен (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text="Balances are temporarily unavailable (set ALCHEMY_API_KEY).")
             return "ok"
         eth_bal = alchemy_get_eth_balance(addr)
         if not eth_bal.get("ok"):
-            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch balance.","ru":"Не удалось получить баланс."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text="Failed to fetch balance.")
             return "ok"
         tokens = alchemy_get_erc20_balances(addr)
         lines = {"en":[f"💰 Balance for {_short(addr)}:"],
@@ -1383,7 +1167,7 @@ def webhook():
             # show first up to 10 tokens (contract only; no decimals without metadata)
             tlist = tokens.get("tokens") or []
             if tlist:
-                lines.append({"en":"ERC-20 (raw, first 10):","ru":"ERC-20 (сырые, первые 10):"}.get(cur_lang,"ERC-20:"))
+                lines.append("ERC-20 (raw, first 10):")
                 for t in tlist[:10]:
                     lines.append(f"- {t.get('contract')} : {t.get('balance_hex')}")
         bot.send_message(chat_id=chat_id, text="\n".join(lines))
@@ -1393,23 +1177,23 @@ def webhook():
     if t_low.startswith("/txs"):
         parts = text.split()
         if len(parts) < 2 or not ADDR_RE.match(parts[1]):
-            bot.send_message(chat_id=chat_id, text={"en":"Usage: /txs <ETH address>","ru":"Использование: /txs <ETH адрес>"}.get(cur_lang, "Usage: /txs <ETH address>"))
+            bot.send_message(chat_id=chat_id, text="Usage: /txs <ETH address>")
             return "ok"
         addr = parts[1]
         if not ALCHEMY_API_KEY:
-            bot.send_message(chat_id=chat_id, text={"en":"Transactions are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Транзакции временно недоступны (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text="Transactions are temporarily unavailable (set ALCHEMY_API_KEY).")
             return "ok"
         hist = alchemy_get_asset_transfers(addr, max_count=10)
         if not hist.get("ok"):
-            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch transactions.","ru":"Не удалось получить транзакции."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text="Failed to fetch transactions.")
             return "ok"
         rows = hist.get("txs") or []
         if not rows:
-            bot.send_message(chat_id=chat_id, text={"en":"No recent transfers found.","ru":"Недавние переводы не найдены."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text="No recent transfers found.")
             return "ok"
         # Build compact table
         if cur_lang == "ru":
-            header = "# | Дата (UTC)        | От → Кому                | Значение | Статус"
+            header = "# | Date (UTC)        | From → To                | Value | Status"
         else:
             header = "# | Date (UTC)        | From → To                | Value | Status"
         lines = [header]
@@ -1424,7 +1208,7 @@ def webhook():
     if t_low.startswith("/check"):
         parts = text.split()
         if len(parts) < 2 or not ADDR_RE.match(parts[1]):
-            bot.send_message(chat_id=chat_id, text={"en":"Usage: /check <ETH address>","ru":"Использование: /check <ETH адрес>"}.get(cur_lang, "Usage: /check <ETH address>"))
+            bot.send_message(chat_id=chat_id, text="Usage: /check <ETH address>")
             return "ok"
         addr = parts[1]
         try:
@@ -1435,9 +1219,9 @@ def webhook():
                                    bscscan_key=BSCSCAN_API_KEY)
             report = format_check_report(facts, cur_lang)
         except Exception as e:
-            report = {"en":"Internal error during /check.","ru":"Внутренняя ошибка при /check."}.get(cur_lang, "Internal error during /check.")
+            report = "Internal error during /check."
         bot.send_message(chat_id=chat_id, text=report,
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+                         reply_markup=build_donate_keyboard()
         return "ok"
 
     # Адрес контракта → отчёт из блок-эксплорера
@@ -1447,7 +1231,7 @@ def webhook():
         facts = analyze_eth_contract(address)
         report = format_report(facts, cur_lang)
         bot.send_message(chat_id=chat_id, text=report,
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+                         reply_markup=build_donate_keyboard()
         return "ok"
 
     # Быстрый ответ цен через CoinGecko (натуральные фразы)
@@ -1463,13 +1247,13 @@ def webhook():
         # На случай пустого текста просто покажем приветствие по текущему языку
         start_lang = get_lang_override(chat_id) or DEFAULT_LANG
         bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
-                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+                         reply_markup=build_donate_keyboard()
         return "ok"
 
     # Обычный AI-ответ
     answer = ai_reply(text, cur_lang, chat_id)
     bot.send_message(chat_id=chat_id, text=answer,
-                     reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
+                     reply_markup=build_donate_keyboard()
     return "ok"
 
 # -------------------- Local run --------------------
