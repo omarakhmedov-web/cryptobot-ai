@@ -1139,26 +1139,26 @@ def webhook():
         bot.send_message(chat_id=chat_id, text="\n".join(lines))
         return "ok"
 
-
-# /check <address>
-if t_low.startswith("/check"):
-    parts = text.split()
-    if len(parts) < 2 or not ADDR_RE.match(parts[1]):
-        bot.send_message(chat_id=chat_id, text={"en":"Usage: /check <ETH address>","ru":"Использование: /check <ETH адрес>"}.get(cur_lang, "Usage: /check <ETH address>"))
+    
+    # /check <address>
+    if t_low.startswith("/check"):
+        parts = text.split()
+        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+            bot.send_message(chat_id=chat_id, text={"en":"Usage: /check <ETH address>","ru":"Использование: /check <ETH адрес>"}.get(cur_lang, "Usage: /check <ETH address>"))
+            return "ok"
+        addr = parts[1]
+        try:
+            from server_contract_check import check_contract, format_check_report
+            facts = check_contract(addr, alchemy_key=ALCHEMY_API_KEY,
+                                   etherscan_key=ETHERSCAN_API_KEY,
+                                   polygonscan_key=POLYGONSCAN_API_KEY,
+                                   bscscan_key=BSCSCAN_API_KEY)
+            report = format_check_report(facts, cur_lang)
+        except Exception as e:
+            report = {"en":"Internal error during /check.","ru":"Внутренняя ошибка при /check."}.get(cur_lang, "Internal error during /check.")
+        bot.send_message(chat_id=chat_id, text=report,
+                         reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
-    addr = parts[1]
-    try:
-        from server_contract_check import check_contract, format_check_report
-        facts = check_contract(addr, alchemy_key=ALCHEMY_API_KEY,
-                               etherscan_key=ETHERSCAN_API_KEY,
-                               polygonscan_key=POLYGONSCAN_API_KEY,
-                               bscscan_key=BSCSCAN_API_KEY)
-        report = format_check_report(facts, cur_lang)
-    except Exception as e:
-        report = {"en":"Internal error during /check.","ru":"Внутренняя ошибка при /check."}.get(cur_lang, "Internal error during /check.")
-    bot.send_message(chat_id=chat_id, text=report,
-                     reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
-    return "ok"
 
     # Адрес контракта → отчёт из блок-эксплорера
     m = ADDR_RE.search(text)
@@ -1427,6 +1427,5 @@ def format_check_report(facts: dict, lang: str) -> str:
     if facts.get("via"):
         lines.append(f"🔎 {L['via']}: " + ", ".join(facts.get("via")))
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines.append(f"
-As of {dt}." if lang == "en" else f"\nПо состоянию на {dt}.")
+    lines.append(("\nAs of {dt}." if lang == "en" else "\nПо состоянию на {dt}.").format(dt=dt))
     return "\n".join(lines)
