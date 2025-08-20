@@ -310,6 +310,205 @@ def explorer_getsourcecode(address: str) -> dict:
 # ----- Guardex minimal helpers -----
 import os
 
+# ===== Guardex: caching, retries, and RPC helpers =====
+import time, random, json
+
+class _TTLCache:
+    def __init__(self):
+        self._d = {}
+    def get(self, key):
+        v = self._d.get(key)
+        if not v: return None
+        val, exp = v
+        if exp < time.time():
+            self._d.pop(key, None)
+            return None
+        return val
+    def set(self, key, val, ttl):
+        self._d[key] = (val, time.time() + ttl)
+
+_GX_CACHE = _TTLCache()
+
+def _http_get(url, params=None, timeout=12, retries=3, base_sleep=0.5):
+    for i in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code == 200:
+                return r
+        except Exception:
+            pass
+        time.sleep(base_sleep * (2**i) + random.random()*0.2)
+    return requests.get(url, params=params, timeout=timeout)
+
+def _http_post(url, json_payload=None, timeout=12, retries=3, base_sleep=0.5):
+    for i in range(retries):
+        try:
+            r = requests.post(url, json=json_payload, timeout=timeout)
+            if r.status_code == 200:
+                return r
+        except Exception:
+            pass
+        time.sleep(base_sleep * (2**i) + random.random()*0.2)
+    return requests.post(url, json=json_payload, timeout=timeout)
+
+def gx_eth_call(address: str, data_hex: str) -> str:
+    """Minimal eth_call via Alchemy; cached for 5 minutes."""
+    try:
+        url = get_alchemy_rpc_url()
+    except Exception:
+        url = None
+    if not url:
+        return "0x"
+    key = ("eth_call", address.lower(), data_hex.lower())
+    cached = _GX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    payload = {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":address, "data":data_hex}, "latest"]}
+    try:
+        r = _http_post(url, json_payload=payload, timeout=12)
+        res = (r.json() or {}).get("result", "0x")
+    except Exception:
+        res = "0x"
+    _GX_CACHE.set(key, res, ttl=300)
+    return res
+
+def _hex_to_int(x: str) -> int:
+    try:
+        return int(x, 16)
+    except Exception:
+        return 0
+
+def _word(hexstr: str, idx: int) -> str:
+    """Return 32-byte word (as hex string without 0x) at index idx from a hex-encoded ABI output."""
+    h = hexstr[2:] if hexstr.startswith("0x") else hexstr
+    start = idx*64
+    end = start + 64
+    return h[start:end].ljust(64, "0")
+
+def _decode_uint(hexstr: str) -> int:
+    w = _word(hexstr, 0)
+    return _hex_to_int(w)
+
+def _decode_bool(hexstr: str) -> bool:
+    return bool(_decode_uint(hexstr))
+
+def _decode_address(hexstr: str) -> str:
+    w = _word(hexstr, 0)
+    return "0x" + w[-40:]
+
+def _try_decode_string(hexstr: str) -> str:
+    """Try to decode dynamic string; fallback to bytes32 -> ascii; else return ''."""
+    h = hexstr[2:] if hexstr.startswith("0x") else hexstr
+    if len(h) < 64:
+        return ""
+    try:
+        off = _hex_to_int(h[0:64])
+        if off == 32:
+            length = _hex_to_int(h[64:128])
+            data_start = 128
+            data_end = data_start + ((length + 31)//32)*64
+            data_hex = h[data_start:data_end]
+            data_bytes = bytes.fromhex(data_hex[:length*2])
+            return data_bytes.decode("utf-8", errors="ignore").strip("\x00")
+    except Exception:
+        pass
+    try:
+        b = bytes.fromhex(h[:64])
+        s = b.decode("utf-8", errors="ignore").strip("\x00")
+        if any(c.isalnum() for c in s):
+            return s
+    except Exception:
+        pass
+    return ""
+
+# Common ERC20 selectors
+SEL_NAME        = "0x06fdde03"
+SEL_SYMBOL      = "0x95d89b41"
+SEL_DECIMALS    = "0x313ce567"
+SEL_TOTALSUPPLY = "0x18160ddd"
+# Common access-control
+SEL_OWNER       = "0x8da5cb5b"
+# Pausable
+SEL_PAUSED      = "0x5c975abb"
+
+def gx_read_erc20_summary(address: str) -> dict:
+    """Read common ERC20 fields via eth_call. Returns dict with optional keys."""
+    out = {}
+    try:
+        r = gx_eth_call(address, SEL_SYMBOL)
+        sym = _try_decode_string(r) or ""
+        if sym: out["symbol"] = sym
+    except Exception:
+        pass
+    try:
+        r = gx_eth_call(address, SEL_DECIMALS)
+        dec = _decode_uint(r)
+        out["decimals"] = dec
+    except Exception:
+        pass
+    try:
+        r = gx_eth_call(address, SEL_TOTALSUPPLY)
+        ts = _decode_uint(r)
+        out["totalSupply"] = ts
+    except Exception:
+        pass
+    try:
+        r = gx_eth_call(address, SEL_PAUSED)
+        if isinstance(r, str) and len(r) >= 66:
+            out["paused"] = _decode_bool(r)
+    except Exception:
+        pass
+    try:
+        r = gx_eth_call(address, SEL_OWNER)
+        if isinstance(r, str) and len(r) >= 66:
+            out["owner"] = _decode_address(r)
+    except Exception:
+        pass
+    return out
+
+def gx_get_abi_text(address: str) -> str:
+    """Fetch ABI (with TTL cache 15m)."""
+    key = ("abi", address.lower())
+    c = _GX_CACHE.get(key)
+    if c is not None:
+        return c
+    try:
+        res = explorer_getsourcecode(address)
+        meta = res.get("data") or {}
+        abi_text = meta.get("ABI") or ""
+        if abi_text and abi_text != "Contract source code not verified":
+            _GX_CACHE.set(key, abi_text, 900)
+            return abi_text
+    except Exception:
+        pass
+    try:
+        abi_text = etherscan_getabi_direct(address)
+        if abi_text and abi_text not in ("[]", "Contract source code not verified"):
+            _GX_CACHE.set(key, abi_text, 900)
+            return abi_text
+    except Exception:
+        pass
+    try:
+        for ex in EXPLORERS:
+            if not ex.get("key"): continue
+            params = {"module": ex["module"], "action": "getabi", "address": address, "apikey": ex["key"]}
+            rr = _http_get(ex["base"], params=params, timeout=12)
+            jj = rr.json()
+            if str(jj.get("status")) == "1" and jj.get("result"):
+                abi_text = jj.get("result")
+                _GX_CACHE.set(key, abi_text, 900)
+                return abi_text
+    except Exception:
+        pass
+    _GX_CACHE.set(key, "[]", 300)
+    return "[]"
+
+def gx_has_role_fn(abi_text: str, fn_name: str) -> bool:
+    try:
+        return ('"name":"' + fn_name + '"') in abi_text or ('"name": "' + fn_name + '"') in abi_text
+    except Exception:
+        return False
+
 def etherscan_getsourcecode_flat(address: str) -> dict:
     """
     Direct Etherscan getsourcecode using ETHERSCAN_API_KEY; fallback to explorer_getsourcecode.
@@ -1380,6 +1579,65 @@ def webhook_with_secret(secret):
                 bot.send_message(chat_id=chat_id, text=f"<pre>{html.escape(abi_text)}</pre>", parse_mode="HTML")
         except Exception:
             bot.send_message(chat_id=chat_id, text="Failed to fetch ABI from Etherscan.")
+        return "ok"
+
+    # /status <address> — summarize token & roles (auto-resolve proxy -> implementation)
+    if t_low.startswith("/status"):
+        parts = text.split()
+        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+            bot.send_message(chat_id=chat_id, text="Usage: /status <ETH address>")
+            return "ok"
+        addr = parts[1]
+        meta_res = explorer_getsourcecode(addr)
+        meta = meta_res.get("data") or {}
+        is_proxy = (meta.get("Proxy") == "1") or bool(meta.get("Implementation"))
+        target = addr
+        impl = ""
+        if is_proxy:
+            impl = (meta.get("Implementation") or "").strip()
+            if not (impl.startswith("0x") and len(impl) == 42):
+                try:
+                    slot_hex = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbb"
+                    rpc = get_alchemy_rpc_url()
+                    word = "0x" + "00"*32
+                    if rpc:
+                        payload = {"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[addr, slot_hex, "latest"]}
+                        resp = _http_post(rpc, json_payload=payload, timeout=12)
+                        word = (resp.json() or {}).get("result", word)
+                    h = (word[2:] if isinstance(word, str) and word.startswith("0x") else "").rjust(64, "0")
+                    impl = "0x" + h[-40:] if h else ""
+                except Exception:
+                    impl = ""
+            if impl and impl.lower() != "0x" + "0"*40:
+                target = impl
+
+        summary = gx_read_erc20_summary(target)
+        sym = summary.get("symbol") or "-"
+        dec = summary.get("decimals"); dec_s = str(dec) if isinstance(dec, int) else "-"
+        ts = summary.get("totalSupply"); ts_s = str(ts) if isinstance(ts, int) else "-"
+        paused = summary.get("paused"); paused_s = "—" if (paused is None) else ("Yes" if paused else "No")
+        owner = summary.get("owner") or "—"
+
+        abi_text = gx_get_abi_text(target)
+        roles_presence = []
+        for fn in ["owner", "masterMinter", "pauser", "blacklister", "rescuer"]:
+            roles_presence.append(f"{fn}: {'✅' if gx_has_role_fn(abi_text, fn) else '—'}")
+        roles_line = " | ".join(roles_presence)
+
+        lines = [
+            "🧭 Network: ethereum",
+            f"🔗 Address: {addr}",
+            f"🧩 Proxy: {'✅' if is_proxy else '❌'}" + (f"  →  Implementation: {target}" if is_proxy else ""),
+            f"🏷️ Symbol: {sym}",
+            f"🔢 Decimals: {dec_s}",
+            f"💰 TotalSupply: {ts_s}",
+            f"⏸️ Paused: {paused_s}",
+            f"👤 Owner: {owner}",
+            f"🔐 Roles: {roles_line}",
+            "🔎 Data source: Etherscan / Alchemy RPC"
+        ]
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open on Etherscan", url=f"https://etherscan.io/address/{target}")]])
+        bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=kb, disable_web_page_preview=True)
         return "ok"
 # Address mention => explorer report
     m = ADDR_RE.search(text)
