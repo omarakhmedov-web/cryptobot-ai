@@ -359,14 +359,35 @@ def guardex_getabi(address: str) -> str:
             continue
     return "[]"
 
+
 def guardex_parse_name_compiler_from_sourcecode(meta: dict) -> tuple[str,str]:
-    """Fallback parse of Etherscan standard-json in 'SourceCode' to extract contract name and compiler."""
-    name = meta.get("ContractName") or "Unknown"
-    ver  = meta.get("CompilerVersion") or "-"
+    """Fallback parse of Etherscan standard-json in 'SourceCode' to extract contract name and compiler.
+    Works with three cases:
+      1) Plain fields in metadata (ContractName / CompilerVersion)
+      2) Standard JSON (flattened) in SourceCode
+      3) Raw Solidity source (no JSON) — pick first contract/interface/library name
+    """
+    # 1) direct fields (handle strange keys with trailing spaces)
+    name = (
+        meta.get("ContractName")
+        or meta.get("ContractName ")
+        or meta.get("contractName")
+        or "Unknown"
+    )
+    ver = (
+        meta.get("CompilerVersion")
+        or meta.get("CompilerVersion ")
+        or meta.get("compilerVersion")
+        or "-"
+    )
+
+    sc = meta.get("SourceCode") or ""
     try:
-        sc = meta.get("SourceCode") or ""
+        # Some Etherscan responses wrap JSON with extra braces
         if isinstance(sc, str) and sc.startswith("{{") and sc.endswith("}}"):
             sc = sc[1:-1]
+
+        # 2) Standard JSON path
         if isinstance(sc, str) and sc.strip().startswith("{"):
             import json
             j = json.loads(sc)
@@ -375,15 +396,27 @@ def guardex_parse_name_compiler_from_sourcecode(meta: dict) -> tuple[str,str]:
                 ct = settings.get("compilationTarget") or {}
                 if isinstance(ct, dict) and ct and name == "Unknown":
                     try:
-                        name = list(ct.values())[0]
+                        name = list(ct.values())[0] or name
                     except Exception:
                         pass
                 compiler = j.get("compiler") or {}
                 if isinstance(compiler, dict) and (ver in ("-", "", None)):
                     ver = compiler.get("version") or ver
+
+        # 3) Raw Solidity source — extract first contract/interface/library name
+        if (not isinstance(sc, str)) or (not sc):
+            pass
+        else:
+            # If still unknown, try regex
+            if name == "Unknown":
+                import re as _re
+                m = _re.search(r"\b(contract|library|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\b", sc)
+                if m:
+                    name = m.group(2)
     except Exception:
         pass
     return name, ver
+
 
 def get_alchemy_rpc_url() -> str | None:
     if not ALCHEMY_API_KEY:
