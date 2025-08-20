@@ -307,97 +307,45 @@ def explorer_getsourcecode(address: str) -> dict:
     return {"ok": False, "error": "no_explorer_ok", "source": None, "raw": None}
 
 # -------------------- Alchemy helpers --------------------
-# ---------- Guardex proxy/ABI helpers (minimal patch) ----------
-def _guardex_rpc_get_storage_at(address: str, slot_hex: str) -> str:
-    url = get_alchemy_rpc_url()
-    if not url:
-        return "0x" + "00"*32
-    try:
-        payload = {"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[address, slot_hex, "latest"]}
-        r = requests.post(url, json=payload, timeout=12)
-        j = r.json() or {}
-        return j.get("result", "0x" + "00"*32)
-    except Exception:
-        return "0x" + "00"*32
+# ----- Guardex minimal helpers -----
+import os
 
-def _guardex_extract_addr_from_word(word_hex: str) -> str:
-    if not isinstance(word_hex, str) or not word_hex.startswith("0x"):
-        return ""
-    h = word_hex[2:].rjust(64, "0")
-    addr = "0x" + h[-40:]
-    return "" if addr.lower() == "0x" + "0"*40 else addr
-
-def guardex_resolve_impl(address: str) -> str:
-    """Resolve implementation for proxies via explorers or EIP-1967 slot."""
-    res = explorer_getsourcecode(address)
-    data = res.get("data") or {}
-    impl = (data.get("Implementation") or "").strip()
-    if impl.startswith("0x") and len(impl) == 42:
-        return impl
-    # EIP-1967 implementation slot
-    slot_hex = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbb"
-    word = _guardex_rpc_get_storage_at(address, slot_hex)
-    return _guardex_extract_addr_from_word(word)
-
-def guardex_getabi(address: str) -> str:
-    """Try ABI from getsourcecode, then direct Etherscan getabi, then explorers aggregator."""
-    res = explorer_getsourcecode(address)
-    meta = res.get("data") or {}
-    abi_text = meta.get("ABI") or ""
-    if abi_text and abi_text != "Contract source code not verified":
-        return abi_text
-    # direct Etherscan
-    abi_text = etherscan_getabi_direct(address)
-    if abi_text and abi_text not in ("[]", "Contract source code not verified"):
-        return abi_text
-    # explorers fallback
-    res = explorer_getsourcecode(address)
-    meta = res.get("data") or {}
-    abi_text = meta.get("ABI") or ""
-    if abi_text and abi_text != "Contract source code not verified":
-        return abi_text
-    for ex in EXPLORERS:
-        if not ex.get("key"):
-            continue
+def etherscan_getsourcecode_flat(address: str) -> dict:
+    """
+    Direct Etherscan getsourcecode using ETHERSCAN_API_KEY; fallback to explorer_getsourcecode.
+    """
+    key = os.getenv("ETHERSCAN_API_KEY", "")
+    if key:
         try:
-            q = {"module": ex["module"], "action": "getabi", "address": address, "apikey": ex["key"]}
-            r = requests.get(ex["base"], params=q, timeout=12)
+            url = "https://api.etherscan.io/api"
+            params = {"module":"contract","action":"getsourcecode","address":address,"apikey":key}
+            r = requests.get(url, params=params, timeout=12)
             j = r.json()
             if str(j.get("status")) == "1" and j.get("result"):
-                return j.get("result")
+                first = j["result"][0]
+                if isinstance(first, dict):
+                    return first
         except Exception:
-            continue
-    return "[]"
-
-
-def guardex_parse_name_compiler_from_sourcecode(meta: dict) -> tuple[str,str]:
-    """Fallback parse of Etherscan standard-json in 'SourceCode' to extract contract name and compiler.
-    Works with three cases:
-      1) Plain fields in metadata (ContractName / CompilerVersion)
-      2) Standard JSON (flattened) in SourceCode
-      3) Raw Solidity source (no JSON) — pick first contract/interface/library name
-    """
-    # 1) direct fields (handle strange keys with trailing spaces)
-    name = (
-        meta.get("ContractName")
-        or meta.get("ContractName ")
-        or meta.get("contractName")
-        or "Unknown"
-    )
-    ver = (
-        meta.get("CompilerVersion")
-        or meta.get("CompilerVersion ")
-        or meta.get("compilerVersion")
-        or "-"
-    )
-
-    sc = meta.get("SourceCode") or ""
+            pass
     try:
-        # Some Etherscan responses wrap JSON with extra braces
+        res = explorer_getsourcecode(address)
+        data = res.get("data") or {}
+        if isinstance(data, list) and data:
+            data = data[0]
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def guardex_parse_name_compiler(meta: dict) -> tuple[str,str]:
+    """
+    Try multiple ways to extract ContractName and CompilerVersion.
+    """
+    name = meta.get("ContractName") or meta.get("ContractName ") or meta.get("contractName") or "Unknown"
+    ver  = meta.get("CompilerVersion") or meta.get("Compiler Version") or meta.get("compilerVersion") or "-"
+    try:
+        sc = meta.get("SourceCode") or ""
         if isinstance(sc, str) and sc.startswith("{{") and sc.endswith("}}"):
             sc = sc[1:-1]
-
-        # 2) Standard JSON path
         if isinstance(sc, str) and sc.strip().startswith("{"):
             import json
             j = json.loads(sc)
@@ -412,21 +360,14 @@ def guardex_parse_name_compiler_from_sourcecode(meta: dict) -> tuple[str,str]:
                 compiler = j.get("compiler") or {}
                 if isinstance(compiler, dict) and (ver in ("-", "", None)):
                     ver = compiler.get("version") or ver
-
-        # 3) Raw Solidity source — extract first contract/interface/library name
-        if (not isinstance(sc, str)) or (not sc):
-            pass
-        else:
-            # If still unknown, try regex
-            if name == "Unknown":
-                import re as _re
-                m = _re.search(r"\b(contract|library|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\b", sc)
-                if m:
-                    name = m.group(2)
+        if name == "Unknown":
+            import re as _re
+            m = _re.search(r"\b(contract|library|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\b", sc or "")
+            if m:
+                name = m.group(2)
     except Exception:
         pass
     return name, ver
-
 
 def get_alchemy_rpc_url() -> str | None:
     if not ALCHEMY_API_KEY:
@@ -1327,37 +1268,55 @@ def webhook_with_secret(secret):
         return "ok"
 
     
-    # /impl <address> — show implementation metadata for proxies (uses implementation meta/ABI)
+    # /impl <address> — show implementation metadata via direct Etherscan + fallbacks
     if t_low.startswith("/impl"):
         parts = text.split()
         if len(parts) < 2 or not ADDR_RE.match(parts[1]):
             bot.send_message(chat_id=chat_id, text="Usage: /impl <ETH address>")
             return "ok"
         addr = parts[1]
+        # detect proxy from aggregator meta (fast)
         meta_res = explorer_getsourcecode(addr)
         meta = meta_res.get("data") or {}
         is_proxy = (meta.get("Proxy") == "1") or bool(meta.get("Implementation"))
         if not is_proxy:
             bot.send_message(chat_id=chat_id, text="Not a proxy (no implementation).")
             return "ok"
-        impl = guardex_resolve_impl(addr)
-        if not impl:
+        # resolve implementation: prefer explorer hint, else EIP-1967
+        impl = (meta.get("Implementation") or "").strip()
+        if not (impl.startswith("0x") and len(impl) == 42):
+            # fallback to slot
+            try:
+                slot_hex = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbb"
+                rpc = get_alchemy_rpc_url()
+                word = "0x" + "00"*32
+                if rpc:
+                    payload = {"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[addr, slot_hex, "latest"]}
+                    resp = requests.post(rpc, json=payload, timeout=12)
+                    word = (resp.json() or {}).get("result", word)
+                h = (word[2:] if isinstance(word, str) and word.startswith("0x") else "").rjust(64, "0")
+                impl = "0x" + h[-40:] if h else ""
+            except Exception:
+                impl = ""
+        if not impl or impl.lower() == "0x" + "0"*40:
             bot.send_message(chat_id=chat_id, text="Proxy detected, but implementation not found (EIP-1967 slot empty).")
             return "ok"
-        im_meta = guardex_getsourcecode_etherscan_only(impl)
-        name, ver = guardex_parse_name_compiler_from_sourcecode(im_meta)
-        if name == "Unknown":
-            name = im_meta.get("ContractName") or name
-        if ver in ("-", "", None):
-            ver = im_meta.get("CompilerVersion") or ver
-        abi_text = guardex_getabi(impl)
-
-        if (ver in ("-", "", None)):
-
-            ver = im_meta.get("CompilerVersion") or ver
-
-        verified_bool = bool(abi_text and abi_text != "Contract source code not verified")
-        v_mark = "✅" if verified_bool else "❌"
+        im_meta = etherscan_getsourcecode_flat(impl)
+        name, ver = guardex_parse_name_compiler(im_meta)
+        # ABI-based verification; if empty ABI, try explicit path in your codebase if exists
+        abi_text = im_meta.get("ABI") or ""
+        if not abi_text or abi_text == "Contract source code not verified":
+            # fallback: ask explorer for ABI via existing code path if any
+            try:
+                q = {"module": meta.get("module") or "contract", "action": "getabi", "address": impl, "apikey": os.getenv("ETHERSCAN_API_KEY","")}
+                r = requests.get("https://api.etherscan.io/api", params=q, timeout=12)
+                j = r.json()
+                if str(j.get("status")) == "1" and j.get("result"):
+                    abi_text = j.get("result")
+            except Exception:
+                pass
+        verified = bool(abi_text and abi_text != "Contract source code not verified")
+        v_mark = "✅" if verified else "❌"
         lines = [
             "🧭 Network: ethereum",
             f"🔗 Proxy: {addr}",
@@ -1365,7 +1324,7 @@ def webhook_with_secret(secret):
             f"🏷️ Contract name: {name}",
             f"✅ Source verified: {v_mark}",
             f"🧪 Compiler: {ver}",
-            f"🔎 Data source: {meta_res.get('source') or 'Explorer'}"
+            f"🔎 Data source: Etherscan"
         ]
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("Etherscan (Proxy)", url=f"https://etherscan.io/address/{addr}"),
@@ -1374,7 +1333,7 @@ def webhook_with_secret(secret):
         bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=kb, disable_web_page_preview=True)
         return "ok"
 
-    # /abi <address> — return ABI (implementation ABI if proxy)
+    # /abi <address> — implementation ABI if proxy
     if t_low.startswith("/abi"):
         parts = text.split()
         if len(parts) < 2 or not ADDR_RE.match(parts[1]):
@@ -1385,16 +1344,42 @@ def webhook_with_secret(secret):
         meta = meta_res.get("data") or {}
         target = addr
         if (meta.get("Proxy") == "1") or bool(meta.get("Implementation")):
-            impl = guardex_resolve_impl(addr)
-            if impl:
+            # resolve as above
+            impl = (meta.get("Implementation") or "").strip()
+            if not (impl.startswith("0x") and len(impl) == 42):
+                try:
+                    slot_hex = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbb"
+                    rpc = get_alchemy_rpc_url()
+                    word = "0x" + "00"*32
+                    if rpc:
+                        payload = {"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[addr, slot_hex, "latest"]}
+                        resp = requests.post(rpc, json=payload, timeout=12)
+                        word = (resp.json() or {}).get("result", word)
+                    h = (word[2:] if isinstance(word, str) and word.startswith("0x") else "").rjust(64, "0")
+                    impl = "0x" + h[-40:] if h else ""
+                except Exception:
+                    impl = ""
+            if impl and impl.lower() != "0x" + "0"*40:
                 target = impl
-        abi_text = guardex_getabi(target) or "[]"
-        if len(abi_text) > 3500:
-            preview = abi_text[:3400] + "..."
-            link = f"https://etherscan.io/address/{target}#code"
-            bot.send_message(chat_id=chat_id, text=f"ABI for {target} (truncated):\n\n<pre>{html.escape(preview)}</pre>\n\nFull: {link}", parse_mode="HTML", disable_web_page_preview=True)
-        else:
-            bot.send_message(chat_id=chat_id, text=f"<pre>{html.escape(abi_text)}</pre>", parse_mode="HTML")
+        # ABI via Etherscan direct
+        try:
+            key = os.getenv("ETHERSCAN_API_KEY","")
+            abi_text = "[]"
+            if key:
+                url = "https://api.etherscan.io/api"
+                params = {"module":"contract","action":"getabi","address":target,"apikey":key}
+                rr = requests.get(url, params=params, timeout=12)
+                jj = rr.json()
+                if str(jj.get("status")) == "1" and jj.get("result"):
+                    abi_text = jj.get("result")
+            if len(abi_text) > 3500:
+                preview = abi_text[:3400] + "..."
+                link = f"https://etherscan.io/address/{target}#code"
+                bot.send_message(chat_id=chat_id, text=f"ABI for {target} (truncated):\n\n<pre>{html.escape(preview)}</pre>\n\nFull: {link}", parse_mode="HTML", disable_web_page_preview=True)
+            else:
+                bot.send_message(chat_id=chat_id, text=f"<pre>{html.escape(abi_text)}</pre>", parse_mode="HTML")
+        except Exception:
+            bot.send_message(chat_id=chat_id, text="Failed to fetch ABI from Etherscan.")
         return "ok"
 # Address mention => explorer report
     m = ADDR_RE.search(text)
@@ -1967,73 +1952,3 @@ def format_check_report(facts: dict, lang: str) -> str:
     else:
         lines.append(f"\nПо состоянию на {dt}.")
     return "\n".join(lines)
-
-
-
-def guardex_getsourcecode_etherscan_only(address: str) -> dict:
-    """Direct Etherscan getsourcecode for stable ContractName/CompilerVersion (fallback to aggregator)."""
-    try:
-        for ex in EXPLORERS:
-            if ex.get("name") == "etherscan" and ex.get("key"):
-                params = {"module":"contract","action":"getsourcecode","address":address,"apikey":ex["key"]}
-                r = requests.get(ex["base"], params=params, timeout=12)
-                j = r.json()
-                if str(j.get("status")) == "1" and j.get("result"):
-                    return j["result"][0]
-                break
-    except Exception:
-        pass
-    res = explorer_getsourcecode(address)
-    data = res.get("data") or {}
-    if isinstance(data, list) and data:
-        try:
-            data = data[0]
-        except Exception:
-            data = {}
-    return data
-
-import os
-
-def etherscan_getsourcecode_flat(address: str) -> dict:
-    """
-    Direct call to Etherscan getsourcecode using ETHERSCAN_API_KEY.
-    Returns the first result dict or {}. Falls back to explorer_getsourcecode.
-    """
-    key = os.getenv("ETHERSCAN_API_KEY", "")
-    if key:
-        try:
-            url = "https://api.etherscan.io/api"
-            params = {"module":"contract","action":"getsourcecode","address":address,"apikey":key}
-            r = requests.get(url, params=params, timeout=12)
-            j = r.json()
-            if str(j.get("status")) == "1" and j.get("result"):
-                return j["result"][0]
-        except Exception:
-            pass
-    # Fallback to aggregator
-    try:
-        res = explorer_getsourcecode(address)
-        data = res.get("data") or {}
-        if isinstance(data, list) and data:
-            data = data[0]
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-def etherscan_getabi_direct(address: str) -> str:
-    """
-    Direct Etherscan getabi using ETHERSCAN_API_KEY. Returns JSON string or "[]".
-    """
-    key = os.getenv("ETHERSCAN_API_KEY", "")
-    if not key:
-        return "[]"
-    try:
-        url = "https://api.etherscan.io/api"
-        params = {"module":"contract","action":"getabi","address":address,"apikey":key}
-        r = requests.get(url, params=params, timeout=12)
-        j = r.json()
-        if str(j.get("status")) == "1" and j.get("result"):
-            return j["result"]
-    except Exception:
-        pass
-    return "[]"
