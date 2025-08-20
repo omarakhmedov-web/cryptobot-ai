@@ -302,6 +302,37 @@ def explorer_getsourcecode(address: str) -> dict:
             j = r.json()
             if str(j.get("status")) == "1":
                 return {"ok": True, "data": (j.get("result") or [{}])[0], "source": ex["name"], "raw": j}
+
+
+def resolve_proxy_impl(address: str) -> str:
+    """
+    Try to resolve implementation via getsourcecode meta, then fallback to EIP-1967 slot.
+    """
+    try:
+        meta = etherscan_getsourcecode_flat(address) or {}
+    except Exception:
+        meta = {}
+    impl = (meta.get("Implementation") or "").strip()
+    if impl and re.match(r"^0x[a-fA-F0-9]{40}$", impl):
+        return impl
+    # Fallback: EIP-1967 implementation slot
+    slot_hex = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbb"
+    url = get_alchemy_rpc_url()
+    if not url:
+        return ""
+    try:
+        payload = {"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[address, slot_hex, "latest"]}
+        r = requests.post(url, json=payload, timeout=12)
+        j = r.json() if r is not None else {}
+        word = (j or {}).get("result", "") if isinstance(j, dict) else ""
+        if isinstance(word, str) and word.startswith("0x"):
+            h = word[2:].rjust(64, "0")
+            cand = "0x" + h[-40:]
+            if re.match(r"^0x[a-fA-F0-9]{40}$", cand) and cand.lower() != "0x" + "0"*40:
+                return cand
+    except Exception:
+        pass
+    return ""
         except Exception as e:
             app.logger.warning(f"explorer_getsourcecode error via {ex['name']}: {e}")
     return {"ok": False, "error": "no_explorer_ok", "source": None, "raw": None}
@@ -1341,6 +1372,126 @@ def webhook_with_secret(secret):
 
     text = (msg.get("text") or msg.get("caption") or "").strip()
     t_low = (text or "").lower()
+
+
+    # ===== Guardex: /impl /abi /status =====
+    if t_low.startswith("/impl"):
+        parts = text.split()
+        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+            bot.send_message(chat_id=chat_id, text="Usage: /impl <ETH address>")
+            return "ok"
+        addr = parts[1]
+        meta = etherscan_getsourcecode_flat(addr) or {}
+        is_proxy = (meta.get("Proxy") == "1") or bool(meta.get("Implementation"))
+        if not is_proxy:
+            bot.send_message(chat_id=chat_id, text="Not a proxy (no implementation).")
+            return "ok"
+        impl = resolve_proxy_impl(addr)
+        if not impl:
+            bot.send_message(chat_id=chat_id, text="Proxy detected, but implementation not found (EIP-1967 slot empty).")
+            return "ok"
+        im_meta = etherscan_getsourcecode_flat(impl) or {}
+        try:
+            name, ver = guardex_parse_name_compiler(im_meta)
+        except Exception:
+            name = im_meta.get("ContractName") or "Unknown"
+            ver  = im_meta.get("CompilerVersion") or "-"
+        abi_text = gx_get_abi_text(impl)
+        verified_bool = bool(abi_text and abi_text != "Contract source code not verified")
+        v_mark = "✅" if verified_bool else "❌"
+        lines = [
+            "🧭 Network: ethereum",
+            f"🔗 Proxy: {addr}",
+            f"🧷 Implementation: {impl}",
+            f"🏷️ Contract name: {name}",
+            f"✅ Source verified: {v_mark}",
+            f"🧪 Compiler: {ver}",
+            "🔎 Data source: Etherscan"
+        ]
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Etherscan (Proxy)", url=f"https://etherscan.io/address/{addr}"),
+            InlineKeyboardButton("Etherscan (Impl)",  url=f"https://etherscan.io/address/{impl}")
+        ]])
+        bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=kb, disable_web_page_preview=True)
+        return "ok"
+
+    if t_low.startswith("/abi"):
+        parts = text.split()
+        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+            bot.send_message(chat_id=chat_id, text="Usage: /abi <ETH address>")
+            return "ok"
+        addr = parts[1]
+        meta = etherscan_getsourcecode_flat(addr) or {}
+        target = addr
+        if (meta.get("Proxy") == "1") or bool(meta.get("Implementation")):
+            impl = resolve_proxy_impl(addr)
+            if impl: target = impl
+        abi_text = gx_get_abi_text(target) or "[]"
+        if len(abi_text) > 3500:
+            preview = abi_text[:3400] + "..."
+            link = f"https://etherscan.io/address/{target}#code"
+            bot.send_message(chat_id=chat_id, text=f"ABI for {target} (truncated):\n\n<pre>{html.escape(preview)}</pre>\n\nFull: {link}", parse_mode="HTML", disable_web_page_preview=True)
+        else:
+            bot.send_message(chat_id=chat_id, text=f"<pre>{html.escape(abi_text)}</pre>", parse_mode="HTML")
+        return "ok"
+
+    if t_low.startswith("/status"):
+        parts = text.split()
+        if len(parts) < 2 or not ADDR_RE.match(parts[1]):
+            bot.send_message(chat_id=chat_id, text="Usage: /status <ETH address>")
+            return "ok"
+        addr = parts[1]
+        meta = etherscan_getsourcecode_flat(addr) or {}
+        is_proxy = (meta.get("Proxy") == "1") or bool(meta.get("Implementation"))
+        impl = resolve_proxy_impl(addr) if is_proxy else ""
+        state_target = addr  # storage lives on proxy
+        abi_target = (impl if impl else addr)
+
+        summary = gx_read_erc20_summary(state_target)
+        sym = summary.get("symbol") or "-"
+        dec = summary.get("decimals")
+        dec_s = str(dec) if isinstance(dec, int) else "-"
+        ts = summary.get("totalSupply")
+        ts_s = str(ts) if isinstance(ts, int) else "-"
+        paused = summary.get("paused")
+        paused_s = "—" if (paused is None) else ("Yes" if paused else "No")
+        owner = summary.get("owner") or "—"
+        if owner in ("0x0000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000001", "—"):
+            r2 = gx_eth_call(state_target, "0x893d20e8")  # getOwner()
+            if isinstance(r2, str) and len(r2) >= 66:
+                owner = _decode_address(r2)
+
+        # Humanize TotalSupply
+        ts_h = ts_s
+        try:
+            if isinstance(ts, int) and isinstance(dec, int) and dec <= 36 and ts is not None:
+                getcontext().prec = 50
+                ts_h = f"{(Decimal(ts) / (Decimal(10) ** dec)):.{min(dec, 6)}f}"
+        except Exception:
+            pass
+
+        abi_text = gx_get_abi_text(abi_target)
+        roles_presence = []
+        for fn in ["owner", "masterMinter", "pauser", "blacklister", "rescuer"]:
+            roles_presence.append(f"{fn}: {'✅' if gx_has_role_fn(abi_text, fn) else '—'}")
+        roles_line = " | ".join(roles_presence)
+
+        lines = [
+            "🧭 Network: ethereum",
+            f"🔗 Address: {addr}",
+            f"🧩 Proxy: {'✅' if is_proxy else '❌'}" + (f"  →  Implementation: {impl}" if is_proxy and impl else ""),
+            f"🏷️ Symbol: {sym}",
+            f"🔢 Decimals: {dec_s}",
+            f"💰 TotalSupply (raw): {ts_s}",
+            f"💰 TotalSupply (human): {ts_h}",
+            f"⏸️ Paused: {paused_s}",
+            f"👤 Owner: {owner}",
+            f"🔐 Roles: {roles_line}",
+            "🔎 Data source: Etherscan / Alchemy RPC"
+        ]
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open on Etherscan", url=f"https://etherscan.io/address/{abi_target}")]])
+        bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=kb, disable_web_page_preview=True)
+        return "ok"
     cur_lang = get_lang_override(chat_id) or DEFAULT_LANG
 
     # /start
