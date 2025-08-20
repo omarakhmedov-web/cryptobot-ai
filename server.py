@@ -1302,14 +1302,14 @@ def webhook_with_secret(secret):
             return "ok"
         name = meta.get("ContractName") or "Unknown"
         ver  = meta.get("CompilerVersion") or "-"
-        # Fallback: parse SourceCode JSON (Etherscan standard-json) to infer name/compiler if missing
+        # Fallback: parse SourceCode JSON (Etherscan standard-json) to infer name/compiler
         try:
+            import json
             sc = meta.get("SourceCode") or ""
-            if isinstance(sc, str) and sc.startswith("{{") and sc.endswith("}}"):  # some Etherscan formats wrap with extra braces
+            if isinstance(sc, str) and sc.startswith("{{") and sc.endswith("}}"):
                 sc = sc[1:-1]
-            import json as _json
             if isinstance(sc, str) and sc.strip().startswith("{"):
-                j = _json.loads(sc)
+                j = json.loads(sc)
                 if isinstance(j, dict):
                     settings = j.get("settings") or {}
                     ct = settings.get("compilationTarget") or {}
@@ -1319,11 +1319,15 @@ def webhook_with_secret(secret):
                         except Exception:
                             pass
                     compiler = j.get("compiler") or {}
-                    if isinstance(compiler, dict) and (ver == "-" or not ver):
+                    if isinstance(compiler, dict) and (ver in ("-", "", None)):
                         ver = compiler.get("version") or ver
         except Exception:
             pass
-        verified = "✅" if ((meta.get("ABI") and meta.get("ABI") != "Contract source code not verified") or (meta.get("SourceCode") not in ("", None))) else "❌"
+        # Verified: use ABI presence (either in meta or fetched) as ground truth
+        abi_for_impl = info.get("abi") or meta.get("ABI") or ""
+        verified_bool = bool(abi_for_impl and abi_for_impl != "Contract source code not verified")
+        v_mark = "✅" if verified_bool else "❌"
+
         lines = [
             f"🧭 Network: ethereum",
             f"🔗 Proxy: {addr}",
