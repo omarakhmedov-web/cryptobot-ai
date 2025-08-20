@@ -340,7 +340,17 @@ def guardex_resolve_impl(address: str) -> str:
     return _guardex_extract_addr_from_word(word)
 
 def guardex_getabi(address: str) -> str:
-    """Try ABI from getsourcecode, otherwise explicit getabi on explorers."""
+    """Try ABI from getsourcecode, then direct Etherscan getabi, then explorers aggregator."""
+    res = explorer_getsourcecode(address)
+    meta = res.get("data") or {}
+    abi_text = meta.get("ABI") or ""
+    if abi_text and abi_text != "Contract source code not verified":
+        return abi_text
+    # direct Etherscan
+    abi_text = etherscan_getabi_direct(address)
+    if abi_text and abi_text not in ("[]", "Contract source code not verified"):
+        return abi_text
+    # explorers fallback
     res = explorer_getsourcecode(address)
     meta = res.get("data") or {}
     abi_text = meta.get("ABI") or ""
@@ -1335,9 +1345,11 @@ def webhook_with_secret(secret):
             bot.send_message(chat_id=chat_id, text="Proxy detected, but implementation not found (EIP-1967 slot empty).")
             return "ok"
         im_meta = guardex_getsourcecode_etherscan_only(impl)
-
         name, ver = guardex_parse_name_compiler_from_sourcecode(im_meta)
-
+        if name == "Unknown":
+            name = im_meta.get("ContractName") or name
+        if ver in ("-", "", None):
+            ver = im_meta.get("CompilerVersion") or ver
         abi_text = guardex_getabi(impl)
 
         if (ver in ("-", "", None)):
@@ -1979,3 +1991,49 @@ def guardex_getsourcecode_etherscan_only(address: str) -> dict:
         except Exception:
             data = {}
     return data
+
+import os
+
+def etherscan_getsourcecode_flat(address: str) -> dict:
+    """
+    Direct call to Etherscan getsourcecode using ETHERSCAN_API_KEY.
+    Returns the first result dict or {}. Falls back to explorer_getsourcecode.
+    """
+    key = os.getenv("ETHERSCAN_API_KEY", "")
+    if key:
+        try:
+            url = "https://api.etherscan.io/api"
+            params = {"module":"contract","action":"getsourcecode","address":address,"apikey":key}
+            r = requests.get(url, params=params, timeout=12)
+            j = r.json()
+            if str(j.get("status")) == "1" and j.get("result"):
+                return j["result"][0]
+        except Exception:
+            pass
+    # Fallback to aggregator
+    try:
+        res = explorer_getsourcecode(address)
+        data = res.get("data") or {}
+        if isinstance(data, list) and data:
+            data = data[0]
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def etherscan_getabi_direct(address: str) -> str:
+    """
+    Direct Etherscan getabi using ETHERSCAN_API_KEY. Returns JSON string or "[]".
+    """
+    key = os.getenv("ETHERSCAN_API_KEY", "")
+    if not key:
+        return "[]"
+    try:
+        url = "https://api.etherscan.io/api"
+        params = {"module":"contract","action":"getabi","address":address,"apikey":key}
+        r = requests.get(url, params=params, timeout=12)
+        j = r.json()
+        if str(j.get("status")) == "1" and j.get("result"):
+            return j["result"]
+    except Exception:
+        pass
+    return "[]"
