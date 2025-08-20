@@ -1334,10 +1334,16 @@ def webhook_with_secret(secret):
         if not impl:
             bot.send_message(chat_id=chat_id, text="Proxy detected, but implementation not found (EIP-1967 slot empty).")
             return "ok"
-        im_res = explorer_getsourcecode(impl)
-        im_meta = im_res.get("data") or {}
+        im_meta = guardex_getsourcecode_etherscan_only(impl)
+
         name, ver = guardex_parse_name_compiler_from_sourcecode(im_meta)
+
         abi_text = guardex_getabi(impl)
+
+        if (ver in ("-", "", None)):
+
+            ver = im_meta.get("CompilerVersion") or ver
+
         verified_bool = bool(abi_text and abi_text != "Contract source code not verified")
         v_mark = "✅" if verified_bool else "❌"
         lines = [
@@ -1949,3 +1955,27 @@ def format_check_report(facts: dict, lang: str) -> str:
     else:
         lines.append(f"\nПо состоянию на {dt}.")
     return "\n".join(lines)
+
+
+
+def guardex_getsourcecode_etherscan_only(address: str) -> dict:
+    """Direct Etherscan getsourcecode for stable ContractName/CompilerVersion (fallback to aggregator)."""
+    try:
+        for ex in EXPLORERS:
+            if ex.get("name") == "etherscan" and ex.get("key"):
+                params = {"module":"contract","action":"getsourcecode","address":address,"apikey":ex["key"]}
+                r = requests.get(ex["base"], params=params, timeout=12)
+                j = r.json()
+                if str(j.get("status")) == "1" and j.get("result"):
+                    return j["result"][0]
+                break
+    except Exception:
+        pass
+    res = explorer_getsourcecode(address)
+    data = res.get("data") or {}
+    if isinstance(data, list) and data:
+        try:
+            data = data[0]
+        except Exception:
+            data = {}
+    return data
