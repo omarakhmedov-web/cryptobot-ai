@@ -1302,7 +1302,28 @@ def webhook_with_secret(secret):
             return "ok"
         name = meta.get("ContractName") or "Unknown"
         ver  = meta.get("CompilerVersion") or "-"
-        verified = "✅" if (meta.get("SourceCode") not in ("", None)) else "❌"
+        # Fallback: parse SourceCode JSON (Etherscan standard-json) to infer name/compiler if missing
+        try:
+            sc = meta.get("SourceCode") or ""
+            if isinstance(sc, str) and sc.startswith("{{") and sc.endswith("}}"):  # some Etherscan formats wrap with extra braces
+                sc = sc[1:-1]
+            import json as _json
+            if isinstance(sc, str) and sc.strip().startswith("{"):
+                j = _json.loads(sc)
+                if isinstance(j, dict):
+                    settings = j.get("settings") or {}
+                    ct = settings.get("compilationTarget") or {}
+                    if isinstance(ct, dict) and ct and name == "Unknown":
+                        try:
+                            name = list(ct.values())[0]
+                        except Exception:
+                            pass
+                    compiler = j.get("compiler") or {}
+                    if isinstance(compiler, dict) and (ver == "-" or not ver):
+                        ver = compiler.get("version") or ver
+        except Exception:
+            pass
+        verified = "✅" if ((meta.get("ABI") and meta.get("ABI") != "Contract source code not verified") or (meta.get("SourceCode") not in ("", None))) else "❌"
         lines = [
             f"🧭 Network: ethereum",
             f"🔗 Proxy: {addr}",
