@@ -887,7 +887,7 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
         "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
         "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","arbitrum":"ARB","optimism":"OP",
         "cardano":"ADA","ripple":"XRP","avalanche-2":"AVAX","tron":"TRX","dogecoin":"DOGE","matic-network":"MATIC",
-        "sui":"SUI","apt":"APT"
+        "sui":"SUI","aptos":"APT"
     }
     lines = {"en":["🔔 Spot prices (USD):"],"ru":["🔔 Спот-цены (USD):"]}.get(lang, ["🔔 Spot prices (USD):"])
     order = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin"]
@@ -968,7 +968,7 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
 
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     token = store_price_ids(chat_id, ids)
-    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"t10:{token}")]])
 
 # -------------------- GAS / F&G / BTC DOM --------------------
 
@@ -1280,6 +1280,29 @@ def webhook_with_secret(secret):
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
+            
+            elif data.startswith("t10:"):
+                token = data.split(":", 1)[1].strip()
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                mkts = []
+                try:
+                    mkts = coingecko_top_market(10)
+                except Exception:
+                    app.logger.exception("coingecko_top_market error in t10 handler")
+                msg_out, ids = format_top10(mkts, lang_cq)
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg_out,
+                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
+                    )
+                except Exception:
+                    try:
+                        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
+                    except Exception:
+                        pass
+                bot.answer_callback_query(cq.get("id"), text="Top-10 updated")
             elif data == "gas:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 gas = get_eth_gas()
@@ -1715,6 +1738,29 @@ def webhook():
                     bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
+            
+            elif data.startswith("t10:"):
+                token = data.split(":", 1)[1].strip()
+                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+                mkts = []
+                try:
+                    mkts = coingecko_top_market(10)
+                except Exception:
+                    app.logger.exception("coingecko_top_market error in t10 handler")
+                msg_out, ids = format_top10(mkts, lang_cq)
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=cq.get("message", {}).get("message_id"),
+                        text=msg_out,
+                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
+                    )
+                except Exception:
+                    try:
+                        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
+                    except Exception:
+                        pass
+                bot.answer_callback_query(cq.get("id"), text="Top-10 updated")
             elif data == "gas:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 gas = get_eth_gas()
