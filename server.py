@@ -1381,7 +1381,7 @@ def webhook_with_secret(secret):
     if (
         t_low.strip() in ("top10", "top ten", "top-ten", "top coins") or
         re.search(r"\btop\s*-?\s*10\b", t_low) or
-        re.search(r"\bshow\s+top\s+coins\b", t_low)
+        re.search(r"\bshow\s+top\s+coins\b", t_low) or re.search(r"\bтоп\s*-?\s*10\b", t_low) or t_low.strip() in ("топ10","топ 10","топ-10")
     ):
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=cur_lang)
@@ -1399,7 +1399,7 @@ def webhook_with_secret(secret):
         return "ok"
 
     # /top10 (compat)
-    if t_low.startswith("/top10"):
+    if t_low.startswith("/top10") or t_low.startswith("/топ10") or t_low.startswith("/топ 10"):
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=cur_lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
@@ -1838,7 +1838,7 @@ def webhook():
     if (
         t_low.strip() in ("top10", "top ten", "top-ten", "top coins") or
         re.search(r"\btop\s*-?\s*10\b", t_low) or
-        re.search(r"\bshow\s+top\s+coins\b", t_low)
+        re.search(r"\bshow\s+top\s+coins\b", t_low) or re.search(r"\bтоп\s*-?\s*10\b", t_low) or t_low.strip() in ("топ10","топ 10","топ-10")
     ):
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=cur_lang)
@@ -1856,7 +1856,7 @@ def webhook():
         return "ok"
 
     # /top10 (оставляем совместимость)
-    if t_low.startswith("/top10"):
+    if t_low.startswith("/top10") or t_low.startswith("/топ10") or t_low.startswith("/топ 10"):
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=cur_lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
@@ -1986,6 +1986,24 @@ def webhook():
         bot.send_message(chat_id=chat_id, text=WELCOME.get(start_lang, WELCOME["en"]),
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
+
+
+# "what can you do?" / "что ты умеешь?" → показать список возможностей
+if t_low.strip() in (
+    "what can you do", "what can you do?",
+    "what can u do", "what can u do?",
+    "что ты умеешь", "что ты умеешь?",
+    "что ты можешь", "что ты можешь?",
+    "что умеешь", "что умеешь?",
+    "твои возможности", "твои возможности?"
+):
+    start_lang = get_lang_override(chat_id) or DEFAULT_LANG
+    bot.send_message(
+        chat_id=chat_id,
+        text=WELCOME.get(start_lang, WELCOME["en"]),
+        reply_markup=build_donate_keyboard() if DONATE_STICKY else None
+    )
+    return "ok"
 
     # Обычный AI-ответ
     answer = ai_reply(text, cur_lang, chat_id)
