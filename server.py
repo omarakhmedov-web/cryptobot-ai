@@ -862,27 +862,6 @@ def _cg_cache_get(key: str):
 def _cg_cache_set(key: str, data: dict):
     _cg_cache.update({"t": time.time(), "key": key, "data": data})
 
-
-def get_price_24h(coin_id: str):
-    """
-    Возвращает (old_price, current_price) для coin_id за 24 часа.
-    """
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-    params = {"vs_currency": "usd", "days": 1, "interval": "hourly"}
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        prices = data.get("prices", [])
-        if not prices:
-            return None
-        old_price = prices[0][1]
-        current_price = prices[-1][1]
-        return old_price, current_price
-    except Exception:
-        app.logger.exception(f"get_price_24h failed for {coin_id}")
-        return None
-
 def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
     coin_ids_str = ",".join(coin_ids)
@@ -908,7 +887,7 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
         "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
         "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","arbitrum":"ARB","optimism":"OP",
         "cardano":"ADA","ripple":"XRP","avalanche-2":"AVAX","tron":"TRX","dogecoin":"DOGE","matic-network":"MATIC",
-        "sui":"SUI","aptos":"APT"
+        "sui":"SUI",'aptos': 'APT'
     }
     lines = {"en":["🔔 Spot prices (USD):"],"ru":["🔔 Спот-цены (USD):"]}.get(lang, ["🔔 Spot prices (USD):"])
     order = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin"]
@@ -945,6 +924,28 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 # -------------------- TOP-10 --------------------
+
+def get_price_24h(coin_id: str):
+    """Return (old_price, current_price) over last 24h using CoinGecko market_chart."""
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    params = {"vs_currency": "usd", "days": 1, "interval": "hourly"}
+    try:
+        r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
+        r.raise_for_status()
+        data = r.json() or {}
+        prices = data.get("prices") or []
+        if not prices:
+            return None
+        old_price = float(prices[0][1])
+        current_price = float(prices[-1][1])
+        return (old_price, current_price)
+    except Exception:
+        try:
+            app.logger.exception(f"get_price_24h failed for {coin_id}")
+        except Exception:
+            pass
+        return None
+
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
@@ -1301,42 +1302,50 @@ def webhook_with_secret(secret):
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
-            
             elif data.startswith("t10:"):
-                token = data.split(":", 1)[1].strip()
+                token_full = data.split(":", 1)[1].strip()
+                token = token_full.split(":")[0]
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-            if ":24h" in token:
-                coin_id = token.replace(":24h", "")
-                prices = get_price_24h(coin_id)
-                if prices:
-                    old_price, current_price = prices
-                    delta = ((current_price - old_price) / old_price) * 100 if old_price else 0
-                    msg_out = f"{coin_id.upper()}\n24h ago: ${old_price:,.2f}\nNow:     ${current_price:,.2f}\nChange:  {delta:+.2f}%"
+                ids = resolve_price_ids(chat_id, token) or ["bitcoin","ethereum","solana","the-open-network"]
+                if token_full.endswith(":24h"):
+                    lines = {"en": ["⏱️ 24h ago vs now (USD):"], "ru": ["⏱️ 24 часа назад vs сейчас (USD):"]}.get(lang_cq, ["⏱️ 24h ago vs now (USD):"])
+                    out_any = False
+                    for cid in ids[:10]:
+                        prices = get_price_24h(cid)
+                        if not prices:
+                            continue
+                        old_price, current_price = prices
+                        delta = ((current_price - old_price) / old_price) * 100.0 if old_price else 0.0
+                        _map = {
+                            "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
+                            "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","arbitrum":"ARB","optimism":"OP",
+                            "cardano":"ADA","ripple":"XRP","avalanche-2":"AVAX","tron":"TRX","dogecoin":"DOGE","matic-network":"MATIC",
+                            "sui":"SUI","aptos":"APT"
+                        }
+                        sym = _map.get(cid, (cid or "").upper())
+                        lines.append(f"{sym}: 24h ago ${old_price:,.2f} → now ${current_price:,.2f}  ({delta:+.2f}%)")
+                        out_any = True
+                    if not out_any:
+                        lines.append({"en":"No data.","ru":"Нет данных."}.get(lang_cq, "No data."))
                     try:
-                        bot.send_message(chat_id=chat_id, text=msg_out)
+                        bot.send_message(chat_id=chat_id, text="\n".join(lines))
                     except Exception:
                         pass
                     bot.answer_callback_query(cq.get("id"), text="24h data")
-                    return
-                mkts = []
-                try:
+                else:
                     mkts = coingecko_top_market(10)
-                except Exception:
-                    app.logger.exception("coingecko_top_market error in t10 handler")
-                msg_out, ids = format_top10(mkts, lang_cq)
-                try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg_out,
-                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
-                    )
-                except Exception:
+                    msg_now, new_ids = format_top10(mkts, lang=lang_cq)
                     try:
-                        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
+                        bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=cq.get("message", {}).get("message_id"),
+                            text=msg_now,
+                            reply_markup=build_top10_keyboard(chat_id, new_ids, lang_cq)
+                        )
                     except Exception:
-                        pass
-                bot.answer_callback_query(cq.get("id"), text="Top-10 updated")
+                        bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_top10_keyboard(chat_id, new_ids, lang_cq))
+                    bot.answer_callback_query(cq.get("id"), text="Updated")
+    
             elif data == "gas:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 gas = get_eth_gas()
@@ -1772,29 +1781,6 @@ def webhook():
                     bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
-            
-            elif data.startswith("t10:"):
-                token = data.split(":", 1)[1].strip()
-                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                mkts = []
-                try:
-                    mkts = coingecko_top_market(10)
-                except Exception:
-                    app.logger.exception("coingecko_top_market error in t10 handler")
-                msg_out, ids = format_top10(mkts, lang_cq)
-                try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=cq.get("message", {}).get("message_id"),
-                        text=msg_out,
-                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
-                    )
-                except Exception:
-                    try:
-                        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
-                    except Exception:
-                        pass
-                bot.answer_callback_query(cq.get("id"), text="Top-10 updated")
             elif data == "gas:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 gas = get_eth_gas()
