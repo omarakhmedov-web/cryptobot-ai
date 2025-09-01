@@ -476,6 +476,10 @@ def gx_get_abi_text(address: str) -> str:
         meta = res.get("data") or {}
         abi_text = meta.get("ABI") or ""
         if abi_text and abi_text != "Contract source code not verified":
+
+    if text.strip().lower() == "/help":
+        cmd_help(bot, chat_id)
+        return "ok"
             _GX_CACHE.set(key, abi_text, 900)
             return abi_text
     except Exception:
@@ -1290,7 +1294,7 @@ def webhook_with_secret(secret):
                         reply_markup=build_price_keyboard(chat_id, ids, lang_cq)
                     )
                 except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
+                    cmd_help(bot, chat_id); return "ok"
                 bot.answer_callback_query(cq.get("id"), text="Updated")
             elif data == "gas:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
@@ -1384,7 +1388,7 @@ def webhook_with_secret(secret):
         ids = _cg_ids_from_text(query_text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+        cmd_help(bot, chat_id); return "ok"
         return "ok"
 
     # /top10 (compat)
@@ -1665,7 +1669,7 @@ def webhook_with_secret(secret):
         ids = _cg_ids_from_text(text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+        cmd_help(bot, chat_id); return "ok"
         return "ok"
 
     # Empty text => show welcome
@@ -1724,7 +1728,7 @@ def webhook():
                         reply_markup=build_price_keyboard(chat_id, ids, lang_cq)
                     )
                 except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
+                    cmd_help(bot, chat_id); return "ok"
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
             elif data == "gas:r":
@@ -1841,7 +1845,7 @@ def webhook():
         ids = _cg_ids_from_text(query_text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+        cmd_help(bot, chat_id); return "ok"
         return "ok"
 
     # /top10 (оставляем совместимость)
@@ -1965,7 +1969,7 @@ def webhook():
         ids = _cg_ids_from_text(text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+        cmd_help(bot, chat_id); return "ok"
         return "ok"
 
     # Пусто
