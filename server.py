@@ -862,25 +862,7 @@ def _cg_cache_set(key: str, data: dict):
     _cg_cache.update({"t": time.time(), "key": key, "data": data})
 
 
-# ===== Auto-injected: TTL cache + Binance fallback helpers =====
-class _TTLCacheCG:
-    def __init__(self):
-        self.data = {}
-    def get(self, key):
-        v = self.data.get(key)
-        if not v:
-            return None
-        payload, exp = v
-        if exp < time.time():
-            self.data.pop(key, None)
-            return None
-        return payload
-    def set(self, key, payload, ttl=60):
-        self.data[key] = (payload, time.time() + ttl)
-
-_CG_TTL = _TTLCacheCG()
-
-# CoinGecko id -> Binance USDT pair
+# ===== Binance fallback helpers (auto-injected) =====
 _BINANCE_MAP = {
     "bitcoin":"BTCUSDT","ethereum":"ETHUSDT","solana":"SOLUSDT","the-open-network":"TONUSDT",
     "tether":"USDTUSDT","usd-coin":"USDCUSDT","binancecoin":"BNBUSDT","ripple":"XRPUSDT",
@@ -888,9 +870,8 @@ _BINANCE_MAP = {
     "avalanche-2":"AVAXUSDT","sui":"SUIUSDT","apt":"APTUSDT","arbitrum":"ARBUSDT","optimism":"OPUSDT"
 }
 
-def _binance_price(symbol_pair: str):
+def _binance_price(symbol_pair: str) -> float | None:
     try:
-        import requests
         r = requests.get("https://api.binance.com/api/v3/ticker/price",
                          params={"symbol": symbol_pair}, timeout=10,
                          headers={"User-Agent":"Mozilla/5.0"})
@@ -913,33 +894,61 @@ def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
             out[cid] = {"usd": p, "last_updated_at": now_ts}
     return out
 
+
 def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
     coin_ids_str = ",".join(coin_ids)
-    cache_key = f"prices:{coin_ids_str}:{vs}"
-    cached = _CG_TTL.get(cache_key) if "_CG_TTL" in globals() else None
+    cache_key = f"{coin_ids_str}:{vs}"
+    cached = _cg_cache_get(cache_key)
     if cached is not None:
         return cached
     url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": coin_ids_str, "vs_currencies": vs, "include_last_updated_at": "true"}
+    params = {"ids": coin_ids_str, "vs_currencies": vs, "": "true", "include_last_updated_at": "true"}
     try:
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
         data = r.json() or {}
-        if not data and "_binance_prices_for_ids" in globals():
-            data = _binance_prices_for_ids(coin_ids)
-        if data and "_CG_TTL" in globals():
-            _CG_TTL.set(cache_key, data, ttl=60)
-        return data or {"error": "no_data"}
-    except Exception:
-        if "_binance_prices_for_ids" in globals():
-            data = _binance_prices_for_ids(coin_ids)
-            if data and "_CG_TTL" in globals():
-                _CG_TTL.set(cache_key, data, ttl=60)
-            if data:
-                return data
-        return {"error": "price_unavailable"}
+        _cg_cache_set(cache_key, data)
+        return data
+    except Exception as e:
+        return {"error": str(e)}
 
+def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
+    if "error" in data:
+        return {"en":"Price fetch error.","ru":"Ошибка получения цены."}.get(lang, "Price fetch error.")
+    name_map = {
+        "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
+        "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","arbitrum":"ARB","optimism":"OP",
+        "cardano":"ADA","ripple":"XRP","avalanche-2":"AVAX","tron":"TRX","dogecoin":"DOGE","matic-network":"MATIC",
+        "sui":"SUI","apt":"APT"
+    }
+    lines = {"en":["🔔 Spot prices (USD):"],"ru":["🔔 Спот-цены (USD):"]}.get(lang, ["🔔 Spot prices (USD):"])
+    order = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin"]
+    for k in order + [k for k in data.keys() if k not in order]:
+        if k not in data: continue
+        item = data[k]
+        price = item.get(vs)
+        if price is None:
+            continue
+        sym = name_map.get(k, k)
+        chg = item.get(f"")
+        chg_s = ""
+        if isinstance(chg, (int,float)):
+            sign = "▲" if chg >= 0 else "▼"
+            chg_s = f""
+        lines.append(f"{sym}: ${price:,.4f}{chg_s}")
+    if len(lines) == 1:
+        return {"en":"No price data.","ru":"Нет данных по ценам."}.get(lang, "No price data.")
+    try:
+        all_ts = [v.get("last_updated_at") for v in data.values() if isinstance(v, dict) and v.get("last_updated_at")]
+        if all_ts:
+            dt = datetime.utcfromtimestamp(max(all_ts)).strftime("%Y-%m-%d %H:%M UTC")
+            lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}."}.get(lang, f"\nAs of {dt}."))
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+# UI для цен
 def _t_refresh(lang: str) -> str:
     return {"en":"🔄 Refresh","ru":"🔄 Обновить"}.get(lang, "🔄 Refresh")
 
@@ -948,12 +957,7 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 # -------------------- TOP-10 --------------------
-
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
-    cache_key = f"top:{cap_n}"
-    cached = _CG_TTL.get(cache_key) if "_CG_TTL" in globals() else None
-    if cached is not None:
-        return cached
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
@@ -965,29 +969,35 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
         }
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
-        data = r.json() or []
-        if data and "_CG_TTL" in globals():
-            _CG_TTL.set(cache_key, data, ttl=60)
-            return data
+        return r.json() or []
     except Exception as e:
-        try:
-            app.logger.warning(f"coingecko_top_market error: {e}")
-        except Exception:
-            pass
-    fallback_ids = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin","binancecoin","ripple","cardano","dogecoin"]
-    sym_map = {"bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON","tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","ripple":"XRP","cardano":"ADA","dogecoin":"DOGE"}
-    prices = _binance_prices_for_ids(fallback_ids) if "_binance_prices_for_ids" in globals() else {}
-    out = []
-    for cid in fallback_ids[:cap_n]:
-        item = prices.get(cid) if isinstance(prices, dict) else None
-        price = (item or {}).get("usd")
-        if price is None:
-            continue
-        out.append({"id": cid, "symbol": sym_map.get(cid, cid.upper()), "current_price": price})
-    if out and "_CG_TTL" in globals():
-        _CG_TTL.set(cache_key, out, ttl=60)
-    return out
+        app.logger.warning(f"coingecko_top_market error: {e}")
+        return []
 
+def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
+    if not mkts:
+        return (
+            {"en":"No market data.","ru":"Нет рыночных данных."}.get(lang, "No market data."),
+            []
+        )
+    lines = {
+        "en": ["🏆 Top-10 by market cap (USD):"],
+        "ru": ["🏆 Топ-10 по капитализации (USD):"],
+    }.get(lang, ["🏆 Top-10 by market cap (USD):"])
+    ids = []
+    for i, c in enumerate(mkts, start=1):
+        sym = (c.get("symbol") or "").upper()
+        price = c.get("current_price")
+        chg = c.get("")
+        chg_s = ""
+        if isinstance(chg, (int, float)):
+            sign = "▲" if chg >= 0 else "▼"
+            chg_s = f""
+        lines.append(f"{i}. {sym}: ${price:,.4f}{chg_s}")
+        ids.append(c.get("id"))
+    dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}."}.get(lang, f"\nAs of {dt}."))
+    return ("\n".join(lines), ids)
 
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     token = store_price_ids(chat_id, ids)
@@ -1364,7 +1374,26 @@ def webhook_with_secret(secret):
 
     text = (msg.get("text") or msg.get("caption") or "").strip()
     t_low = (text or "").lower()
+
     cur_lang = get_lang_override(chat_id) or DEFAULT_LANG
+
+    # Natural language routes (EN-only)
+    try:
+        _t = t_low.strip()
+        if any(k in _t for k in ("what can you do", "help", "menu", "commands", "how to use")):
+            bot.send_message(chat_id=chat_id, text=WELCOME.get(cur_lang, WELCOME["en"]), reply_markup=build_donate_keyboard())
+            return "ok"
+        # single symbol like "eth", "$btc", "sol"
+        import re as _re
+        if _re.fullmatch(r"\$?[a-z]{2,6}", _t):
+            sym = _t.lstrip("$").upper()
+            ids = _cg_ids_from_text(sym)
+            data = coingecko_prices(ids, vs="usd")
+            msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
+            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+            return "ok"
+    except Exception:
+        pass
 
     # /start
     if t_low in ("/start", "start"):
@@ -1381,7 +1410,7 @@ def webhook_with_secret(secret):
     if (
         t_low.strip() in ("top10", "top ten", "top-ten", "top coins") or
         re.search(r"\btop\s*-?\s*10\b", t_low) or
-        re.search(r"\bshow\s+top\s+coins\b", t_low) or re.search(r"\bтоп\s*-?\s*10\b", t_low) or t_low.strip() in ("топ10","топ 10","топ-10")
+        re.search(r"\bshow\s+top\s+coins\b", t_low)
     ):
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=cur_lang)
@@ -1399,7 +1428,7 @@ def webhook_with_secret(secret):
         return "ok"
 
     # /top10 (compat)
-    if t_low.startswith("/top10") or t_low.startswith("/топ10") or t_low.startswith("/топ 10"):
+    if t_low.startswith("/top10"):
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=cur_lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
@@ -1838,7 +1867,7 @@ def webhook():
     if (
         t_low.strip() in ("top10", "top ten", "top-ten", "top coins") or
         re.search(r"\btop\s*-?\s*10\b", t_low) or
-        re.search(r"\bshow\s+top\s+coins\b", t_low) or re.search(r"\bтоп\s*-?\s*10\b", t_low) or t_low.strip() in ("топ10","топ 10","топ-10")
+        re.search(r"\bshow\s+top\s+coins\b", t_low)
     ):
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=cur_lang)
@@ -1856,7 +1885,7 @@ def webhook():
         return "ok"
 
     # /top10 (оставляем совместимость)
-    if t_low.startswith("/top10") or t_low.startswith("/топ10") or t_low.startswith("/топ 10"):
+    if t_low.startswith("/top10"):
         mkts = coingecko_top_market(10)
         msg_out, ids = format_top10(mkts, lang=cur_lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
@@ -1987,16 +2016,6 @@ def webhook():
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
 
-    # "what can you do?" / "что ты умеешь?" → показать список возможностей
-    if t_low.strip() in (    "what can you do", "what can you do?",    "what can u do", "what can u do?",    "что ты умеешь", "что ты умеешь?",    "что ты можешь", "что ты можешь?",    "что умеешь", "что умеешь?",    "твои возможности", "твои возможности?"
-    ):
-        start_lang = get_lang_override(chat_id) or DEFAULT_LANG
-        bot.send_message(
-            chat_id=chat_id,
-            text=WELCOME.get(start_lang, WELCOME["en"]),
-            reply_markup=build_donate_keyboard() if DONATE_STICKY else None
-        )
-        return "ok"
     # Обычный AI-ответ
     answer = ai_reply(text, cur_lang, chat_id)
     bot.send_message(chat_id=chat_id, text=answer,
