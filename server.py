@@ -1317,7 +1317,7 @@ def webhook_with_secret(secret):
                     except Exception:
                         pass
                     bot.answer_callback_query(cq.get("id"), text="24h data")
-                    continue
+                    return
                 mkts = []
                 try:
                     mkts = coingecko_top_market(10)
