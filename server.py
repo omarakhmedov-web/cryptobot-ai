@@ -887,9 +887,12 @@ def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
     out = {}
     for cid in coin_ids:
         sp = _BINANCE_MAP.get(cid)
-        if not sp:
-            continue
-        p = _binance_price(sp)
+        p = None
+        if sp:
+            p = _binance_price(sp)
+        # Stablecoin fallback if pair missing/unavailable
+        if p is None and cid in ("tether", "usd-coin"):
+            p = 1.0
         if p is not None:
             out[cid] = {"usd": p, "last_updated_at": now_ts}
     return out
@@ -925,6 +928,7 @@ def _cg_warn_rl(msg: str, min_interval: int = 300):
         _CG_LAST_WARN_TS = now
 
 
+
 def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
     coin_ids_str = ",".join(coin_ids)
@@ -932,16 +936,27 @@ def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     cached = _cg_cache_get(cache_key)
     if cached is not None:
         return cached
+
     url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": coin_ids_str, "vs_currencies": vs, "": "true", "include_last_updated_at": "true"}
+    params = {"ids": coin_ids_str, "vs_currencies": vs, "include_last_updated_at": "true"}
+
     try:
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
         data = r.json() or {}
-        _cg_cache_set(cache_key, data)
-        return data
-    except Exception as e:
-        return {"error": str(e)}
+        if not data:
+            data = _binance_prices_for_ids(coin_ids)
+        if data:
+            _cg_cache_set(cache_key, data)
+            return data
+        return {"error": "no_data"}
+    except Exception:
+        data = _binance_prices_for_ids(coin_ids)
+        if data:
+            _cg_cache_set(cache_key, data)
+            return data
+        return {"error": "price_unavailable"}
+
 
 def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
     if "error" in data:
@@ -987,7 +1002,20 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 # -------------------- TOP-10 --------------------
+
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
+    # simple 60s cache
+    global _CG_TOP_CACHE
+    try:
+        _CG_TOP_CACHE
+    except NameError:
+        _CG_TOP_CACHE = _TTLCache()
+
+    cache_key = f"top:{cap_n}"
+    cached = _CG_TOP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
@@ -999,10 +1027,29 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
         }
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
-        return r.json() or []
+        data = r.json() or []
+        if data:
+            _CG_TOP_CACHE.set(cache_key, data, 60)
+            return data
     except Exception as e:
-        app.logger.warning(f"coingecko_top_market error: {e}")
-        return []
+        try:
+            app.logger.warning(f"coingecko_top_market error: {e}")
+        except Exception:
+            pass
+
+    fallback_ids = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin","binancecoin","ripple","cardano","dogecoin"]
+    sym_map = {"bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON","tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","ripple":"XRP","cardano":"ADA","dogecoin":"DOGE"}
+    bp = _binance_prices_for_ids(fallback_ids)
+    out = []
+    for cid in fallback_ids[:cap_n]:
+        price = (bp.get(cid) or {}).get("usd")
+        if price is None:
+            continue
+        out.append({"id": cid, "symbol": sym_map.get(cid, cid.upper()), "current_price": price})
+    if out:
+        _CG_TOP_CACHE.set(cache_key, out, 60)
+    return out
+
 
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
