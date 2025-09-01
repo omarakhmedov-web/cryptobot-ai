@@ -885,20 +885,45 @@ def _binance_price(symbol_pair: str) -> float | None:
 def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
     now_ts = int(time.time())
     out = {}
+    pairs = []
+    id_for_pair = {}
     for cid in coin_ids:
         sp = _BINANCE_MAP.get(cid)
-        p = None
         if sp:
-            p = _binance_price(sp)
-        # Stablecoin fallback if pair missing/unavailable
+            pairs.append(sp)
+            id_for_pair[sp] = cid
+
+    # Bulk request when possible to avoid per-coin 429s
+    if pairs:
+        try:
+            arr = json.dumps(pairs)
+            r = requests.get("https://api.binance.com/api/v3/ticker/price",
+                             params={"symbols": arr},
+                             timeout=10,
+                             headers={"User-Agent":"Mozilla/5.0"})
+            data = r.json()
+            if isinstance(data, list):
+                for item in data:
+                    sp = item.get("symbol")
+                    price = item.get("price")
+                    if sp in id_for_pair and price is not None:
+                        cid = id_for_pair[sp]
+                        out[cid] = {"usd": float(price), "last_updated_at": now_ts}
+        except Exception:
+            # fallback to single requests
+            pass
+
+    # Single fetch for any missing ones
+    for cid in coin_ids:
+        if cid in out:
+            continue
+        sp = _BINANCE_MAP.get(cid)
+        p = _binance_price(sp) if sp else None
         if p is None and cid in ("tether", "usd-coin"):
             p = 1.0
         if p is not None:
             out[cid] = {"usd": p, "last_updated_at": now_ts}
     return out
-
-
-
 # ===== Auto-injected: CoinGecko backoff & rate-limited logging =====
 _CG_BACKOFF_UNTIL = 0.0
 _CG_LAST_WARN_TS = 0.0
@@ -1003,6 +1028,7 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
 
 # -------------------- TOP-10 --------------------
 
+
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
     # simple 60s cache
     global _CG_TOP_CACHE
@@ -1037,6 +1063,7 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
         except Exception:
             pass
 
+    # Binance fallback with fixed list
     fallback_ids = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin","binancecoin","ripple","cardano","dogecoin"]
     sym_map = {"bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON","tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","ripple":"XRP","cardano":"ADA","dogecoin":"DOGE"}
     bp = _binance_prices_for_ids(fallback_ids)
@@ -1457,17 +1484,76 @@ def webhook_with_secret(secret):
     # Natural language routes (EN-only)
     try:
         _t = t_low.strip()
-        if any(k in _t for k in ("what can you do", "help", "menu", "commands", "how to use")):
-            bot.send_message(chat_id=chat_id, text=WELCOME.get(cur_lang, WELCOME["en"]), reply_markup=build_donate_keyboard())
+        # reserved / aliases
+        if _t in ("start", "/start", "hi", "hello"):
+            bot.send_message(chat_id=chat_id, text=WELCOME.get(cur_lang, WELCOME.get("en","Welcome")), reply_markup=build_donate_keyboard())
             return "ok"
-        # single symbol like "eth", "$btc", "sol"
+        if any(k in _t for k in ("what can you do", "help", "/help", "menu", "commands", "how to use")):
+            bot.send_message(chat_id=chat_id, text=WELCOME.get(cur_lang, WELCOME.get("en","Welcome")), reply_markup=build_donate_keyboard())
+            return "ok"
+        if _t in ("top 10", "top10", "top-ten", "top", "top coins"):
+            data = coingecko_top_market(10)
+            try:
+                msg_txt = format_top10(data, cur_lang)
+            except Exception:
+                # fallback plain formatter
+                lines = ["🏆 Top-10 by market cap (USD):"]
+                order = 1
+                for it in data:
+                    sym = (it.get("symbol") or "").upper() or it.get("id","").upper()
+                    price = it.get("current_price")
+                    if sym and price is not None:
+                        lines.append(f"{order}. {sym}: ${price:,.4f}")
+                        order += 1
+                lines.append("")
+                from datetime import datetime, timezone
+                lines.append(f"As of {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.")
+                msg_txt = "\n".join(lines)
+            # ids for refresh keyboard
+            ids = [it.get("id") for it in data if it.get("id")]
+            if not ids:
+                ids = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin","binancecoin","ripple","cardano","dogecoin"]
+            kb = build_top10_keyboard(chat_id, ids, cur_lang)
+            bot.send_message(chat_id=chat_id, text=msg_txt, reply_markup=kb)
+            return "ok"
+        if _t in ("gas", "fees", "gas price", "eth gas"):
+            g = cmd_gas_price()
+            bot.send_message(chat_id=chat_id, text=g or "Gas data unavailable.", reply_markup=None)
+            return "ok"
+        if _t in ("btcdom", "dominance", "btc dominance"):
+            d = cmd_btc_dominance()
+            bot.send_message(chat_id=chat_id, text=d or "BTC dominance unavailable.", reply_markup=None)
+            return "ok"
+        if _t in ("fg", "fear and greed", "fear & greed"):
+            f = cmd_fear_greed()
+            bot.send_message(chat_id=chat_id, text=f or "Fear & Greed unavailable.", reply_markup=None)
+            return "ok"
+
+        # Single ticker like "eth", "$btc", "sol" -> price
         import re as _re
         if _re.fullmatch(r"\$?[a-z]{2,6}", _t):
             sym = _t.lstrip("$").upper()
-            ids = _cg_ids_from_text(sym)
-            data = coingecko_prices(ids, vs="usd")
-            msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-            bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+            # Map symbol -> CG ids using existing helper if present
+            ids = None
+            try:
+                ids = _cg_ids_from_text(sym)  # returns list or None
+            except Exception:
+                ids = None
+            if not ids:
+                _SYM2ID = {
+                    "BTC":"bitcoin","ETH":"ethereum","SOL":"solana","TON":"the-open-network","BNB":"binancecoin",
+                    "ADA":"cardano","XRP":"ripple","DOGE":"dogecoin","TRX":"tron","MATIC":"matic-network",
+                    "AVAX":"avalanche-2","USDT":"tether","USDC":"usd-coin","SUI":"sui","APT":"apt","ARB":"arbitrum","OP":"optimism"
+                }
+                if sym in _SYM2ID:
+                    ids = [_SYM2ID[sym]]
+            if ids:
+                data = coingecko_prices(ids, vs="usd")
+                msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
+                bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+                return "ok"
+            # if symbol unknown, fall back to help
+            bot.send_message(chat_id=chat_id, text=WELCOME.get(cur_lang, WELCOME.get("en","Welcome")), reply_markup=build_donate_keyboard())
             return "ok"
     except Exception:
         pass
