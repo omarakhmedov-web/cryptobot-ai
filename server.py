@@ -877,7 +877,16 @@ def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
         data = r.json() or {}
         _cg_cache_set(cache_key, data)
         return data
+        data = r.json() or {}
+        _cg_cache_set(cache_key, data)
+        return data
     except Exception as e:
+        # Fallback to last global cache even if expired or key mismatch
+        try:
+            if _cg_cache.get("data"):
+                return _cg_cache.get("data")
+        except Exception:
+            pass
         return {"error": str(e)}
 
 def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
@@ -946,22 +955,35 @@ def get_price_24h(coin_id: str):
             pass
         return None
 
+
+# Simple cache for Top-10 (90 seconds)
+_top10_cache = {"t": 0.0, "n": 0, "data": []}
+
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
+    # Serve from cache if fresh and same N
     try:
+        now = time.time()
+        if now - _top10_cache.get("t", 0) < 90 and _top10_cache.get("n") == cap_n:
+            return _top10_cache.get("data") or []
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
             "vs_currency": "usd",
             "order": "market_cap_desc",
-            "per_page": str(cap_n),
-            "page": "1",
+            "per_page": cap_n,
+            "page": 1,
             "price_change_percentage": "24h"
         }
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
-        return r.json() or []
+        data = r.json() or []
+        # Update cache only if we got non-empty data
+        if data:
+            _top10_cache.update({"t": now, "n": cap_n, "data": data})
+        return data
     except Exception as e:
         app.logger.warning(f"coingecko_top_market error: {e}")
-        return []
+        # Fallback to last cached good data
+        return _top10_cache.get("data") or []
 
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
@@ -976,8 +998,8 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     ids = []
     for i, c in enumerate(mkts, start=1):
         sym = (c.get("symbol") or "").upper()
-        price = c.get("current_price")
-        chg = c.get("price_change_percentage_24h")
+        price = c.get("current_price") or 0
+        chg = c.get("price_change_percentage_24h") if c.get("price_change_percentage_24h") is not None else 0.0
         chg_s = ""
         if isinstance(chg, (int, float)):
             sign = "▲" if chg >= 0 else "▼"
