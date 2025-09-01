@@ -50,7 +50,7 @@ client = Groq(api_key=GROQ_API_KEY)  # без proxies
 
 # -------------------- Language / Texts --------------------
 EN_RE = re.compile(r"[A-Za-z]")
-LANG_RE = {"ru": re.compile(r"[А-Яа-яЁё]")}
+LANG_RE = {"ru": re.compile(r"[--]")}
 
 # Универсальное приветствие (полная версия для /start)
 WELCOME = {
@@ -65,14 +65,14 @@ WELCOME = {
         "Your help adds new features, integrations, and smarter answers. Every contribution matters! ☕💙"
     ),
     "ru": (
-        "🤖 Добро пожаловать в GuardexBot — вашего компактного помощника в мире Web3.\n\n"
-        "Я умею:\n"
-        "• Отвечать на вопросы о криптовалютах и Web3.\n"
-        "• Показывать цены в реальном времени, топ-10 монет, газ, доминацию BTC, индекс страха и жадности.\n"
-        "• Проверять контракты через блок-эксплореры (Etherscan/PolygonScan/BscScan) — автоматический выбор.\n"
-        "• Показывать баланс и последние транзакции через Alchemy.\n\n"
+        "🤖    GuardexBot —      Web3.\n\n"
+        " :\n"
+        "•       Web3.\n"
+        "•     , -10 , ,  BTC,    .\n"
+        "•    - (Etherscan/PolygonScan/BscScan) —  .\n"
+        "•       Alchemy.\n\n"
         ""
-        "Ваша помощь добавит новые функции, интеграции и сделает ответы умнее. Каждый вклад важен! ☕💙"
+        "    ,     .   ! ☕💙"
     ),
 }
 
@@ -88,11 +88,11 @@ DONATE_TEXT = {
     ),
     "ru": (
         ""
-        "Ваш вклад помогает:\n"
-        "• Обеспечивать стабильную работу бота без простоев.\n"
-        "• Добавлять новые функции и интеграции (Etherscan/PolygonScan/BscScan, Alchemy аналитика, уведомления).\n"
-        "• Делать ответы умнее и полезнее для крипто-сообщества.\n\n"
-        "Каждый вклад важен — спасибо! ☕💙"
+        "  :\n"
+        "•      .\n"
+        "•      (Etherscan/PolygonScan/BscScan, Alchemy , ).\n"
+        "•       -.\n\n"
+        "   — ! ☕💙"
     ),
 }
 
@@ -100,15 +100,15 @@ REPORT_LABELS = {
     "en": {"network":"Network","address":"Address","name":"Contract name","sourceverified":"Source verified",
            "impl":"Implementation","proxy":"Proxy","compiler":"Compiler","funcs":"Detected functions",
            "via":"Data source","error":"Could not fetch data from explorers. Add API keys or check the address."},
-    "ru": {"network":"Сеть","address":"Адрес","name":"Имя контракта","sourceverified":"Исходник верифицирован",
-           "impl":"Реализация","proxy":"Прокси","compiler":"Компайлер","funcs":"Обнаруженные функции",
-           "via":"Источник","error":"Не удалось получить данные у блок-эксплореров. Добавьте API ключи или проверьте адрес."},
+    "ru": {"network":"","address":"","name":" ","sourceverified":" ",
+           "impl":"","proxy":"","compiler":"","funcs":" ",
+           "via":"","error":"     -.  API    ."},
 }
 ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 SYSTEM_PROMPT_BASE = (
     "You are GuardexBot — a concise Web3 assistant.\n"
-    "RULES:\n"
+    "ENLES:\n"
     "1) If user sends an Ethereum address (0x...), do NOT guess — run an explorer check and summarize.\n"
     "2) For general questions, answer briefly and practically.\n"
     "3) If data is missing (chain, address, explorer), say what is needed in ONE short line.\n"
@@ -212,11 +212,11 @@ def maybe_set_language_from_text(t_low: str) -> str | None:
         return "en"
     if re.search(r"\blanguage\s*:\s*en\b", t_low) or re.search(r"\blang\s*en\b", t_low):
         return "en"
-    if re.search(r"\benglish\b", t_low) and not re.search(r"\brussian|русск", t_low):
+    if re.search(r"\benglish\b", t_low) and not re.search(r"\brussian|", t_low):
         return "en"
     if t_low.strip() in ("en", "eng", "english please", "please english"):
         return "en"
-    if re.search(r"\bна\s+английск\w*\b", t_low) or re.search(r"\bсделай\s+английск\w*\b", t_low):
+    if re.search(r"\b\s+\w*\b", t_low) or re.search(r"\b\s+\w*\b", t_low):
         return "en"
 
     # Русский
@@ -224,9 +224,9 @@ def maybe_set_language_from_text(t_low: str) -> str | None:
         return "ru"
     if re.search(r"\blanguage\s*:\s*ru\b", t_low) or re.search(r"\blang\s*ru\b", t_low):
         return "ru"
-    if re.search(r"\bрусск\w*\b", t_low) or re.search(r"\bна\s+русском\b", t_low) or re.search(r"\bсделай\s+русск\w*\b", t_low):
+    if re.search(r"\b\w*\b", t_low) or re.search(r"\b\s+\b", t_low) or re.search(r"\b\s+\w*\b", t_low):
         return "ru"
-    if t_low.strip() in ("ru", "russian", "по русски", "по-русски"):
+    if t_low.strip() in ("ru", "russian", " ", "-"):
         return "ru"
 
     return None
@@ -805,7 +805,7 @@ def compose_snippets_text(snips: list, lang: str) -> str:
     if not snips: return ""
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
     header = {"en": f"Fresh web snippets (UTC {date_str}):",
-              "ru": f"Свежие сниппеты из веба (UTC {date_str}):"}.get(lang, f"Fresh web snippets (UTC {date_str}):")
+              "ru": f"    (UTC {date_str}):"}.get(lang, f"Fresh web snippets (UTC {date_str}):")
     lines = [header]
     for s in snips:
         t = s.get("title") or ""; l = s.get("link") or ""; p = s.get("snippet") or ""
@@ -815,8 +815,8 @@ def compose_snippets_text(snips: list, lang: str) -> str:
 # -------------------- [PRICE] CoinGecko + /price + Refresh --------------------
 PRICE_TRIGGERS = re.compile(
     r"(?:\b|_)(?:price|prices|rate|quote|update\s*price)\b"
-    r"|(?:\b|_)(?:курс|котировк|котировки|цена|цены|стоимость|сколько\s+стоит|сколько\s+сейчас)\b"
-    r"|(?:\b|_)(?:сейчас|на\s+данный\s+момент|прямо\s+сейчас|now|at\s+the\s+moment)\b",
+    r"|(?:\b|_)(?:||||||\s+|\s+)\b"
+    r"|(?:\b|_)(?:|\s+\s+|\s+|now|at\s+the\s+moment)\b",
     re.IGNORECASE
 )
 SYMBOL_TO_CG = {
@@ -835,7 +835,7 @@ def is_price_query(text: str) -> bool:
 
 def _cg_ids_from_text(text: str) -> list[str]:
     t = (text or "").lower()
-    ask_all = any(w in t for w in ("все", "всё", "all"))
+    ask_all = any(w in t for w in ("", "", "all"))
     default_top = [
         "bitcoin","ethereum","solana","the-open-network",
         "tether","usd-coin","binancecoin","ripple","cardano","dogecoin"
@@ -881,14 +881,14 @@ def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
 
 def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
     if "error" in data:
-        return {"en":"Price fetch error.","ru":"Ошибка получения цены."}.get(lang, "Price fetch error.")
+        return {"en":"Price fetch error.","ru":"Error  ."}.get(lang, "Price fetch error.")
     name_map = {
         "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
         "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","arbitrum":"ARB","optimism":"OP",
         "cardano":"ADA","ripple":"XRP","avalanche-2":"AVAX","tron":"TRX","dogecoin":"DOGE","matic-network":"MATIC",
         "sui":"SUI","apt":"APT"
     }
-    lines = {"en":["🔔 Spot prices (USD):"],"ru":["🔔 Спот-цены (USD):"]}.get(lang, ["🔔 Spot prices (USD):"])
+    lines = {"en":["🔔 Spot prices (USD):"],"ru":["🔔 - (USD):"]}.get(lang, ["🔔 Spot prices (USD):"])
     order = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin"]
     for k in order + [k for k in data.keys() if k not in order]:
         if k not in data: continue
@@ -904,19 +904,19 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
             chg_s = f""
         lines.append(f"{sym}: ${price:,.4f}{chg_s}")
     if len(lines) == 1:
-        return {"en":"No price data.","ru":"Нет данных по ценам."}.get(lang, "No price data.")
+        return {"en":"No price data.","ru":"   ."}.get(lang, "No price data.")
     try:
         all_ts = [v.get("last_updated_at") for v in data.values() if isinstance(v, dict) and v.get("last_updated_at")]
         if all_ts:
             dt = datetime.utcfromtimestamp(max(all_ts)).strftime("%Y-%m-%d %H:%M UTC")
-            lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}."}.get(lang, f"\nAs of {dt}."))
+            lines.append({"en":f"\nAs of {dt}.","ru":f"\n   {dt}."}.get(lang, f"\nAs of {dt}."))
     except Exception:
         pass
     return "\n".join(lines)
 
 # UI для цен
 def _t_refresh(lang: str) -> str:
-    return {"en":"🔄 Refresh","ru":"🔄 Обновить"}.get(lang, "🔄 Refresh")
+    return {"en":"🔄 Refresh","ru":"🔄 Refresh"}.get(lang, "🔄 Refresh")
 
 def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     token = store_price_ids(chat_id, ids)
@@ -943,12 +943,12 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
         return (
-            {"en":"No market data.","ru":"Нет рыночных данных."}.get(lang, "No market data."),
+            {"en":"No market data.","ru":"  ."}.get(lang, "No market data."),
             []
         )
     lines = {
         "en": ["🏆 Top-10 by market cap (USD):"],
-        "ru": ["🏆 Топ-10 по капитализации (USD):"],
+        "ru": ["🏆 Top-10   (USD):"],
     }.get(lang, ["🏆 Top-10 by market cap (USD):"])
     ids = []
     for i, c in enumerate(mkts, start=1):
@@ -962,7 +962,7 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
         lines.append(f"{i}. {sym}: ${price:,.4f}{chg_s}")
         ids.append(c.get("id"))
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}."}.get(lang, f"\nAs of {dt}."))
+    lines.append({"en":f"\nAs of {dt}.","ru":f"\n   {dt}."}.get(lang, f"\nAs of {dt}."))
     return ("\n".join(lines), ids)
 
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
@@ -1105,11 +1105,11 @@ def get_eth_gas() -> dict:
 
 def format_gas_message(data: dict, lang: str) -> str:
     if "error" in data:
-        return {"en":"Gas data unavailable.","ru":"Данные по газу недоступны."}.get(lang, "Gas data unavailable.")
+        return {"en":"Gas data unavailable.","ru":"Data   ."}.get(lang, "Gas data unavailable.")
     src = data.get("source", "n/a")
     lines = {
         "en": ["⛽ Ethereum gas (gwei):"],
-        "ru": ["⛽ Газ Ethereum (gwei):"],
+        "ru": ["⛽  Ethereum (gwei):"],
     }.get(lang, ["⛽ Ethereum gas (gwei):"])
     lines.append(f"Safe: {data.get('safe'):.1f}")
     lines.append(f"Propose: {data.get('propose'):.1f}")
@@ -1118,7 +1118,7 @@ def format_gas_message(data: dict, lang: str) -> str:
         lines.append(f"Base fee: {data.get('base'):.1f}")
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     lines.append({"en":f"\nSource: {src}. As of {dt}.",
-                  "ru":f"\nИсточник: {src}. По состоянию на {dt}."}.get(lang, f"\nSource: {src}. As of {dt}."))
+                  "ru":f"\n: {src}.    {dt}."}.get(lang, f"\nSource: {src}. As of {dt}."))
     return "\n".join(lines)
 
 def build_gas_keyboard(lang: str) -> InlineKeyboardMarkup:
@@ -1140,7 +1140,7 @@ def fetch_fear_greed() -> dict:
 def format_fear_greed(d: dict, lang: str) -> str:
     if "error" in d or not d.get("value"):
         return {"en":"Fear & Greed data unavailable.",
-                "ru":"Индекс страха и жадности недоступен."}.get(lang, "Fear & Greed data unavailable.")
+                "ru":"    ."}.get(lang, "Fear & Greed data unavailable.")
     val = d["value"]
     cls = d.get("classification","")
     try:
@@ -1149,8 +1149,8 @@ def format_fear_greed(d: dict, lang: str) -> str:
     except Exception:
         dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     hdr = {"en":"😨/😎 Crypto Fear & Greed Index:",
-           "ru":"😨/😎 Индекс страха и жадности:"}.get(lang, "😨/😎 Crypto Fear & Greed Index:")
-    return f"{hdr}\n{val} ({cls})\n\n" + {"en":f"As of {dt}.","ru":f"По состоянию на {dt}."}.get(lang, f"As of {dt}.")
+           "ru":"😨/😎    :"}.get(lang, "😨/😎 Crypto Fear & Greed Index:")
+    return f"{hdr}\n{val} ({cls})\n\n" + {"en":f"As of {dt}.","ru":f"   {dt}."}.get(lang, f"As of {dt}.")
 
 def build_fng_keyboard(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data="fng:r")]])
@@ -1168,18 +1168,18 @@ def fetch_btc_dominance() -> dict:
 def format_btc_dominance(d: dict, lang: str) -> str:
     if "error" in d or d.get("dominance") is None:
         return {"en":"BTC dominance unavailable.",
-                "ru":"Доминация BTC недоступна."}.get(lang, "BTC dominance unavailable.")
+                "ru":"Dominance BTC ."}.get(lang, "BTC dominance unavailable.")
     dom = float(d["dominance"])
     mcap = d.get("mcap_usd")
     lines = {
         "en": [f"🟧 BTC dominance: {dom:.2f}%"],
-        "ru": [f"🟧 Доминация BTC: {dom:.2f}%"],
+        "ru": [f"🟧 Dominance BTC: {dom:.2f}%"],
     }.get(lang, [f"🟧 BTC dominance: {dom:.2f}%"])
     if isinstance(mcap, (int, float)):
         lines.append({"en":f"Total crypto mcap: ${mcap:,.0f}",
-                      "ru":f"Общая капитализация рынка: ${mcap:,.0f}"}[lang])
+                      "ru":f"  : ${mcap:,.0f}"}[lang])
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines.append({"en":f"\nAs of {dt}.","ru":f"\nПо состоянию на {dt}."}.get(lang, f"\nAs of {dt}."))
+    lines.append({"en":f"\nAs of {dt}.","ru":f"\n   {dt}."}.get(lang, f"\nAs of {dt}."))
     return "\n".join(lines)
 
 def build_btcdom_keyboard(lang: str) -> InlineKeyboardMarkup:
@@ -1792,7 +1792,7 @@ def webhook():
     lang_nl = maybe_set_language_from_text(t_low)
     if lang_nl in ("en", "ru"):
         set_lang_override(chat_id, lang_nl)
-        bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}[lang_nl])
+        bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Language ."}[lang_nl])
         return "ok"
 
     # Принудительная установка языка: /lang en|ru
@@ -1800,13 +1800,13 @@ def webhook():
         parts = t_low.split()
         if len(parts) >= 2 and parts[1] in ("en","ru"):
             set_lang_override(chat_id, parts[1])
-            bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Язык установлен."}.get(parts[1], "Language set."))
+            bot.send_message(chat_id=chat_id, text={"en":"Language set.","ru":"Language ."}.get(parts[1], "Language set."))
         else:
             bot.send_message(chat_id=chat_id, text="Usage: /lang en | ru")
         return "ok"
 
     # Донаты (и без слэша тоже)
-    if t_low in ("/donate", "donate", "донат", "/tip", "tip"):
+    if t_low in ("/donate", "donate", "", "/tip", "tip"):
         send_donate_message(chat_id, cur_lang)
         return "ok"
 
@@ -1862,25 +1862,25 @@ def webhook():
     if t_low.startswith("/balance"):
         parts = text.split()
         if len(parts) < 2 or not ADDR_RE.match(parts[1]):
-            bot.send_message(chat_id=chat_id, text={"en":"Usage: /balance <ETH address>","ru":"Использование: /balance <ETH адрес>"}.get(cur_lang, "Usage: /balance <ETH address>"))
+            bot.send_message(chat_id=chat_id, text={"en":"Usage: /balance <ETH address>","ru":": /balance <ETH >"}.get(cur_lang, "Usage: /balance <ETH address>"))
             return "ok"
         addr = parts[1]
         if not ALCHEMY_API_KEY:
-            bot.send_message(chat_id=chat_id, text={"en":"Balances are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Баланс временно недоступен (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text={"en":"Balances are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Balance   ( ALCHEMY_API_KEY)."}.get(cur_lang, ""))
             return "ok"
         eth_bal = alchemy_get_eth_balance(addr)
         if not eth_bal.get("ok"):
-            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch balance.","ru":"Не удалось получить баланс."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch balance.","ru":"   ."}.get(cur_lang, ""))
             return "ok"
         tokens = alchemy_get_erc20_balances(addr)
         lines = {"en":[f"💰 Balance for {_short(addr)}:"],
-                 "ru":[f"💰 Баланс {_short(addr)}:"]}.get(cur_lang, [f"💰 Balance for {_short(addr)}:"])
+                 "ru":[f"💰 Balance {_short(addr)}:"]}.get(cur_lang, [f"💰 Balance for {_short(addr)}:"])
         lines.append(f"ETH: {eth_bal.get('eth')}")
         if tokens.get("ok"):
             # show first up to 10 tokens (contract only; no decimals without metadata)
             tlist = tokens.get("tokens") or []
             if tlist:
-                lines.append({"en":"ERC-20 (raw, first 10):","ru":"ERC-20 (сырые, первые 10):"}.get(cur_lang,"ERC-20:"))
+                lines.append({"en":"ERC-20 (raw, first 10):","ru":"ERC-20 (,  10):"}.get(cur_lang,"ERC-20:"))
                 for t in tlist[:10]:
                     lines.append(f"- {t.get('contract')} : {t.get('balance_hex')}")
         bot.send_message(chat_id=chat_id, text="\n".join(lines))
@@ -1890,23 +1890,23 @@ def webhook():
     if t_low.startswith("/txs"):
         parts = text.split()
         if len(parts) < 2 or not ADDR_RE.match(parts[1]):
-            bot.send_message(chat_id=chat_id, text={"en":"Usage: /txs <ETH address>","ru":"Использование: /txs <ETH адрес>"}.get(cur_lang, "Usage: /txs <ETH address>"))
+            bot.send_message(chat_id=chat_id, text={"en":"Usage: /txs <ETH address>","ru":": /txs <ETH >"}.get(cur_lang, "Usage: /txs <ETH address>"))
             return "ok"
         addr = parts[1]
         if not ALCHEMY_API_KEY:
-            bot.send_message(chat_id=chat_id, text={"en":"Transactions are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Транзакции временно недоступны (установите ALCHEMY_API_KEY)."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text={"en":"Transactions are temporarily unavailable (set ALCHEMY_API_KEY).","ru":"Transactions   ( ALCHEMY_API_KEY)."}.get(cur_lang, ""))
             return "ok"
         hist = alchemy_get_asset_transfers(addr, max_count=10)
         if not hist.get("ok"):
-            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch transactions.","ru":"Не удалось получить транзакции."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text={"en":"Failed to fetch transactions.","ru":"   ."}.get(cur_lang, ""))
             return "ok"
         rows = hist.get("txs") or []
         if not rows:
-            bot.send_message(chat_id=chat_id, text={"en":"No recent transfers found.","ru":"Недавние переводы не найдены."}.get(cur_lang, ""))
+            bot.send_message(chat_id=chat_id, text={"en":"No recent transfers found.","ru":"   ."}.get(cur_lang, ""))
             return "ok"
         # Build compact table
         if cur_lang == "ru":
-            header = "# | Дата (UTC)        | От → Кому                | Значение | Статус"
+            header = "# |  (UTC)        |  →                 |  | "
         else:
             header = "# | Date (UTC)        | From → To                | Value | Status"
         lines = [header]
@@ -1921,7 +1921,7 @@ def webhook():
     if t_low.startswith("/check"):
         parts = text.split()
         if len(parts) < 2 or not ADDR_RE.match(parts[1]):
-            bot.send_message(chat_id=chat_id, text={"en":"Usage: /check <ETH address>","ru":"Использование: /check <ETH адрес>"}.get(cur_lang, "Usage: /check <ETH address>"))
+            bot.send_message(chat_id=chat_id, text={"en":"Usage: /check <ETH address>","ru":": /check <ETH >"}.get(cur_lang, "Usage: /check <ETH address>"))
             return "ok"
         addr = parts[1]
         try:
@@ -1932,7 +1932,7 @@ def webhook():
                                    bscscan_key=BSCSCAN_API_KEY)
             report = format_check_report(facts, cur_lang)
         except Exception as e:
-            report = {"en":"Internal error during /check.","ru":"Внутренняя ошибка при /check."}.get(cur_lang, "Internal error during /check.")
+            report = {"en":"Internal error during /check.","ru":"   /check."}.get(cur_lang, "Internal error during /check.")
         bot.send_message(chat_id=chat_id, text=report,
                          reply_markup=build_donate_keyboard() if DONATE_STICKY else None)
         return "ok"
@@ -2167,12 +2167,12 @@ def format_check_report(facts: dict, lang: str) -> str:
             "error":"Internal error or bad address."
         },
         "ru": {
-            "hdr":"🔎 Быстрая проверка контракта:",
-            "network":"Сеть","address":"Адрес",
-            "name":"Имя","symbol":"Символ","decimals":"Десятичные",
+            "hdr":"🔎   :",
+            "network":"","address":"",
+            "name":"","symbol":"","decimals":"",
             "erc165":"ERC-165","erc721":"ERC-721","erc1155":"ERC-1155",
-            "proxy":"Прокси","impl":"Реализация","via":"Источник",
-            "error":"Внутренняя ошибка или неверный адрес."
+            "proxy":"","impl":"","via":"",
+            "error":"    ."
         }
     }.get(lang, {
         "hdr":"🔎 Contract quick check:",
@@ -2207,7 +2207,7 @@ def format_check_report(facts: dict, lang: str) -> str:
     if lang == "en":
         lines.append(f"\nAs of {dt}.")
     else:
-        lines.append(f"\nПо состоянию на {dt}.")
+        lines.append(f"\n   {dt}.")
     return "\n".join(lines)
 
 
