@@ -2209,3 +2209,11 @@ def format_check_report(facts: dict, lang: str) -> str:
     else:
         lines.append(f"\nПо состоянию на {dt}.")
     return "\n".join(lines)
+
+
+def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
+    """
+    Top-10: ONLY a single Refresh button. No "24" buttons.
+    """
+    token = store_price_ids(chat_id, ids)
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
