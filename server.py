@@ -580,7 +580,7 @@ def _rpc(payload: dict) -> dict:
         resp = requests.post(url, json=payload, timeout=20, headers={"Content-Type":"application/json"})
         return resp.json()
     except Exception as e:
-        return {"error": str(e)}
+        return _cg_cache_get(cache_key) or {"error": str(e)}
 
 def _to_eth(wei_hex_or_int) -> Decimal:
     try:
@@ -874,10 +874,15 @@ def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
         data = r.json() or {}
+        if not data:
+            # retry once
+            r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
+            r.raise_for_status()
+            data = r.json() or {}
         _cg_cache_set(cache_key, data)
         return data
     except Exception as e:
-        return {"error": str(e)}
+        return _cg_cache_get(cache_key) or {"error": str(e)}
 
 def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
     if "error" in data:
@@ -923,7 +928,7 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}"),
-        InlineKeyboardButton("24h", callback_data=f"pry:{token}")
+        InlineKeyboardButton("24", callback_data=f"pry:{token}")
     ]])
 
 
@@ -990,6 +995,20 @@ def format_yesterday_prices_message(data: dict, lang: str = "en", vs="usd") -> s
     dt = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
     lines.append({"en":f"\\nAs of {dt} (UTC).","ru":f"\\nПо состоянию на {dt} (UTC)."}.get(lang, f"\\nAs of {dt} (UTC)."))
     return "\\n".join(lines)
+
+
+# Helper to get last used price token per chat or default ids
+def resolve_last_or_default_ids(chat_id: int) -> list[str]:
+    # Try to find any stored token; fall back to common set
+    ids = None
+    try:
+        # Prefer last stored under this chat id using internal storage (if available)
+        ids = resolve_price_ids(chat_id, "__last__")
+    except Exception:
+        ids = None
+    if not ids:
+        ids = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin","binancecoin","ripple","cardano","dogecoin"]
+    return ids
 
 # -------------------- TOP-10 --------------------
 
@@ -1480,7 +1499,7 @@ def webhook_with_secret(secret):
         ids = _cg_ids_from_text(query_text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
         return "ok"
 
     # /top10 (compat)
@@ -1489,6 +1508,17 @@ def webhook_with_secret(secret):
         msg_out, ids = format_top10(mkts, lang=cur_lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
         return "ok"
+
+# 24h text fallback (in case user sends text or some clients echo button label)
+if t_low in ("/24","/24h","24","24h"):
+    ids = resolve_last_or_default_ids(chat_id)
+    lang = cur_lang
+    data_y = coingecko_yesterday_prices(ids, vs="usd")
+    msg_y = format_yesterday_prices_message(data_y, lang, vs="usd")
+    bot.send_message(chat_id=chat_id, text=msg_y, reply_markup=build_top10_keyboard(chat_id, ids, lang))
+    return "ok"
+
+
 
     # /gas
     if t_low.startswith("/gas") or t_low == "gas":
@@ -1761,7 +1791,7 @@ def webhook_with_secret(secret):
         ids = _cg_ids_from_text(text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
         return "ok"
 
     # Empty text => show welcome
@@ -1956,7 +1986,7 @@ def webhook():
         ids = _cg_ids_from_text(query_text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
         return "ok"
 
     # /top10 (оставляем совместимость)
@@ -2080,7 +2110,7 @@ def webhook():
         ids = _cg_ids_from_text(text)
         data = coingecko_prices(ids, vs="usd")
         msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
+        bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
         return "ok"
 
     # Пусто
@@ -2126,7 +2156,7 @@ def _rpc(url: str, method: str, params: list) -> dict:
         r = requests.post(url, json={"jsonrpc":"2.0","id":1,"method":method,"params":params}, timeout=20, headers={"Content-Type":"application/json"})
         return r.json()
     except Exception as e:
-        return {"error": str(e)}
+        return _cg_cache_get(cache_key) or {"error": str(e)}
 
 def _hex_to_bytes(x: str) -> bytes:
     x = x or ""
