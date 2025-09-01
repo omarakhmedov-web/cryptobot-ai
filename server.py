@@ -861,123 +861,6 @@ def _cg_cache_get(key: str):
 def _cg_cache_set(key: str, data: dict):
     _cg_cache.update({"t": time.time(), "key": key, "data": data})
 
-
-# ===== Binance fallback helpers (auto-injected) =====
-_BINANCE_MAP = {
-    "bitcoin":"BTCUSDT","ethereum":"ETHUSDT","solana":"SOLUSDT","the-open-network":"TONUSDT",
-    "tether":"USDTUSDT","usd-coin":"USDCUSDT","binancecoin":"BNBUSDT","ripple":"XRPUSDT",
-    "cardano":"ADAUSDT","dogecoin":"DOGEUSDT","tron":"TRXUSDT","matic-network":"MATICUSDT",
-    "avalanche-2":"AVAXUSDT","sui":"SUIUSDT","apt":"APTUSDT","arbitrum":"ARBUSDT","optimism":"OPUSDT"
-}
-
-def _binance_price(symbol_pair: str) -> float | None:
-    try:
-        r = requests.get("https://api.binance.com/api/v3/ticker/price",
-                         params={"symbol": symbol_pair}, timeout=10,
-                         headers={"User-Agent":"Mozilla/5.0"})
-        j = r.json()
-        if "price" in j:
-            return float(j["price"])
-    except Exception:
-        return None
-    return None
-
-
-
-# ===== Coinbase extra fallback (single symbol) =====
-_CB_ID2SYM = {
-    "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
-    "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","ripple":"XRP","cardano":"ADA","dogecoin":"DOGE",
-    "tron":"TRX","matic-network":"MATIC","avalanche-2":"AVAX","sui":"SUI","apt":"APT","arbitrum":"ARB","optimism":"OP"
-}
-
-def _coinbase_price(symbol: str):
-    # symbol like "ETH"
-    try:
-        r = requests.get(f"https://api.coinbase.com/v2/prices/{symbol}-USD/spot",
-                         timeout=10, headers={"User-Agent":"Mozilla/5.0"})
-        j = r.json()
-        amt = (((j or {}).get("data") or {}).get("amount"))
-        if amt is not None:
-            return float(amt)
-    except Exception:
-        return None
-    return None
-
-def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
-    now_ts = int(time.time())
-    out = {}
-    pairs = []
-    id_for_pair = {}
-    for cid in coin_ids:
-        sp = _BINANCE_MAP.get(cid)
-        if sp:
-            pairs.append(sp)
-            id_for_pair[sp] = cid
-    # Bulk first
-    if pairs:
-        try:
-            import json as _json
-            arr = _json.dumps(pairs)
-            r = requests.get("https://api.binance.com/api/v3/ticker/price",
-                             params={"symbols": arr},
-                             timeout=10, headers={"User-Agent":"Mozilla/5.0"})
-            data = r.json()
-            if isinstance(data, list):
-                for item in data:
-                    sp = item.get("symbol")
-                    price = item.get("price")
-                    if sp in id_for_pair and price is not None:
-                        cid = id_for_pair[sp]
-                        out[cid] = {"usd": float(price), "last_updated_at": now_ts}
-        except Exception:
-            pass
-    # Singles and stable fallback
-    for cid in coin_ids:
-        if cid in out:
-            continue
-        sp = _BINANCE_MAP.get(cid)
-        p = _binance_price(sp) if sp else None
-        if p is None and cid in ("tether", "usd-coin"):
-            p = 1.0
-        if p is None and "_CB_ID2SYM" in globals():
-            # Coinbase fallback for missing
-            sym = _CB_ID2SYM.get(cid)
-            if sym:
-                p = _coinbase_price(sym)
-        if p is not None:
-            out[cid] = {"usd": p, "last_updated_at": now_ts}
-    return out
-# ===== Auto-injected: CoinGecko backoff & rate-limited logging =====
-_CG_BACKOFF_UNTIL = 0.0
-_CG_LAST_WARN_TS = 0.0
-
-def _cg_in_backoff() -> bool:
-    try:
-        return time.time() < _CG_BACKOFF_UNTIL
-    except Exception:
-        return False
-
-def _cg_trip_backoff(seconds: int = 120):
-    global _CG_BACKOFF_UNTIL
-    try:
-        _CG_BACKOFF_UNTIL = time.time() + max(1, int(seconds))
-    except Exception:
-        pass
-
-def _cg_warn_rl(msg: str, min_interval: int = 300):
-    # Warn at most once per window to prevent log spam across many updates
-    global _CG_LAST_WARN_TS
-    now = time.time()
-    if now - _CG_LAST_WARN_TS >= max(5, int(min_interval)):
-        try:
-            app.logger.warning(msg)
-        except Exception:
-            pass
-        _CG_LAST_WARN_TS = now
-
-
-
 def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
     coin_ids_str = ",".join(coin_ids)
@@ -985,27 +868,16 @@ def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     cached = _cg_cache_get(cache_key)
     if cached is not None:
         return cached
-
     url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": coin_ids_str, "vs_currencies": vs, "include_last_updated_at": "true"}
-
+    params = {"ids": coin_ids_str, "vs_currencies": vs, "": "true", "include_last_updated_at": "true"}
     try:
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
         data = r.json() or {}
-        if not data:
-            data = _binance_prices_for_ids(coin_ids)
-        if data:
-            _cg_cache_set(cache_key, data)
-            return data
-        return {"error": "no_data"}
-    except Exception:
-        data = _binance_prices_for_ids(coin_ids)
-        if data:
-            _cg_cache_set(cache_key, data)
-            return data
-        return {"error": "price_unavailable"}
-
+        _cg_cache_set(cache_key, data)
+        return data
+    except Exception as e:
+        return {"error": str(e)}
 
 def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
     if "error" in data:
@@ -1051,21 +923,7 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 # -------------------- TOP-10 --------------------
-
-
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
-    # simple 60s cache
-    global _CG_TOP_CACHE
-    try:
-        _CG_TOP_CACHE
-    except NameError:
-        _CG_TOP_CACHE = _TTLCache()
-
-    cache_key = f"top:{cap_n}"
-    cached = _CG_TOP_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
@@ -1077,30 +935,10 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
         }
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
-        data = r.json() or []
-        if data:
-            _CG_TOP_CACHE.set(cache_key, data, 60)
-            return data
+        return r.json() or []
     except Exception as e:
-        try:
-            app.logger.warning(f"coingecko_top_market error: {e}")
-        except Exception:
-            pass
-
-    # Binance fallback with fixed list
-    fallback_ids = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin","binancecoin","ripple","cardano","dogecoin"]
-    sym_map = {"bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON","tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","ripple":"XRP","cardano":"ADA","dogecoin":"DOGE"}
-    bp = _binance_prices_for_ids(fallback_ids)
-    out = []
-    for cid in fallback_ids[:cap_n]:
-        price = (bp.get(cid) or {}).get("usd")
-        if price is None:
-            continue
-        out.append({"id": cid, "symbol": sym_map.get(cid, cid.upper()), "current_price": price})
-    if out:
-        _CG_TOP_CACHE.set(cache_key, out, 60)
-    return out
-
+        app.logger.warning(f"coingecko_top_market error: {e}")
+        return []
 
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
@@ -1502,98 +1340,7 @@ def webhook_with_secret(secret):
 
     text = (msg.get("text") or msg.get("caption") or "").strip()
     t_low = (text or "").lower()
-
     cur_lang = get_lang_override(chat_id) or DEFAULT_LANG
-
-    
-    # Natural language routes (EN-only)
-    try:
-        _t = t_low.strip()
-        # reserved / aliases
-        if _t in ("start", "/start", "hi", "hello"):
-            bot.send_message(chat_id=chat_id, text=WELCOME.get(cur_lang, WELCOME.get("en","Welcome")), reply_markup=build_donate_keyboard())
-            return "ok"
-        if any(k in _t for k in ("what can you do", "help", "/help", "menu", "commands", "how to use")):
-            bot.send_message(chat_id=chat_id, text=WELCOME.get(cur_lang, WELCOME.get("en","Welcome")), reply_markup=build_donate_keyboard())
-            return "ok"
-        if _t in ("top 10", "top10", "top-ten", "top", "top coins"):
-            data = coingecko_top_market(10)
-            # format_top10 may return string OR (text, ids) / [text, ids]
-            fmt = None
-            try:
-                fmt = format_top10(data, cur_lang)
-            except Exception:
-                fmt = None
-
-            msg_txt = None
-            ids = [it.get("id") for it in data if isinstance(it, dict) and it.get("id")]
-            if isinstance(fmt, (list, tuple)) and len(fmt) >= 1:
-                msg_txt = fmt[0]
-                if len(fmt) > 1 and isinstance(fmt[1], (list, tuple)) and fmt[1]:
-                    ids = list(fmt[1])
-            elif isinstance(fmt, str):
-                msg_txt = fmt
-
-            if not msg_txt:
-                lines = ["🏆 Top-10 by market cap (USD):"]
-                rank = 1
-                for it in data:
-                    sym = ((it.get("symbol") or it.get("id") or "?")).upper()
-                    price = it.get("current_price")
-                    if price is not None:
-                        lines.append(f"{rank}. {sym}: ${price:,.4f}")
-                        rank += 1
-                lines.append("")
-                from datetime import datetime, timezone
-                lines.append(f"As of {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.")
-                msg_txt = "\n".join(lines)
-
-            if not ids:
-                ids = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin","binancecoin","ripple","cardano","dogecoin"]
-            kb = build_top10_keyboard(chat_id, ids, cur_lang)
-            bot.send_message(chat_id=chat_id, text=msg_txt, reply_markup=kb)
-            return "ok"
-
-        if _t in ("gas", "fees", "gas price", "eth gas"):
-            g = cmd_gas_price()
-            bot.send_message(chat_id=chat_id, text=g or "Gas data unavailable.", reply_markup=None)
-            return "ok"
-        if _t in ("btcdom", "dominance", "btc dominance"):
-            d = cmd_btc_dominance()
-            bot.send_message(chat_id=chat_id, text=d or "BTC dominance unavailable.", reply_markup=None)
-            return "ok"
-        if _t in ("fg", "fear and greed", "fear & greed"):
-            f = cmd_fear_greed()
-            bot.send_message(chat_id=chat_id, text=f or "Fear & Greed unavailable.", reply_markup=None)
-            return "ok"
-
-        # Single ticker like "eth", "$btc", "sol" -> price
-        import re as _re
-        if _re.fullmatch(r"\$?[a-z]{2,6}", _t):
-            sym = _t.lstrip("$").upper()
-            ids = None
-            try:
-                ids = _cg_ids_from_text(sym)
-            except Exception:
-                ids = None
-            if not ids:
-                _SYM2ID = {
-                    "BTC":"bitcoin","ETH":"ethereum","SOL":"solana","TON":"the-open-network","BNB":"binancecoin",
-                    "ADA":"cardano","XRP":"ripple","DOGE":"dogecoin","TRX":"tron","MATIC":"matic-network",
-                    "AVAX":"avalanche-2","USDT":"tether","USDC":"usd-coin","SUI":"sui","APT":"apt","ARB":"arbitrum","OP":"optimism"
-                }
-                if sym in _SYM2ID:
-                    ids = [_SYM2ID[sym]]
-            if ids:
-                data = coingecko_prices(ids, vs="usd")
-                msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
-                bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
-                return "ok"
-            bot.send_message(chat_id=chat_id, text=WELCOME.get(cur_lang, WELCOME.get("en","Welcome")), reply_markup=build_donate_keyboard())
-            return "ok"
-    except Exception:
-        pass
-
 
     # /start
     if t_low in ("/start", "start"):
@@ -1616,6 +1363,13 @@ def webhook_with_secret(secret):
         msg_out, ids = format_top10(mkts, lang=cur_lang)
         bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_top10_keyboard(chat_id, ids, cur_lang))
         return "ok"
+
+    # Web3 news — natural phrase
+    if "news" in t_low or "web3 news" in t_low:
+        msg = fetch_web3_news(8)
+        bot.send_message(chat_id=chat_id, text=msg)
+        return "ok"
+
 
     # /price
     if t_low.startswith("/price"):
@@ -2241,6 +1995,45 @@ ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 # EIP-1967 implementation slot = keccak256("eip1967.proxy.implementation") - 1
 EIP1967_IMPL_SLOT = int("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", 16)
 
+
+# -------- Web3 News (RSS) --------
+def fetch_web3_news(max_items: int = 8) -> str:
+    sources = [
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml"),
+        ("Cointelegraph", "https://cointelegraph.com/rss"),
+        ("Decrypt", "https://decrypt.co/feed"),
+        ("The Block", "https://www.theblock.co/rss")
+    ]
+    items = []
+    try:
+        from xml.etree import ElementTree as ET
+    except Exception:
+        return "🗞️ Web3 news is temporarily unavailable."
+
+    for name, url in sources:
+        try:
+            r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+            if r.status_code >= 400 or not r.content:
+                continue
+            root = ET.fromstring(r.content)
+            for it in root.findall(".//item"):
+                title = (it.findtext("title") or "").strip()
+                link = (it.findtext("link") or "").strip()
+                if title and link:
+                    items.append((name, title, link))
+        except Exception:
+            continue
+        if len(items) >= max_items:
+            break
+
+    if not items:
+        return "🗞️ Web3 news is temporarily unavailable."
+
+    lines = ["🗞️ Web3 headlines:"]
+    for src_name, title, link in items[:max_items]:
+        lines.append(f"• {title} — {src_name}\n{link}")
+    return "\n".join(lines)
+
 def _alchemy_url(api_key: str | None) -> str | None:
     if not api_key:
         return None
@@ -2470,39 +2263,3 @@ def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     """
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
-
-
-# ===== Web3 news fetcher (RSS) =====
-def fetch_web3_news(max_items: int = 8) -> str:
-    sources = [
-        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml"),
-        ("Cointelegraph", "https://cointelegraph.com/rss"),
-        ("Decrypt", "https://decrypt.co/feed"),
-        ("The Block", "https://www.theblock.co/rss")
-    ]
-    items = []
-    from xml.etree import ElementTree as ET
-    for name, url in sources:
-        try:
-            r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
-            # Some feeds may respond with non-200 but still have content
-            if r.status_code >= 400 or not r.content:
-                continue
-            root = ET.fromstring(r.content)
-            # RSS 2.0
-            for it in root.findall(".//item"):
-                title = (it.findtext("title") or "").strip()
-                link = (it.findtext("link") or "").strip()
-                if title and link:
-                    items.append((name, title, link))
-        except Exception:
-            continue
-        if len(items) >= max_items:
-            break
-    if not items:
-        return "🗞️ Web3 news is temporarily unavailable. Try again later."
-    out = ["🗞️ Web3 headlines:"]
-    for src, title, link in items[:max_items]:
-        out.append(f"• {title} — {src}\n{link}")
-    return "\n".join(out)
-
