@@ -914,15 +914,14 @@ def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
         if sp:
             pairs.append(sp)
             id_for_pair[sp] = cid
-
-    # Bulk request when possible to avoid per-coin 429s
+    # Bulk first
     if pairs:
         try:
-            arr = json.dumps(pairs)
+            import json as _json
+            arr = _json.dumps(pairs)
             r = requests.get("https://api.binance.com/api/v3/ticker/price",
                              params={"symbols": arr},
-                             timeout=10,
-                             headers={"User-Agent":"Mozilla/5.0"})
+                             timeout=10, headers={"User-Agent":"Mozilla/5.0"})
             data = r.json()
             if isinstance(data, list):
                 for item in data:
@@ -932,10 +931,8 @@ def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
                         cid = id_for_pair[sp]
                         out[cid] = {"usd": float(price), "last_updated_at": now_ts}
         except Exception:
-            # fallback to single requests
             pass
-
-    # Single fetch for any missing ones
+    # Singles and stable fallback
     for cid in coin_ids:
         if cid in out:
             continue
@@ -943,6 +940,11 @@ def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
         p = _binance_price(sp) if sp else None
         if p is None and cid in ("tether", "usd-coin"):
             p = 1.0
+        if p is None and "_CB_ID2SYM" in globals():
+            # Coinbase fallback for missing
+            sym = _CB_ID2SYM.get(cid)
+            if sym:
+                p = _coinbase_price(sym)
         if p is not None:
             out[cid] = {"usd": p, "last_updated_at": now_ts}
     return out
@@ -2468,3 +2470,39 @@ def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     """
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
+
+
+# ===== Web3 news fetcher (RSS) =====
+def fetch_web3_news(max_items: int = 8) -> str:
+    sources = [
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml"),
+        ("Cointelegraph", "https://cointelegraph.com/rss"),
+        ("Decrypt", "https://decrypt.co/feed"),
+        ("The Block", "https://www.theblock.co/rss")
+    ]
+    items = []
+    from xml.etree import ElementTree as ET
+    for name, url in sources:
+        try:
+            r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+            # Some feeds may respond with non-200 but still have content
+            if r.status_code >= 400 or not r.content:
+                continue
+            root = ET.fromstring(r.content)
+            # RSS 2.0
+            for it in root.findall(".//item"):
+                title = (it.findtext("title") or "").strip()
+                link = (it.findtext("link") or "").strip()
+                if title and link:
+                    items.append((name, title, link))
+        except Exception:
+            continue
+        if len(items) >= max_items:
+            break
+    if not items:
+        return "🗞️ Web3 news is temporarily unavailable. Try again later."
+    out = ["🗞️ Web3 headlines:"]
+    for src, title, link in items[:max_items]:
+        out.append(f"• {title} — {src}\n{link}")
+    return "\n".join(out)
+
