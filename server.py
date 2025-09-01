@@ -5,6 +5,44 @@ from decimal import Decimal
 
 from flask import Flask, request, jsonify, Response
 import requests
+
+# --- CoinGecko API configuration (supports Demo/Pro keys) ---
+COINGECKO_DEMO_API_KEY = os.getenv("COINGECKO_DEMO_API_KEY") or os.getenv("CG_DEMO_KEY")
+COINGECKO_PRO_API_KEY = os.getenv("COINGECKO_PRO_API_KEY") or os.getenv("CG_PRO_KEY")
+
+if COINGECKO_PRO_API_KEY:
+    CG_BASE = "https://pro-api.coingecko.com/api/v3"
+    CG_HEADER_NAME = "x-cg-pro-api-key"
+    CG_API_KEY = COINGECKO_PRO_API_KEY
+else:
+    CG_BASE = "https://api.coingecko.com/api/v3"
+    CG_HEADER_NAME = "x-cg-demo-api-key"
+    CG_API_KEY = COINGECKO_DEMO_API_KEY
+
+def cg_get(path: str, params: dict | None = None, timeout: int = 15):
+    headers = {"User-Agent": "Mozilla/5.0 (bot)", "Accept": "application/json"}
+    # Add API key to header if available
+    if CG_API_KEY:
+        headers[CG_HEADER_NAME] = CG_API_KEY
+    # For Demo key, also include as query param for endpoints that still check query string
+    if CG_API_KEY and CG_HEADER_NAME == "x-cg-demo-api-key":
+        params = dict(params or {})
+        params.setdefault("x_cg_demo_api_key", CG_API_KEY)
+    url = f"{CG_BASE}{path}"
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        return r
+    except Exception as e:
+        try:
+            status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
+            if status in (401, 403):
+                app.logger.error("CoinGecko API requires a key. Set COINGECKO_DEMO_API_KEY or COINGECKO_PRO_API_KEY in environment.")
+        except Exception:
+            pass
+        raise
+# --- end CoinGecko config ---
+
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from groq import Groq
 import qrcode
@@ -869,19 +907,13 @@ def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     cached = _cg_cache_get(cache_key)
     if cached is not None:
         return cached
-    url = "https://api.coingecko.com/api/v3/simple/price"
     params = {"ids": coin_ids_str, "vs_currencies": vs, "include_24hr_change": "true", "include_last_updated_at": "true"}
     try:
-        r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
-        r.raise_for_status()
-        data = r.json() or {}
-        _cg_cache_set(cache_key, data)
-        return data
+        r = cg_get("/simple/price", params=params, timeout=15)
         data = r.json() or {}
         _cg_cache_set(cache_key, data)
         return data
     except Exception as e:
-        # Fallback to last global cache even if expired or key mismatch
         try:
             if _cg_cache.get("data"):
                 return _cg_cache.get("data")
@@ -965,7 +997,6 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
         now = time.time()
         if now - _top10_cache.get("t", 0) < 90 and _top10_cache.get("n") == cap_n:
             return _top10_cache.get("data") or []
-        url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
             "vs_currency": "usd",
             "order": "market_cap_desc",
@@ -973,16 +1004,13 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
             "page": 1,
             "price_change_percentage": "24h"
         }
-        r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
-        r.raise_for_status()
+        r = cg_get("/coins/markets", params=params, timeout=15)
         data = r.json() or []
-        # Update cache only if we got non-empty data
         if data:
             _top10_cache.update({"t": now, "n": cap_n, "data": data})
         return data
     except Exception as e:
         app.logger.warning(f"coingecko_top_market error: {e}")
-        # Fallback to last cached good data
         return _top10_cache.get("data") or []
 
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
