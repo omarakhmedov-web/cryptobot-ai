@@ -5,44 +5,6 @@ from decimal import Decimal
 
 from flask import Flask, request, jsonify, Response
 import requests
-
-# --- CoinGecko API configuration (supports Demo/Pro keys) ---
-COINGECKO_DEMO_API_KEY = os.getenv("COINGECKO_DEMO_API_KEY") or os.getenv("CG_DEMO_KEY")
-COINGECKO_PRO_API_KEY = os.getenv("COINGECKO_PRO_API_KEY") or os.getenv("CG_PRO_KEY")
-
-if COINGECKO_PRO_API_KEY:
-    CG_BASE = "https://pro-api.coingecko.com/api/v3"
-    CG_HEADER_NAME = "x-cg-pro-api-key"
-    CG_API_KEY = COINGECKO_PRO_API_KEY
-else:
-    CG_BASE = "https://api.coingecko.com/api/v3"
-    CG_HEADER_NAME = "x-cg-demo-api-key"
-    CG_API_KEY = COINGECKO_DEMO_API_KEY
-
-def cg_get(path: str, params: dict | None = None, timeout: int = 15):
-    headers = {"User-Agent": "Mozilla/5.0 (bot)", "Accept": "application/json"}
-    # Add API key to header if available
-    if CG_API_KEY:
-        headers[CG_HEADER_NAME] = CG_API_KEY
-    # For Demo key, also include as query param for endpoints that still check query string
-    if CG_API_KEY and CG_HEADER_NAME == "x-cg-demo-api-key":
-        params = dict(params or {})
-        params.setdefault("x_cg_demo_api_key", CG_API_KEY)
-    url = f"{CG_BASE}{path}"
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=timeout)
-        r.raise_for_status()
-        return r
-    except Exception as e:
-        try:
-            status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
-            if status in (401, 403):
-                app.logger.error("CoinGecko API requires a key. Set COINGECKO_DEMO_API_KEY or COINGECKO_PRO_API_KEY in environment.")
-        except Exception:
-            pass
-        raise
-# --- end CoinGecko config ---
-
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from groq import Groq
 import qrcode
@@ -907,18 +869,15 @@ def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     cached = _cg_cache_get(cache_key)
     if cached is not None:
         return cached
+    url = "https://api.coingecko.com/api/v3/simple/price"
     params = {"ids": coin_ids_str, "vs_currencies": vs, "include_24hr_change": "true", "include_last_updated_at": "true"}
     try:
-        r = cg_get("/simple/price", params=params, timeout=15)
+        r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
+        r.raise_for_status()
         data = r.json() or {}
         _cg_cache_set(cache_key, data)
         return data
     except Exception as e:
-        try:
-            if _cg_cache.get("data"):
-                return _cg_cache.get("data")
-        except Exception:
-            pass
         return {"error": str(e)}
 
 def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
@@ -928,7 +887,7 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
         "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
         "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","arbitrum":"ARB","optimism":"OP",
         "cardano":"ADA","ripple":"XRP","avalanche-2":"AVAX","tron":"TRX","dogecoin":"DOGE","matic-network":"MATIC",
-        "sui":"SUI",'aptos': 'APT'
+        "sui":"SUI","apt":"APT"
     }
     lines = {"en":["🔔 Spot prices (USD):"],"ru":["🔔 Спот-цены (USD):"]}.get(lang, ["🔔 Spot prices (USD):"])
     order = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin"]
@@ -965,53 +924,22 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 # -------------------- TOP-10 --------------------
-
-def get_price_24h(coin_id: str):
-    """Return (old_price, current_price) over last 24h using CoinGecko market_chart."""
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-    params = {"vs_currency": "usd", "days": 1, "interval": "hourly"}
-    try:
-        r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
-        r.raise_for_status()
-        data = r.json() or {}
-        prices = data.get("prices") or []
-        if not prices:
-            return None
-        old_price = float(prices[0][1])
-        current_price = float(prices[-1][1])
-        return (old_price, current_price)
-    except Exception:
-        try:
-            app.logger.exception(f"get_price_24h failed for {coin_id}")
-        except Exception:
-            pass
-        return None
-
-
-# Simple cache for Top-10 (90 seconds)
-_top10_cache = {"t": 0.0, "n": 0, "data": []}
-
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
-    # Serve from cache if fresh and same N
     try:
-        now = time.time()
-        if now - _top10_cache.get("t", 0) < 90 and _top10_cache.get("n") == cap_n:
-            return _top10_cache.get("data") or []
+        url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
             "vs_currency": "usd",
             "order": "market_cap_desc",
-            "per_page": cap_n,
-            "page": 1,
+            "per_page": str(cap_n),
+            "page": "1",
             "price_change_percentage": "24h"
         }
-        r = cg_get("/coins/markets", params=params, timeout=15)
-        data = r.json() or []
-        if data:
-            _top10_cache.update({"t": now, "n": cap_n, "data": data})
-        return data
+        r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
+        r.raise_for_status()
+        return r.json() or []
     except Exception as e:
         app.logger.warning(f"coingecko_top_market error: {e}")
-        return _top10_cache.get("data") or []
+        return []
 
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
@@ -1026,8 +954,8 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     ids = []
     for i, c in enumerate(mkts, start=1):
         sym = (c.get("symbol") or "").upper()
-        price = c.get("current_price") or 0
-        chg = c.get("price_change_percentage_24h") if c.get("price_change_percentage_24h") is not None else 0.0
+        price = c.get("current_price")
+        chg = c.get("price_change_percentage_24h")
         chg_s = ""
         if isinstance(chg, (int, float)):
             sign = "▲" if chg >= 0 else "▼"
@@ -1040,7 +968,7 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
 
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     token = store_price_ids(chat_id, ids)
-    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"t10:{token}"), InlineKeyboardButton('24h', callback_data=f"t10:{token}:24h")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 # -------------------- GAS / F&G / BTC DOM --------------------
 
@@ -1352,50 +1280,6 @@ def webhook_with_secret(secret):
                 except Exception:
                     bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
-            elif data.startswith("t10:"):
-                token_full = data.split(":", 1)[1].strip()
-                token = token_full.split(":")[0]
-                lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
-                ids = resolve_price_ids(chat_id, token) or ["bitcoin","ethereum","solana","the-open-network"]
-                if token_full.endswith(":24h"):
-                    lines = {"en": ["⏱️ 24h ago vs now (USD):"], "ru": ["⏱️ 24 часа назад vs сейчас (USD):"]}.get(lang_cq, ["⏱️ 24h ago vs now (USD):"])
-                    out_any = False
-                    for cid in ids[:10]:
-                        prices = get_price_24h(cid)
-                        if not prices:
-                            continue
-                        old_price, current_price = prices
-                        delta = ((current_price - old_price) / old_price) * 100.0 if old_price else 0.0
-                        _map = {
-                            "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
-                            "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","arbitrum":"ARB","optimism":"OP",
-                            "cardano":"ADA","ripple":"XRP","avalanche-2":"AVAX","tron":"TRX","dogecoin":"DOGE","matic-network":"MATIC",
-                            "sui":"SUI","aptos":"APT"
-                        }
-                        sym = _map.get(cid, (cid or "").upper())
-                        lines.append(f"{sym}: 24h ago ${old_price:,.2f} → now ${current_price:,.2f}  ({delta:+.2f}%)")
-                        out_any = True
-                    if not out_any:
-                        lines.append({"en":"No data.","ru":"Нет данных."}.get(lang_cq, "No data."))
-                    try:
-                        bot.send_message(chat_id=chat_id, text="\n".join(lines))
-                    except Exception:
-                        pass
-                    bot.answer_callback_query(cq.get("id"), text="24h data")
-                else:
-                    mkts = coingecko_top_market(10)
-                    msg_now, new_ids = format_top10(mkts, lang=lang_cq)
-                    try:
-                        bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=cq.get("message", {}).get("message_id"),
-                            text=msg_now,
-                            reply_markup=build_top10_keyboard(chat_id, new_ids, lang_cq)
-                        )
-                    except Exception:
-                        bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_top10_keyboard(chat_id, new_ids, lang_cq))
-                    bot.answer_callback_query(cq.get("id"), text="Updated")
-    
             elif data == "gas:r":
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
                 gas = get_eth_gas()
