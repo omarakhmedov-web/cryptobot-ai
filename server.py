@@ -895,6 +895,36 @@ def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
     return out
 
 
+
+# ===== Auto-injected: CoinGecko backoff & rate-limited logging =====
+_CG_BACKOFF_UNTIL = 0.0
+_CG_LAST_WARN_TS = 0.0
+
+def _cg_in_backoff() -> bool:
+    try:
+        return time.time() < _CG_BACKOFF_UNTIL
+    except Exception:
+        return False
+
+def _cg_trip_backoff(seconds: int = 120):
+    global _CG_BACKOFF_UNTIL
+    try:
+        _CG_BACKOFF_UNTIL = time.time() + max(1, int(seconds))
+    except Exception:
+        pass
+
+def _cg_warn_rl(msg: str, min_interval: int = 300):
+    # Warn at most once per window to prevent log spam across many updates
+    global _CG_LAST_WARN_TS
+    now = time.time()
+    if now - _CG_LAST_WARN_TS >= max(5, int(min_interval)):
+        try:
+            app.logger.warning(msg)
+        except Exception:
+            pass
+        _CG_LAST_WARN_TS = now
+
+
 def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
     coin_ids_str = ",".join(coin_ids)
