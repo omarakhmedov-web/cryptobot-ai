@@ -862,6 +862,27 @@ def _cg_cache_get(key: str):
 def _cg_cache_set(key: str, data: dict):
     _cg_cache.update({"t": time.time(), "key": key, "data": data})
 
+
+def get_price_24h(coin_id: str):
+    """
+    Возвращает (old_price, current_price) для coin_id за 24 часа.
+    """
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    params = {"vs_currency": "usd", "days": 1, "interval": "hourly"}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        prices = data.get("prices", [])
+        if not prices:
+            return None
+        old_price = prices[0][1]
+        current_price = prices[-1][1]
+        return old_price, current_price
+    except Exception:
+        app.logger.exception(f"get_price_24h failed for {coin_id}")
+        return None
+
 def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
     coin_ids_str = ",".join(coin_ids)
@@ -968,7 +989,7 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
 
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     token = store_price_ids(chat_id, ids)
-    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"t10:{token}")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"t10:{token}"), InlineKeyboardButton('24h', callback_data=f"t10:{token}:24h")]])
 
 # -------------------- GAS / F&G / BTC DOM --------------------
 
@@ -1284,6 +1305,19 @@ def webhook_with_secret(secret):
             elif data.startswith("t10:"):
                 token = data.split(":", 1)[1].strip()
                 lang_cq = get_lang_override(chat_id) or DEFAULT_LANG
+            if ":24h" in token:
+                coin_id = token.replace(":24h", "")
+                prices = get_price_24h(coin_id)
+                if prices:
+                    old_price, current_price = prices
+                    delta = ((current_price - old_price) / old_price) * 100 if old_price else 0
+                    msg_out = f"{coin_id.upper()}\n24h ago: ${old_price:,.2f}\nNow:     ${current_price:,.2f}\nChange:  {delta:+.2f}%"
+                    try:
+                        bot.send_message(chat_id=chat_id, text=msg_out)
+                    except Exception:
+                        pass
+                    bot.answer_callback_query(cq.get("id"), text="24h data")
+                    continue
                 mkts = []
                 try:
                     mkts = coingecko_top_market(10)
