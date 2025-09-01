@@ -882,6 +882,28 @@ def _binance_price(symbol_pair: str) -> float | None:
         return None
     return None
 
+
+
+# ===== Coinbase extra fallback (single symbol) =====
+_CB_ID2SYM = {
+    "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
+    "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","ripple":"XRP","cardano":"ADA","dogecoin":"DOGE",
+    "tron":"TRX","matic-network":"MATIC","avalanche-2":"AVAX","sui":"SUI","apt":"APT","arbitrum":"ARB","optimism":"OP"
+}
+
+def _coinbase_price(symbol: str):
+    # symbol like "ETH"
+    try:
+        r = requests.get(f"https://api.coinbase.com/v2/prices/{symbol}-USD/spot",
+                         timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json()
+        amt = (((j or {}).get("data") or {}).get("amount"))
+        if amt is not None:
+            return float(amt)
+    except Exception:
+        return None
+    return None
+
 def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
     now_ts = int(time.time())
     out = {}
@@ -1481,6 +1503,7 @@ def webhook_with_secret(secret):
 
     cur_lang = get_lang_override(chat_id) or DEFAULT_LANG
 
+    
     # Natural language routes (EN-only)
     try:
         _t = t_low.strip()
@@ -1493,29 +1516,42 @@ def webhook_with_secret(secret):
             return "ok"
         if _t in ("top 10", "top10", "top-ten", "top", "top coins"):
             data = coingecko_top_market(10)
+            # format_top10 may return string OR (text, ids) / [text, ids]
+            fmt = None
             try:
-                msg_txt = format_top10(data, cur_lang)
+                fmt = format_top10(data, cur_lang)
             except Exception:
-                # fallback plain formatter
+                fmt = None
+
+            msg_txt = None
+            ids = [it.get("id") for it in data if isinstance(it, dict) and it.get("id")]
+            if isinstance(fmt, (list, tuple)) and len(fmt) >= 1:
+                msg_txt = fmt[0]
+                if len(fmt) > 1 and isinstance(fmt[1], (list, tuple)) and fmt[1]:
+                    ids = list(fmt[1])
+            elif isinstance(fmt, str):
+                msg_txt = fmt
+
+            if not msg_txt:
                 lines = ["🏆 Top-10 by market cap (USD):"]
-                order = 1
+                rank = 1
                 for it in data:
-                    sym = (it.get("symbol") or "").upper() or it.get("id","").upper()
+                    sym = ((it.get("symbol") or it.get("id") or "?")).upper()
                     price = it.get("current_price")
-                    if sym and price is not None:
-                        lines.append(f"{order}. {sym}: ${price:,.4f}")
-                        order += 1
+                    if price is not None:
+                        lines.append(f"{rank}. {sym}: ${price:,.4f}")
+                        rank += 1
                 lines.append("")
                 from datetime import datetime, timezone
                 lines.append(f"As of {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.")
                 msg_txt = "\n".join(lines)
-            # ids for refresh keyboard
-            ids = [it.get("id") for it in data if it.get("id")]
+
             if not ids:
                 ids = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin","binancecoin","ripple","cardano","dogecoin"]
             kb = build_top10_keyboard(chat_id, ids, cur_lang)
             bot.send_message(chat_id=chat_id, text=msg_txt, reply_markup=kb)
             return "ok"
+
         if _t in ("gas", "fees", "gas price", "eth gas"):
             g = cmd_gas_price()
             bot.send_message(chat_id=chat_id, text=g or "Gas data unavailable.", reply_markup=None)
@@ -1533,10 +1569,9 @@ def webhook_with_secret(secret):
         import re as _re
         if _re.fullmatch(r"\$?[a-z]{2,6}", _t):
             sym = _t.lstrip("$").upper()
-            # Map symbol -> CG ids using existing helper if present
             ids = None
             try:
-                ids = _cg_ids_from_text(sym)  # returns list or None
+                ids = _cg_ids_from_text(sym)
             except Exception:
                 ids = None
             if not ids:
@@ -1552,11 +1587,11 @@ def webhook_with_secret(secret):
                 msg_out = format_prices_message(data, lang=cur_lang, vs="usd")
                 bot.send_message(chat_id=chat_id, text=msg_out, reply_markup=build_price_keyboard(chat_id, ids, cur_lang))
                 return "ok"
-            # if symbol unknown, fall back to help
             bot.send_message(chat_id=chat_id, text=WELCOME.get(cur_lang, WELCOME.get("en","Welcome")), reply_markup=build_donate_keyboard())
             return "ok"
     except Exception:
         pass
+
 
     # /start
     if t_low in ("/start", "start"):
