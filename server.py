@@ -478,7 +478,9 @@ def gx_get_abi_text(address: str) -> str:
         if abi_text and abi_text != "Contract source code not verified":
 
     if text.strip().lower() == "/help":
-        cmd_help(bot, chat_id)
+    cmd_help(bot, chat_id)
+    return "ok"
+cmd_help(bot, chat_id)
         return "ok"
             _GX_CACHE.set(key, abi_text, 900)
             return abi_text
