@@ -61,7 +61,7 @@ WELCOME = {
         "• Show live prices, top-10 coins, gas fees, BTC dominance, Fear & Greed.\n"
         "• Contract checks via block explorers (Etherscan/PolygonScan/BscScan) — auto-selected.\n"
         "• Balances & recent transactions via Alchemy.\n\n"
-        "💎 Support the project so it can grow, improve, and stay online 24/7 for everyone’s benefit.\n"
+        ""
         "Your help adds new features, integrations, and smarter answers. Every contribution matters! ☕💙"
     ),
     "ru": (
@@ -71,7 +71,7 @@ WELCOME = {
         "• Показывать цены в реальном времени, топ-10 монет, газ, доминацию BTC, индекс страха и жадности.\n"
         "• Проверять контракты через блок-эксплореры (Etherscan/PolygonScan/BscScan) — автоматический выбор.\n"
         "• Показывать баланс и последние транзакции через Alchemy.\n\n"
-        "💎 Поддержите проект, чтобы он развивался, совершенствовался и всегда был на связи 24/7 на благо людей.\n"
+        ""
         "Ваша помощь добавит новые функции, интеграции и сделает ответы умнее. Каждый вклад важен! ☕💙"
     ),
 }
@@ -79,7 +79,7 @@ WELCOME = {
 # Мотивирующий текст для /donate (без списка возможностей)
 DONATE_TEXT = {
     "en": (
-        "💎 Support GuardexBot so it can grow, improve, and stay online 24/7 for everyone’s benefit.\n\n"
+        ""
         "Your donation helps to:\n"
         "• Keep the bot running reliably without downtime.\n"
         "• Add new features and integrations (Etherscan/PolygonScan/BscScan, Alchemy analytics, alerts).\n"
@@ -87,7 +87,7 @@ DONATE_TEXT = {
         "Every contribution matters — thank you! ☕💙"
     ),
     "ru": (
-        "💎 Поддержите GuardexBot, чтобы он развивался, совершенствовался и всегда был на связи 24/7 на благо людей.\n\n"
+        ""
         "Ваш вклад помогает:\n"
         "• Обеспечивать стабильную работу бота без простоев.\n"
         "• Добавлять новые функции и интеграции (Etherscan/PolygonScan/BscScan, Alchemy аналитика, уведомления).\n"
@@ -753,7 +753,7 @@ def format_report(facts: dict, lang: str) -> str:
 
 # -------------------- Fresh Web Search --------------------
 FRESH_TRIGGERS = re.compile(
-    r"\b(today|now|latest|news|price|prices|update|updated|2024|2025|rate|inflation|btc|eth|ton|market)\b",
+    r"",
     re.IGNORECASE
 )
 def needs_fresh_search(text: str) -> bool:
@@ -869,7 +869,7 @@ def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     if cached is not None:
         return cached
     url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": coin_ids_str, "vs_currencies": vs, "include_24hr_change": "true", "include_last_updated_at": "true"}
+    params = {"ids": coin_ids_str, "vs_currencies": vs, "": "true", "include_last_updated_at": "true"}
     try:
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
@@ -897,11 +897,11 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
         if price is None:
             continue
         sym = name_map.get(k, k)
-        chg = item.get(f"{vs}_24h_change")
+        chg = item.get(f"")
         chg_s = ""
         if isinstance(chg, (int,float)):
             sign = "▲" if chg >= 0 else "▼"
-            chg_s = f"  {sign}{abs(chg):.2f}%/24h"
+            chg_s = f""
         lines.append(f"{sym}: ${price:,.4f}{chg_s}")
     if len(lines) == 1:
         return {"en":"No price data.","ru":"Нет данных по ценам."}.get(lang, "No price data.")
@@ -931,7 +931,7 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
             "order": "market_cap_desc",
             "per_page": str(cap_n),
             "page": "1",
-            "price_change_percentage": "24h"
+            "price_change_percentage": ""
         }
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
@@ -954,11 +954,11 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     for i, c in enumerate(mkts, start=1):
         sym = (c.get("symbol") or "").upper()
         price = c.get("current_price")
-        chg = c.get("price_change_percentage_24h")
+        chg = c.get("")
         chg_s = ""
         if isinstance(chg, (int, float)):
             sign = "▲" if chg >= 0 else "▼"
-            chg_s = f"  {sign}{abs(chg):.2f}%/24h"
+            chg_s = f""
         lines.append(f"{i}. {sym}: ${price:,.4f}{chg_s}")
         ids.append(c.get("id"))
     dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -2213,7 +2213,7 @@ def format_check_report(facts: dict, lang: str) -> str:
 
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     """
-    Top-10: ONLY a single Refresh button. No "24" buttons.
+    Top-10: ONLY a single Refresh button. No "" buttons.
     """
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
