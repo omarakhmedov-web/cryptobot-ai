@@ -244,7 +244,6 @@ def build_donate_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💎 Ethereum (ETH)", url=eth_url)],
         [InlineKeyboardButton("🔵 TON", url=ton_url)],
         [InlineKeyboardButton("🟣 Solana (SOL)", url=sol_url)],
-        [InlineKeyboardButton("☕ Ko-fi", url=kofi_link_with_utm())],
         [
             InlineKeyboardButton("📷 QR ETH", callback_data="qr_eth"),
             InlineKeyboardButton("📷 QR TON", callback_data="qr_ton"),
