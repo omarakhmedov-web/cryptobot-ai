@@ -918,9 +918,13 @@ def format_prices_message(data: dict, lang: str = "en", vs="usd") -> str:
 def _t_refresh(lang: str) -> str:
     return {"en":"🔄 Refresh","ru":"🔄 Обновить"}.get(lang, "🔄 Refresh")
 
+
 def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     token = store_price_ids(chat_id, ids)
-    return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}"),
+        InlineKeyboardButton("24h", callback_data=f"pry:{token}")
+    ]])
 
 
 # ---- Yesterday prices (UTC) via CoinGecko ----
@@ -1360,10 +1364,10 @@ def webhook_with_secret(secret):
                         chat_id=chat_id,
                         message_id=cq.get("message", {}).get("message_id"),
                         text=msg_now,
-                        reply_markup=build_price_keyboard(chat_id, ids, lang_cq)
+                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
                     )
                 except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
+                    bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
             
             elif data.startswith("pry:"):
@@ -1813,10 +1817,10 @@ def webhook():
                         chat_id=chat_id,
                         message_id=cq.get("message", {}).get("message_id"),
                         text=msg_now,
-                        reply_markup=build_price_keyboard(chat_id, ids, lang_cq)
+                        reply_markup=build_top10_keyboard(chat_id, ids, lang_cq)
                     )
                 except Exception:
-                    bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_price_keyboard(chat_id, ids, lang_cq))
+                    bot.send_message(chat_id=chat_id, text=msg_now, reply_markup=build_top10_keyboard(chat_id, ids, lang_cq))
                 bot.answer_callback_query(cq.get("id"), text="Updated")
 
             
