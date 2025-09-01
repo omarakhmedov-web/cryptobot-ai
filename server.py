@@ -988,7 +988,9 @@ def format_yesterday_prices_message(data: dict, lang: str = "en", vs="usd") -> s
     return "\\n".join(lines)
 
 # -------------------- TOP-10 --------------------
+
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
+    out = []
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
@@ -1000,10 +1002,29 @@ def coingecko_top_market(cap_n: int = 10) -> list[dict]:
         }
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
-        return r.json() or []
+        out = r.json() or []
     except Exception as e:
         app.logger.warning(f"coingecko_top_market error: {e}")
-        return []
+    # Fallback: if primary request failed or returned empty, use a static top list and simple prices
+    if not out:
+        try:
+            default_ids = ["bitcoin","ethereum","solana","the-open-network","tether","usd-coin","binancecoin","ripple","cardano","dogecoin"]
+            prices = coingecko_prices(default_ids, vs="usd")
+            mkts = []
+            sym_map = {
+                "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","the-open-network":"TON",
+                "tether":"USDT","usd-coin":"USDC","binancecoin":"BNB","ripple":"XRP","cardano":"ADA","dogecoin":"DOGE"
+            }
+            for cid in default_ids[:cap_n]:
+                p = (prices or {}).get(cid, {})
+                price = p.get("usd")
+                if price is None:
+                    continue
+                mkts.append({"id": cid, "symbol": sym_map.get(cid, cid.upper()), "current_price": float(price), "price_change_percentage_24h": None})
+            out = mkts
+        except Exception as _e:
+            app.logger.warning(f"top10 fallback error: {_e}")
+    return out
 
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
