@@ -1213,6 +1213,19 @@ def ai_reply(user_text: str, lang: str, chat_id: int) -> str:
 # -------------------- Warm-up / Health --------------------
 @app.route("/", methods=["GET", "HEAD"])
 def index():
+
+    try:
+        _json = request.get_json(silent=True) or {}
+        # Extract chat_id and text
+        _chat_id = None
+        _text_val = None
+        if isinstance(_json, dict) and "message" in _json and _json["message"]:
+            _chat_id = _json["message"].get("chat", {}).get("id")
+            _text_val = _json["message"].get("text") or _json["message"].get("caption")
+        if _chat_id and _text_val and _cn_try_help_reply(bot, _chat_id, _text_val):
+            return "ok"
+    except Exception:
+        pass
     # быстрый ответ для пингеров
     return Response("ok", status=200, mimetype="text/plain")
 
@@ -2217,3 +2230,40 @@ def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     """
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
+
+
+# ===== EN-only Help interceptor (auto-injected) =====
+def _cn_help_text() -> str:
+    return (
+        "Here’s what I can do:\n"
+        "• Spot prices (USD) for BTC/ETH/SOL/TON/USDT/USDC/BNB/ADA/DOGE/XRP\n"
+        "• Top-10 coins with Refresh button\n"
+        "• Gas price & fees (ETH mainnet)\n"
+        "• BTC dominance\n"
+        "• Fear & Greed index\n"
+        "• Your ETH balance & last transactions (if ALCHEMY_API_KEY is set)\n"
+        "• Contract checks via block explorers (if API keys are set)\n"
+        "\n"
+        "Commands: /start, /help, /top10, /price <symbol>, /gas, /fg, /btcdom, /balance <address>\n"
+        "Support the project: use the Donate buttons."
+    )
+
+def _cn_is_help_query(s: str) -> bool:
+    if not isinstance(s, str):
+        return False
+    s_norm = s.strip().lower()
+    triggers = [
+        "what can you do", "what u can do", "help", "menu", "how to use", "commands",
+        "что ты умеешь", "что можешь", "команды", "помощь", "меню"  # just in case someone types RU
+    ]
+    return any(t in s_norm for t in triggers)
+
+def _cn_try_help_reply(bot: Bot, chat_id: int, text: str) -> bool:
+    if _cn_is_help_query(text):
+        bot.send_message(chat_id=chat_id, text=_cn_help_text(), parse_mode=None, disable_web_page_preview=True)
+        return True
+    return False
+
+
+def cmd_help(bot: Bot, chat_id: int):
+    bot.send_message(chat_id=chat_id, text=_cn_help_text(), parse_mode=None, disable_web_page_preview=True)
