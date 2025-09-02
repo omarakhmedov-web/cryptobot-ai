@@ -833,6 +833,15 @@ def is_price_query(text: str) -> bool:
     if not text: return False
     return bool(PRICE_TRIGGERS.search(text)) or bool(TICKER_RE.search(text))
 
+
+# === Strong symbol->Coingecko ID map for singles (used when _cg_ids_from_text is inconclusive) ===
+_SYM2ID_STRICT = {
+    "BTC":"bitcoin","ETH":"ethereum","XRP":"ripple","BNB":"binancecoin","SOL":"solana","USDT":"tether","USDC":"usd-coin",
+    "DOGE":"dogecoin","TRX":"tron","ADA":"cardano","MATIC":"matic-network","AVAX":"avalanche-2","TON":"the-open-network",
+    "STETH":"staked-ether","PEPE":"pepe","DOT":"polkadot","LINK":"chainlink","LTC":"litecoin"
+}
+
+
 def _cg_ids_from_text(text: str) -> list[str]:
     t = (text or "").lower()
     ask_all = any(w in t for w in ("все", "всё", "all"))
@@ -860,6 +869,67 @@ def _cg_cache_get(key: str):
     return None
 def _cg_cache_set(key: str, data: dict):
     _cg_cache.update({"t": time.time(), "key": key, "data": data})
+
+
+# === Binance fallback helpers ===
+_BINANCE_MAP = {
+    "bitcoin":"BTCUSDT","ethereum":"ETHUSDT","ripple":"XRPUSDT","binancecoin":"BNBUSDT","solana":"SOLUSDT",
+    "tether":"USDTUSDT","usd-coin":"USDCUSDT","dogecoin":"DOGEUSDT","tron":"TRXUSDT","cardano":"ADAUSDT",
+    "matic-network":"MATICUSDT","avalanche-2":"AVAXUSDT","the-open-network":"TONUSDT","staked-ether":"STETHUSDT"
+}
+def _binance_price(symbol_pair: str):
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": symbol_pair},
+                         timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+        j = r.json()
+        if isinstance(j, dict) and "price" in j:
+            return float(j["price"])
+    except Exception:
+        return None
+    return None
+
+def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
+    now_ts = int(time.time())
+    out = {}
+    # bulk first
+    pairs = []
+    rev = {}
+    for cid in coin_ids:
+        sp = _BINANCE_MAP.get(cid)
+        if sp:
+            pairs.append(sp); rev[sp] = cid
+    if pairs:
+        try:
+            import json as _json
+            arr = _json.dumps(pairs)
+            r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbols": arr},
+                             timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+            data = r.json()
+            if isinstance(data, list):
+                for it in data:
+                    sp = it.get("symbol"); pr = it.get("price")
+                    if sp in rev and pr is not None:
+                        out[rev[sp]] = {"usd": float(pr), "last_updated_at": now_ts}
+        except Exception:
+            pass
+    # singles + stablecoin guard + coinbase fallback
+    for cid in coin_ids:
+        if cid in out:
+            continue
+        p = None
+        sp = _BINANCE_MAP.get(cid)
+        if sp:
+            p = _binance_price(sp)
+        if p is None and cid in ("tether","usd-coin"):
+            p = 1.0
+        if p is None and "_CB_ID2SYM" in globals():
+            sym = _CB_ID2SYM.get(cid)
+            if sym:
+                p = _coinbase_price(sym)
+        if p is not None:
+            out[cid] = {"usd": p, "last_updated_at": now_ts}
+    return out
+
 
 def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
     coin_ids = [c for c in coin_ids if c] or ["bitcoin","ethereum"]
