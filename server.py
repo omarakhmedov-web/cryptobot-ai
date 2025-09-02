@@ -1140,23 +1140,62 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
+
 # -------------------- TOP-10 --------------------
+_TOP10_CACHE = {"t": 0.0, "data": []}
+
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
+    """
+    Prefer Binance bulk on a fixed list to avoid CG 429; fallback to CoinGecko markets.
+    Cache result for 60 seconds.
+    Output schema is compatible with format_top10(): items with 'symbol', 'current_price', 'id'.
+    """
+    # cache
+    if time.time() - _TOP10_CACHE["t"] < 60 and _TOP10_CACHE["data"]:
+        return _TOP10_CACHE["data"][:cap_n]
+
+    fixed_ids = [
+        "bitcoin","ethereum","solana","binancecoin","ripple","cardano",
+        "dogecoin","tron","the-open-network","matic-network"
+    ]
+    try:
+        data = _binance_prices_for_ids(fixed_ids)
+        mkts = []
+        for cid in fixed_ids[:cap_n]:
+            item = data.get(cid)
+            if not item: 
+                continue
+            sym = {"bitcoin":"BTC","ethereum":"ETH","solana":"SOL","binancecoin":"BNB",
+                   "ripple":"XRP","cardano":"ADA","dogecoin":"DOGE","tron":"TRX",
+                   "the-open-network":"TON","matic-network":"MATIC"}.get(cid, cid.upper())
+            mkts.append({"id": cid, "symbol": sym, "current_price": item.get("usd")})
+        if len(mkts) >= min(8, cap_n):  # good enough
+            _TOP10_CACHE["t"] = time.time()
+            _TOP10_CACHE["data"] = mkts
+            return mkts
+    except Exception as e:
+        try:
+            app.logger.warning(f"top10.binance.error: {e}")
+        except Exception:
+            pass
+
+    # fallback to CG markets
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {
-            "vs_currency": "usd",
-            "order": "market_cap_desc",
-            "per_page": str(cap_n),
-            "page": "1",
-            "price_change_percentage": ""
-        }
+        params = {"vs_currency":"usd","order":"market_cap_desc","per_page":str(cap_n),"page":"1"}
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
-        return r.json() or []
+        mkts = r.json() or []
+        _TOP10_CACHE["t"] = time.time()
+        _TOP10_CACHE["data"] = mkts
+        return mkts
     except Exception as e:
-        app.logger.warning(f"coingecko_top_market error: {e}")
+        try:
+            app.logger.warning(f"top10.cg.error: {e}")
+        except Exception:
+            pass
         return []
+
 
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
@@ -1186,6 +1225,192 @@ def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
 def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeyboardMarkup:
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
+
+
+# ===== Resilient synchronous multi-source fetcher with optional Redis cache =====
+try:
+    import redis as _redis_mod
+except Exception:
+    _redis_mod = None
+
+_REDIS_URL = os.getenv("REDIS_URL", "").strip()
+_REDIS_PREFIX = os.getenv("PRICE_REDIS_PREFIX", "px")
+_REDIS = None
+if _redis_mod and _REDIS_URL:
+    try:
+        _REDIS = _redis_mod.StrictRedis.from_url(_REDIS_URL, decode_responses=True)
+    except Exception as e:
+        try:
+            app.logger.warning(f"redis_init_failed: {e}")
+        except Exception:
+            pass
+        _REDIS = None
+
+# local simple TTL cache (separate from _PRICE_ENGINE to avoid coalescing races)
+_PRICE_LOCAL = {}  # (cid, vs) -> (payload_dict, exp_ts)
+
+def _price_local_get(cid: str, vs: str):
+    v = _PRICE_LOCAL.get((cid, vs))
+    if not v: return None
+    payload, exp = v
+    if exp > time.time():
+        return payload
+    else:
+        _PRICE_LOCAL.pop((cid, vs), None)
+        return None
+
+def _price_local_set(cid: str, vs: str, payload: dict, ttl: int):
+    _PRICE_LOCAL[(cid, vs)] = (payload, time.time() + ttl)
+
+def _redis_key(cid: str, vs: str) -> str:
+    return f"{_REDIS_PREFIX}:v1:{vs}:{cid}"
+
+def _redis_get(cid: str, vs: str):
+    if not _REDIS: return None
+    try:
+        raw = _REDIS.get(_redis_key(cid, vs))
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+def _redis_set(cid: str, vs: str, payload: dict, ttl: int):
+    if not _REDIS: return
+    try:
+        _REDIS.setex(_redis_key(cid, vs), ttl, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        # don't crash on redis issues
+        pass
+
+# simple circuit-breakers and negative cache
+_CB = {}       # source -> open_until_ts
+_NEG = {}      # key -> until_ts
+
+def _cb_open(src: str) -> bool:
+    return time.time() < _CB.get(src, 0.0)
+
+def _cb_trip(src: str, window_s: int):
+    _CB[src] = time.time() + max(1, int(window_s))
+
+def _neg_set(key: str, ttl_s: int):
+    _NEG[key] = time.time() + max(1, int(ttl_s))
+
+def _neg_open(key: str) -> bool:
+    return time.time() < _NEG.get(key, 0.0)
+
+def _get_multi_prices_resilient(ids: list[str], vs: str = "usd") -> dict:
+    """
+    Single-threaded resilient fetcher:
+    1) Return fresh values from Redis/local cache where possible.
+    2) For misses: Binance bulk -> CoinGecko simple (if not in CB) -> Coinbase singles.
+    3) Stablecoins (USDT/USDC) guarded to 1.0.
+    Uses envs: PRICE_TTL, PRICE_NEG_TTL, PRICE_CB_WINDOW.
+    Logs metrics for visibility.
+    """
+    cfg_ttl = int(os.getenv("PRICE_TTL", "75"))
+    cfg_neg = int(os.getenv("PRICE_NEG_TTL", "90"))
+    cfg_cb  = int(os.getenv("PRICE_CB_WINDOW", "180"))
+
+    ids = [i for i in (ids or []) if i] or ["bitcoin","ethereum"]
+    vs = vs or "usd"
+
+    t0 = time.time()
+    out, misses = {}, []
+
+    # 0) cache hits (redis + local), count hits
+    cache_hits = 0
+    for cid in ids:
+        # redis first
+        v = _redis_get(cid, vs)
+        if v is None:
+            v = _price_local_get(cid, vs)
+        if isinstance(v, dict):
+            out[cid] = v
+            cache_hits += 1
+        else:
+            misses.append(cid)
+
+    # 1) Binance bulk for misses
+    t1 = time.time()
+    binance_ms = None
+    if misses:
+        try:
+            t_beg = time.time()
+            bulk = _binance_prices_for_ids(misses)
+            binance_ms = int((time.time() - t_beg) * 1000)
+            if isinstance(bulk, dict):
+                for cid, payload in bulk.items():
+                    out[cid] = payload
+        except Exception as e:
+            try:
+                app.logger.warning(f"price.binance.error err={e}")
+            except Exception:
+                pass
+
+    # 2) CoinGecko for remaining (if breaker not open and not stables)
+    t2 = time.time()
+    cg_ms = None
+    rest = [i for i in ids if i not in out and i not in ("tether","usd-coin")]
+    if rest and not _cb_open("coingecko") and not _neg_open("coingecko"):
+        try:
+            from time import time as _tm
+            _ts = _tm()
+            url = "https://api.coingecko.com/api/v3/simple/price"
+            params = {"ids": ",".join(rest), "vs_currencies": vs, "include_last_updated_at": "true"}
+            r = requests.get(url, params=params, timeout=12, headers={"User-Agent":"Mozilla/5.0"})
+            r.raise_for_status()
+            cg = r.json() or {}
+            cg_ms = int((time.time() - _ts) * 1000)
+            if isinstance(cg, dict):
+                for cid, payload in cg.items():
+                    out[cid] = payload
+        except Exception as e:
+            _cb_trip("coingecko", cfg_cb)
+            _neg_set("coingecko", cfg_neg)
+            try:
+                app.logger.warning(f"price.coingecko.trip err={e}")
+            except Exception:
+                pass
+
+    # 3) Coinbase for tails
+    t3 = time.time()
+    cb_ms = None
+    tails = [i for i in ids if i not in out]
+    if tails:
+        t_beg = time.time()
+        for cid in tails:
+            sym = globals().get("_CB_ID2SYM", {}).get(cid)
+            if not sym:
+                continue
+            p = _coinbase_price(sym)
+            if p is not None:
+                out[cid] = {"usd": float(p), "last_updated_at": int(time.time())}
+        cb_ms = int((time.time() - t_beg) * 1000)
+
+    # 4) stablecoin guard
+    now_ts = int(time.time())
+    for cid in ids:
+        if cid not in out and cid in ("tether","usd-coin"):
+            out[cid] = {"usd": 1.0, "last_updated_at": now_ts}
+
+    # 5) write caches for all results
+    for cid, payload in out.items():
+        _price_local_set(cid, vs, payload, cfg_ttl)
+        _redis_set(cid, vs, payload, cfg_ttl)
+
+    # metrics logging
+    try:
+        app.logger.info(
+            "price.metrics hits=%d miss=%d binance_ms=%s cg_ms=%s coinbase_ms=%s total_ms=%d",
+            cache_hits, len(ids)-cache_hits,
+            "-" if binance_ms is None else binance_ms,
+            "-" if cg_ms is None else cg_ms,
+            "-" if cb_ms is None else cb_ms,
+            int((time.time() - t0)*1000)
+        )
+    except Exception:
+        pass
+
+    return out
 
 # -------------------- GAS / F&G / BTC DOM --------------------
 
