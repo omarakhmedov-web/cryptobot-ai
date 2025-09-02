@@ -2,6 +2,7 @@ import os, re, json, logging, io, pathlib, html, time, uuid
 from collections import deque
 from datetime import datetime
 from decimal import Decimal
+import threading
 
 from flask import Flask, request, jsonify, Response
 import requests
@@ -929,6 +930,153 @@ def _binance_prices_for_ids(coin_ids: list[str]) -> dict:
         if p is not None:
             out[cid] = {"usd": p, "last_updated_at": now_ts}
     return out
+
+
+
+# ===== Resilient price engine (cache + negative-cache + circuit breakers + coalescing) =====
+class _PriceEngine:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.cache = {}           # key: (id, vs) -> (value, expires_ts)
+        self.neg_cache = {}       # key: source or id -> expires_ts
+        self.cb = {}              # source -> open_until_ts
+        self.batch = set()        # pending ids for coalesced fetch
+        self.waiters = []         # list of (ids, event)
+        self.cfg = {
+            "TTL": int(os.getenv("PRICE_TTL", "75")),            # seconds
+            "NEG_TTL": int(os.getenv("PRICE_NEG_TTL", "90")),    # seconds
+            "CB_WINDOW": int(os.getenv("PRICE_CB_WINDOW", "180")),# seconds
+            "BATCH_MS": int(os.getenv("PRICE_BATCH_MS", "120")), # coalesce window
+        }
+
+    # ---- public API
+    def get_prices(self, coin_ids: list[str], vs="usd") -> dict:
+        now = time.time()
+        ids = [c for c in (coin_ids or []) if c]
+        if not ids:
+            ids = ["bitcoin","ethereum"]
+        vs = vs or "usd"
+        hits, miss = {}, []
+        with self.lock:
+            for cid in ids:
+                key = (cid, vs)
+                v = self.cache.get(key)
+                if v and v[1] > now:
+                    hits[cid] = v[0]
+                else:
+                    miss.append(cid)
+        if not miss:
+            return hits
+
+        # Coalesce concurrent misses in-process
+        event = threading.Event()
+        with self.lock:
+            self.batch.update(miss)
+            self.waiters.append((set(miss), event))
+            # Start/refresh a timer thread
+            if not getattr(self, "_timer_running", False):
+                self._timer_running = True
+                t = threading.Thread(target=self._drain_after, args=(self.cfg["BATCH_MS"]/1000.0,), daemon=True)
+                t.start()
+
+        # Wait for batch to be processed
+        event.wait(timeout=5.0)
+
+        # Read results after batch
+        out = {}
+        now = time.time()
+        with self.lock:
+            for cid in ids:
+                key = (cid, vs)
+                v = self.cache.get(key)
+                if v and v[1] > now:
+                    out[cid] = v[0]
+        # As last resort, return what we have (maybe partial); caller formats gracefully
+        return out or {"error": "price_unavailable"}
+
+    # ---- internal
+    def _drain_after(self, delay: float):
+        time.sleep(max(0.01, delay))
+        try:
+            self._process_batch()
+        finally:
+            with self.lock:
+                # wake all
+                for _, ev in self.waiters:
+                    ev.set()
+                self.waiters.clear()
+                self._timer_running = False
+
+    def _process_batch(self):
+        with self.lock:
+            ids = list(self.batch)
+            self.batch.clear()
+        if not ids:
+            return
+        vs = "usd"
+        # Order: Binance bulk -> CoinGecko (if not in CB) -> Coinbase singles -> stable guard
+        # 1) Binance bulk
+        data = {}
+        try:
+            data = _binance_prices_for_ids(ids)
+        except Exception:
+            data = {}
+
+        # 2) CoinGecko for the rest (if CB not open and not stables)
+        rest = [i for i in ids if i not in data and i not in ("tether","usd-coin")]
+        if rest and not self._cb_open("coingecko"):
+            try:
+                cg = self._coingecko_simple(rest, vs)
+                if isinstance(cg, dict):
+                    data.update(cg)
+            except Exception as e:
+                self._trip_cb("coingecko")
+                self._neg_set("coingecko")
+
+        # 3) Coinbase for singles that still missing
+        missing = [i for i in ids if i not in data]
+        for cid in missing:
+            sym = globals().get("_CB_ID2SYM", {}).get(cid)
+            if sym:
+                try:
+                    p = _coinbase_price(sym)
+                except Exception:
+                    p = None
+                if p is not None:
+                    data[cid] = {"usd": p, "last_updated_at": int(time.time())}
+
+        # 4) Stablecoin guard
+        now_ts = int(time.time())
+        for cid in ids:
+            if cid not in data and cid in ("tether","usd-coin"):
+                data[cid] = {"usd": 1.0, "last_updated_at": now_ts}
+
+        # Write cache
+        ttl = self.cfg["TTL"]
+        exp = time.time() + ttl
+        with self.lock:
+            for cid, payload in data.items():
+                self.cache[(cid, vs)] = (payload, exp)
+
+    def _coingecko_simple(self, ids, vs):
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {"ids": ",".join(ids), "vs_currencies": vs, "include_last_updated_at": "true"}
+        r = requests.get(url, params=params, timeout=12, headers={"User-Agent":"Mozilla/5.0"})
+        r.raise_for_status()
+        return r.json() or {}
+
+    # circuit breaker helpers
+    def _cb_open(self, src: str) -> bool:
+        return time.time() < self.cb.get(src, 0)
+
+    def _trip_cb(self, src: str):
+        self.cb[src] = time.time() + self.cfg["CB_WINDOW"]
+
+    def _neg_set(self, key: str):
+        self.neg_cache[key] = time.time() + self.cfg["NEG_TTL"]
+
+# Singleton
+_PRICE_ENGINE = _PriceEngine()
 
 
 def coingecko_prices(coin_ids: list[str], vs="usd") -> dict:
