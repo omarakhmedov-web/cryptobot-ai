@@ -1140,48 +1140,23 @@ def build_price_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     token = store_price_ids(chat_id, ids)
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
-
 # -------------------- TOP-10 --------------------
-_TOP10_CACHE = {"t": 0.0, "data": []}
-
 def coingecko_top_market(cap_n: int = 10) -> list[dict]:
-    if time.time() - _TOP10_CACHE["t"] < 60 and _TOP10_CACHE["data"]:
-        return _TOP10_CACHE["data"][:cap_n]
-
-    fixed_ids = [
-        "bitcoin","ethereum","solana","binancecoin","ripple","cardano",
-        "dogecoin","tron","the-open-network","matic-network"
-    ]
-    try:
-        data = _binance_prices_for_ids(fixed_ids)
-        mkts = []
-        for cid in fixed_ids[:cap_n]:
-            item = data.get(cid)
-            if not item: continue
-            sym = {"bitcoin":"BTC","ethereum":"ETH","solana":"SOL","binancecoin":"BNB",
-                   "ripple":"XRP","cardano":"ADA","dogecoin":"DOGE","tron":"TRX",
-                   "the-open-network":"TON","matic-network":"MATIC"}.get(cid, cid.upper())
-            mkts.append({"id": cid, "symbol": sym, "current_price": item.get("usd")})
-        if len(mkts) >= min(8, cap_n):
-            _TOP10_CACHE["t"] = time.time(); _TOP10_CACHE["data"] = mkts
-            return mkts
-    except Exception as e:
-        try: app.logger.warning(f"top10.binance.error: {e}")
-        except Exception: pass
-
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {"vs_currency":"usd","order":"market_cap_desc","per_page":str(cap_n),"page":"1"}
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": str(cap_n),
+            "page": "1",
+            "price_change_percentage": ""
+        }
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
         r.raise_for_status()
-        mkts = r.json() or []
-        _TOP10_CACHE["t"] = time.time(); _TOP10_CACHE["data"] = mkts
-        return mkts
+        return r.json() or []
     except Exception as e:
-        try: app.logger.warning(f"top10.cg.error: {e}")
-        except Exception: pass
+        app.logger.warning(f"coingecko_top_market error: {e}")
         return []
-
 
 def format_top10(mkts: list[dict], lang: str = "en") -> tuple[str, list[str]]:
     if not mkts:
@@ -1213,7 +1188,7 @@ def build_top10_keyboard(chat_id: int, ids: list[str], lang: str) -> InlineKeybo
     return InlineKeyboardMarkup([[InlineKeyboardButton(_t_refresh(lang), callback_data=f"prf:{token}")]])
 
 
-# ===== Resilient synchronous multi-source fetcher with optional Redis cache =====
+# ===== Resilient synchronous multi-source fetcher with optional Redis + stale fallback =====
 try:
     import redis as _redis_mod
 except Exception:
@@ -1226,13 +1201,13 @@ if _redis_mod and _REDIS_URL:
     try:
         _REDIS = _redis_mod.StrictRedis.from_url(_REDIS_URL, decode_responses=True)
     except Exception as e:
-        try:
-            app.logger.warning(f"redis_init_failed: {e}")
-        except Exception:
-            pass
+        try: app.logger.warning(f"redis_init_failed: {e}")
+        except Exception: pass
         _REDIS = None
 
-_PRICE_LOCAL = {}  # (cid, vs) -> (payload_dict, exp_ts)
+# local caches
+_PRICE_LOCAL = {}   # (cid, vs) -> (payload_dict, exp_ts)
+_PRICE_LATEST = {}  # (cid, vs) -> payload_dict   (no expiry; bounded by ids used)
 
 def _price_local_get(cid: str, vs: str):
     v = _PRICE_LOCAL.get((cid, vs))
@@ -1243,6 +1218,10 @@ def _price_local_get(cid: str, vs: str):
 
 def _price_local_set(cid: str, vs: str, payload: dict, ttl: int):
     _PRICE_LOCAL[(cid, vs)] = (payload, time.time() + ttl)
+    _PRICE_LATEST[(cid, vs)] = payload
+
+def _price_latest_get(cid: str, vs: str):
+    return _PRICE_LATEST.get((cid, vs))
 
 def _redis_key(cid: str, vs: str) -> str:
     return f"{_REDIS_PREFIX}:v1:{vs}:{cid}"
@@ -1263,7 +1242,6 @@ def _redis_set(cid: str, vs: str, payload: dict, ttl: int):
         pass
 
 _CB, _NEG = {}, {}
-
 def _cb_open(src: str) -> bool: return time.time() < _CB.get(src, 0.0)
 def _cb_trip(src: str, s: int): _CB[src] = time.time() + max(1, int(s))
 def _neg_set(key: str, s: int): _NEG[key] = time.time() + max(1, int(s))
@@ -1273,6 +1251,7 @@ def _get_multi_prices_resilient(ids: list[str], vs: str = "usd") -> dict:
     cfg_ttl = int(os.getenv("PRICE_TTL", "75"))
     cfg_neg = int(os.getenv("PRICE_NEG_TTL", "90"))
     cfg_cb  = int(os.getenv("PRICE_CB_WINDOW", "180"))
+    cfg_stale = int(os.getenv("PRICE_STALE_TTL", "900"))  # allow serving stale last-known ≤ 15m
     ids = [i for i in (ids or []) if i] or ["bitcoin","ethereum"]
     vs = vs or "usd"
 
@@ -1280,7 +1259,7 @@ def _get_multi_prices_resilient(ids: list[str], vs: str = "usd") -> dict:
     out, misses = {}, []
     cache_hits = 0
 
-    # cache first
+    # cache hits
     for cid in ids:
         v = _redis_get(cid, vs) or _price_local_get(cid, vs)
         if isinstance(v, dict):
@@ -1322,7 +1301,7 @@ def _get_multi_prices_resilient(ids: list[str], vs: str = "usd") -> dict:
             try: app.logger.warning(f"price.coingecko.trip err={e}")
             except Exception: pass
 
-    # Coinbase tails (only for supported)
+    # Coinbase tails
     cb_ms = None
     tails = [i for i in ids if i not in out]
     if tails:
@@ -1335,7 +1314,7 @@ def _get_multi_prices_resilient(ids: list[str], vs: str = "usd") -> dict:
                 out[cid] = {"usd": float(p), "last_updated_at": int(time.time())}
         cb_ms = int((time.time() - t_beg) * 1000)
 
-    # Tiny tails: one-off CG retry even if breaker open (stabilizes single requests)
+    # Tiny tails: one-off CG retry for small requests (<=2 ids) even if CB open
     rest2 = [i for i in ids if i not in out]
     if rest2 and len(ids) <= 2:
         try:
@@ -1360,7 +1339,21 @@ def _get_multi_prices_resilient(ids: list[str], vs: str = "usd") -> dict:
         if cid not in out and cid in ("tether","usd-coin"):
             out[cid] = {"usd": 1.0, "last_updated_at": now_ts}
 
-    # cache writes + per-asset source logging
+    # Stale fallback (serve last-known within cfg_stale)
+    rest3 = [i for i in ids if i not in out]
+    if rest3 and cfg_stale > 0:
+        for cid in rest3:
+            pv = _price_latest_get(cid, vs) or _redis_get(cid, vs)  # try latest known
+            try:
+                ts = int(pv.get("last_updated_at", 0)) if isinstance(pv, dict) else 0
+            except Exception:
+                ts = 0
+            if pv and ts and (now_ts - ts) <= cfg_stale and "usd" in pv:
+                out[cid] = pv
+                try: app.logger.info("price.stale cid=%s age_s=%d", cid, now_ts - ts)
+                except Exception: pass
+
+    # cache writes + source log
     for cid, payload in out.items():
         _price_local_set(cid, vs, payload, cfg_ttl)
         _redis_set(cid, vs, payload, cfg_ttl)
