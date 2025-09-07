@@ -3,13 +3,14 @@ import re
 import time
 from urllib.parse import urlparse
 
-from utils import http_get_json, rdap_domain, wayback_first_capture, ssl_certificate_info, format_kv, locale_text as _
+from utils import http_get_json, http_post_json, rdap_domain, wayback_first_capture, ssl_certificate_info, format_kv, locale_text as _
 
 DEX_API_SEARCH = "https://api.dexscreener.com/latest/dex/search?q={q}"
 DEX_API_PAIR = "https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair}"
 DEX_API_TOKEN_POOLS = "https://api.dexscreener.com/token-pairs/v1/{chain}/{token}"
 
-# Broad EVM set DexScreener supports
+UNISWAP_V3_SUBGRAPH = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3"
+
 CHAIN_GUESS = [
     "ethereum", "base", "arbitrum", "optimism", "polygon",
     "bsc", "avalanche", "fantom", "blast", "linea",
@@ -19,8 +20,6 @@ CHAIN_GUESS = [
 ADDRESS_RE = re.compile(r'(0x[a-fA-F0-9]{40})')
 PAIR_RE = re.compile(r'/(?:pair|pairs)/([a-z0-9\-]+)/([A-Za-z0-9]+)')
 TOKEN_RE = re.compile(r'/token/([a-z0-9\-]+)/([A-Za-z0-9]+)')
-
-WINDOWS = ["5m","1h","6h","24h","7d","30d"]
 
 def normalize_input(s: str) -> str:
     s = s.strip()
@@ -60,18 +59,33 @@ def best_pair(pairs):
     def score(p):
         liq = (p.get("liquidity") or {}).get("usd") or 0
         vol24 = (p.get("volume") or {}).get("h24") or 0
-        return (liq, vol24)
+        # allow TVL from Uniswap fallback
+        tvl = p.get("tvlUsd") or 0
+        return (liq or tvl, vol24)
     return sorted(pairs, key=score, reverse=True)[0]
 
 def summarize_pair(p, window="24h"):
     base = p.get("baseToken", {}) or {}
     quote = p.get("quoteToken", {}) or {}
+    lines = []
+
+    if p.get("_src") == "uniswap":
+        lines.append(f'{base.get("symbol","?")}/{quote.get("symbol","?")} on Uniswap v3 (ethereum)')
+        lines.append(format_kv({
+            "TVL (USD)": p.get("tvlUsd"),
+            "Fee": p.get("feeTier"),
+            "Pool": p.get("poolId")
+        }))
+        # we may not have priceChange; skip Δ
+        if p.get("site"):
+            lines.append("Site: " + p["site"])
+        return "\n".join([l for l in lines if l])
+
+    # DexScreener path
     liq = p.get("liquidity") or {}
     vol = p.get("volume") or {}
     chg = p.get("priceChange") or {}
     info = p.get("info") or {}
-    lines = []
-    # no Markdown formatting to avoid Telegram parse issues
     lines.append(f'{base.get("symbol","?")}/{quote.get("symbol","?")} on {p.get("dexId","?")} ({p.get("chainId","?")})')
     price_usd = p.get("priceUsd")
     if price_usd:
@@ -84,7 +98,6 @@ def summarize_pair(p, window="24h"):
     }))
     if window in chg:
         lines.append(f'Delta {window}: {chg.get(window)}%')
-    # enrich with websites / socials if any
     wsites = [w.get("url") for w in (info.get("websites") or []) if w.get("url")]
     socials = info.get("socials") or []
     if wsites:
@@ -109,11 +122,40 @@ def extract_contract_and_chain(user_input):
         return (None, m.group(1), None)
     return (None, None, None)
 
+def run_uniswap_fallback(token_address):
+    # Returns list of pseudo-"pairs" compatible with summarize_pair
+    q = """
+    query($addr: Bytes!) {
+      pools0: pools(first: 5, orderBy: totalValueLockedUSD, orderDirection: desc, where:{token0: $addr}) {
+        id feeTier totalValueLockedUSD token0 { symbol } token1 { symbol }
+      }
+      pools1: pools(first: 5, orderBy: totalValueLockedUSD, orderDirection: desc, where:{token1: $addr}) {
+        id feeTier totalValueLockedUSD token0 { symbol } token1 { symbol }
+      }
+    }
+    """
+    data = http_post_json(UNISWAP_V3_SUBGRAPH, {"query": q, "variables": {"addr": token_address.lower()}})
+    pools = []
+    try:
+        for p in (data.get("data", {}).get("pools0") or []) + (data.get("data", {}).get("pools1") or []):
+            pools.append({
+                "_src": "uniswap",
+                "baseToken": {"symbol": p.get("token0",{}).get("symbol")},
+                "quoteToken": {"symbol": p.get("token1",{}).get("symbol")},
+                "tvlUsd": float(p.get("totalValueLockedUSD") or 0),
+                "feeTier": p.get("feeTier"),
+                "poolId": p.get("id"),
+                "info": {"websites": [{"url": "https://app.uniswap.org/"}]}
+            })
+    except Exception:
+        return []
+    return pools
+
 def run_dexscreener(user_input):
     chain, token, pair = extract_contract_and_chain(user_input)
     pairs = []
 
-    # 0) Search-first (works best across chains)
+    # 0) Search-first
     q = token or user_input
     data = http_get_json(DEX_API_SEARCH.format(q=q))
     if data and "pairs" in data and data["pairs"]:
@@ -138,6 +180,10 @@ def run_dexscreener(user_input):
             if isinstance(data, list) and data:
                 pairs.extend(data)
                 break
+
+    # 4) Fallback to Uniswap v3 (Ethereum only)
+    if token and not pairs:
+        pairs = run_uniswap_fallback(token)
 
     return pairs
 
