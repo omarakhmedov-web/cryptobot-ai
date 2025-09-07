@@ -9,34 +9,52 @@ from urllib.parse import urlparse
 import requests
 
 USER_AGENT = os.environ.get("USER_AGENT", "MetridexBot/QuickScan (+https://metridex.com)")
-REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "5.0"))
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))  # bump to 10s by default
+DEBUG = os.environ.get("DEBUG", "0") == "1"
+
+COMMON_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json"
+}
+
+def _dbg(msg):
+    if DEBUG:
+        print(f"[DEBUG] {msg}", flush=True)
 
 def http_get_json(url):
     try:
-        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
+        _dbg(f"GET {url}")
+        r = requests.get(url, headers=COMMON_HEADERS, timeout=REQUEST_TIMEOUT)
+        _dbg(f"-> {r.status_code}")
         if r.status_code == 200:
             return r.json()
-    except Exception:
+        else:
+            _dbg(f"Non-200: {r.text[:200]}")
+    except Exception as e:
+        _dbg(f"EXC {type(e).__name__}: {e}")
         return None
     return None
 
 def http_get_text(url):
     try:
-        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
+        _dbg(f"GET {url}")
+        r = requests.get(url, headers=COMMON_HEADERS, timeout=REQUEST_TIMEOUT)
+        _dbg(f"-> {r.status_code}")
         if r.status_code == 200:
             return r.text
-    except Exception:
+        else:
+            _dbg(f"Non-200: {r.text[:200]}")
+    except Exception as e:
+        _dbg(f"EXC {type(e).__name__}: {e}")
         return None
     return None
 
 def rdap_domain(domain):
-    # Use rdap.net redirector. Returns minimal fields.
     try:
         url = f"https://www.rdap.net/domain/{domain}"
-        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-        if r.status_code != 200:
+        data = http_get_json(url)
+        if not data:
             return None
-        data = r.json()
         out = {
             "handle": data.get("handle"),
             "name": (data.get("name") or ""),
@@ -56,7 +74,8 @@ def rdap_domain(domain):
                             out["registrar"] = item[3]
                             break
         return out
-    except Exception:
+    except Exception as e:
+        _dbg(f"RDAP EXC {e}")
         return None
 
 def wayback_first_capture(domain):
@@ -72,7 +91,8 @@ def wayback_first_capture(domain):
                 dt = datetime.strptime(ts[:8], "%Y%m%d").date()
                 return dt.isoformat()
         return None
-    except Exception:
+    except Exception as e:
+        _dbg(f"WAYBACK EXC {e}")
         return None
 
 def ssl_certificate_info(domain):
@@ -81,20 +101,19 @@ def ssl_certificate_info(domain):
         with socket.create_connection((domain, 443), timeout=REQUEST_TIMEOUT) as sock:
             with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
                 cert = ssock.getpeercert()
-                # parse notAfter
                 notAfter = cert.get("notAfter")
                 issuer_t = cert.get("issuer")
                 issuer = None
                 if issuer_t:
                     issuer = " ".join(["=".join(x[0]) for x in issuer_t if x])
                 valid = True
-                # expired?
                 if notAfter:
                     exp_dt = datetime.strptime(notAfter, "%b %d %H:%M:%S %Y %Z")
                     if exp_dt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
                         valid = False
                 return {"notAfter": notAfter, "issuer": issuer, "valid": valid}
-    except Exception:
+    except Exception as e:
+        _dbg(f"SSL EXC {e}")
         return None
 
 def tg_send_message(token, chat_id, text, reply_markup=None, parse_mode=None):
@@ -108,8 +127,8 @@ def tg_send_message(token, chat_id, text, reply_markup=None, parse_mode=None):
         payload["parse_mode"] = parse_mode
     try:
         requests.post(url, json=payload, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
-    except Exception:
-        pass
+    except Exception as e:
+        _dbg(f"TG_SEND EXC {e}")
 
 def tg_answer_callback(token, callback_id, text=None):
     if not token:
@@ -120,8 +139,8 @@ def tg_answer_callback(token, callback_id, text=None):
         payload["text"] = text
     try:
         requests.post(url, json=payload, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
-    except Exception:
-        pass
+    except Exception as e:
+        _dbg(f"TG_CB EXC {e}")
 
 def make_markdown_safe(s):
     return s.replace("_","\\_").replace("*","\\*").replace("[","\\[").replace("`","\\`")
@@ -137,7 +156,6 @@ def format_kv(d):
             parts.append(f"{k}: {v}")
     return " | ".join(parts)
 
-# very small i18n set
 I18N = {
   "en": {
     "help": "*Metridex QuickScan*\nSend a contract address, token or pair URL (DexScreener / explorers), or use `/quickscan <address|url>`.\nI will fetch pools from DexScreener and basic domain signals (WHOIS/RDAP, SSL, Wayback).",
