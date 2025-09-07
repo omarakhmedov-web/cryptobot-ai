@@ -2,14 +2,12 @@ import os
 import json
 import ssl
 import socket
-import math
 from datetime import datetime, timezone
-from urllib.parse import urlparse
 
 import requests
 
-USER_AGENT = os.environ.get("USER_AGENT", "MetridexBot/QuickScan (+https://metridex.com)")
-REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))  # bump to 10s by default
+USER_AGENT = os.environ.get("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
 DEBUG = os.environ.get("DEBUG", "0") == "1"
 
 COMMON_HEADERS = {
@@ -35,17 +33,17 @@ def http_get_json(url):
         return None
     return None
 
-def http_get_text(url):
+def http_post_json(url, payload):
     try:
-        _dbg(f"GET {url}")
-        r = requests.get(url, headers=COMMON_HEADERS, timeout=REQUEST_TIMEOUT)
+        _dbg(f"POST {url}")
+        r = requests.post(url, json=payload, headers=COMMON_HEADERS, timeout=REQUEST_TIMEOUT)
         _dbg(f"-> {r.status_code}")
         if r.status_code == 200:
-            return r.text
+            return r.json()
         else:
             _dbg(f"Non-200: {r.text[:200]}")
     except Exception as e:
-        _dbg(f"EXC {type(e).__name__}: {e}")
+        _dbg(f"POST EXC {type(e).__name__}: {e}")
         return None
     return None
 
