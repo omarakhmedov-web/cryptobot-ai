@@ -146,7 +146,8 @@ I18N = {
     "scan_usage": "Usage: `/quickscan <address|url>`",
     "lang_switched": "Language fixed to EN. Type /lang ru to switch back.",
     "cache_miss": "Cache expired, run /quickscan again.",
-    "updated": "Updated."
+    "updated": "Updated.",
+    "no_pairs": "No pools found on DexScreener."
   },
   "ru": {
     "help": "*Metridex QuickScan*\nОтправьте адрес контракта, ссылку на токен/пул (DexScreener/эксплореры) или `/quickscan <address|url>`.\nЯ подтяну пулы из DexScreener и базовые доменные сигналы (WHOIS/RDAP, SSL, Wayback).",
@@ -155,7 +156,8 @@ I18N = {
     "scan_usage": "Формат: `/quickscan <address|url>`",
     "lang_switched": "Язык зафиксирован: RU. Напишите /lang en для EN.",
     "cache_miss": "Кэш истёк, запустите /quickscan ещё раз.",
-    "updated": "Обновлено."
+    "updated": "Обновлено.",
+    "no_pairs": "Пулы на DexScreener не найдены."
   }
 }
 
