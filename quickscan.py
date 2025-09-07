@@ -1,13 +1,21 @@
+
 import os
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 
 from utils import http_get_json, http_post_json, rdap_domain, wayback_first_capture, ssl_certificate_info, format_kv, locale_text as _
 
-DEX_API_SEARCH = "https://api.dexscreener.com/latest/dex/search?q={q}"
-DEX_API_PAIR = "https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair}"
-DEX_API_TOKEN_POOLS = "https://api.dexscreener.com/token-pairs/v1/{chain}/{token}"
+DEX_BASE = os.environ.get("DEX_BASE", "https://api.dexscreener.com").rstrip("/")
+
+def ds_url(path_qs: str) -> str:
+    if not path_qs.startswith("/"):
+        path_qs = "/" + path_qs
+    return f"{DEX_BASE}{path_qs}"
+
+DEX_API_SEARCH = lambda q: ds_url(f"/latest/dex/search?q={quote_plus(q)}")
+DEX_API_PAIR   = lambda chain, pair: ds_url(f"/latest/dex/pairs/{chain}/{pair}")
+DEX_API_TOKEN_POOLS = lambda chain, token: ds_url(f"/token-pairs/v1/{chain}/{token}")
 
 UNISWAP_V3_SUBGRAPH = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3"
 
@@ -59,7 +67,6 @@ def best_pair(pairs):
     def score(p):
         liq = (p.get("liquidity") or {}).get("usd") or 0
         vol24 = (p.get("volume") or {}).get("h24") or 0
-        # allow TVL from Uniswap fallback
         tvl = p.get("tvlUsd") or 0
         return (liq or tvl, vol24)
     return sorted(pairs, key=score, reverse=True)[0]
@@ -76,12 +83,10 @@ def summarize_pair(p, window="24h"):
             "Fee": p.get("feeTier"),
             "Pool": p.get("poolId")
         }))
-        # we may not have priceChange; skip Δ
         if p.get("site"):
             lines.append("Site: " + p["site"])
         return "\n".join([l for l in lines if l])
 
-    # DexScreener path
     liq = p.get("liquidity") or {}
     vol = p.get("volume") or {}
     chg = p.get("priceChange") or {}
@@ -123,7 +128,6 @@ def extract_contract_and_chain(user_input):
     return (None, None, None)
 
 def run_uniswap_fallback(token_address):
-    # Returns list of pseudo-"pairs" compatible with summarize_pair
     q = """
     query($addr: Bytes!) {
       pools0: pools(first: 5, orderBy: totalValueLockedUSD, orderDirection: desc, where:{token0: $addr}) {
@@ -145,7 +149,9 @@ def run_uniswap_fallback(token_address):
                 "tvlUsd": float(p.get("totalValueLockedUSD") or 0),
                 "feeTier": p.get("feeTier"),
                 "poolId": p.get("id"),
-                "info": {"websites": [{"url": "https://app.uniswap.org/"}]}
+                "info": {"websites": [{"url": "https://app.uniswap.org/"}]},
+                "chainId": "ethereum",
+                "dexId": "uniswap-v3"
             })
     except Exception:
         return []
@@ -157,26 +163,26 @@ def run_dexscreener(user_input):
 
     # 0) Search-first
     q = token or user_input
-    data = http_get_json(DEX_API_SEARCH.format(q=q))
+    data = http_get_json(DEX_API_SEARCH(q))
     if data and "pairs" in data and data["pairs"]:
         pairs.extend(data["pairs"])
 
     # 1) Pair URL exact
     if pair and chain and not pairs:
-        data = http_get_json(DEX_API_PAIR.format(chain=chain, pair=pair))
+        data = http_get_json(DEX_API_PAIR(chain, pair))
         if data and "pairs" in data:
             pairs.extend(data["pairs"] or [])
 
     # 2) Token URL exact
     if token and chain and not pairs:
-        data = http_get_json(DEX_API_TOKEN_POOLS.format(chain=chain, token=token))
+        data = http_get_json(DEX_API_TOKEN_POOLS(chain, token))
         if isinstance(data, list):
             pairs.extend(data)
 
     # 3) Raw address → probe common chains
     if token and not pairs:
         for ch in CHAIN_GUESS:
-            data = http_get_json(DEX_API_TOKEN_POOLS.format(chain=ch, token=token))
+            data = http_get_json(DEX_API_TOKEN_POOLS(ch, token))
             if isinstance(data, list) and data:
                 pairs.extend(data)
                 break
