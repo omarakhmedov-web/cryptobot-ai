@@ -1,45 +1,46 @@
-[README_DEPLOY (2).md](https://github.com/user-attachments/files/22198623/README_DEPLOY.2.md)
-# MetridexBot Skeleton
+# Metridex QuickScan (MVP)
 
-Minimal, production-oriented Flask webhook for Telegram:
-- Stable `/webhook/<SECRET>`
-- `/healthz` for Render
-- i18n EN/RU, `/lang`
-- `/license` + feature flags (stub)
-- Inline callbacks (24h/7d/30d)
-- No proxies anywhere
+Flask + Gunicorn webhook that implements **QuickScan**:
+- Pools & price/volume/FDV via **DexScreener** API.
+- Domain signals (WHOIS/RDAP via `rdap.net`, SSL cert check, Wayback first capture).
+- Caching, timeouts, and inline buttons for Δ 24h/7d/30d.
 
-## Quick start (Render)
+## Deploy (Render)
 
-1) Set env vars in Render → Environment:
-- `TELEGRAM_TOKEN` = token from @BotFather for **@MetridexBot**
-- `TELEGRAM_WEBHOOK_SECRET` = `python -c "import secrets; print(secrets.token_hex(32))"`
-- `APP_BASE_URL` = `https://<your-app>.onrender.com`
+1. Create a new **Web Service** from this folder.
+2. Set env vars (Render → *Environment*):
+   - `TELEGRAM_TOKEN`
+   - `WEBHOOK_SECRET` (random, used in URL path)
+   - `WEBHOOK_HEADER_SECRET` (random, used as Telegram `secret_token` header)
+   - optional: `BOT_USERNAME`, `REQUEST_TIMEOUT`, `CACHE_TTL_SECONDS`
 
-2) Deploy (it will bind Gunicorn).
-
-3) Set webhook (from your terminal):
+3. After deploy, set Telegram webhook (replace vars):
 ```bash
-export TELEGRAM_BOT_TOKEN="<TOKEN>"
-export WEBHOOK_SECRET="<SECRET>"
-export APP_BASE_URL="https://<your-app>.onrender.com"
-
-curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
-  -d "url=$APP_BASE_URL/webhook/$WEBHOOK_SECRET" \
-  -d "max_connections=40" \
-  -d "drop_pending_updates=true" \
-  -d "allowed_updates[]=message" \
-  -d "allowed_updates[]=edited_message" \
-  -d "allowed_updates[]=callback_query" \
-  -d "allowed_updates[]=my_chat_member" \
-  -d "allowed_updates[]=chat_member"
+curl -s "https://api.telegram.org/bot$TELEGRAM_TOKEN/setWebhook" \
+  -d "url=$RENDER_EXTERNAL_URL/webhook/$WEBHOOK_SECRET" \
+  -d "secret_token=$WEBHOOK_HEADER_SECRET"
 ```
+4. Check:
+   - `GET $RENDER_EXTERNAL_URL/healthz` → `{status:ok}`
+   - `GET $RENDER_EXTERNAL_URL/` → meta
 
-4) Smoke test:
-- Open `/healthz` → 200 OK
-- DM `/start` to @MetridexBot
-- Add to a test group (privacy disabled), send a normal message → webhook receives it
+## Usage
+
+- `/quickscan <address|url>` — accepts raw EVM address, DexScreener token/pair URL, or explorer URL.
+- Just send a message with an address or URL to trigger an implicit scan.
+
+Outputs:
+- Best pool summary (by liquidity then 24h volume).
+- Δ 24h/7d/30d buttons.
+- Domain: WHOIS/RDAP created date & registrar, SSL validity + issuer, Wayback first snapshot date.
 
 ## Notes
-- This is a skeleton to get the bot reliably online. Replace in-memory dicts with DB (Postgres) and implement QuickScan/DeepReport modules next.
-- Keep tokens and secrets out of logs and git.
+
+- DexScreener API used:
+  - `/latest/dex/pairs/{chainId}/{pairId}`
+  - `/token-pairs/v1/{chainId}/{tokenAddress}`
+  - `/latest/dex/search?q=` (fallback, works across chains for address queries)
+- WHOIS → RDAP via `https://www.rdap.net/domain/<domain>`
+- Wayback availability API: `https://archive.org/wayback/available?url=<domain>`
+
+No proxies. Keep timeouts small.

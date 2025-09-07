@@ -1,263 +1,140 @@
-# MetridexBot — minimal production-ready skeleton (Flask webhook)
-# Focus: stable webhook, i18n, license stub, feature flags, no proxies.
-
 import os
-import logging
+import json
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from urllib.parse import urlparse
+from functools import wraps
 
-import requests
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify
 
-# ----------------------------------------------------------------------------
-# Environment
-# ----------------------------------------------------------------------------
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET") or os.getenv("WEBHOOK_SECRET")
-APP_BASE_URL = os.getenv("APP_BASE_URL", "")
+from quickscan import quickscan_entrypoint, normalize_input, SafeCache
+from utils import tg_send_message, tg_answer_callback, make_markdown_safe, locale_text as _
 
-if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_TOKEN is not set")
-if not WEBHOOK_SECRET:
-    raise RuntimeError("TELEGRAM_WEBHOOK_SECRET / WEBHOOK_SECRET is not set")
+APP_VERSION = os.environ.get("APP_VERSION", "0.2.0-quickscan-mvp")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+WEBHOOK_HEADER_SECRET = os.environ.get("WEBHOOK_HEADER_SECRET", WEBHOOK_SECRET)  # optional separate header secret
+ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-REQUEST_TIMEOUT = 10  # seconds
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "5.0"))
+CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
 
-# ----------------------------------------------------------------------------
-# Logging
-# ----------------------------------------------------------------------------
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-log = logging.getLogger("metridex")
-
-# ----------------------------------------------------------------------------
-# App
-# ----------------------------------------------------------------------------
 app = Flask(__name__)
 
-# ----------------------------------------------------------------------------
-# In-memory stores (MVP; replace with DB later)
-# ----------------------------------------------------------------------------
-USER_LOCALE: Dict[int, str] = {}          # user_id -> 'en' | 'ru'
-ORG_BINDINGS: Dict[str, Dict[str, Any]] = {}  # org_key -> { plan, bind_mode, chat_id, users }
-QUOTAS: Dict[str, Dict[str, int]] = {}        # org_key -> counters
+cache = SafeCache(ttl=CACHE_TTL_SECONDS)
 
-# ----------------------------------------------------------------------------
-# i18n (very small, extend later)
-# ----------------------------------------------------------------------------
-I18N = {
-    "en": {
-        "greet": "🤖 Metridex is online.\nType /help to see available commands.\nLanguage: /lang en | /lang ru",
-        "help": "Commands:\n/start – welcome\n/lang en|ru – set language\n/license <KEY> – activate license\n/quota – show usage\nQuick buttons: QuickScan, Docs, Support",
-        "license_ok": "✅ License activated. Your plan: PRO (demo).",
-        "license_need": "Please provide a license key: /license YOUR-KEY",
-        "quota": "Your quotas: QuickScan 0/∞, DeepReports 0/∞ (demo mode).",
-        "unknown": "I didn't understand. Type /help.",
-        "quickscan_stub": "🔎 QuickScan: send a token address / domain / t.me link.\n(Stub in MVP. Full scan will be enabled next.)",
-        "changed_lang": "Language set to English.",
-        "cb_ack": "Updated.",
-    },
-    "ru": {
-        "greet": "🤖 Metridex запущен.\nКоманда /help покажет доступные команды.\nЯзык: /lang en | /lang ru",
-        "help": "Команды:\n/start – приветствие\n/lang en|ru – выбрать язык\n/license <КЛЮЧ> – активировать лицензию\n/quota – текущие лимиты\nБыстрые кнопки: QuickScan, Docs, Support",
-        "license_ok": "✅ Лицензия активирована. Ваш план: PRO (демо).",
-        "license_need": "Укажите лицензионный ключ: /license ВАШ-КЛЮЧ",
-        "quota": "Ваши лимиты: QuickScan 0/∞, DeepReports 0/∞ (демо).",
-        "unknown": "Команда не распознана. Введите /help.",
-        "quickscan_stub": "🔎 QuickScan: пришлите адрес токена / домен / ссылку t.me.\n(Заглушка в MVP. Полный скан включим далее.)",
-        "changed_lang": "Язык переключен на русский.",
-        "cb_ack": "Обновлено.",
-    },
-}
+def require_webhook_secret(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        # If header secret configured, enforce X-Telegram-Bot-Api-Secret-Token
+        if WEBHOOK_HEADER_SECRET:
+            header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if header != WEBHOOK_HEADER_SECRET:
+                return ("forbidden", 403)
+        return fn(*args, **kwargs)
+    return wrapper
 
-def t(user_id: Optional[int], key: str) -> str:
-    lang = USER_LOCALE.get(user_id, "en")
-    return I18N.get(lang, I18N["en"]).get(key, key)
-
-# ----------------------------------------------------------------------------
-# Utils
-# ----------------------------------------------------------------------------
-def send_message(chat_id: int, text: str, reply_markup: Optional[Dict[str, Any]] = None):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=REQUEST_TIMEOUT)
-        if r.status_code != 200:
-            log.warning("sendMessage non-200: %s %s", r.status_code, r.text[:200])
-    except Exception as e:
-        log.exception("sendMessage failed: %s", e)
-
-def answer_callback_query(callback_query_id: str, text: str = ""):
-    try:
-        r = requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": callback_query_id, "text": text}, timeout=REQUEST_TIMEOUT)
-        if r.status_code != 200:
-            log.warning("answerCallbackQuery non-200: %s %s", r.status_code, r.text[:200])
-    except Exception as e:
-        log.exception("answerCallbackQuery failed: %s", e)
-
-def edit_message_text(chat_id: int, message_id: int, text: str, reply_markup: Optional[Dict[str, Any]] = None):
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        r = requests.post(f"{TELEGRAM_API}/editMessageText", json=payload, timeout=REQUEST_TIMEOUT)
-        if r.status_code != 200:
-            log.warning("editMessageText non-200: %s %s", r.status_code, r.text[:200])
-    except Exception as e:
-        log.exception("editMessageText failed: %s", e)
-
-def main_keyboard():
-    return {
-        "keyboard": [[{"text": "QuickScan"}], [{"text": "Docs"}, {"text": "Support"}]],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
-    }
-
-def inline_period_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "24h", "callback_data": "period:24h"},
-             {"text": "7d", "callback_data": "period:7d"},
-             {"text": "30d", "callback_data": "period:30d"}]
-        ]
-    }
-
-# ----------------------------------------------------------------------------
-# Routes
-# ----------------------------------------------------------------------------
-@app.get("/")
-def root():
-    return "ok", 200
-
-@app.get("/healthz")
+@app.route("/healthz")
 def healthz():
-    return jsonify({
-        "status": "ok",
-        "time": datetime.now(timezone.utc).isoformat(),
-        "bot": "MetridexBot",
-        "webhook": f"/webhook/{WEBHOOK_SECRET[:6]}…",
-        "version": "0.1.0-skeleton"
-    })
+    return jsonify({"status": "ok", "time": datetime.utcnow().isoformat(), "version": APP_VERSION})
 
-@app.post(f"/webhook/{WEBHOOK_SECRET}")
-def webhook():
+@app.route("/")
+def root():
+    return jsonify({"bot": BOT_USERNAME, "status": "ok", "time": datetime.utcnow().isoformat(), "version": APP_VERSION, "webhook": f"/webhook/{WEBHOOK_SECRET[:6]}…"}), 200
+
+@app.route("/webhook/<secret>", methods=["POST"])
+@require_webhook_secret
+def webhook(secret):
+    if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
+        return ("forbidden", 403)
+
     try:
         update = request.get_json(force=True, silent=False)
     except Exception:
-        abort(400)
-    if not update:
-        abort(400)
+        return ("bad json", 400)
 
-    # Handle updates
-    try:
-        if "message" in update:
-            handle_message(update["message"])
-        elif "edited_message" in update:
-            # ignore silently or handle if needed
-            pass
-        elif "callback_query" in update:
-            handle_callback(update["callback_query"])
-        elif "my_chat_member" in update or "chat_member" in update:
-            # membership changes
-            pass
-    except Exception as e:
-        log.exception("Error handling update: %s", e)
+    # Telegram "message" or "callback_query"
+    if "callback_query" in update:
+        cq = update["callback_query"]
+        chat_id = cq["message"]["chat"]["id"]
+        data = cq.get("data", "")
+        lang = detect_lang(cq["from"])
+        if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
+            return ("ok", 200)
+        # handle quickscan refresh window buttons
+        if data.startswith("qs:"):
+            key = data.split(":", 1)[1]  # normalized input key
+            cached = cache.get(f"qs:{key}")
+            if not cached:
+                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en","cache_miss"))
+                return ("ok", 200)
+            # re-render with requested window if provided
+            window = None
+            if "window=" in data:
+                try:
+                    window = data.split("window=",1)[1]
+                except Exception:
+                    window = None
+            text, keyboard = quickscan_entrypoint(cached["raw_input"], lang=lang, force_reuse=cached, window=window)
+            tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en","updated"))
+        return ("ok", 200)
 
-    # Always ACK 200 quickly
-    return "", 200
+    msg = update.get("message") or update.get("edited_message")
+    if not msg:
+        return ("ok", 200)
 
-# ----------------------------------------------------------------------------
-# Handlers
-# ----------------------------------------------------------------------------
-def handle_message(msg: Dict[str, Any]):
-    chat = msg.get("chat", {})
-    chat_id = chat.get("id")
-    from_user = msg.get("from", {})
-    user_id = from_user.get("id")
-    text = msg.get("text") or ""
+    chat_id = msg["chat"]["id"]
+    if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
+        return ("ok", 200)
 
-    if not chat_id or not user_id:
-        return
+    text = (msg.get("text") or "").strip()
+    lang = detect_lang(msg.get("from", {}))
 
-    # language default
-    USER_LOCALE.setdefault(user_id, "en")
+    if not text:
+        tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","empty"), parse_mode="Markdown")
+        return ("ok", 200)
 
-    # Commands
     if text.startswith("/"):
-        parts = text.split(maxsplit=1)
-        cmd = parts[0].lower()
-        arg = parts[1] if len(parts) > 1 else ""
-
-        if cmd == "/start":
-            send_message(chat_id, t(user_id, "greet"), reply_markup=main_keyboard())
-            return
-        if cmd == "/help":
-            send_message(chat_id, t(user_id, "help"))
-            return
-        if cmd == "/lang":
-            lang = (arg or "").strip().lower()
-            if lang in ("en", "ru"):
-                USER_LOCALE[user_id] = lang
-                send_message(chat_id, t(user_id, "changed_lang"))
+        cmd, *rest = text.split(maxsplit=1)
+        arg = rest[0] if rest else ""
+        if cmd in ("/start", "/help"):
+            tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown")
+        elif cmd in ("/lang",):
+            # naive language switch
+            if arg.lower().startswith("ru"):
+                tg_send_message(TELEGRAM_TOKEN, chat_id, _("ru","lang_switched"))
             else:
-                send_message(chat_id, "Usage: /lang en | /lang ru")
-            return
-        if cmd == "/license":
-            key = (arg or "").strip()
-            if not key:
-                send_message(chat_id, t(user_id, "license_need"))
-                return
-            # Bind to org (demo): org_key = str(chat_id) or custom
-            org_key = f"org:{chat_id}"
-            ORG_BINDINGS[org_key] = {"plan": "PRO", "bind_mode": "chat", "chat_id": chat_id, "users": {user_id}}
-            QUOTAS.setdefault(org_key, {"quickscan": 0, "deep": 0})
-            send_message(chat_id, t(user_id, "license_ok"))
-            return
-        if cmd == "/quota":
-            org_key = f"org:{chat_id}"
-            q = QUOTAS.get(org_key, {"quickscan": 0, "deep": 0})
-            send_message(chat_id, t(user_id, "quota") + f"\n(q:{q['quickscan']} d:{q['deep']})")
-            return
+                tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","lang_switched"))
+        elif cmd in ("/license",):
+            tg_send_message(TELEGRAM_TOKEN, chat_id, "Metridex QuickScan MVP — MIT License")
+        elif cmd in ("/quota",):
+            tg_send_message(TELEGRAM_TOKEN, chat_id, "Free tier — 300 DexScreener req/min shared; be kind.")
+        elif cmd in ("/quickscan", "/scan"):
+            if not arg:
+                tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","scan_usage"))
+            else:
+                norm = normalize_input(arg)
+                text, keyboard = quickscan_entrypoint(arg, lang=lang)
+                tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+        else:
+            tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","unknown"))
+        return ("ok", 200)
 
-        # Unknown command
-        send_message(chat_id, t(user_id, "unknown"))
-        return
+    # Implicit quickscan on raw address or URL
+    if text:
+        text_out, keyboard = quickscan_entrypoint(text, lang=lang)
+        tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, parse_mode="Markdown")
+        return ("ok", 200)
 
-    # Plain text
-    lowered = text.strip().lower()
-    if lowered == "quickscan":
-        send_message(chat_id, t(user_id, "quickscan_stub"), reply_markup=inline_period_keyboard())
-        return
+    return ("ok", 200)
 
-    # Fallback
-    send_message(chat_id, t(user_id, "unknown"))
+def detect_lang(user):
+    # very simple heuristic by Telegram "language_code"
+    code = (user or {}).get("language_code", "en").lower()
+    return "ru" if code.startswith("ru") else "en"
 
-def handle_callback(cb: Dict[str, Any]):
-    cq_id = cb.get("id")
-    data = cb.get("data", "")
-    msg = cb.get("message", {})
-    chat = msg.get("chat", {})
-    chat_id = chat.get("id")
-    message_id = msg.get("message_id")
-    from_user = cb.get("from", {})
-    user_id = from_user.get("id")
-
-    if cq_id:
-        answer_callback_query(cq_id, t(user_id, "cb_ack"))
-
-    if data.startswith("period:"):
-        period = data.split(":", 1)[1]
-        new_text = f"📈 Period selected: <b>{period}</b>\n(Stub: data would refresh here.)"
-        edit_message_text(chat_id, message_id, new_text, reply_markup=inline_period_keyboard())
-
-# ----------------------------------------------------------------------------
-# Gunicorn entrypoint
-# ----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # For local testing only
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
