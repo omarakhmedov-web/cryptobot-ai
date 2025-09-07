@@ -10,7 +10,7 @@ from flask import Flask, request, jsonify
 from quickscan import quickscan_entrypoint, normalize_input, SafeCache
 from utils import tg_send_message, tg_answer_callback, make_markdown_safe, locale_text as _
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.2.0-quickscan-mvp")
+APP_VERSION = os.environ.get("APP_VERSION", "0.2.1-quickscan-mvp")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -77,7 +77,8 @@ def webhook(secret):
                 except Exception:
                     window = None
             text, keyboard = quickscan_entrypoint(cached["raw_input"], lang=lang, force_reuse=cached, window=window)
-            tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+            # IMPORTANT: send without Markdown to avoid formatting failures
+            tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
             tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en","updated"))
         return ("ok", 200)
 
@@ -93,13 +94,14 @@ def webhook(secret):
     lang = detect_lang(msg.get("from", {}))
 
     if not text:
-        tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","empty"), parse_mode="Markdown")
+        tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","empty"))
         return ("ok", 200)
 
     if text.startswith("/"):
         cmd, *rest = text.split(maxsplit=1)
         arg = rest[0] if rest else ""
         if cmd in ("/start", "/help"):
+            # Keep Markdown for help (our strings are safe)
             tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown")
         elif cmd in ("/lang",):
             # naive language switch
@@ -117,7 +119,8 @@ def webhook(secret):
             else:
                 norm = normalize_input(arg)
                 text, keyboard = quickscan_entrypoint(arg, lang=lang)
-                tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+                # IMPORTANT: send without Markdown to avoid formatting failures
+                tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
         else:
             tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","unknown"))
         return ("ok", 200)
@@ -125,7 +128,8 @@ def webhook(secret):
     # Implicit quickscan on raw address or URL
     if text:
         text_out, keyboard = quickscan_entrypoint(text, lang=lang)
-        tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, parse_mode="Markdown")
+        # IMPORTANT: send without Markdown to avoid formatting failures
+        tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard)
         return ("ok", 200)
 
     return ("ok", 200)
