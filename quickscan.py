@@ -12,6 +12,13 @@ DEX_API_SEARCH = "https://api.dexscreener.com/latest/dex/search?q={q}"
 DEX_API_PAIR = "https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair}"
 DEX_API_TOKEN_POOLS = "https://api.dexscreener.com/token-pairs/v1/{chain}/{token}"
 
+# Broad but safe EVM set DexScreener supports
+CHAIN_GUESS = [
+    "ethereum", "base", "arbitrum", "optimism", "polygon",
+    "bsc", "avalanche", "fantom", "blast", "linea",
+    "scroll", "mantle", "zksync", "opbnb"
+]
+
 ADDRESS_RE = re.compile(r'(0x[a-fA-F0-9]{40})')
 PAIR_RE = re.compile(r'/(?:pair|pairs)/([a-z0-9\-]+)/([A-Za-z0-9]+)')
 TOKEN_RE = re.compile(r'/token/([a-z0-9\-]+)/([A-Za-z0-9]+)')
@@ -62,7 +69,8 @@ def best_pair(pairs):
     return sorted(pairs, key=score, reverse=True)[0]
 
 def summarize_pair(p, window="24h"):
-    base = p["baseToken"]; quote = p["quoteToken"]
+    base = p.get("baseToken", {}) or {}
+    quote = p.get("quoteToken", {}) or {}
     liq = p.get("liquidity") or {}
     vol = p.get("volume") or {}
     chg = p.get("priceChange") or {}
@@ -113,20 +121,36 @@ def run_dexscreener(user_input):
     # normalize and try endpoints
     chain, token, pair = extract_contract_and_chain(user_input)
     pairs = []
+
+    # 1) Pair URL exact
     if pair and chain:
         data = http_get_json(DEX_API_PAIR.format(chain=chain, pair=pair))
         if data and "pairs" in data:
             pairs.extend(data["pairs"] or [])
-    if token and chain:
+
+    # 2) Token URL exact
+    if token and chain and not pairs:
         data = http_get_json(DEX_API_TOKEN_POOLS.format(chain=chain, token=token))
         if isinstance(data, list):
             pairs.extend(data)
+
+    # 3) Raw address → probe common chains
+    if token and not pairs:
+        for ch in CHAIN_GUESS:
+            data = http_get_json(DEX_API_TOKEN_POOLS.format(chain=ch, token=token))
+            if isinstance(data, list) and data:
+                pairs.extend(data)
+        # stop if we found anything
+        if pairs:
+            return pairs
+
+    # 4) Fallback search
     if not pairs:
-        # last resort: search by query (works for addresses across chains)
         q = token or user_input
         data = http_get_json(DEX_API_SEARCH.format(q=q))
         if data and "pairs" in data:
             pairs.extend(data["pairs"] or [])
+
     return pairs
 
 def domain_from_pairs(pairs):
@@ -185,7 +209,7 @@ def quickscan_entrypoint(user_input, lang="en", force_reuse=None, window=None):
     if rdap:
         who = rdap.get("name") or rdap.get("handle") or "-"
         created = rdap.get("created") or "-"
-        registrar = rdap.get("registrar") or rdap.get("registrarName") or "-"
+        registrar = rdap.get("registrar") or "-"
         lines.append(f'WHOIS/RDAP: {who} | Created: {created} | Registrar: {registrar}')
     if cert:
         valid = "✅" if cert.get("valid") else "⚠️"
