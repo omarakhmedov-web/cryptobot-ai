@@ -4,10 +4,10 @@ from functools import wraps
 
 from flask import Flask, request, jsonify
 
-from quickscan import quickscan_entrypoint, normalize_input, SafeCache
+from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, normalize_input, SafeCache
 from utils import tg_send_message, tg_answer_callback, locale_text as _
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.2.5-quickscan-mvp+lean")
+APP_VERSION = os.environ.get("APP_VERSION", "0.2.6-quickscan-mvp+pair-cb")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -50,7 +50,7 @@ def webhook(secret):
     except Exception:
         return ("bad json", 400)
 
-    # Handle callback buttons (fast, lean mode)
+    # Handle callback buttons (fast paths)
     if "callback_query" in update:
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
@@ -66,19 +66,28 @@ def webhook(secret):
         if cqid:
             seen_callbacks.set(cqid, True)
 
+        if data.startswith("qs2:"):
+            payload = data.split(":", 1)[1]  # 'chain/pair?window=h1'
+            path, _, window = payload.partition("?window=")
+            window = window or "h24"
+            chain, _, pair_addr = path.partition("/")
+            text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
+            tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
+            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+            return ("ok", 200)
+
         if data.startswith("qs:"):
             payload = data.split(":", 1)[1]
             addr, _, window = payload.partition("?window=")
             window = window or "h24"
-
-            # Fast, compact response: skip heavy enrich
             text, keyboard = quickscan_entrypoint(addr, lang=lang, window=window, lean=True)
-
             tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
             tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+            return ("ok", 200)
+
         return ("ok", 200)
 
-    # Normal message path
+    # Normal message
     msg = update.get("message") or update.get("edited_message")
     if not msg:
         return ("ok", 200)
@@ -126,7 +135,6 @@ def webhook(secret):
 
         else:
             tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "unknown"))
-
         return ("ok", 200)
 
     if text:
