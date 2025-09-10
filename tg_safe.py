@@ -13,7 +13,6 @@ def _post(token: str, method: str, payload: dict, logger=None):
         except Exception:
             body = {"ok": False, "text": resp.text[:500]}
         if logger:
-            red = token[:8] + "…"
             logger.info(f"[TG] {method} -> {status} chat={payload.get('chat_id')} resp={body}")
         return status, body
     except Exception as e:
@@ -27,7 +26,6 @@ def _split_text(text: str):
     parts = []
     t = text
     while len(t) > MAX_LEN:
-        # try split by double newline
         cut = t.rfind("\n\n", 0, MAX_LEN)
         if cut < MAX_LEN * 0.7:
             cut = MAX_LEN
