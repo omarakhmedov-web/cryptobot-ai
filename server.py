@@ -13,7 +13,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.0-quickscan-mvp+debuglog")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.1-quickscan-mvp+selftest")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -64,6 +64,16 @@ def debug():
             "CACHE_TTL_SECONDS": CACHE_TTL_SECONDS,
         }
     })
+
+@app.route("/selftest")
+def selftest():
+    # /selftest?chat_id=123456&text=ping
+    chat_id = request.args.get("chat_id")
+    text = request.args.get("text", "ping")
+    if not TELEGRAM_TOKEN or not chat_id:
+        return jsonify({"ok": False, "error": "missing token or chat_id"}), 400
+    st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, f"[selftest] {text}", logger=app.logger)
+    return jsonify({"ok": (st == 200 and (isinstance(body, dict) and body.get("ok"))), "status": st, "resp": body})
 
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
