@@ -13,7 +13,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.1-quickscan-mvp+selftest")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.2-quickscan-mvp+lean")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -67,17 +67,17 @@ def debug():
 
 @app.route("/selftest")
 def selftest():
-    # /selftest?chat_id=123456&text=ping
     chat_id = request.args.get("chat_id")
     text = request.args.get("text", "ping")
     if not TELEGRAM_TOKEN or not chat_id:
         return jsonify({"ok": False, "error": "missing token or chat_id"}), 400
     st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, f"[selftest] {text}", logger=app.logger)
-    return jsonify({"ok": (st == 200 and (isinstance(body, dict) and body.get("ok"))), "status": st, "resp": body})
+    return jsonify({"ok": (st == 200 and (isinstance(body, dict) and body.get('ok'))), "status": st, "resp": body})
 
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
+    # If WEBHOOK_SECRET is empty, accept any path (useful for debug).
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
         app.logger.warning("[AUTH] bad path secret")
         return ("forbidden", 403)
@@ -89,7 +89,7 @@ def webhook(secret):
         return ("ok", 200)
 
     try:
-        # CALLBACKS
+        # CALLBACKS (Δ)
         if "callback_query" in update:
             cq = update["callback_query"]
             chat_id = cq["message"]["chat"]["id"]
@@ -107,25 +107,25 @@ def webhook(secret):
             if cqid:
                 seen_callbacks.set(cqid, True)
 
-            if data.startswith("qs2:"):
-                path, _, window = data.split(":", 1)[1].partition("?window=")
-                chain, _, pair_addr = path.partition("/")
-                window = window or "h24"
-                text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                app.logger.info(f"[QS] pair window={window} -> len={len(text)}")
+            try:
+                if data.startswith("qs2:"):
+                    path, _, window = data.split(":", 1)[1].partition("?window=")
+                    chain, _, pair_addr = path.partition("/")
+                    window = window or "h24"
+                    text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
+                elif data.startswith("qs:"):
+                    addr, _, window = data.split(":", 1)[1].partition("?window=")
+                    window = window or "h24"
+                    text, keyboard = quickscan_entrypoint(addr, lang="en", window=window, lean=True)
+                else:
+                    return ("ok", 200)
+
+                app.logger.info(f"[QS] cb window={window} -> len={len(text)}")
                 tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, logger=app.logger)
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
-                return ("ok", 200)
-
-            if data.startswith("qs:"):
-                addr, _, window = data.split(":", 1)[1].partition("?window=")
-                window = window or "h24"
-                text, keyboard = quickscan_entrypoint(addr, lang="en", window=window, lean=True)
-                app.logger.info(f"[QS] addr window={window} -> len={len(text)}")
-                tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, logger=app.logger)
-                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
-                return ("ok", 200)
-
+            except Exception:
+                app.logger.exception("[ERR] callback quickscan")
+                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "error"), logger=app.logger)
             return ("ok", 200)
 
         # MESSAGES
@@ -178,25 +178,30 @@ def webhook(secret):
                 if not arg:
                     tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "scan_usage"), logger=app.logger)
                 else:
-                    text_out, keyboard = quickscan_entrypoint(arg, lang="en")
-                    app.logger.info(f"[QS] cmd -> len={len(text_out)}")
-                    tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                    try:
+                        text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
+                        app.logger.info(f"[QS] cmd -> len={len(text_out)}")
+                        tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                    except Exception:
+                        app.logger.exception("[ERR] cmd quickscan")
+                        tg_send_message(TELEGRAM_TOKEN, chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
                 return ("ok", 200)
 
             tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "unknown"), logger=app.logger)
             return ("ok", 200)
 
-        # Implicit quickscan
-        if text:
-            text_out, keyboard = quickscan_entrypoint(text, lang="en")
+        # Implicit quickscan (plain address, pair URL, etc.)
+        try:
+            text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
             app.logger.info(f"[QS] implicit -> len={len(text_out)}")
             tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
-            return ("ok", 200)
-
+        except Exception:
+            app.logger.exception("[ERR] implicit quickscan")
+            tg_send_message(TELEGRAM_TOKEN, chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
         return ("ok", 200)
 
     except Exception:
-        app.logger.exception("[ERR] webhook handler")
+        app.logger.exception("[ERR] webhook handler (outer)")
         try:
             if "callback_query" in update:
                 cq = update["callback_query"]
