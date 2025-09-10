@@ -10,9 +10,9 @@ from quickscan import (
     normalize_input,
     SafeCache,
 )
-from utils import tg_send_message, tg_answer_callback, locale_text as _
+from utils import tg_send_message, tg_answer_callback, locale_text
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.2.7-quickscan-mvp+robust")
+APP_VERSION = os.environ.get("APP_VERSION", "0.2.8-quickscan-mvp+locfix")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -20,6 +20,9 @@ WEBHOOK_HEADER_SECRET = os.environ.get("WEBHOOK_HEADER_SECRET", WEBHOOK_SECRET)
 ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
 
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
+
+# Safe alias to avoid "_" shadowing
+LOC = locale_text
 
 app = Flask(__name__)
 
@@ -53,8 +56,7 @@ def webhook(secret):
     # Parse update safely
     try:
         update = request.get_json(force=True, silent=False)
-    except Exception as e:
-        app.logger.exception("Bad JSON from Telegram")
+    except Exception:
         # Return 200 to prevent retries
         return ("ok", 200)
 
@@ -71,7 +73,7 @@ def webhook(secret):
             # Deduplicate
             cqid = cq.get("id")
             if cqid and seen_callbacks.get(cqid):
-                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"))
                 return ("ok", 200)
             if cqid:
                 seen_callbacks.set(cqid, True)
@@ -83,7 +85,7 @@ def webhook(secret):
                 chain, _, pair_addr = path.partition("/")
                 text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
                 tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
-                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"))
                 return ("ok", 200)
 
             if data.startswith("qs:"):
@@ -92,7 +94,7 @@ def webhook(secret):
                 window = window or "h24"
                 text, keyboard = quickscan_entrypoint(addr, lang=lang, window=window, lean=True)
                 tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
-                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"))
                 return ("ok", 200)
 
             return ("ok", 200)
@@ -114,7 +116,7 @@ def webhook(secret):
         lang = detect_lang(msg.get("from", {}))
 
         if not text:
-            tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "empty"))
+            tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "empty"))
             return ("ok", 200)
 
         if text.startswith("/"):
@@ -122,13 +124,13 @@ def webhook(secret):
             arg = rest[0] if rest else ""
 
             if cmd in ("/start", "/help"):
-                tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown")
+                tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown")
 
             elif cmd in ("/lang",):
                 if arg.lower().startswith("ru"):
-                    tg_send_message(TELEGRAM_TOKEN, chat_id, _("ru", "lang_switched"))
+                    tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("ru", "lang_switched"))
                 else:
-                    tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "lang_switched"))
+                    tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "lang_switched"))
 
             elif cmd in ("/license",):
                 tg_send_message(TELEGRAM_TOKEN, chat_id, "Metridex QuickScan MVP — MIT License")
@@ -138,14 +140,14 @@ def webhook(secret):
 
             elif cmd in ("/quickscan", "/scan"):
                 if not arg:
-                    tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "scan_usage"))
+                    tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "scan_usage"))
                 else:
                     norm = normalize_input(arg)
                     text_out, keyboard = quickscan_entrypoint(arg, lang=lang)
                     tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard)
 
             else:
-                tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "unknown"))
+                tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "unknown"))
             return ("ok", 200)
 
         # Implicit quickscan
@@ -156,13 +158,12 @@ def webhook(secret):
 
         return ("ok", 200)
 
-    except Exception as e:
-        # Log and always acknowledge to stop Telegram retries
-        app.logger.exception("Webhook handler error")
+    except Exception:
+        # Always acknowledge to stop Telegram retries
         try:
             if "callback_query" in update:
                 cq = update["callback_query"]
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), _("en", "error"))
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), LOC("en", "error"))
         except Exception:
             pass
         return ("ok", 200)
