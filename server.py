@@ -1,3 +1,4 @@
+
 import os
 from datetime import datetime
 from functools import wraps
@@ -7,7 +8,7 @@ from flask import Flask, request, jsonify
 from quickscan import quickscan_entrypoint, normalize_input, SafeCache
 from utils import tg_send_message, tg_answer_callback, locale_text as _
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.2.3-quickscan-mvp+cbfix")
+APP_VERSION = os.environ.get("APP_VERSION", "0.2.4-quickscan-mvp+dedup")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -18,8 +19,10 @@ CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
 
 app = Flask(__name__)
 
-# Local cache can be used for messages, but callbacks no longer rely on it
+# Cache for general data
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)
+# Short-lived cache for deduplicating callback_query ids (Telegram may retry)
+seen_callbacks = SafeCache(ttl=300)
 
 def require_webhook_secret(fn):
     @wraps(fn)
@@ -59,15 +62,24 @@ def webhook(secret):
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
 
+        # Deduplicate by callback_query.id
+        cqid = cq.get("id")
+        if cqid and seen_callbacks.get(cqid):
+            # Already processed; just acknowledge silently
+            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+            return ("ok", 200)
+        if cqid:
+            seen_callbacks.set(cqid, True)
+
         if data.startswith("qs:"):
             payload = data.split(":", 1)[1]  # '0xabc...?window=24h'
             addr, _, window = payload.partition("?window=")
             window = window or "24h"
 
-            # Recompute fresh summary for requested window (do NOT rely on in-memory cache)
+            # Recompute fresh summary for requested window
             text, keyboard = quickscan_entrypoint(addr, lang=lang, window=window)
 
-            # Send a fresh message (safer than edit for Markdown/preview issues)
+            # Send a fresh message (avoids edit/markdown pitfalls)
             tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
             tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
         return ("ok", 200)
@@ -75,6 +87,10 @@ def webhook(secret):
     # Normal message
     msg = update.get("message") or update.get("edited_message")
     if not msg:
+        return ("ok", 200)
+
+    # Ignore messages sent by the bot itself to avoid echo loops
+    if (msg.get("from") or {}).get("is_bot"):
         return ("ok", 200)
 
     chat_id = msg["chat"]["id"]
@@ -120,7 +136,7 @@ def webhook(secret):
 
         return ("ok", 200)
 
-    # Implicit quickscan
+    # Implicit quickscan for plain addresses/URLs
     if text:
         text_out, keyboard = quickscan_entrypoint(text, lang=lang)
         tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard)
