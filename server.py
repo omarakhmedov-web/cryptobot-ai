@@ -1,3 +1,4 @@
+
 import os
 import json
 import time
@@ -10,11 +11,11 @@ from flask import Flask, request, jsonify
 from quickscan import quickscan_entrypoint, normalize_input, SafeCache
 from utils import tg_send_message, tg_answer_callback, make_markdown_safe, locale_text as _
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.2.1-quickscan-mvp")
+APP_VERSION = os.environ.get("APP_VERSION", "0.2.2-quickscan-mvp+")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
-WEBHOOK_HEADER_SECRET = os.environ.get("WEBHOOK_HEADER_SECRET", WEBHOOK_SECRET)  # optional separate header secret
+WEBHOOK_HEADER_SECRET = os.environ.get("WEBHOOK_HEADER_SECRET", WEBHOOK_SECRET)
 ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
 
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "5.0"))
@@ -27,7 +28,6 @@ cache = SafeCache(ttl=CACHE_TTL_SECONDS)
 def require_webhook_secret(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        # If header secret configured, enforce X-Telegram-Bot-Api-Secret-Token
         if WEBHOOK_HEADER_SECRET:
             header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
             if header != WEBHOOK_HEADER_SECRET:
@@ -54,7 +54,7 @@ def webhook(secret):
     except Exception:
         return ("bad json", 400)
 
-    # Telegram "message" or "callback_query"
+    # callback_query (кнопки Δ24h/7d/30d)
     if "callback_query" in update:
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
@@ -62,26 +62,31 @@ def webhook(secret):
         lang = detect_lang(cq["from"])
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
-        # handle quickscan refresh window buttons
+
         if data.startswith("qs:"):
-            key = data.split(":", 1)[1]  # normalized input key
-            cached = cache.get(f"qs:{key}")
+            payload = data.split(":", 1)[1]  # '0xabc...?window=24h'
+            # НОРМАЛИЗАЦИЯ КЛЮЧА КЭША: адрес без ?window=..., в нижнем регистре
+            key_norm = payload.split("?", 1)[0].lower()
+            cached = cache.get(f"qs:{key_norm}")
             if not cached:
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en","cache_miss"))
                 return ("ok", 200)
-            # re-render with requested window if provided
+
+            # окно, если передано
             window = None
-            if "window=" in data:
+            if "window=" in payload:
                 try:
-                    window = data.split("window=",1)[1]
+                    window = payload.split("window=", 1)[1]
                 except Exception:
                     window = None
+
             text, keyboard = quickscan_entrypoint(cached["raw_input"], lang=lang, force_reuse=cached, window=window)
-            # IMPORTANT: send without Markdown to avoid formatting failures
+            # без Markdown — чтобы не ловить ошибки форматирования
             tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
             tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en","updated"))
         return ("ok", 200)
 
+    # обычное сообщение
     msg = update.get("message") or update.get("edited_message")
     if not msg:
         return ("ok", 200)
@@ -98,44 +103,47 @@ def webhook(secret):
         return ("ok", 200)
 
     if text.startswith("/"):
+
         cmd, *rest = text.split(maxsplit=1)
         arg = rest[0] if rest else ""
+
         if cmd in ("/start", "/help"):
-            # Keep Markdown for help (our strings are safe)
             tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown")
+
         elif cmd in ("/lang",):
-            # naive language switch
             if arg.lower().startswith("ru"):
                 tg_send_message(TELEGRAM_TOKEN, chat_id, _("ru","lang_switched"))
             else:
                 tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","lang_switched"))
+
         elif cmd in ("/license",):
             tg_send_message(TELEGRAM_TOKEN, chat_id, "Metridex QuickScan MVP — MIT License")
+
         elif cmd in ("/quota",):
             tg_send_message(TELEGRAM_TOKEN, chat_id, "Free tier — 300 DexScreener req/min shared; be kind.")
+
         elif cmd in ("/quickscan", "/scan"):
             if not arg:
                 tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","scan_usage"))
             else:
                 norm = normalize_input(arg)
                 text, keyboard = quickscan_entrypoint(arg, lang=lang)
-                # IMPORTANT: send without Markdown to avoid formatting failures
                 tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
+
         else:
             tg_send_message(TELEGRAM_TOKEN, chat_id, _("en","unknown"))
+
         return ("ok", 200)
 
-    # Implicit quickscan on raw address or URL
+    # Имплицитный quickscan
     if text:
         text_out, keyboard = quickscan_entrypoint(text, lang=lang)
-        # IMPORTANT: send without Markdown to avoid formatting failures
         tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard)
         return ("ok", 200)
 
     return ("ok", 200)
 
 def detect_lang(user):
-    # very simple heuristic by Telegram "language_code"
     code = (user or {}).get("language_code", "en").lower()
     return "ru" if code.startswith("ru") else "en"
 
