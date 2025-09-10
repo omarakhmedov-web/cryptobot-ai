@@ -1,4 +1,3 @@
-
 import os
 import re
 import time
@@ -71,11 +70,38 @@ def best_pair(pairs):
         return (liq or tvl, vol24)
     return sorted(pairs, key=score, reverse=True)[0]
 
+# === Formatting helpers (MVP+) ===
+def _abbr(n):
+    try:
+        n = float(n)
+    except Exception:
+        return "n/a"
+    units = [(1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")]
+    for v, s in units:
+        if abs(n) >= v:
+            return f"{n / v:.2f}{s}"
+    return f"{n:.2f}"
+
+def _pct(x):
+    try:
+        x = float(x)
+        sign = "−" if x < 0 else "+"
+        return f"{sign}{abs(x):.2f}%"
+    except Exception:
+        return "n/a"
+
+def _fmt_usd(x):
+    try:
+        return f"${float(x):,.6f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "n/a"
+
 def summarize_pair(p, window="24h"):
     base = p.get("baseToken", {}) or {}
     quote = p.get("quoteToken", {}) or {}
     lines = []
 
+    # Fallback: Uniswap v3
     if p.get("_src") == "uniswap":
         lines.append(f'{base.get("symbol","?")}/{quote.get("symbol","?")} on Uniswap v3 (ethereum)')
         lines.append(format_kv({
@@ -85,24 +111,35 @@ def summarize_pair(p, window="24h"):
         }))
         if p.get("site"):
             lines.append("Site: " + p["site"])
+        lines.append("source: Uniswap v3 (fallback)")
         return "\n".join([l for l in lines if l])
 
+    # DexScreener path (MVP+ compact view)
     liq = p.get("liquidity") or {}
     vol = p.get("volume") or {}
     chg = p.get("priceChange") or {}
-    info = p.get("info") or {}
+
     lines.append(f'{base.get("symbol","?")}/{quote.get("symbol","?")} on {p.get("dexId","?")} ({p.get("chainId","?")})')
+
     price_usd = p.get("priceUsd")
-    if price_usd:
-        lines.append(f'Price: ${price_usd}')
-    lines.append(format_kv({
-        "FDV": p.get("fdv"),
-        "MC": p.get("marketCap"),
-        "Liq (USD)": liq.get("usd"),
-        "Vol 24h": vol.get("h24")
-    }))
-    if window in chg:
-        lines.append(f'Delta {window}: {chg.get(window)}%')
+    if price_usd is not None:
+        lines.append(f'Price: {_fmt_usd(price_usd)}')
+
+    fdv = p.get("fdv")
+    mcap = p.get("marketCap")
+    liq_usd = liq.get("usd")
+    vol24 = vol.get("h24")
+    d24 = chg.get("h24")
+
+    stats = f'FDV {_abbr(fdv)} | MC {_abbr(mcap)} | Liq {_abbr(liq_usd)} | Vol24h {_abbr(vol24)}'
+    if d24 is not None:
+        stats += f' | Δ24h {_pct(d24)}'
+    lines.append(stats)
+
+    lines.append("source: DexScreener")
+
+    # Optional: website/social (unchanged logic)
+    info = p.get("info") or {}
     wsites = [w.get("url") for w in (info.get("websites") or []) if w.get("url")]
     socials = info.get("socials") or []
     if wsites:
@@ -112,6 +149,7 @@ def summarize_pair(p, window="24h"):
         handle = s0.get("handle")
         if handle:
             lines.append(f'{s0.get("platform")}: {handle}')
+
     return "\n".join([l for l in lines if l])
 
 def extract_contract_and_chain(user_input):
@@ -240,7 +278,7 @@ def quickscan_entrypoint(user_input, lang="en", force_reuse=None, window=None):
     rdap, first_cap, cert = enrich_domain(domain)
 
     lines = []
-    lines.append("Metridex QuickScan (MVP)")
+    lines.append("Metridex QuickScan (MVP+)")
     lines.append(main_text)
     if domain:
         lines.append(f'Domain: {domain}')
@@ -257,9 +295,26 @@ def quickscan_entrypoint(user_input, lang="en", force_reuse=None, window=None):
     if first_cap:
         lines.append(f'Wayback: first {first_cap}')
 
+    # ==== Inline keyboard ====
     buttons = []
+
+    # Row 1: Open on DexScreener (or Uniswap app for fallback)
+    url_btn = None
+    if isinstance(pair, dict):
+        url_btn = pair.get("url")
+        if not url_btn:
+            # try Uniswap app URL from info if fallback
+            info = pair.get("info") or {}
+            webs = info.get("websites") or []
+            if webs:
+                url_btn = webs[0].get("url")
+    if url_btn:
+        buttons.append([{"text": "Open on DexScreener", "url": url_btn}])
+
+    # Rows 2..: Δ window selectors
     for w in ["24h","7d","30d"]:
         buttons.append([{"text": f"Δ {w}", "callback_data": f"qs:{norm}?window={w}"}])
+
     keyboard = {"inline_keyboard": buttons}
 
     out = "\n".join([l for l in lines if l])
