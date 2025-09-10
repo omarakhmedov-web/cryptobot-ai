@@ -4,10 +4,15 @@ from functools import wraps
 
 from flask import Flask, request, jsonify
 
-from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, normalize_input, SafeCache
+from quickscan import (
+    quickscan_entrypoint,
+    quickscan_pair_entrypoint,
+    normalize_input,
+    SafeCache,
+)
 from utils import tg_send_message, tg_answer_callback, locale_text as _
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.2.6-quickscan-mvp+pair-cb")
+APP_VERSION = os.environ.get("APP_VERSION", "0.2.7-quickscan-mvp+robust")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -45,104 +50,122 @@ def webhook(secret):
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
         return ("forbidden", 403)
 
+    # Parse update safely
     try:
         update = request.get_json(force=True, silent=False)
-    except Exception:
-        return ("bad json", 400)
+    except Exception as e:
+        app.logger.exception("Bad JSON from Telegram")
+        # Return 200 to prevent retries
+        return ("ok", 200)
 
-    # Handle callback buttons (fast paths)
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        chat_id = cq["message"]["chat"]["id"]
-        data = cq.get("data", "")
-        lang = detect_lang(cq["from"])
+    try:
+        # CALLBACKS (Δ buttons)
+        if "callback_query" in update:
+            cq = update["callback_query"]
+            chat_id = cq["message"]["chat"]["id"]
+            data = cq.get("data", "")
+            lang = detect_lang(cq.get("from", {}))
+            if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
+                return ("ok", 200)
+
+            # Deduplicate
+            cqid = cq.get("id")
+            if cqid and seen_callbacks.get(cqid):
+                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+                return ("ok", 200)
+            if cqid:
+                seen_callbacks.set(cqid, True)
+
+            if data.startswith("qs2:"):
+                payload = data.split(":", 1)[1]  # 'chain/pair?window=h1'
+                path, _, window = payload.partition("?window=")
+                window = window or "h24"
+                chain, _, pair_addr = path.partition("/")
+                text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
+                tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
+                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+                return ("ok", 200)
+
+            if data.startswith("qs:"):
+                payload = data.split(":", 1)[1]
+                addr, _, window = payload.partition("?window=")
+                window = window or "h24"
+                text, keyboard = quickscan_entrypoint(addr, lang=lang, window=window, lean=True)
+                tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
+                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+                return ("ok", 200)
+
+            return ("ok", 200)
+
+        # MESSAGES
+        msg = update.get("message") or update.get("edited_message")
+        if not msg:
+            return ("ok", 200)
+
+        # Ignore bot's own messages to prevent echo loops
+        if (msg.get("from") or {}).get("is_bot"):
+            return ("ok", 200)
+
+        chat_id = msg["chat"]["id"]
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
 
-        cqid = cq.get("id")
-        if cqid and seen_callbacks.get(cqid):
-            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
-            return ("ok", 200)
-        if cqid:
-            seen_callbacks.set(cqid, True)
+        text = (msg.get("text") or "").strip()
+        lang = detect_lang(msg.get("from", {}))
 
-        if data.startswith("qs2:"):
-            payload = data.split(":", 1)[1]  # 'chain/pair?window=h1'
-            path, _, window = payload.partition("?window=")
-            window = window or "h24"
-            chain, _, pair_addr = path.partition("/")
-            text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-            tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
-            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
+        if not text:
+            tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "empty"))
             return ("ok", 200)
 
-        if data.startswith("qs:"):
-            payload = data.split(":", 1)[1]
-            addr, _, window = payload.partition("?window=")
-            window = window or "h24"
-            text, keyboard = quickscan_entrypoint(addr, lang=lang, window=window, lean=True)
-            tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
-            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], _("en", "updated"))
-            return ("ok", 200)
+        if text.startswith("/"):
+            cmd, *rest = text.split(maxsplit=1)
+            arg = rest[0] if rest else ""
 
-        return ("ok", 200)
+            if cmd in ("/start", "/help"):
+                tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown")
 
-    # Normal message
-    msg = update.get("message") or update.get("edited_message")
-    if not msg:
-        return ("ok", 200)
+            elif cmd in ("/lang",):
+                if arg.lower().startswith("ru"):
+                    tg_send_message(TELEGRAM_TOKEN, chat_id, _("ru", "lang_switched"))
+                else:
+                    tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "lang_switched"))
 
-    if (msg.get("from") or {}).get("is_bot"):
-        return ("ok", 200)
+            elif cmd in ("/license",):
+                tg_send_message(TELEGRAM_TOKEN, chat_id, "Metridex QuickScan MVP — MIT License")
 
-    chat_id = msg["chat"]["id"]
-    if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
-        return ("ok", 200)
+            elif cmd in ("/quota",):
+                tg_send_message(TELEGRAM_TOKEN, chat_id, "Free tier — 300 DexScreener req/min shared; be kind.")
 
-    text = (msg.get("text") or "").strip()
-    lang = detect_lang(msg.get("from", {}))
+            elif cmd in ("/quickscan", "/scan"):
+                if not arg:
+                    tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "scan_usage"))
+                else:
+                    norm = normalize_input(arg)
+                    text_out, keyboard = quickscan_entrypoint(arg, lang=lang)
+                    tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard)
 
-    if not text:
-        tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "empty"))
-        return ("ok", 200)
-
-    if text.startswith("/"):
-        cmd, *rest = text.split(maxsplit=1)
-        arg = rest[0] if rest else ""
-
-        if cmd in ("/start", "/help"):
-            tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown")
-
-        elif cmd in ("/lang",):
-            if arg.lower().startswith("ru"):
-                tg_send_message(TELEGRAM_TOKEN, chat_id, _("ru", "lang_switched"))
             else:
-                tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "lang_switched"))
+                tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "unknown"))
+            return ("ok", 200)
 
-        elif cmd in ("/license",):
-            tg_send_message(TELEGRAM_TOKEN, chat_id, "Metridex QuickScan MVP — MIT License")
+        # Implicit quickscan
+        if text:
+            text_out, keyboard = quickscan_entrypoint(text, lang=lang)
+            tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard)
+            return ("ok", 200)
 
-        elif cmd in ("/quota",):
-            tg_send_message(TELEGRAM_TOKEN, chat_id, "Free tier — 300 DexScreener req/min shared; be kind.")
-
-        elif cmd in ("/quickscan", "/scan"):
-            if not arg:
-                tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "scan_usage"))
-            else:
-                norm = normalize_input(arg)
-                text, keyboard = quickscan_entrypoint(arg, lang=lang)
-                tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard)
-
-        else:
-            tg_send_message(TELEGRAM_TOKEN, chat_id, _("en", "unknown"))
         return ("ok", 200)
 
-    if text:
-        text_out, keyboard = quickscan_entrypoint(text, lang=lang)
-        tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard)
+    except Exception as e:
+        # Log and always acknowledge to stop Telegram retries
+        app.logger.exception("Webhook handler error")
+        try:
+            if "callback_query" in update:
+                cq = update["callback_query"]
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), _("en", "error"))
+        except Exception:
+            pass
         return ("ok", 200)
-
-    return ("ok", 200)
 
 def detect_lang(user):
     code = (user or {}).get("language_code", "en").lower()
