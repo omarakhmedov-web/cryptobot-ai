@@ -1,4 +1,5 @@
 import os
+import hashlib
 from datetime import datetime
 from functools import wraps
 
@@ -13,7 +14,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.3-quickscan-mvp+echo")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.4-quickscan-mvp+cbfix")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -28,6 +29,7 @@ app = Flask(__name__)
 
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)
 seen_callbacks = SafeCache(ttl=300)
+cb_cache = SafeCache(ttl=600)  # maps short token -> original callback_data
 
 def require_webhook_secret(fn):
     @wraps(fn)
@@ -39,6 +41,28 @@ def require_webhook_secret(fn):
                 return ("forbidden", 403)
         return fn(*args, **kwargs)
     return wrapper
+
+def _compress_keyboard(kb: dict) -> dict:
+    """Replace long callback_data with short tokens 'cb:<8hex>' to satisfy Telegram 64-byte limit."""
+    if not kb or not isinstance(kb, dict):
+        return kb
+    ik = kb.get("inline_keyboard")
+    if not ik:
+        return kb
+    for row in ik:
+        for btn in row:
+            data = btn.get("callback_data")
+            if not data:
+                continue
+            if len(data) <= 60 and data.startswith(("qs:", "qs2:")):
+                # Already short enough
+                continue
+            # make stable short token
+            h = hashlib.sha1(data.encode("utf-8")).hexdigest()[:10]  # 10 hex = 40 bits
+            token = f"cb:{h}"
+            cb_cache.set(token, data)
+            btn["callback_data"] = token
+    return {"inline_keyboard": ik}
 
 @app.route("/healthz")
 def healthz():
@@ -81,6 +105,7 @@ def qs_preview():
         return jsonify({"ok": False, "error": "missing q"}), 400
     try:
         text_out, keyboard = quickscan_entrypoint(q, lang="en", lean=True)
+        keyboard = _compress_keyboard(keyboard)
         return jsonify({"ok": True, "text": text_out, "keyboard": keyboard})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -110,6 +135,16 @@ def webhook(secret):
                 app.logger.info(f"[UPD] callback ignored (not allowed) chat={chat_id}")
                 return ("ok", 200)
 
+            # Expand compressed data, if any
+            if data.startswith("cb:"):
+                orig = cb_cache.get(data)
+                if orig:
+                    data = orig
+                    app.logger.info(f"[CB] expanded {data[:40]}…")
+                else:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), LOC("en", "error"), logger=app.logger)
+                    return ("ok", 200)
+
             cqid = cq.get("id")
             if cqid and seen_callbacks.get(cqid):
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
@@ -130,6 +165,7 @@ def webhook(secret):
                 else:
                     return ("ok", 200)
 
+                keyboard = _compress_keyboard(keyboard)
                 app.logger.info(f"[QS] cb window={window} -> len={len(text)}")
                 tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, logger=app.logger)
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
@@ -190,6 +226,7 @@ def webhook(secret):
                 else:
                     try:
                         text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
+                        keyboard = _compress_keyboard(keyboard)
                         app.logger.info(f"[QS] cmd -> len={len(text_out)}")
                         tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                     except Exception:
@@ -201,10 +238,10 @@ def webhook(secret):
             return ("ok", 200)
 
         # Implicit quickscan (plain address, pair URL, etc.)
-        # New: immediate echo to prove receipt
         tg_send_message(TELEGRAM_TOKEN, chat_id, "Processing…", logger=app.logger)
         try:
             text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
+            keyboard = _compress_keyboard(keyboard)
             app.logger.info(f"[QS] implicit -> len={len(text_out)}")
             tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
         except Exception:
