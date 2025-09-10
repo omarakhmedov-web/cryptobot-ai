@@ -13,7 +13,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.2-quickscan-mvp+lean")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.3-quickscan-mvp+echo")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -72,12 +72,22 @@ def selftest():
     if not TELEGRAM_TOKEN or not chat_id:
         return jsonify({"ok": False, "error": "missing token or chat_id"}), 400
     st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, f"[selftest] {text}", logger=app.logger)
-    return jsonify({"ok": (st == 200 and (isinstance(body, dict) and body.get('ok'))), "status": st, "resp": body})
+    return jsonify({"ok": (st == 200 and (isinstance(body, dict) and body.get("ok"))), "status": st, "resp": body})
+
+@app.route("/qs_preview")
+def qs_preview():
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"ok": False, "error": "missing q"}), 400
+    try:
+        text_out, keyboard = quickscan_entrypoint(q, lang="en", lean=True)
+        return jsonify({"ok": True, "text": text_out, "keyboard": keyboard})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
-    # If WEBHOOK_SECRET is empty, accept any path (useful for debug).
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
         app.logger.warning("[AUTH] bad path secret")
         return ("forbidden", 403)
@@ -191,6 +201,8 @@ def webhook(secret):
             return ("ok", 200)
 
         # Implicit quickscan (plain address, pair URL, etc.)
+        # New: immediate echo to prove receipt
+        tg_send_message(TELEGRAM_TOKEN, chat_id, "Processing…", logger=app.logger)
         try:
             text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
             app.logger.info(f"[QS] implicit -> len={len(text_out)}")
