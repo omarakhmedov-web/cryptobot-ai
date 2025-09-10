@@ -1,3 +1,4 @@
+
 import os
 import re
 import time
@@ -274,6 +275,39 @@ def enrich_domain(domain):
     cert = ssl_certificate_info(domain)
     return rdap, first_cap, cert
 
+def build_keyboard_for_pair(pair, norm_addr, window_buttons_variant="qs2"):
+    buttons = []
+
+    # Row 1: Open on DexScreener (or Uniswap app for fallback)
+    url_btn = None
+    if isinstance(pair, dict):
+        url_btn = pair.get("url")
+        if not url_btn:
+            info = pair.get("info") or {}
+            webs = info.get("websites") or []
+            if webs:
+                url_btn = webs[0].get("url")
+    if url_btn:
+        buttons.append([{"text": "Open on DexScreener", "url": url_btn}])
+
+    # Row 2: Δ windows
+    # Prefer fast pair-based callbacks (qs2:chain/pair)
+    cb_prefix = None
+    if window_buttons_variant == "qs2" and isinstance(pair, dict) and pair.get("pairAddress") and pair.get("chainId"):
+        cb_prefix = f"qs2:{pair['chainId']}/{pair['pairAddress']}"
+    else:
+        cb_prefix = f"qs:{norm_addr}"
+
+    win_buttons = [
+        {"text": "Δ 5m", "callback_data": f"{cb_prefix}?window=m5"},
+        {"text": "Δ 1h", "callback_data": f"{cb_prefix}?window=h1"},
+        {"text": "Δ 6h", "callback_data": f"{cb_prefix}?window=h6"},
+        {"text": "Δ 24h", "callback_data": f"{cb_prefix}?window=h24"},
+    ]
+    buttons.append(win_buttons)
+
+    return {"inline_keyboard": buttons}
+
 def quickscan_entrypoint(user_input, lang="en", force_reuse=None, window=None, lean=False):
     raw = user_input.strip()
     norm = normalize_input(raw)
@@ -311,34 +345,21 @@ def quickscan_entrypoint(user_input, lang="en", force_reuse=None, window=None, l
         if first_cap:
             lines.append(f'Wayback: first {first_cap}')
 
-    # ==== Inline keyboard ====
-    buttons = []
-
-    # Row 1: Open on DexScreener (or Uniswap app for fallback)
-    url_btn = None
-    if isinstance(pair, dict):
-        url_btn = pair.get("url")
-        if not url_btn:
-            info = pair.get("info") or {}
-            webs = info.get("websites") or []
-            if webs:
-                url_btn = webs[0].get("url")
-    if url_btn:
-        buttons.append([{"text": "Open on DexScreener", "url": url_btn}])
-
-    # Row 2: Δ windows actual (5m/1h/6h/24h)
-    norm_addr = norm
-    win_buttons = [
-        {"text": "Δ 5m", "callback_data": f"qs:{norm_addr}?window=m5"},
-        {"text": "Δ 1h", "callback_data": f"qs:{norm_addr}?window=h1"},
-        {"text": "Δ 6h", "callback_data": f"qs:{norm_addr}?window=h6"},
-        {"text": "Δ 24h", "callback_data": f"qs:{norm_addr}?window=h24"},
-    ]
-    buttons.append(win_buttons)
-
-    keyboard = {"inline_keyboard": buttons}
+    keyboard = build_keyboard_for_pair(pair, norm_addr=norm, window_buttons_variant="qs2")
 
     out = "\n".join([l for l in lines if l])
     rec = {"text": out, "keyboard": keyboard, "raw_input": raw}
     cache.set(cache_key, rec)
     return out, keyboard
+
+def quickscan_pair_entrypoint(chain: str, pair_addr: str, window: str = "h24"):
+    """Fast path for callbacks: fetch exact pair and render lean summary."""
+    data = http_get_json(DEX_API_PAIR(chain, pair_addr))
+    pairs = (data or {}).get("pairs") or []
+    if not pairs:
+        return _("en","no_pairs"), {"inline_keyboard": []}
+    bp = best_pair(pairs)
+    main_text = summarize_pair(bp, window=window or "h24")
+    lines = ["Metridex QuickScan (MVP+)", main_text]
+    keyboard = build_keyboard_for_pair(bp, norm_addr=pair_addr, window_buttons_variant="qs2")
+    return "\n".join(lines), keyboard
