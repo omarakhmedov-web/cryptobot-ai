@@ -1,3 +1,4 @@
+
 import os
 import re
 import time
@@ -96,6 +97,16 @@ def _fmt_usd(x):
     except Exception:
         return "n/a"
 
+WINDOW_MAP = {
+    "m5": ("5m", "m5"),
+    "1h": ("1h", "h1"),
+    "h1": ("1h", "h1"),
+    "6h": ("6h", "h6"),
+    "h6": ("6h", "h6"),
+    "24h": ("24h", "h24"),
+    "h24": ("24h", "h24"),
+}
+
 def summarize_pair(p, window="24h"):
     base = p.get("baseToken", {}) or {}
     quote = p.get("quoteToken", {}) or {}
@@ -119,6 +130,8 @@ def summarize_pair(p, window="24h"):
     vol = p.get("volume") or {}
     chg = p.get("priceChange") or {}
 
+    label, field = WINDOW_MAP.get(str(window).lower(), ("24h", "h24"))
+
     lines.append(f'{base.get("symbol","?")}/{quote.get("symbol","?")} on {p.get("dexId","?")} ({p.get("chainId","?")})')
 
     price_usd = p.get("priceUsd")
@@ -129,11 +142,11 @@ def summarize_pair(p, window="24h"):
     mcap = p.get("marketCap")
     liq_usd = liq.get("usd")
     vol24 = vol.get("h24")
-    d24 = chg.get("h24")
+    delta = chg.get(field)
 
     stats = f'FDV {_abbr(fdv)} | MC {_abbr(mcap)} | Liq {_abbr(liq_usd)} | Vol24h {_abbr(vol24)}'
-    if d24 is not None:
-        stats += f' | Δ24h {_pct(d24)}'
+    if delta is not None:
+        stats += f' | Δ{label} {_pct(delta)}'
     lines.append(stats)
 
     lines.append("source: DexScreener")
@@ -262,38 +275,42 @@ def enrich_domain(domain):
     cert = ssl_certificate_info(domain)
     return rdap, first_cap, cert
 
-def quickscan_entrypoint(user_input, lang="en", force_reuse=None, window=None):
+def quickscan_entrypoint(user_input, lang="en", force_reuse=None, window=None, lean=False):
     raw = user_input.strip()
     norm = normalize_input(raw)
     cache_key = f"qs:{norm.lower()}"
-    if not force_reuse:
+    cached = None if force_reuse is None else force_reuse
+    if cached is None:
         cached = cache.get(cache_key)
-    else:
-        cached = force_reuse
-    if cached and not window:
+
+    # If we have cached and no window change, return quickly
+    if cached and window is None:
         return cached["text"], cached["keyboard"]
 
+    # Main summary
     main_text, pair, domain = quickscan_contract(norm, lang=lang, window=window)
-
-    rdap, first_cap, cert = enrich_domain(domain)
 
     lines = []
     lines.append("Metridex QuickScan (MVP+)")
     lines.append(main_text)
-    if domain:
-        lines.append(f'Domain: {domain}')
-    if rdap:
-        who = rdap.get("name") or rdap.get("handle") or "-"
-        created = rdap.get("created") or "-"
-        registrar = rdap.get("registrar") or "-"
-        lines.append(f'WHOIS/RDAP: {who} | Created: {created} | Registrar: {registrar}')
-    if cert:
-        valid = "OK" if cert.get("valid") else "WARN"
-        exp = cert.get("notAfter")
-        issuer = cert.get("issuer")
-        lines.append(f'SSL: {valid} | Expires: {exp} | Issuer: {issuer}')
-    if first_cap:
-        lines.append(f'Wayback: first {first_cap}')
+
+    # Only heavy enrich for non-lean (initial requests). Callback windows stay fast and compact.
+    if not lean:
+        rdap, first_cap, cert = enrich_domain(domain)
+        if domain:
+            lines.append(f'Domain: {domain}')
+        if rdap:
+            who = rdap.get("name") or rdap.get("handle") or "-"
+            created = rdap.get("created") or "-"
+            registrar = rdap.get("registrar") or "-"
+            lines.append(f'WHOIS/RDAP: {who} | Created: {created} | Registrar: {registrar}')
+        if cert:
+            valid = "OK" if cert.get("valid") else "WARN"
+            exp = cert.get("notAfter")
+            issuer = cert.get("issuer")
+            lines.append(f'SSL: {valid} | Expires: {exp} | Issuer: {issuer}')
+        if first_cap:
+            lines.append(f'Wayback: first {first_cap}')
 
     # ==== Inline keyboard ====
     buttons = []
@@ -303,7 +320,6 @@ def quickscan_entrypoint(user_input, lang="en", force_reuse=None, window=None):
     if isinstance(pair, dict):
         url_btn = pair.get("url")
         if not url_btn:
-            # try Uniswap app URL from info if fallback
             info = pair.get("info") or {}
             webs = info.get("websites") or []
             if webs:
@@ -311,9 +327,15 @@ def quickscan_entrypoint(user_input, lang="en", force_reuse=None, window=None):
     if url_btn:
         buttons.append([{"text": "Open on DexScreener", "url": url_btn}])
 
-    # Rows 2..: Δ window selectors
-    for w in ["24h","7d","30d"]:
-        buttons.append([{"text": f"Δ {w}", "callback_data": f"qs:{norm}?window={w}"}])
+    # Row 2: Δ windows actual (5m/1h/6h/24h)
+    norm_addr = norm
+    win_buttons = [
+        {"text": "Δ 5m", "callback_data": f"qs:{norm_addr}?window=m5"},
+        {"text": "Δ 1h", "callback_data": f"qs:{norm_addr}?window=h1"},
+        {"text": "Δ 6h", "callback_data": f"qs:{norm_addr}?window=h6"},
+        {"text": "Δ 24h", "callback_data": f"qs:{norm_addr}?window=h24"},
+    ]
+    buttons.append(win_buttons)
 
     keyboard = {"inline_keyboard": buttons}
 
