@@ -32,11 +32,19 @@ app = Flask(__name__)
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)
 seen_callbacks = SafeCache(ttl=300)
 cb_cache = SafeCache(ttl=600)  # maps short token -> original callback_data
+msg2addr = SafeCache(ttl=86400)  # message_id(str) -> base 0x-address
 
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
 
+def _has_full_markers(text: str) -> bool:
+    """Heuristic to confirm 'full' report: expect at least one of whois/rdap/ssl/wayback (case-insensitive)."""
+    if not text:
+        return False
+    t = text.lower()
+    hits = sum(1 for kw in ("whois", "rdap", "ssl", "wayback") if kw in t)
+    return hits >= 1
+
 def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
-    """Pull 0x... token address from first qs2: button if present."""
     if not kb or not isinstance(kb, dict):
         return None
     ik = kb.get("inline_keyboard") or []
@@ -44,24 +52,35 @@ def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
         for btn in row:
             data = (btn.get("callback_data") or "")
             if data.startswith("qs2:"):
-                # qs2:chain/pair-0xTOKEN[... or -0xTOKEN-... ]?window=h24
                 path, _, _ = data.split(":", 1)[1].partition("?")
                 _, _, pair_addr = path.partition("/")
                 parts = pair_addr.split("-")
-                # Return the first 0x... that is NOT obviously a 'pair' id (heuristic: prefer later items)
-                # but keep simple: prefer last 0x… occurrence (usually token, not pair id)
                 addrs = [p for p in parts if ADDR_RE.fullmatch(p)]
                 if addrs:
-                    return addrs[-1]
+                    return addrs[-1]  # prefer last
+            if data.startswith("qs:"):
+                payload = data.split(":", 1)[1]
+                addr = payload.split("?", 1)[0]
+                if ADDR_RE.fullmatch(addr):
+                    return addr
     return None
 
 def _extract_addr_from_text(s: str) -> str | None:
-    """Find 0x... address inside arbitrary text/URL. Prefer the LAST match (token over pair in Dexscreener URLs)."""
     if not s:
         return None
     matches = list(ADDR_RE.finditer(s))
     return matches[-1].group(0) if matches else None
 
+def _store_addr_for_message(result_obj, addr: str | None):
+    try:
+        if not result_obj or not isinstance(result_obj, dict) or not addr:
+            return
+        if result_obj.get("ok") and isinstance(result_obj.get("result"), dict):
+            mid = str(result_obj["result"].get("message_id"))
+            if mid and ADDR_RE.fullmatch(addr):
+                msg2addr.set(mid, addr)
+    except Exception:
+        pass
 
 def require_webhook_secret(fn):
     @wraps(fn)
@@ -75,7 +94,6 @@ def require_webhook_secret(fn):
     return wrapper
 
 def _compress_keyboard(kb: dict) -> dict:
-    """Replace long callback_data with short tokens 'cb:<10hex>' to satisfy Telegram 64-byte limit."""
     if not kb or not isinstance(kb, dict):
         return kb
     ik = kb.get("inline_keyboard")
@@ -95,8 +113,6 @@ def _compress_keyboard(kb: dict) -> dict:
     return {"inline_keyboard": ik}
 
 def _rewrite_keyboard_to_addr(addr: str | None, kb: dict, add_more_btn: bool = True) -> dict:
-    """Convert any 'qs2:...?...window=...' buttons into compact 'qs:<addr>?window=...' and optionally append More details.
-       If addr is None, only pass-through existing keyboard (no rewrite to 'qs:' and no More details)."""
     if not kb or not isinstance(kb, dict):
         kb = {}
     ik = kb.get("inline_keyboard") or []
@@ -106,15 +122,13 @@ def _rewrite_keyboard_to_addr(addr: str | None, kb: dict, add_more_btn: bool = T
         for btn in row:
             data = btn.get("callback_data")
             if data and data.startswith("qs2:") and addr:
-                # extract window query param (default h24)
                 _, _, query = data.partition("?")
                 params = parse_qs(query)
                 window = params.get("window", ["h24"])[0]
-                btn = dict(btn)  # copy
+                btn = dict(btn)
                 btn["callback_data"] = f"qs:{addr}?window={window}"
             new_row.append(btn)
         out.append(new_row)
-    # Append More details button (stateless) as the last row if addr is present
     if add_more_btn and addr:
         out.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
     return {"inline_keyboard": out} if out else kb
@@ -160,7 +174,6 @@ def qs_preview():
         return jsonify({"ok": False, "error": "missing q"}), 400
     try:
         text_out, keyboard = quickscan_entrypoint(q, lang="en", lean=True)
-        # Prefer token address from keyboard; fallback to last 0x… in q
         base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(q)
         keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
         keyboard = _compress_keyboard(keyboard)
@@ -187,13 +200,14 @@ def webhook(secret):
             cq = update["callback_query"]
             chat_id = cq["message"]["chat"]["id"]
             data = cq.get("data", "")
-            app.logger.info(f"[UPD] callback chat={chat_id} data={data}")
+            msg_obj = cq.get("message", {})
+            msg_id = str(msg_obj.get("message_id"))
+            app.logger.info(f"[UPD] callback chat={chat_id} data={data} msg_id={msg_id}")
 
             if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
                 app.logger.info(f"[UPD] callback ignored (not allowed) chat={chat_id}")
                 return ("ok", 200)
 
-            # Expand compressed token if any
             if data.startswith("cb:"):
                 orig = cb_cache.get(data)
                 if orig:
@@ -213,22 +227,42 @@ def webhook(secret):
             try:
                 if data.startswith("more:"):
                     raw = data.split(":", 1)[1]
-                    # Prefer LAST 0x… in payload to avoid grabbing pair id; fall back to raw
-                    addr = _extract_addr_from_text(raw) or raw
-                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)  # full details
-                    keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)  # no extra More on full
+                    addr = (
+                        _extract_addr_from_text(raw) or
+                        (msg2addr.get(msg_id) if msg_id else None) or
+                        _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {}) or
+                        _extract_addr_from_text(msg_obj.get("text") or "")
+                    )
+                    app.logger.info(f"[MORE] resolved addr={addr} (payload={raw})")
+                    if not addr:
+                        tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "error"), logger=app.logger)
+                        return ("ok", 200)
+                    # First attempt: full scan
+                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)
+                    # Insurance: if no full markers, normalize and retry once with window=h24
+                    if not _has_full_markers(text):
+                        addr_try = addr
+                        try:
+                            n = normalize_input(addr)
+                            if isinstance(n, str) and ADDR_RE.fullmatch(n):
+                                addr_try = n
+                        except Exception:
+                            pass
+                        app.logger.info(f"[MORE] retrying deep scan with {addr_try}")
+                        try:
+                            text, keyboard = quickscan_entrypoint(addr_try, lang="en", window="h24", lean=False)
+                        except Exception:
+                            app.logger.exception("[MORE] deep retry failed")
+                    keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
                 elif data.startswith("qs2:"):
                     path, _, window = data.split(":", 1)[1].partition("?window=")
                     chain, _, pair_addr = path.partition("/")
                     window = window or "h24"
                     text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                    # Derive base token addr from the keyboard (more reliable), fallback to parsing pair_addr
-                    base_addr = _extract_base_addr_from_keyboard(keyboard)
-                    if not base_addr and "-" in pair_addr:
-                        parts = pair_addr.split("-")
-                        addrs = [p for p in parts if ADDR_RE.fullmatch(p)]
-                        if addrs:
-                            base_addr = addrs[-1]
+                    base_addr = (
+                        _extract_base_addr_from_keyboard(keyboard) or
+                        _extract_addr_from_text(pair_addr)
+                    )
                     keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                 elif data.startswith("qs:"):
                     addr, _, window = data.split(":", 1)[1].partition("?window=")
@@ -239,8 +273,8 @@ def webhook(secret):
                     return ("ok", 200)
 
                 keyboard = _compress_keyboard(keyboard)
-                app.logger.info(f"[QS] cb -> len={len(text)}")
-                tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, logger=app.logger)
+                app.logger.info(f"[QS] cb -> len={len(text)} / full_markers={_has_full_markers(text)}")
+                st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, logger=app.logger)
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
             except Exception:
                 app.logger.exception("[ERR] callback quickscan")
@@ -275,57 +309,57 @@ def webhook(secret):
             app.logger.info(f"[CMD] {cmd} arg={arg}")
 
             if cmd in ("/start", "/help"):
-                tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
+                st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
                 return ("ok", 200)
 
             if cmd == "/lang":
                 if arg.lower().startswith("ru"):
-                    tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("ru", "lang_switched"), logger=app.logger)
+                    st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("ru", "lang_switched"), logger=app.logger)
                 else:
-                    tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "lang_switched"), logger=app.logger)
+                    st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "lang_switched"), logger=app.logger)
                 return ("ok", 200)
 
             if cmd == "/license":
-                tg_send_message(TELEGRAM_TOKEN, chat_id, "Metridex QuickScan MVP — MIT License", logger=app.logger)
+                st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Metridex QuickScan MVP — MIT License", logger=app.logger)
                 return ("ok", 200)
 
             if cmd == "/quota":
-                tg_send_message(TELEGRAM_TOKEN, chat_id, "Free tier — 300 DexScreener req/min shared; be kind.", logger=app.logger)
+                st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Free tier — 300 DexScreener req/min shared; be kind.", logger=app.logger)
                 return ("ok", 200)
 
             if cmd in ("/quickscan", "/scan"):
                 if not arg:
-                    tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "scan_usage"), logger=app.logger)
+                    st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "scan_usage"), logger=app.logger)
                 else:
                     try:
                         text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
-                        # Prefer token address from keyboard; fallback to last 0x… in arg
                         base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
                         keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                         keyboard = _compress_keyboard(keyboard)
                         app.logger.info(f"[QS] cmd -> len={len(text_out)}")
-                        tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                        st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                        _store_addr_for_message(body, base_addr)
                     except Exception:
                         app.logger.exception("[ERR] cmd quickscan")
-                        tg_send_message(TELEGRAM_TOKEN, chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+                        st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
                 return ("ok", 200)
 
-            tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "unknown"), logger=app.logger)
+            st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "unknown"), logger=app.logger)
             return ("ok", 200)
 
-        # Implicit quickscan (plain address, pair URL, etc.)
-        tg_send_message(TELEGRAM_TOKEN, chat_id, "Processing…", logger=app.logger)
+        # Implicit quickscan
+        st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Processing…", logger=app.logger)
         try:
             text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
-            # Prefer token address from keyboard; fallback to last 0x… in text
             base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
             keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
             keyboard = _compress_keyboard(keyboard)
             app.logger.info(f"[QS] implicit -> len={len(text_out)}")
-            tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+            st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+            _store_addr_for_message(body, base_addr)
         except Exception:
             app.logger.exception("[ERR] implicit quickscan")
-            tg_send_message(TELEGRAM_TOKEN, chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+            st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
         return ("ok", 200)
 
     except Exception:
