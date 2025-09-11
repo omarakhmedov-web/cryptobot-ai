@@ -3,6 +3,7 @@ import hashlib
 from urllib.parse import parse_qs
 from datetime import datetime
 from functools import wraps
+import re
 
 from flask import Flask, request, jsonify
 
@@ -31,6 +32,34 @@ app = Flask(__name__)
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)
 seen_callbacks = SafeCache(ttl=300)
 cb_cache = SafeCache(ttl=600)  # maps short token -> original callback_data
+
+ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
+
+def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
+    """Pull 0x... token address from first qs2: button if present."""
+    if not kb or not isinstance(kb, dict):
+        return None
+    ik = kb.get("inline_keyboard") or []
+    for row in ik:
+        for btn in row:
+            data = (btn.get("callback_data") or "")
+            if data.startswith("qs2:"):
+                # qs2:chain/pair-0xTOKEN[... or -0xTOKEN-... ]?window=h24
+                path, _, _ = data.split(":", 1)[1].partition("?")
+                _, _, pair_addr = path.partition("/")
+                parts = pair_addr.split("-")
+                for p in parts:
+                    if ADDR_RE.fullmatch(p):
+                        return p
+    return None
+
+def _extract_addr_from_text(s: str) -> str | None:
+    """Find first 0x... address inside arbitrary text/URL."""
+    if not s:
+        return None
+    m = ADDR_RE.search(s)
+    return m.group(0) if m else None
+
 
 def require_webhook_secret(fn):
     @wraps(fn)
@@ -178,7 +207,9 @@ def webhook(secret):
 
             try:
                 if data.startswith("more:"):
-                    addr = data.split(":", 1)[1]
+                    raw = data.split(":", 1)[1]
+                    # If user originally scanned a pair URL, derive 0x address to force full details
+                    addr = _extract_addr_from_text(raw) or raw
                     text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)  # full details
                     keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)  # no extra More on full
                 elif data.startswith("qs2:"):
