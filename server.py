@@ -18,10 +18,9 @@ from quickscan import (
     SafeCache,
 )
 from utils import locale_text
-    # Ensure tg_safe provides tg_send_message and tg_answer_callback
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.6-quickscan-mvp+details")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.7-quickscan-mvp+details")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -54,6 +53,9 @@ KNOWN_HOMEPAGES = {
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",    # WBTC custodian
 }
 
+KNOWN_DOMAINS_FILE_PATH = None
+KNOWN_DOMAINS_LOADED = 0
+
 def _norm_domain(url: str):
     if not url:
         return None
@@ -68,14 +70,18 @@ def _norm_domain(url: str):
         return None
 
 def _load_known_domains():
-    """Load/merge known_domains.json into KNOWN_HOMEPAGES (lowercase keys)."""
+    """Load/merge known_domains (env: KNOWN_DOMAINS_FILE or KNOWN_DOMAINS_PATH) into KNOWN_HOMEPAGES."""
+    global KNOWN_DOMAINS_FILE_PATH, KNOWN_DOMAINS_LOADED
     try:
-        path = os.getenv(
-            "KNOWN_DOMAINS_FILE",
-            os.path.join(os.path.dirname(__file__), "known_domains.json"),
+        # accept both env names; fall back to ./known_domains.json next to this file
+        KNOWN_DOMAINS_FILE_PATH = (
+            os.getenv("KNOWN_DOMAINS_FILE")
+            or os.getenv("KNOWN_DOMAINS_PATH")
+            or os.path.join(os.path.dirname(__file__), "known_domains.json")
         )
+        path = KNOWN_DOMAINS_FILE_PATH
         if not os.path.exists(path):
-            app.logger.info("[KNOWN] known_domains.json not found — using built-ins only")
+            app.logger.info(f"[KNOWN] {path} not found — using built-ins only")
             return
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -89,9 +95,10 @@ def _load_known_domains():
             if dom:
                 KNOWN_HOMEPAGES[addr] = dom
                 merged += 1
+        KNOWN_DOMAINS_LOADED = merged
         app.logger.info(f"[KNOWN] loaded {merged} domain hints from {path}")
     except Exception as e:
-        app.logger.warning(f"[KNOWN] failed to load known_domains.json: {e}")
+        app.logger.warning(f"[KNOWN] failed to load known domains: {e}")
 
 # merge external known_domains.json (optional)
 _load_known_domains()
@@ -140,7 +147,7 @@ def _cg_homepage(addr: str):
         return KNOWN_HOMEPAGES[addr_l]
     try:
         url = f"https://api.coingecko.com/api/v3/coins/ethereum/contract/{addr}"
-        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
+        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")})
         if r.status_code != 200:
             return None
         data = r.json()
@@ -156,7 +163,7 @@ def _cg_homepage(addr: str):
 def _rdap(domain: str):
     # returns (handle, created, registrar)
     try:
-        r = requests.get(f"https://rdap.org/domain/{domain}", timeout=TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
+        r = requests.get(f"https://rdap.org/domain/{domain}", timeout=TIMEOUT, headers={"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")})
         if r.status_code != 200:
             return ("—", "—", "—")
         j = r.json()
@@ -201,7 +208,7 @@ def _ssl_info(domain: str):
 def _wayback_first(domain: str):
     try:
         url = f"https://web.archive.org/cdx/search/cdx?url={domain}&output=json&limit=1&fl=timestamp&filter=statuscode:200&from=2000"
-        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
+        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")})
         if r.status_code != 200:
             return "—"
         data = r.json()
@@ -221,7 +228,6 @@ def _needs_enrichment(text: str) -> bool:
         return True
     if "Domain:" not in text or "SSL:" not in text or "Wayback:" not in text:
         return True
-    # empty line after Domain:
     if re.search(r"Domain:\s*(?:—)?\s*(?:\n|$)", text):
         return True
     return False
@@ -329,6 +335,8 @@ def debug():
             "WEBHOOK_HEADER_SECRET_set": bool(WEBHOOK_HEADER_SECRET),
             "ALLOWED_CHAT_IDS_count": len(ALLOWED_CHAT_IDS),
             "CACHE_TTL_SECONDS": CACHE_TTL_SECONDS,
+            "KNOWN_DOMAINS_FILE_PATH": KNOWN_DOMAINS_FILE_PATH,
+            "KNOWN_DOMAINS_LOADED": KNOWN_DOMAINS_LOADED,
         }
     })
 
@@ -471,7 +479,7 @@ def webhook(secret):
             arg = rest[0] if rest else ""
             app.logger.info(f"[CMD] {cmd} arg={arg}")
 
-        # commands
+        # Commands
             if cmd in ("/start", "/help"):
                 _send_text(chat_id, LOC("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
                 return ("ok", 200)
@@ -489,6 +497,10 @@ def webhook(secret):
 
             if cmd == "/quota":
                 _send_text(chat_id, "Free tier — 300 DexScreener req/min shared; be kind.", logger=app.logger)
+                return ("ok", 200)
+
+            if cmd == "/debug_known":
+                _send_text(chat_id, f"known_domains: path={KNOWN_DOMAINS_FILE_PATH}, loaded={KNOWN_DOMAINS_LOADED}", logger=app.logger)
                 return ("ok", 200)
 
             if cmd in ("/quickscan", "/scan"):
