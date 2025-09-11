@@ -20,7 +20,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.7a-quickscan-mvp+details")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.7b-quickscan-mvp+details")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -43,6 +43,7 @@ msg2addr = SafeCache(ttl=86400)
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
 NEWLINE_ESC_RE = re.compile(r'\\n')
 
+# Built-ins
 KNOWN_HOMEPAGES = {
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "circle.com",
     "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",
@@ -51,10 +52,8 @@ KNOWN_HOMEPAGES = {
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",
 }
 
-KNOWN_DOMAINS_FILE_PATH = None
-KNOWN_DOMAINS_LOADED = 0
-KNOWN_DOMAINS_EXISTS = False
-KNOWN_DOMAINS_ERROR = ""
+# Diagnostics
+KNOWN_SOURCES = []  # list of dicts: {"path":..., "exists":bool, "loaded":int, "error":str}
 
 def _norm_domain(url: str):
     if not url:
@@ -69,26 +68,24 @@ def _norm_domain(url: str):
     except Exception:
         return None
 
-def _load_known_domains():
-    global KNOWN_DOMAINS_FILE_PATH, KNOWN_DOMAINS_LOADED, KNOWN_DOMAINS_EXISTS, KNOWN_DOMAINS_ERROR
+def _merge_known_from(path: str):
+    entry = {"path": path, "exists": False, "loaded": 0, "error": ""}
     try:
-        KNOWN_DOMAINS_FILE_PATH = (
-            os.getenv("KNOWN_DOMAINS_FILE")
-            or os.getenv("KNOWN_DOMAINS_PATH")
-            or os.path.join(os.path.dirname(__file__), "known_domains.json")
-        )
-        path = KNOWN_DOMAINS_FILE_PATH
-        KNOWN_DOMAINS_EXISTS = os.path.exists(path)
-        if not KNOWN_DOMAINS_EXISTS:
-            app.logger.info(f"[KNOWN] {path} not found — using built-ins only")
+        if not path:
+            entry["error"] = "empty path"
+            KNOWN_SOURCES.append(entry)
+            return
+        entry["exists"] = os.path.exists(path)
+        if not entry["exists"]:
+            KNOWN_SOURCES.append(entry)
             return
         with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
         try:
             data = json.loads(raw)
         except Exception as e:
-            KNOWN_DOMAINS_ERROR = f"JSON parse error: {e}"
-            app.logger.warning(f"[KNOWN] JSON parse error: {e}")
+            entry["error"] = f"JSON parse error: {e}"
+            KNOWN_SOURCES.append(entry)
             return
         merged = 0
         for k, v in (data or {}).items():
@@ -100,11 +97,20 @@ def _load_known_domains():
             if dom:
                 KNOWN_HOMEPAGES[addr] = dom
                 merged += 1
-        KNOWN_DOMAINS_LOADED = merged
-        app.logger.info(f"[KNOWN] loaded {merged} domain hints from {path}")
+        entry["loaded"] = merged
+        KNOWN_SOURCES.append(entry)
     except Exception as e:
-        KNOWN_DOMAINS_ERROR = str(e)
-        app.logger.warning(f"[KNOWN] failed to load known domains: {e}")
+        entry["error"] = str(e)
+        KNOWN_SOURCES.append(entry)
+
+def _load_known_domains():
+    # 1) default neighbor file
+    default_path = os.path.join(os.path.dirname(__file__), "known_domains.json")
+    _merge_known_from(default_path)
+    # 2) env-provided path(s)
+    env_path = os.getenv("KNOWN_DOMAINS_FILE") or os.getenv("KNOWN_DOMAINS_PATH")
+    if env_path:
+        _merge_known_from(env_path)
 
 _load_known_domains()
 
@@ -338,22 +344,16 @@ def debug():
             "WEBHOOK_HEADER_SECRET_set": bool(WEBHOOK_HEADER_SECRET),
             "ALLOWED_CHAT_IDS_count": len(ALLOWED_CHAT_IDS),
             "CACHE_TTL_SECONDS": CACHE_TTL_SECONDS,
-            "KNOWN_DOMAINS_FILE_PATH": KNOWN_DOMAINS_FILE_PATH,
-            "KNOWN_DOMAINS_EXISTS": KNOWN_DOMAINS_EXISTS,
-            "KNOWN_DOMAINS_LOADED": KNOWN_DOMAINS_LOADED,
-            "KNOWN_DOMAINS_ERROR": KNOWN_DOMAINS_ERROR,
+            "KNOWN_SOURCES": KNOWN_SOURCES,
         }
     })
 
 @app.route("/debug_known")
 def debug_known():
-    sample = list(KNOWN_HOMEPAGES.items())[:10]
     return jsonify({
-        "path": KNOWN_DOMAINS_FILE_PATH,
-        "exists": KNOWN_DOMAINS_EXISTS,
-        "loaded_count": KNOWN_DOMAINS_LOADED,
-        "error": KNOWN_DOMAINS_ERROR,
-        "sample": sample,
+        "sources": KNOWN_SOURCES,
+        "sample": list(KNOWN_HOMEPAGES.items())[:10],
+        "total_after_merge": len(KNOWN_HOMEPAGES),
     })
 
 @app.route("/qs_preview")
@@ -374,13 +374,11 @@ def qs_preview():
 @require_webhook_secret
 def webhook(secret):
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
-        app.logger.warning("[AUTH] bad path secret")
         return ("forbidden", 403)
 
     try:
         update = request.get_json(force=True, silent=False)
     except Exception:
-        app.logger.exception("[UPD] bad json")
         return ("ok", 200)
 
     try:
@@ -470,7 +468,8 @@ def webhook(secret):
                 return ("ok", 200)
 
             if cmd == "/debug_known":
-                _send_text(chat_id, f"path={KNOWN_DOMAINS_FILE_PATH} exists={KNOWN_DOMAINS_EXISTS} loaded={KNOWN_DOMAINS_LOADED} error={KNOWN_DOMAINS_ERROR}", logger=app.logger)
+                s = "; ".join([f"{d['path']} (exists={d['exists']}, loaded={d['loaded']}, error={d['error']})" for d in KNOWN_SOURCES])
+                _send_text(chat_id, f"known_sources: {s}", logger=app.logger)
                 return ("ok", 200)
 
             if cmd in ("/quickscan", "/scan"):
