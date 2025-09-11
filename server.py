@@ -48,17 +48,19 @@ def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
                 path, _, _ = data.split(":", 1)[1].partition("?")
                 _, _, pair_addr = path.partition("/")
                 parts = pair_addr.split("-")
-                for p in parts:
-                    if ADDR_RE.fullmatch(p):
-                        return p
+                # Return the first 0x... that is NOT obviously a 'pair' id (heuristic: prefer later items)
+                # but keep simple: prefer last 0x… occurrence (usually token, not pair id)
+                addrs = [p for p in parts if ADDR_RE.fullmatch(p)]
+                if addrs:
+                    return addrs[-1]
     return None
 
 def _extract_addr_from_text(s: str) -> str | None:
-    """Find first 0x... address inside arbitrary text/URL."""
+    """Find 0x... address inside arbitrary text/URL. Prefer the LAST match (token over pair in Dexscreener URLs)."""
     if not s:
         return None
-    m = ADDR_RE.search(s)
-    return m.group(0) if m else None
+    matches = list(ADDR_RE.finditer(s))
+    return matches[-1].group(0) if matches else None
 
 
 def require_webhook_secret(fn):
@@ -92,8 +94,9 @@ def _compress_keyboard(kb: dict) -> dict:
             btn["callback_data"] = token
     return {"inline_keyboard": ik}
 
-def _rewrite_keyboard_to_addr(addr: str, kb: dict, add_more_btn: bool = True) -> dict:
-    """Convert any 'qs2:...?...window=...' buttons into compact 'qs:<addr>?window=...' and optionally append More details."""
+def _rewrite_keyboard_to_addr(addr: str | None, kb: dict, add_more_btn: bool = True) -> dict:
+    """Convert any 'qs2:...?...window=...' buttons into compact 'qs:<addr>?window=...' and optionally append More details.
+       If addr is None, only pass-through existing keyboard (no rewrite to 'qs:' and no More details)."""
     if not kb or not isinstance(kb, dict):
         kb = {}
     ik = kb.get("inline_keyboard") or []
@@ -102,7 +105,7 @@ def _rewrite_keyboard_to_addr(addr: str, kb: dict, add_more_btn: bool = True) ->
         new_row = []
         for btn in row:
             data = btn.get("callback_data")
-            if data and data.startswith("qs2:"):
+            if data and data.startswith("qs2:") and addr:
                 # extract window query param (default h24)
                 _, _, query = data.partition("?")
                 params = parse_qs(query)
@@ -157,7 +160,9 @@ def qs_preview():
         return jsonify({"ok": False, "error": "missing q"}), 400
     try:
         text_out, keyboard = quickscan_entrypoint(q, lang="en", lean=True)
-        keyboard = _rewrite_keyboard_to_addr(q, keyboard, add_more_btn=True)
+        # Prefer token address from keyboard; fallback to last 0x… in q
+        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(q)
+        keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
         keyboard = _compress_keyboard(keyboard)
         return jsonify({"ok": True, "text": text_out, "keyboard": keyboard})
     except Exception as e:
@@ -208,7 +213,7 @@ def webhook(secret):
             try:
                 if data.startswith("more:"):
                     raw = data.split(":", 1)[1]
-                    # If user originally scanned a pair URL, derive 0x address to force full details
+                    # Prefer LAST 0x… in payload to avoid grabbing pair id; fall back to raw
                     addr = _extract_addr_from_text(raw) or raw
                     text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)  # full details
                     keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)  # no extra More on full
@@ -217,13 +222,14 @@ def webhook(secret):
                     chain, _, pair_addr = path.partition("/")
                     window = window or "h24"
                     text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                    # Derive base addr if composite and add More details
-                    base_addr = None
-                    if "-" in pair_addr:
+                    # Derive base token addr from the keyboard (more reliable), fallback to parsing pair_addr
+                    base_addr = _extract_base_addr_from_keyboard(keyboard)
+                    if not base_addr and "-" in pair_addr:
                         parts = pair_addr.split("-")
-                        if len(parts) >= 2:
-                            base_addr = parts[1]
-                    keyboard = _rewrite_keyboard_to_addr(base_addr or pair_addr, keyboard, add_more_btn=bool(base_addr))
+                        addrs = [p for p in parts if ADDR_RE.fullmatch(p)]
+                        if addrs:
+                            base_addr = addrs[-1]
+                    keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                 elif data.startswith("qs:"):
                     addr, _, window = data.split(":", 1)[1].partition("?window=")
                     window = window or "h24"
@@ -293,7 +299,9 @@ def webhook(secret):
                 else:
                     try:
                         text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
-                        keyboard = _rewrite_keyboard_to_addr(arg, keyboard, add_more_btn=True)
+                        # Prefer token address from keyboard; fallback to last 0x… in arg
+                        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
+                        keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                         keyboard = _compress_keyboard(keyboard)
                         app.logger.info(f"[QS] cmd -> len={len(text_out)}")
                         tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
@@ -309,7 +317,9 @@ def webhook(secret):
         tg_send_message(TELEGRAM_TOKEN, chat_id, "Processing…", logger=app.logger)
         try:
             text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
-            keyboard = _rewrite_keyboard_to_addr(text, keyboard, add_more_btn=True)
+            # Prefer token address from keyboard; fallback to last 0x… in text
+            base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
+            keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
             keyboard = _compress_keyboard(keyboard)
             app.logger.info(f"[QS] implicit -> len={len(text_out)}")
             tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
