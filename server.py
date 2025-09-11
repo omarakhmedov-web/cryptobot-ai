@@ -15,7 +15,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.5-quickscan-mvp+compactkb")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.6-quickscan-mvp+details")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -55,7 +55,7 @@ def _compress_keyboard(kb: dict) -> dict:
             data = btn.get("callback_data")
             if not data:
                 continue
-            if len(data) <= 60 and data.startswith(("qs:", "qs2:")):
+            if len(data) <= 60 and data.startswith(("qs:", "qs2:", "more:", "less:")):
                 continue
             h = hashlib.sha1(data.encode("utf-8")).hexdigest()[:10]
             token = f"cb:{h}"
@@ -63,13 +63,11 @@ def _compress_keyboard(kb: dict) -> dict:
             btn["callback_data"] = token
     return {"inline_keyboard": ik}
 
-def _rewrite_keyboard_to_addr(addr: str, kb: dict) -> dict:
-    """Convert any 'qs2:...?...window=...' buttons into compact 'qs:<addr>?window=...' (<=64B, stateless)."""
+def _rewrite_keyboard_to_addr(addr: str, kb: dict, add_more_btn: bool = True) -> dict:
+    """Convert any 'qs2:...?...window=...' buttons into compact 'qs:<addr>?window=...' and optionally append More details."""
     if not kb or not isinstance(kb, dict):
-        return kb
-    ik = kb.get("inline_keyboard")
-    if not ik:
-        return kb
+        kb = {}
+    ik = kb.get("inline_keyboard") or []
     out = []
     for row in ik:
         new_row = []
@@ -84,7 +82,10 @@ def _rewrite_keyboard_to_addr(addr: str, kb: dict) -> dict:
                 btn["callback_data"] = f"qs:{addr}?window={window}"
             new_row.append(btn)
         out.append(new_row)
-    return {"inline_keyboard": out}
+    # Append More details button (stateless) as the last row if addr is present
+    if add_more_btn and addr:
+        out.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
+    return {"inline_keyboard": out} if out else kb
 
 @app.route("/healthz")
 def healthz():
@@ -127,7 +128,7 @@ def qs_preview():
         return jsonify({"ok": False, "error": "missing q"}), 400
     try:
         text_out, keyboard = quickscan_entrypoint(q, lang="en", lean=True)
-        keyboard = _rewrite_keyboard_to_addr(q, keyboard)
+        keyboard = _rewrite_keyboard_to_addr(q, keyboard, add_more_btn=True)
         keyboard = _compress_keyboard(keyboard)
         return jsonify({"ok": True, "text": text_out, "keyboard": keyboard})
     except Exception as e:
@@ -176,29 +177,32 @@ def webhook(secret):
                 seen_callbacks.set(cqid, True)
 
             try:
-                if data.startswith("qs2:"):
+                if data.startswith("more:"):
+                    addr = data.split(":", 1)[1]
+                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)  # full details
+                    keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)  # no extra More on full
+                elif data.startswith("qs2:"):
                     path, _, window = data.split(":", 1)[1].partition("?window=")
                     chain, _, pair_addr = path.partition("/")
                     window = window or "h24"
                     text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                    # try to replace with compact keyboard: use base addr from pair_addr if present, else none
+                    # Derive base addr if composite and add More details
                     base_addr = None
                     if "-" in pair_addr:
                         parts = pair_addr.split("-")
-                        # typical composite: pool-base-quote; use base as addr
                         if len(parts) >= 2:
                             base_addr = parts[1]
-                    keyboard = _rewrite_keyboard_to_addr(base_addr or pair_addr, keyboard)
+                    keyboard = _rewrite_keyboard_to_addr(base_addr or pair_addr, keyboard, add_more_btn=bool(base_addr))
                 elif data.startswith("qs:"):
                     addr, _, window = data.split(":", 1)[1].partition("?window=")
                     window = window or "h24"
                     text, keyboard = quickscan_entrypoint(addr, lang="en", window=window, lean=True)
-                    keyboard = _rewrite_keyboard_to_addr(addr, keyboard)
+                    keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=True)
                 else:
                     return ("ok", 200)
 
                 keyboard = _compress_keyboard(keyboard)
-                app.logger.info(f"[QS] cb window={window} -> len={len(text)}")
+                app.logger.info(f"[QS] cb -> len={len(text)}")
                 tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, logger=app.logger)
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
             except Exception:
@@ -258,7 +262,7 @@ def webhook(secret):
                 else:
                     try:
                         text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
-                        keyboard = _rewrite_keyboard_to_addr(arg, keyboard)
+                        keyboard = _rewrite_keyboard_to_addr(arg, keyboard, add_more_btn=True)
                         keyboard = _compress_keyboard(keyboard)
                         app.logger.info(f"[QS] cmd -> len={len(text_out)}")
                         tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
@@ -274,7 +278,7 @@ def webhook(secret):
         tg_send_message(TELEGRAM_TOKEN, chat_id, "Processing…", logger=app.logger)
         try:
             text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
-            keyboard = _rewrite_keyboard_to_addr(text, keyboard)
+            keyboard = _rewrite_keyboard_to_addr(text, keyboard, add_more_btn=True)
             keyboard = _compress_keyboard(keyboard)
             app.logger.info(f"[QS] implicit -> len={len(text_out)}")
             tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
