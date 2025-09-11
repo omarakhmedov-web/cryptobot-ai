@@ -38,6 +38,8 @@ msg2addr = SafeCache(ttl=86400)  # message_id(str) -> base 0x-address
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
 
 def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
+    """Try to infer the base token address from keyboard buttons.
+       For pairs '...-0xA-0xB' prefer the FIRST 0x… (base), not the last (quote)."""
     if not kb or not isinstance(kb, dict):
         return None
     ik = kb.get("inline_keyboard") or []
@@ -50,7 +52,7 @@ def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
                 parts = pair_addr.split("-")
                 addrs = [p for p in parts if ADDR_RE.fullmatch(p)]
                 if addrs:
-                    return addrs[-1]  # prefer last
+                    return addrs[0]  # prefer FIRST = base
             if data.startswith("qs:"):
                 payload = data.split(":", 1)[1]
                 addr = payload.split("?", 1)[0]
@@ -63,6 +65,10 @@ def _extract_addr_from_text(s: str) -> str | None:
         return None
     matches = list(ADDR_RE.finditer(s))
     return matches[-1].group(0) if matches else None
+
+def _prefer_input_addr(input_addr: str | None, kb_addr: str | None) -> str | None:
+    """If the user provided an address explicitly, it wins over keyboard-derived guesses."""
+    return input_addr or kb_addr
 
 def _store_addr_for_message(result_obj, addr: str | None):
     try:
@@ -82,19 +88,18 @@ def _is_full_report(text: str) -> bool:
     return any(m in text for m in markers)
 
 def _force_full_shape(text: str) -> str:
-    # Ensure user visually sees the "full" block even if no data available
     placeholders = [
         "Domain: —",
         "WHOIS/RDAP: —",
         "SSL: —",
         "Wayback: —",
     ]
-    if text and text.endswith("\n"):
-        return text + "\n".join(placeholders)
+    if text and text.endswith("\\n"):
+        return text + "\\n".join(placeholders)
     elif text:
-        return text + "\n" + "\n".join(placeholders)
+        return text + "\\n" + "\\n".join(placeholders)
     else:
-        return "\n".join(placeholders)
+        return "\\n".join(placeholders)
 
 def require_webhook_secret(fn):
     @wraps(fn)
@@ -188,7 +193,9 @@ def qs_preview():
         return jsonify({"ok": False, "error": "missing q"}), 400
     try:
         text_out, keyboard = quickscan_entrypoint(q, lang="en", lean=True)
-        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(q)
+        input_addr = _extract_addr_from_text(q)
+        kb_addr = _extract_base_addr_from_keyboard(keyboard)
+        base_addr = _prefer_input_addr(input_addr, kb_addr)
         keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
         keyboard = _compress_keyboard(keyboard)
         return jsonify({"ok": True, "text": text_out, "keyboard": keyboard})
@@ -258,17 +265,14 @@ def webhook(secret):
                         app.logger.warning(f"[MORE] no full markers; retry once for {addr}")
                         text, keyboard = quickscan_entrypoint(addr, lang="en", window="h24", lean=False)
                         if not _is_full_report(text):
-                            text = _force_full_shape(text)  # final visual guarantee
+                            text = _force_full_shape(text)
                     keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
                 elif data.startswith("qs2:"):
                     path, _, window = data.split(":", 1)[1].partition("?window=")
                     chain, _, pair_addr = path.partition("/")
                     window = window or "h24"
                     text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                    base_addr = (
-                        _extract_base_addr_from_keyboard(keyboard) or
-                        _extract_addr_from_text(pair_addr)
-                    )
+                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(pair_addr)
                     keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                 elif data.startswith("qs:"):
                     addr, _, window = data.split(":", 1)[1].partition("?window=")
@@ -339,7 +343,9 @@ def webhook(secret):
                 else:
                     try:
                         text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
-                        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
+                        input_addr = _extract_addr_from_text(arg)
+                        kb_addr = _extract_base_addr_from_keyboard(keyboard)
+                        base_addr = _prefer_input_addr(input_addr, kb_addr)
                         keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                         keyboard = _compress_keyboard(keyboard)
                         app.logger.info(f"[QS] cmd -> len={len(text_out)}")
@@ -357,7 +363,9 @@ def webhook(secret):
         st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Processing…", logger=app.logger)
         try:
             text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
-            base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
+            input_addr = _extract_addr_from_text(text)
+            kb_addr = _extract_base_addr_from_keyboard(keyboard)
+            base_addr = _prefer_input_addr(input_addr, kb_addr)
             keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
             keyboard = _compress_keyboard(keyboard)
             app.logger.info(f"[QS] implicit -> len={len(text_out)}")
