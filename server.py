@@ -19,7 +19,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.6-quickscan-mvp+details")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.7-quickscan-mvp+details+cache")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -27,8 +27,9 @@ WEBHOOK_HEADER_SECRET = os.environ.get("WEBHOOK_HEADER_SECRET", "")
 ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
 
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
+EXT_CACHE_TTL = int(os.environ.get("EXT_CACHE_TTL", "900"))  # 15m for external lookups
 DEBUG_MORE = os.environ.get("DEBUG_MORE", "0") == "1"
-TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
+HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
 
 LOC = locale_text
 
@@ -36,21 +37,69 @@ app = Flask(__name__)
 
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)
 seen_callbacks = SafeCache(ttl=300)
-cb_cache = SafeCache(ttl=600)  # maps short token -> original callback_data
-msg2addr = SafeCache(ttl=86400)  # message_id(str) -> base 0x-address
+cb_cache = SafeCache(ttl=600)        # short-callback expander
+msg2addr = SafeCache(ttl=86400)      # message_id -> 0xaddr
+cg_cache = SafeCache(ttl=EXT_CACHE_TTL)      # 0xaddr -> domain or ''
+rdap_cache = SafeCache(ttl=EXT_CACHE_TTL)    # domain -> (handle, created, registrar)
+ssl_cache = SafeCache(ttl=EXT_CACHE_TTL)     # domain -> (exp, issuerCN)
+wayback_cache = SafeCache(ttl=EXT_CACHE_TTL) # domain -> first_date
 
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
-NEWLINE_ESC_RE = re.compile(r'\\n')  # literal backslash+n
+NEWLINE_ESC_RE = re.compile(r'\\n')  # literal "\n"
 
-# Known homepage domains for bluechips (lowercased addresses)
+# --- Known homepages (seed) --- #
 KNOWN_HOMEPAGES = {
-    # Ethereum
-    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "circle.com",     # USDC
-    "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",      # USDT
-    "0x6b175474e89094c44da98b954eedeac495271d0f": "makerdao.com",   # DAI
-    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "ethereum.org",   # WETH
-    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",    # WBTC custodian
+    # ===== Ethereum =====
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "circle.com",      # USDC
+    "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",       # USDT
+    "0x6b175474e89094c44da98b954eedeac495271d0f": "makerdao.com",    # DAI
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "ethereum.org",    # WETH
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",     # WBTC
+    "0x514910771af9ca656af840dff83e8264ecf986ca": "chain.link",      # LINK
+    "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce": "shibatoken.com",  # SHIB
+    "0xba100000625a3754423978a60c9317c58a424e3d": "balancer.fi",     # BAL
+    "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": "lido.fi",         # stETH
+    # ===== BSC =====
+    "0x55d398326f99059ff775485246999027b3197955": "tether.to",       # USDT
+    "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": "circle.com",      # USDC
+    "0xe9e7cea3dedca5984780bafc599bd69add087d56": "binance.com",     # BUSD (legacy)
+    "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c": "binance.org",     # WBNB
+    # ===== Polygon (PoS) =====
+    "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": "circle.com",      # USDC
+    "0xc2132d05d31c914a87c6611c10748aeb04b58e8f": "tether.to",       # USDT
+    "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270": "polygon.technology", # WMATIC
+    # ===== Arbitrum =====
+    "0xaf88d065e77c8cc2239327c5edb3a432268e5831": "circle.com",      # USDC
+    "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": "tether.to",       # USDT
+    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": "arbitrum.foundation", # WETH
+    # ===== Optimism =====
+    "0x7f5c764cbc14f9669b88837ca1490cca17c31607": "circle.com",      # USDC.e
+    "0x0b2c639c533813f4aa9d7837caf62653d097ff85": "circle.com",      # USDC (native)
+    "0x94b008aa00579c1307b0ef2c499ad98a8ce58e58": "tether.to",       # USDT
+    # ===== Base =====
+    "0x833589fcd6edb6e08f4c7c32d4f71b54a3a0bfdd": "circle.com",      # USDC
+    "0x4200000000000000000000000000000000000006": "base.org",        # WETH (Base)
+    # ===== Avalanche C-Chain =====
+    "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e": "circle.com",      # USDC
+    "0xc7198437980c041c805a1edcba50c1ce5db95118": "tether.to",       # USDT.e (legacy)
 }
+
+# Optionally merge external JSON map (address->domain), path via KNOWN_DOMAINS_PATH
+def _load_known_domains():
+    path = os.environ.get("KNOWN_DOMAINS_PATH", "/app/known_domains.json")
+    try:
+        if os.path.exists(path):
+            import json
+            with open(path, "r", encoding="utf-8") as f:
+                ext = json.load(f)
+            if isinstance(ext, dict):
+                for k, v in ext.items():
+                    if isinstance(k, str) and isinstance(v, str):
+                        KNOWN_HOMEPAGES[k.lower()] = v
+    except Exception:
+        pass
+
+_load_known_domains()
 
 def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
     if not kb or not isinstance(kb, dict):
@@ -65,7 +114,7 @@ def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
                 parts = pair_addr.split("-")
                 addrs = [p for p in parts if ADDR_RE.fullmatch(p)]
                 if addrs:
-                    return addrs[-1]  # prefer last
+                    return addrs[-1]
             if data.startswith("qs:"):
                 payload = data.split(":", 1)[1]
                 addr = payload.split("?", 1)[0]
@@ -95,7 +144,7 @@ def _norm_domain(url: str | None) -> str | None:
         return None
     try:
         u = urlparse(url.strip())
-        host = u.netloc or u.path  # allow 'example.com' or 'https://example.com'
+        host = u.netloc or u.path
         host = host.lower()
         if host.startswith("www."):
             host = host[4:]
@@ -103,54 +152,86 @@ def _norm_domain(url: str | None) -> str | None:
     except Exception:
         return None
 
+# Try multiple chain slugs on Coingecko; cached
+_CG_SLUGS = [
+    "ethereum",
+    "binance-smart-chain",
+    "polygon-pos",
+    "arbitrum-one",
+    "optimistic-ethereum",
+    "avalanche",
+    "base",
+    "fantom",
+    "cronos",
+]
+
 def _cg_homepage(addr: str) -> str | None:
     addr_l = addr.lower()
     if addr_l in KNOWN_HOMEPAGES:
         return KNOWN_HOMEPAGES[addr_l]
-    try:
-        url = f"https://api.coingecko.com/api/v3/coins/ethereum/contract/{addr}"
-        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        hp = (data.get("links") or {}).get("homepage") or []
-        for u in hp:
-            d = _norm_domain(u)
-            if d:
-                return d
-    except Exception:
-        return None
-    return None
-
-def _rdap(domain: str) -> tuple[str, str, str]:
-    try:
-        r = requests.get(f"https://rdap.org/domain/{domain}", timeout=TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
-        if r.status_code != 200:
-            return ("—", "—", "—")
-        j = r.json()
-        handle = j.get("handle") or "—"
-        created = "—"
-        for ev in j.get("events", []):
-            if ev.get("eventAction") == "registration":
-                created = ev.get("eventDate", "—")
+    cached = cg_cache.get(addr_l)
+    if cached is not None:
+        return cached or None
+    domain = None
+    headers = {"User-Agent": "MetridexBot/1.0"}
+    for slug in _CG_SLUGS:
+        try:
+            url = f"https://api.coingecko.com/api/v3/coins/{slug}/contract/{addr_l}"
+            r = requests.get(url, timeout=HTTP_TIMEOUT, headers=headers)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            hp = (data.get("links") or {}).get("homepage") or []
+            for u in hp:
+                d = _norm_domain(u)
+                if d:
+                    domain = d
+                    break
+            if domain:
                 break
-        registrar = "—"
-        for ent in j.get("entities", []):
-            if (ent.get("roles") or []) and "registrar" in ent["roles"]:
-                v = ent.get("vcardArray")
-                if isinstance(v, list) and len(v) == 2:
-                    for item in v[1]:
-                        if item and item[0] == "fn":
-                            registrar = item[3]
-                            break
-        return (handle, created, registrar)
-    except Exception:
-        return ("—", "—", "—")
+        except Exception:
+            continue
+    cg_cache.set(addr_l, domain or "")
+    return domain
 
-def _ssl_info(domain: str) -> tuple[str, str]:
+def _rdap(domain: str):
+    domain = domain.lower()
+    cached = rdap_cache.get(domain)
+    if cached is not None:
+        return cached
+    try:
+        r = requests.get(f"https://rdap.org/domain/{domain}", timeout=HTTP_TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
+        if r.status_code != 200:
+            out = ("—", "—", "—")
+        else:
+            j = r.json()
+            handle = j.get("handle") or "—"
+            created = "—"
+            for ev in j.get("events", []):
+                if ev.get("eventAction") == "registration":
+                    created = ev.get("eventDate", "—"); break
+            registrar = "—"
+            for ent in j.get("entities", []):
+                if (ent.get("roles") or []) and "registrar" in ent["roles"]:
+                    v = ent.get("vcardArray")
+                    if isinstance(v, list) and len(v) == 2:
+                        for item in v[1]:
+                            if item and item[0] == "fn":
+                                registrar = item[3]; break
+            out = (handle, created, registrar)
+    except Exception:
+        out = ("—", "—", "—")
+    rdap_cache.set(domain, out)
+    return out
+
+def _ssl_info(domain: str):
+    domain = domain.lower()
+    cached = ssl_cache.get(domain)
+    if cached is not None:
+        return cached
     try:
         ctx = ssl.create_default_context()
-        with socket.create_connection((domain, 443), timeout=TIMEOUT) as sock:
+        with socket.create_connection((domain, 443), timeout=HTTP_TIMEOUT) as sock:
             with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
                 cert = ssock.getpeercert()
         exp = cert.get("notAfter", "—")
@@ -159,75 +240,80 @@ def _ssl_info(domain: str) -> tuple[str, str]:
         for tup in issuer:
             for k, v in tup:
                 if k.lower() == "commonName".lower():
-                    cn = v
-                    break
-        return (exp, cn)
+                    cn = v; break
+        out = (exp, cn)
     except Exception:
-        return ("—", "—")
+        out = ("—", "—")
+    ssl_cache.set(domain, out)
+    return out
 
 def _wayback_first(domain: str) -> str:
+    domain = domain.lower()
+    cached = wayback_cache.get(domain)
+    if cached is not None:
+        return cached
     try:
         url = f"https://web.archive.org/cdx/search/cdx?url={domain}&output=json&limit=1&fl=timestamp&filter=statuscode:200&from=2000"
-        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
+        r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
         if r.status_code != 200:
-            return "—"
-        data = r.json()
-        if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list) and data[1]:
-            ts = data[1][0]
-            try:
-                dt = datetime.strptime(ts, "%Y%m%d%H%M%S")
-                return dt.date().isoformat()
-            except Exception:
-                return ts
-        return "—"
+            out = "—"
+        else:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list) and data[1]:
+                ts = data[1][0]
+                try:
+                    dt = datetime.strptime(ts, "%Y%m%d%H%M%S")
+                    out = dt.date().isoformat()
+                except Exception:
+                    out = ts
+            else:
+                out = "—"
     except Exception:
-        return "—"
+        out = "—"
+    wayback_cache.set(domain, out)
+    return out
 
 def _needs_enrichment(text: str) -> bool:
     if not text:
         return True
-    # enrich if markers missing or empty placeholders like "Domain:\n" or "Domain: " or "Domain:—"
-    if "Domain:" not in text:
-        return True
-    # look for empty after 'Domain:' up to end-of-line
-    m = re.search(r"Domain:\s*(?:—)?\s*(?:\n|$)", text)
-    if m:
-        return True
-    if "WHOIS" not in text and "RDAP" not in text:
-        return True
-    if "SSL:" not in text:
-        return True
-    if "Wayback:" not in text:
-        return True
+    if "Domain:" not in text: return True
+    if re.search(r"Domain:\s*(?:—)?\s*(?:\n|$)", text): return True
+    if "WHOIS" not in text and "RDAP" not in text: return True
+    if "SSL:" not in text: return True
+    if "Wayback:" not in text: return True
     return False
 
 def _enrich_full(addr: str, text: str) -> str:
     domain = _cg_homepage(addr)
+    txt = NEWLINE_ESC_RE.sub("\n", text or "")
     if not domain:
-        return NEWLINE_ESC_RE.sub("\n", text)  # ensure real newlines anyway
+        return txt
     h, created, reg = _rdap(domain)
     exp, issuer = _ssl_info(domain)
     wb = _wayback_first(domain)
-    block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}"
-    txt = NEWLINE_ESC_RE.sub("\n", text)
+    lines = {
+        "Domain": f"Domain: {domain}",
+        "WHOIS": f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}",
+        "SSL": f"SSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}",
+        "WB": f"Wayback: first {wb}",
+    }
     if "Domain:" in txt:
-        # replace placeholders/lines
-        txt = re.sub(r"Domain:.*", f"Domain: {domain}", txt)
-        if "WHOIS/RDAP:" in txt:
-            txt = re.sub(r"WHOIS/RDAP:.*", f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}", txt)
-        else:
-            txt += f"\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}"
-        if "SSL:" in txt:
-            txt = re.sub(r"SSL:.*", f"SSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}", txt)
-        else:
-            txt += f"\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}"
-        if "Wayback:" in txt:
-            txt = re.sub(r"Wayback:.*", f"Wayback: first {wb}", txt)
-        else:
-            txt += f"\nWayback: first {wb}"
-        return txt
-    # append
-    return txt + "\n" + block
+        txt = re.sub(r"Domain:.*", lines["Domain"], txt)
+    else:
+        txt += ("\n" if not txt.endswith("\n") else "") + lines["Domain"]
+    if "WHOIS/RDAP:" in txt:
+        txt = re.sub(r"WHOIS/RDAP:.*", lines["WHOIS"], txt)
+    else:
+        txt += "\n" + lines["WHOIS"]
+    if "SSL:" in txt:
+        txt = re.sub(r"SSL:.*", lines["SSL"], txt)
+    else:
+        txt += "\n" + lines["SSL"]
+    if "Wayback:" in txt:
+        txt = re.sub(r"Wayback:.*", lines["WB"], txt)
+    else:
+        txt += "\n" + lines["WB"]
+    return txt
 
 def require_webhook_secret(fn):
     @wraps(fn)
@@ -270,7 +356,8 @@ def _rewrite_keyboard_to_addr(addr: str | None, kb: dict, add_more_btn: bool = T
             data = btn.get("callback_data")
             if data and data.startswith("qs2:") and addr:
                 _, _, query = data.partition("?")
-                params = parse_qs(query)
+                from urllib.parse import parse_qs as _pq
+                params = _pq(query)
                 window = params.get("window", ["h24"])[0]
                 btn = dict(btn)
                 btn["callback_data"] = f"qs:{addr}?window={window}"
@@ -281,7 +368,6 @@ def _rewrite_keyboard_to_addr(addr: str | None, kb: dict, add_more_btn: bool = T
     return {"inline_keyboard": out} if out else kb
 
 def _send_text(chat_id, text, **kwargs):
-    # normalize accidental escaped newlines
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
@@ -307,17 +393,9 @@ def debug():
             "WEBHOOK_HEADER_SECRET_set": bool(WEBHOOK_HEADER_SECRET),
             "ALLOWED_CHAT_IDS_count": len(ALLOWED_CHAT_IDS),
             "CACHE_TTL_SECONDS": CACHE_TTL_SECONDS,
+            "EXT_CACHE_TTL": EXT_CACHE_TTL,
         }
     })
-
-@app.route("/selftest")
-def selftest():
-    chat_id = request.args.get("chat_id")
-    text = request.args.get("text", "ping")
-    if not TELEGRAM_TOKEN or not chat_id:
-        return jsonify({"ok": False, "error": "missing token or chat_id"}), 400
-    st, body = _send_text(chat_id, f"[selftest] {text}", logger=app.logger)
-    return jsonify({"ok": (st == 200 and (isinstance(body, dict) and body.get("ok"))), "status": st, "resp": body})
 
 @app.route("/qs_preview")
 def qs_preview():
@@ -391,7 +469,7 @@ def webhook(secret):
                     if not addr:
                         tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "error"), logger=app.logger)
                         return ("ok", 200)
-                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)  # full details
+                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)
                     if _needs_enrichment(text):
                         text = _enrich_full(addr, text)
                     keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
@@ -400,10 +478,7 @@ def webhook(secret):
                     chain, _, pair_addr = path.partition("/")
                     window = window or "h24"
                     text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                    base_addr = (
-                        _extract_base_addr_from_keyboard(keyboard) or
-                        _extract_addr_from_text(pair_addr)
-                    )
+                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(pair_addr)
                     keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                 elif data.startswith("qs:"):
                     addr, _, window = data.split(":", 1)[1].partition("?window=")
