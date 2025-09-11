@@ -1,11 +1,14 @@
 import os
 import hashlib
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 from datetime import datetime
 from functools import wraps
 import re
+import socket
+import ssl
 
 from flask import Flask, request, jsonify
+import requests
 
 from quickscan import (
     quickscan_entrypoint,
@@ -25,6 +28,7 @@ ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS"
 
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
 DEBUG_MORE = os.environ.get("DEBUG_MORE", "0") == "1"
+TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
 
 LOC = locale_text
 
@@ -36,10 +40,19 @@ cb_cache = SafeCache(ttl=600)  # maps short token -> original callback_data
 msg2addr = SafeCache(ttl=86400)  # message_id(str) -> base 0x-address
 
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
+NEWLINE_ESC_RE = re.compile(r'\\n')  # literal backslash+n
+
+# Known homepage domains for bluechips (lowercased addresses)
+KNOWN_HOMEPAGES = {
+    # Ethereum
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "circle.com",     # USDC
+    "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",      # USDT
+    "0x6b175474e89094c44da98b954eedeac495271d0f": "makerdao.com",   # DAI
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "ethereum.org",   # WETH
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",    # WBTC custodian
+}
 
 def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
-    """Try to infer the base token address from keyboard buttons.
-       For pairs '...-0xA-0xB' prefer the FIRST 0x… (base), not the last (quote)."""
     if not kb or not isinstance(kb, dict):
         return None
     ik = kb.get("inline_keyboard") or []
@@ -52,7 +65,7 @@ def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
                 parts = pair_addr.split("-")
                 addrs = [p for p in parts if ADDR_RE.fullmatch(p)]
                 if addrs:
-                    return addrs[0]  # prefer FIRST = base
+                    return addrs[-1]  # prefer last
             if data.startswith("qs:"):
                 payload = data.split(":", 1)[1]
                 addr = payload.split("?", 1)[0]
@@ -66,10 +79,6 @@ def _extract_addr_from_text(s: str) -> str | None:
     matches = list(ADDR_RE.finditer(s))
     return matches[-1].group(0) if matches else None
 
-def _prefer_input_addr(input_addr: str | None, kb_addr: str | None) -> str | None:
-    """If the user provided an address explicitly, it wins over keyboard-derived guesses."""
-    return input_addr or kb_addr
-
 def _store_addr_for_message(result_obj, addr: str | None):
     try:
         if not result_obj or not isinstance(result_obj, dict) or not addr:
@@ -81,25 +90,144 @@ def _store_addr_for_message(result_obj, addr: str | None):
     except Exception:
         pass
 
-def _is_full_report(text: str) -> bool:
-    if not text:
-        return False
-    markers = ("Domain:", "WHOIS", "RDAP", "SSL:", "Wayback:")
-    return any(m in text for m in markers)
+def _norm_domain(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        u = urlparse(url.strip())
+        host = u.netloc or u.path  # allow 'example.com' or 'https://example.com'
+        host = host.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host.strip("/")
+    except Exception:
+        return None
 
-def _force_full_shape(text: str) -> str:
-    placeholders = [
-        "Domain: —",
-        "WHOIS/RDAP: —",
-        "SSL: —",
-        "Wayback: —",
-    ]
-    if text and text.endswith("\\n"):
-        return text + "\\n".join(placeholders)
-    elif text:
-        return text + "\\n" + "\\n".join(placeholders)
-    else:
-        return "\\n".join(placeholders)
+def _cg_homepage(addr: str) -> str | None:
+    addr_l = addr.lower()
+    if addr_l in KNOWN_HOMEPAGES:
+        return KNOWN_HOMEPAGES[addr_l]
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/ethereum/contract/{addr}"
+        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        hp = (data.get("links") or {}).get("homepage") or []
+        for u in hp:
+            d = _norm_domain(u)
+            if d:
+                return d
+    except Exception:
+        return None
+    return None
+
+def _rdap(domain: str) -> tuple[str, str, str]:
+    try:
+        r = requests.get(f"https://rdap.org/domain/{domain}", timeout=TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
+        if r.status_code != 200:
+            return ("—", "—", "—")
+        j = r.json()
+        handle = j.get("handle") or "—"
+        created = "—"
+        for ev in j.get("events", []):
+            if ev.get("eventAction") == "registration":
+                created = ev.get("eventDate", "—")
+                break
+        registrar = "—"
+        for ent in j.get("entities", []):
+            if (ent.get("roles") or []) and "registrar" in ent["roles"]:
+                v = ent.get("vcardArray")
+                if isinstance(v, list) and len(v) == 2:
+                    for item in v[1]:
+                        if item and item[0] == "fn":
+                            registrar = item[3]
+                            break
+        return (handle, created, registrar)
+    except Exception:
+        return ("—", "—", "—")
+
+def _ssl_info(domain: str) -> tuple[str, str]:
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((domain, 443), timeout=TIMEOUT) as sock:
+            with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
+                cert = ssock.getpeercert()
+        exp = cert.get("notAfter", "—")
+        issuer = cert.get("issuer", [])
+        cn = "—"
+        for tup in issuer:
+            for k, v in tup:
+                if k.lower() == "commonName".lower():
+                    cn = v
+                    break
+        return (exp, cn)
+    except Exception:
+        return ("—", "—")
+
+def _wayback_first(domain: str) -> str:
+    try:
+        url = f"https://web.archive.org/cdx/search/cdx?url={domain}&output=json&limit=1&fl=timestamp&filter=statuscode:200&from=2000"
+        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": "MetridexBot/1.0"})
+        if r.status_code != 200:
+            return "—"
+        data = r.json()
+        if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list) and data[1]:
+            ts = data[1][0]
+            try:
+                dt = datetime.strptime(ts, "%Y%m%d%H%M%S")
+                return dt.date().isoformat()
+            except Exception:
+                return ts
+        return "—"
+    except Exception:
+        return "—"
+
+def _needs_enrichment(text: str) -> bool:
+    if not text:
+        return True
+    # enrich if markers missing or empty placeholders like "Domain:\n" or "Domain: " or "Domain:—"
+    if "Domain:" not in text:
+        return True
+    # look for empty after 'Domain:' up to end-of-line
+    m = re.search(r"Domain:\s*(?:—)?\s*(?:\n|$)", text)
+    if m:
+        return True
+    if "WHOIS" not in text and "RDAP" not in text:
+        return True
+    if "SSL:" not in text:
+        return True
+    if "Wayback:" not in text:
+        return True
+    return False
+
+def _enrich_full(addr: str, text: str) -> str:
+    domain = _cg_homepage(addr)
+    if not domain:
+        return NEWLINE_ESC_RE.sub("\n", text)  # ensure real newlines anyway
+    h, created, reg = _rdap(domain)
+    exp, issuer = _ssl_info(domain)
+    wb = _wayback_first(domain)
+    block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}"
+    txt = NEWLINE_ESC_RE.sub("\n", text)
+    if "Domain:" in txt:
+        # replace placeholders/lines
+        txt = re.sub(r"Domain:.*", f"Domain: {domain}", txt)
+        if "WHOIS/RDAP:" in txt:
+            txt = re.sub(r"WHOIS/RDAP:.*", f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}", txt)
+        else:
+            txt += f"\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}"
+        if "SSL:" in txt:
+            txt = re.sub(r"SSL:.*", f"SSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}", txt)
+        else:
+            txt += f"\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}"
+        if "Wayback:" in txt:
+            txt = re.sub(r"Wayback:.*", f"Wayback: first {wb}", txt)
+        else:
+            txt += f"\nWayback: first {wb}"
+        return txt
+    # append
+    return txt + "\n" + block
 
 def require_webhook_secret(fn):
     @wraps(fn)
@@ -152,6 +280,11 @@ def _rewrite_keyboard_to_addr(addr: str | None, kb: dict, add_more_btn: bool = T
         out.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
     return {"inline_keyboard": out} if out else kb
 
+def _send_text(chat_id, text, **kwargs):
+    # normalize accidental escaped newlines
+    text = NEWLINE_ESC_RE.sub("\n", text or "")
+    return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+
 @app.route("/healthz")
 def healthz():
     return jsonify({
@@ -183,7 +316,7 @@ def selftest():
     text = request.args.get("text", "ping")
     if not TELEGRAM_TOKEN or not chat_id:
         return jsonify({"ok": False, "error": "missing token or chat_id"}), 400
-    st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, f"[selftest] {text}", logger=app.logger)
+    st, body = _send_text(chat_id, f"[selftest] {text}", logger=app.logger)
     return jsonify({"ok": (st == 200 and (isinstance(body, dict) and body.get("ok"))), "status": st, "resp": body})
 
 @app.route("/qs_preview")
@@ -193,9 +326,7 @@ def qs_preview():
         return jsonify({"ok": False, "error": "missing q"}), 400
     try:
         text_out, keyboard = quickscan_entrypoint(q, lang="en", lean=True)
-        input_addr = _extract_addr_from_text(q)
-        kb_addr = _extract_base_addr_from_keyboard(keyboard)
-        base_addr = _prefer_input_addr(input_addr, kb_addr)
+        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(q)
         keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
         keyboard = _compress_keyboard(keyboard)
         return jsonify({"ok": True, "text": text_out, "keyboard": keyboard})
@@ -261,18 +392,18 @@ def webhook(secret):
                         tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "error"), logger=app.logger)
                         return ("ok", 200)
                     text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)  # full details
-                    if not _is_full_report(text):
-                        app.logger.warning(f"[MORE] no full markers; retry once for {addr}")
-                        text, keyboard = quickscan_entrypoint(addr, lang="en", window="h24", lean=False)
-                        if not _is_full_report(text):
-                            text = _force_full_shape(text)
+                    if _needs_enrichment(text):
+                        text = _enrich_full(addr, text)
                     keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
                 elif data.startswith("qs2:"):
                     path, _, window = data.split(":", 1)[1].partition("?window=")
                     chain, _, pair_addr = path.partition("/")
                     window = window or "h24"
                     text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(pair_addr)
+                    base_addr = (
+                        _extract_base_addr_from_keyboard(keyboard) or
+                        _extract_addr_from_text(pair_addr)
+                    )
                     keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                 elif data.startswith("qs:"):
                     addr, _, window = data.split(":", 1)[1].partition("?window=")
@@ -284,7 +415,7 @@ def webhook(secret):
 
                 keyboard = _compress_keyboard(keyboard)
                 app.logger.info(f"[QS] cb -> len={len(text)}")
-                st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, logger=app.logger)
+                st, body = _send_text(chat_id, text, reply_markup=keyboard, logger=app.logger)
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
             except Exception:
                 app.logger.exception("[ERR] callback quickscan")
@@ -310,7 +441,7 @@ def webhook(secret):
             return ("ok", 200)
 
         if not text:
-            tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "empty"), logger=app.logger)
+            _send_text(chat_id, LOC("en", "empty"), logger=app.logger)
             return ("ok", 200)
 
         if text.startswith("/"):
@@ -319,61 +450,57 @@ def webhook(secret):
             app.logger.info(f"[CMD] {cmd} arg={arg}")
 
             if cmd in ("/start", "/help"):
-                st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
+                _send_text(chat_id, LOC("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
                 return ("ok", 200)
 
             if cmd == "/lang":
                 if arg.lower().startswith("ru"):
-                    st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("ru", "lang_switched"), logger=app.logger)
+                    _send_text(chat_id, LOC("ru", "lang_switched"), logger=app.logger)
                 else:
-                    st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "lang_switched"), logger=app.logger)
+                    _send_text(chat_id, LOC("en", "lang_switched"), logger=app.logger)
                 return ("ok", 200)
 
             if cmd == "/license":
-                st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Metridex QuickScan MVP — MIT License", logger=app.logger)
+                _send_text(chat_id, "Metridex QuickScan MVP — MIT License", logger=app.logger)
                 return ("ok", 200)
 
             if cmd == "/quota":
-                st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Free tier — 300 DexScreener req/min shared; be kind.", logger=app.logger)
+                _send_text(chat_id, "Free tier — 300 DexScreener req/min shared; be kind.", logger=app.logger)
                 return ("ok", 200)
 
             if cmd in ("/quickscan", "/scan"):
                 if not arg:
-                    st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "scan_usage"), logger=app.logger)
+                    _send_text(chat_id, LOC("en", "scan_usage"), logger=app.logger)
                 else:
                     try:
                         text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
-                        input_addr = _extract_addr_from_text(arg)
-                        kb_addr = _extract_base_addr_from_keyboard(keyboard)
-                        base_addr = _prefer_input_addr(input_addr, kb_addr)
+                        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
                         keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                         keyboard = _compress_keyboard(keyboard)
                         app.logger.info(f"[QS] cmd -> len={len(text_out)}")
-                        st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                        st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                         _store_addr_for_message(body, base_addr)
                     except Exception:
                         app.logger.exception("[ERR] cmd quickscan")
-                        st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+                        _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
                 return ("ok", 200)
 
-            st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, LOC("en", "unknown"), logger=app.logger)
+            _send_text(chat_id, LOC("en", "unknown"), logger=app.logger)
             return ("ok", 200)
 
         # Implicit quickscan
-        st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Processing…", logger=app.logger)
+        _send_text(chat_id, "Processing…", logger=app.logger)
         try:
             text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
-            input_addr = _extract_addr_from_text(text)
-            kb_addr = _extract_base_addr_from_keyboard(keyboard)
-            base_addr = _prefer_input_addr(input_addr, kb_addr)
+            base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
             keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
             keyboard = _compress_keyboard(keyboard)
             app.logger.info(f"[QS] implicit -> len={len(text_out)}")
-            st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+            st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
             _store_addr_for_message(body, base_addr)
         except Exception:
             app.logger.exception("[ERR] implicit quickscan")
-            st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+            _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
         return ("ok", 200)
 
     except Exception:
