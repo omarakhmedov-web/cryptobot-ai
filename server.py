@@ -81,6 +81,21 @@ def _is_full_report(text: str) -> bool:
     markers = ("Domain:", "WHOIS", "RDAP", "SSL:", "Wayback:")
     return any(m in text for m in markers)
 
+def _force_full_shape(text: str) -> str:
+    # Ensure user visually sees the "full" block even if no data available
+    placeholders = [
+        "Domain: —",
+        "WHOIS/RDAP: —",
+        "SSL: —",
+        "Wayback: —",
+    ]
+    if text and text.endswith("\n"):
+        return text + "\n".join(placeholders)
+    elif text:
+        return text + "\n" + "\n".join(placeholders)
+    else:
+        return "\n".join(placeholders)
+
 def require_webhook_secret(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -226,7 +241,6 @@ def webhook(secret):
             try:
                 if data.startswith("more:"):
                     raw = data.split(":", 1)[1]
-                    # Prefer mapping bound to message id, then payload, then markup/text fallbacks
                     addr = (
                         (msg2addr.get(msg_id) if msg_id else None) or
                         _extract_addr_from_text(raw) or
@@ -241,8 +255,10 @@ def webhook(secret):
                         return ("ok", 200)
                     text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)  # full details
                     if not _is_full_report(text):
-                        app.logger.warning(f"[MORE] full markers not found, retry once for {addr}")
+                        app.logger.warning(f"[MORE] no full markers; retry once for {addr}")
                         text, keyboard = quickscan_entrypoint(addr, lang="en", window="h24", lean=False)
+                        if not _is_full_report(text):
+                            text = _force_full_shape(text)  # final visual guarantee
                     keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
                 elif data.startswith("qs2:"):
                     path, _, window = data.split(":", 1)[1].partition("?window=")
