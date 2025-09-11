@@ -20,7 +20,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.7-quickscan-mvp+details")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.7a-quickscan-mvp+details")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -37,24 +37,24 @@ app = Flask(__name__)
 
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)
 seen_callbacks = SafeCache(ttl=300)
-cb_cache = SafeCache(ttl=600)   # short-token -> original callback_data
-msg2addr = SafeCache(ttl=86400) # message_id(str) -> base 0x-address
+cb_cache = SafeCache(ttl=600)
+msg2addr = SafeCache(ttl=86400)
 
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
-NEWLINE_ESC_RE = re.compile(r'\\n')  # literal backslash+n
+NEWLINE_ESC_RE = re.compile(r'\\n')
 
-# Built-in homepage hints for bluechips (lowercased addresses)
 KNOWN_HOMEPAGES = {
-    # Ethereum
-    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "circle.com",     # USDC
-    "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",      # USDT
-    "0x6b175474e89094c44da98b954eedeac495271d0f": "makerdao.com",   # DAI
-    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "ethereum.org",   # WETH
-    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",    # WBTC custodian
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "circle.com",
+    "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",
+    "0x6b175474e89094c44da98b954eedeac495271d0f": "makerdao.com",
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "ethereum.org",
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",
 }
 
 KNOWN_DOMAINS_FILE_PATH = None
 KNOWN_DOMAINS_LOADED = 0
+KNOWN_DOMAINS_EXISTS = False
+KNOWN_DOMAINS_ERROR = ""
 
 def _norm_domain(url: str):
     if not url:
@@ -70,21 +70,26 @@ def _norm_domain(url: str):
         return None
 
 def _load_known_domains():
-    """Load/merge known_domains (env: KNOWN_DOMAINS_FILE or KNOWN_DOMAINS_PATH) into KNOWN_HOMEPAGES."""
-    global KNOWN_DOMAINS_FILE_PATH, KNOWN_DOMAINS_LOADED
+    global KNOWN_DOMAINS_FILE_PATH, KNOWN_DOMAINS_LOADED, KNOWN_DOMAINS_EXISTS, KNOWN_DOMAINS_ERROR
     try:
-        # accept both env names; fall back to ./known_domains.json next to this file
         KNOWN_DOMAINS_FILE_PATH = (
             os.getenv("KNOWN_DOMAINS_FILE")
             or os.getenv("KNOWN_DOMAINS_PATH")
             or os.path.join(os.path.dirname(__file__), "known_domains.json")
         )
         path = KNOWN_DOMAINS_FILE_PATH
-        if not os.path.exists(path):
+        KNOWN_DOMAINS_EXISTS = os.path.exists(path)
+        if not KNOWN_DOMAINS_EXISTS:
             app.logger.info(f"[KNOWN] {path} not found — using built-ins only")
             return
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            raw = f.read()
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            KNOWN_DOMAINS_ERROR = f"JSON parse error: {e}"
+            app.logger.warning(f"[KNOWN] JSON parse error: {e}")
+            return
         merged = 0
         for k, v in (data or {}).items():
             addr = (k or "").lower().strip()
@@ -98,9 +103,9 @@ def _load_known_domains():
         KNOWN_DOMAINS_LOADED = merged
         app.logger.info(f"[KNOWN] loaded {merged} domain hints from {path}")
     except Exception as e:
+        KNOWN_DOMAINS_ERROR = str(e)
         app.logger.warning(f"[KNOWN] failed to load known domains: {e}")
 
-# merge external known_domains.json (optional)
 _load_known_domains()
 
 def _extract_base_addr_from_keyboard(kb: dict):
@@ -116,7 +121,7 @@ def _extract_base_addr_from_keyboard(kb: dict):
                 parts = pair_addr.split("-")
                 addrs = [p for p in parts if ADDR_RE.fullmatch(p)]
                 if addrs:
-                    return addrs[-1]  # prefer last
+                    return addrs[-1]
             if data.startswith("qs:"):
                 payload = data.split(":", 1)[1]
                 addr = payload.split("?", 1)[0]
@@ -161,7 +166,6 @@ def _cg_homepage(addr: str):
     return None
 
 def _rdap(domain: str):
-    # returns (handle, created, registrar)
     try:
         r = requests.get(f"https://rdap.org/domain/{domain}", timeout=TIMEOUT, headers={"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")})
         if r.status_code != 200:
@@ -187,7 +191,6 @@ def _rdap(domain: str):
         return ("—", "—", "—")
 
 def _ssl_info(domain: str):
-    # returns (notAfter, issuerCN)
     try:
         ctx = ssl.create_default_context()
         with socket.create_connection((domain, 443), timeout=TIMEOUT) as sock:
@@ -336,18 +339,22 @@ def debug():
             "ALLOWED_CHAT_IDS_count": len(ALLOWED_CHAT_IDS),
             "CACHE_TTL_SECONDS": CACHE_TTL_SECONDS,
             "KNOWN_DOMAINS_FILE_PATH": KNOWN_DOMAINS_FILE_PATH,
+            "KNOWN_DOMAINS_EXISTS": KNOWN_DOMAINS_EXISTS,
             "KNOWN_DOMAINS_LOADED": KNOWN_DOMAINS_LOADED,
+            "KNOWN_DOMAINS_ERROR": KNOWN_DOMAINS_ERROR,
         }
     })
 
-@app.route("/selftest")
-def selftest():
-    chat_id = request.args.get("chat_id")
-    text = request.args.get("text", "ping")
-    if not TELEGRAM_TOKEN or not chat_id:
-        return jsonify({"ok": False, "error": "missing token or chat_id"}), 400
-    st, body = _send_text(chat_id, f"[selftest] {text}", logger=app.logger)
-    return jsonify({"ok": (st == 200 and (isinstance(body, dict) and body.get("ok"))), "status": st, "resp": body})
+@app.route("/debug_known")
+def debug_known():
+    sample = list(KNOWN_HOMEPAGES.items())[:10]
+    return jsonify({
+        "path": KNOWN_DOMAINS_FILE_PATH,
+        "exists": KNOWN_DOMAINS_EXISTS,
+        "loaded_count": KNOWN_DOMAINS_LOADED,
+        "error": KNOWN_DOMAINS_ERROR,
+        "sample": sample,
+    })
 
 @app.route("/qs_preview")
 def qs_preview():
@@ -377,24 +384,20 @@ def webhook(secret):
         return ("ok", 200)
 
     try:
-        # CALLBACKS
         if "callback_query" in update:
             cq = update["callback_query"]
             chat_id = cq["message"]["chat"]["id"]
             data = cq.get("data", "")
             msg_obj = cq.get("message", {})
             msg_id = str(msg_obj.get("message_id"))
-            app.logger.info(f"[UPD] callback chat={chat_id} data={data} msg_id={msg_id}")
 
             if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
-                app.logger.info(f"[UPD] callback ignored (not allowed) chat={chat_id}")
                 return ("ok", 200)
 
             if data.startswith("cb:"):
                 orig = cb_cache.get(data)
                 if orig:
                     data = orig
-                    app.logger.info(f"[CB] expanded {data[:48]}…")
                 else:
                     tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), LOC("en", "error"), logger=app.logger)
                     return ("ok", 200)
@@ -415,13 +418,10 @@ def webhook(secret):
                         _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {}) or
                         _extract_addr_from_text(msg_obj.get("text") or "")
                     )
-                    if DEBUG_MORE:
-                        tg_answer_callback(TELEGRAM_TOKEN, cq["id"], f"Full scan for {addr}", logger=app.logger)
-                    app.logger.info(f"[MORE] resolved addr={addr} (payload={raw})")
                     if not addr:
                         tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "error"), logger=app.logger)
                         return ("ok", 200)
-                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)  # full details
+                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)
                     if _needs_enrichment(text):
                         text = _enrich_full(addr, text)
                     keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
@@ -430,10 +430,7 @@ def webhook(secret):
                     chain, _, pair_addr = path.partition("/")
                     window = window or "h24"
                     text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                    base_addr = (
-                        _extract_base_addr_from_keyboard(keyboard) or
-                        _extract_addr_from_text(pair_addr)
-                    )
+                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(pair_addr)
                     keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                 elif data.startswith("qs:"):
                     addr, _, window = data.split(":", 1)[1].partition("?window=")
@@ -444,30 +441,20 @@ def webhook(secret):
                     return ("ok", 200)
 
                 keyboard = _compress_keyboard(keyboard)
-                app.logger.info(f"[QS] cb -> len={len(text)}")
-                st, body = _send_text(chat_id, text, reply_markup=keyboard, logger=app.logger)
+                tg_send_message(TELEGRAM_TOKEN, chat_id, NEWLINE_ESC_RE.sub("\n", text), reply_markup=keyboard, logger=app.logger)
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
             except Exception:
-                app.logger.exception("[ERR] callback quickscan")
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "error"), logger=app.logger)
             return ("ok", 200)
 
-        # MESSAGES
         msg = update.get("message") or update.get("edited_message")
-        if not msg:
-            app.logger.info("[UPD] no message/callback")
-            return ("ok", 200)
-
-        if (msg.get("from") or {}).get("is_bot"):
-            app.logger.info("[UPD] from bot, ignore")
+        if not msg or (msg.get("from") or {}).get("is_bot"):
             return ("ok", 200)
 
         chat_id = msg["chat"]["id"]
         text = (msg.get("text") or "").strip()
-        app.logger.info(f"[UPD] message chat={chat_id} text={text[:80]}")
 
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
-            app.logger.info(f"[UPD] message ignored (not allowed) chat={chat_id}")
             return ("ok", 200)
 
         if not text:
@@ -477,30 +464,13 @@ def webhook(secret):
         if text.startswith("/"):
             cmd, *rest = text.split(maxsplit=1)
             arg = rest[0] if rest else ""
-            app.logger.info(f"[CMD] {cmd} arg={arg}")
 
-        # Commands
             if cmd in ("/start", "/help"):
                 _send_text(chat_id, LOC("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
                 return ("ok", 200)
 
-            if cmd == "/lang":
-                if arg.lower().startswith("ru"):
-                    _send_text(chat_id, LOC("ru", "lang_switched"), logger=app.logger)
-                else:
-                    _send_text(chat_id, LOC("en", "lang_switched"), logger=app.logger)
-                return ("ok", 200)
-
-            if cmd == "/license":
-                _send_text(chat_id, "Metridex QuickScan MVP — MIT License", logger=app.logger)
-                return ("ok", 200)
-
-            if cmd == "/quota":
-                _send_text(chat_id, "Free tier — 300 DexScreener req/min shared; be kind.", logger=app.logger)
-                return ("ok", 200)
-
             if cmd == "/debug_known":
-                _send_text(chat_id, f"known_domains: path={KNOWN_DOMAINS_FILE_PATH}, loaded={KNOWN_DOMAINS_LOADED}", logger=app.logger)
+                _send_text(chat_id, f"path={KNOWN_DOMAINS_FILE_PATH} exists={KNOWN_DOMAINS_EXISTS} loaded={KNOWN_DOMAINS_LOADED} error={KNOWN_DOMAINS_ERROR}", logger=app.logger)
                 return ("ok", 200)
 
             if cmd in ("/quickscan", "/scan"):
@@ -512,40 +482,28 @@ def webhook(secret):
                         base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
                         keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                         keyboard = _compress_keyboard(keyboard)
-                        app.logger.info(f"[QS] cmd -> len={len(text_out)}")
                         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                         _store_addr_for_message(body, base_addr)
                     except Exception:
-                        app.logger.exception("[ERR] cmd quickscan")
                         _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
                 return ("ok", 200)
 
             _send_text(chat_id, LOC("en", "unknown"), logger=app.logger)
             return ("ok", 200)
 
-        # Implicit quickscan
         _send_text(chat_id, "Processing…", logger=app.logger)
         try:
             text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
             base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
             keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
             keyboard = _compress_keyboard(keyboard)
-            app.logger.info(f"[QS] implicit -> len={len(text_out)}")
             st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
             _store_addr_for_message(body, base_addr)
         except Exception:
-            app.logger.exception("[ERR] implicit quickscan")
             _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
         return ("ok", 200)
 
     except Exception:
-        app.logger.exception("[ERR] webhook handler (outer)")
-        try:
-            if "callback_query" in update:
-                cq = update["callback_query"]
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), LOC("en", "error"), logger=app.logger)
-        except Exception:
-            pass
         return ("ok", 200)
 
 def detect_lang(user):
