@@ -16,7 +16,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.6-quickscan-mvp+details-v5-hard")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.6-quickscan-mvp+details")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -24,6 +24,7 @@ WEBHOOK_HEADER_SECRET = os.environ.get("WEBHOOK_HEADER_SECRET", "")
 ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
 
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
+DEBUG_MORE = os.environ.get("DEBUG_MORE", "0") == "1"
 
 LOC = locale_text
 
@@ -35,13 +36,6 @@ cb_cache = SafeCache(ttl=600)  # maps short token -> original callback_data
 msg2addr = SafeCache(ttl=86400)  # message_id(str) -> base 0x-address
 
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
-
-def _has_full_markers(text: str) -> bool:
-    if not text:
-        return False
-    t = text.lower()
-    hits = sum(1 for kw in ("whois", "rdap", "ssl", "wayback") if kw in t)
-    return hits >= 1
 
 def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
     if not kb or not isinstance(kb, dict):
@@ -56,7 +50,7 @@ def _extract_base_addr_from_keyboard(kb: dict) -> str | None:
                 parts = pair_addr.split("-")
                 addrs = [p for p in parts if ADDR_RE.fullmatch(p)]
                 if addrs:
-                    return addrs[-1]
+                    return addrs[-1]  # prefer last
             if data.startswith("qs:"):
                 payload = data.split(":", 1)[1]
                 addr = payload.split("?", 1)[0]
@@ -78,9 +72,14 @@ def _store_addr_for_message(result_obj, addr: str | None):
             mid = str(result_obj["result"].get("message_id"))
             if mid and ADDR_RE.fullmatch(addr):
                 msg2addr.set(mid, addr)
-                app.logger.info(f"[MSG2ADDR] set {mid} -> {addr}")
     except Exception:
-        app.logger.exception("[MSG2ADDR] failed")
+        pass
+
+def _is_full_report(text: str) -> bool:
+    if not text:
+        return False
+    markers = ("Domain:", "WHOIS", "RDAP", "SSL:", "Wayback:")
+    return any(m in text for m in markers)
 
 def require_webhook_secret(fn):
     @wraps(fn)
@@ -227,36 +226,33 @@ def webhook(secret):
             try:
                 if data.startswith("more:"):
                     raw = data.split(":", 1)[1]
+                    # Prefer mapping bound to message id, then payload, then markup/text fallbacks
                     addr = (
-                        _extract_addr_from_text(raw) or
                         (msg2addr.get(msg_id) if msg_id else None) or
+                        _extract_addr_from_text(raw) or
                         _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {}) or
                         _extract_addr_from_text(msg_obj.get("text") or "")
                     )
-                    app.logger.info(f"[MORE] resolved addr={addr} (payload={raw}) msg_id={msg_id}")
+                    if DEBUG_MORE:
+                        tg_answer_callback(TELEGRAM_TOKEN, cq["id"], f"Full scan for {addr}", logger=app.logger)
+                    app.logger.info(f"[MORE] resolved addr={addr} (payload={raw})")
                     if not addr:
                         tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "error"), logger=app.logger)
                         return ("ok", 200)
-                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)
-                    if not _has_full_markers(text):
-                        try:
-                            n = normalize_input(addr)
-                            if isinstance(n, str) and ADDR_RE.fullmatch(n):
-                                addr = n
-                        except Exception:
-                            pass
-                        app.logger.info(f"[MORE] retry deep scan for {addr}")
-                        try:
-                            text, keyboard = quickscan_entrypoint(addr, lang="en", window="h24", lean=False)
-                        except Exception:
-                            app.logger.exception("[MORE] deep retry failed")
+                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)  # full details
+                    if not _is_full_report(text):
+                        app.logger.warning(f"[MORE] full markers not found, retry once for {addr}")
+                        text, keyboard = quickscan_entrypoint(addr, lang="en", window="h24", lean=False)
                     keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
                 elif data.startswith("qs2:"):
                     path, _, window = data.split(":", 1)[1].partition("?window=")
                     chain, _, pair_addr = path.partition("/")
                     window = window or "h24"
                     text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(pair_addr)
+                    base_addr = (
+                        _extract_base_addr_from_keyboard(keyboard) or
+                        _extract_addr_from_text(pair_addr)
+                    )
                     keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
                 elif data.startswith("qs:"):
                     addr, _, window = data.split(":", 1)[1].partition("?window=")
@@ -267,7 +263,7 @@ def webhook(secret):
                     return ("ok", 200)
 
                 keyboard = _compress_keyboard(keyboard)
-                app.logger.info(f"[QS] cb -> len={len(text)} full={_has_full_markers(text)}")
+                app.logger.info(f"[QS] cb -> len={len(text)}")
                 st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, text, reply_markup=keyboard, logger=app.logger)
                 tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
             except Exception:
