@@ -14,13 +14,12 @@ import requests
 from quickscan import (
     quickscan_entrypoint,
     quickscan_pair_entrypoint,
-    normalize_input,
     SafeCache,
 )
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.7b-quickscan-mvp+details")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.7c-quickscan-mvp+details")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -43,7 +42,6 @@ msg2addr = SafeCache(ttl=86400)
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
 NEWLINE_ESC_RE = re.compile(r'\\n')
 
-# Built-ins
 KNOWN_HOMEPAGES = {
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "circle.com",
     "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",
@@ -52,8 +50,7 @@ KNOWN_HOMEPAGES = {
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",
 }
 
-# Diagnostics
-KNOWN_SOURCES = []  # list of dicts: {"path":..., "exists":bool, "loaded":int, "error":str}
+KNOWN_SOURCES = []
 
 def _norm_domain(url: str):
     if not url:
@@ -80,13 +77,7 @@ def _merge_known_from(path: str):
             KNOWN_SOURCES.append(entry)
             return
         with open(path, "r", encoding="utf-8") as f:
-            raw = f.read()
-        try:
-            data = json.loads(raw)
-        except Exception as e:
-            entry["error"] = f"JSON parse error: {e}"
-            KNOWN_SOURCES.append(entry)
-            return
+            data = json.load(f)
         merged = 0
         for k, v in (data or {}).items():
             addr = (k or "").lower().strip()
@@ -104,10 +95,8 @@ def _merge_known_from(path: str):
         KNOWN_SOURCES.append(entry)
 
 def _load_known_domains():
-    # 1) default neighbor file
     default_path = os.path.join(os.path.dirname(__file__), "known_domains.json")
     _merge_known_from(default_path)
-    # 2) env-provided path(s)
     env_path = os.getenv("KNOWN_DOMAINS_FILE") or os.getenv("KNOWN_DOMAINS_PATH")
     if env_path:
         _merge_known_from(env_path)
@@ -232,38 +221,20 @@ def _wayback_first(domain: str):
     except Exception:
         return "—"
 
-def _needs_enrichment(text: str) -> bool:
-    if not text:
-        return True
-    if "Domain:" not in text or "SSL:" not in text or "Wayback:" not in text:
-        return True
-    if re.search(r"Domain:\s*(?:—)?\s*(?:\n|$)", text):
-        return True
-    return False
-
 def _enrich_full(addr: str, text: str):
     txt = NEWLINE_ESC_RE.sub("\n", text or "")
     domain = _cg_homepage(addr)
     if not domain:
-        return txt
+        return txt  # nothing to add
     h, created, reg = _rdap(domain)
     exp, issuer = _ssl_info(domain)
     wb = _wayback_first(domain)
     block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}"
     if "Domain:" in txt:
         txt = re.sub(r"Domain:.*", f"Domain: {domain}", txt)
-        if "WHOIS/RDAP:" in txt:
-            txt = re.sub(r"WHOIS/RDAP:.*", f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}", txt)
-        else:
-            txt += f"\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}"
-        if "SSL:" in txt:
-            txt = re.sub(r"SSL:.*", f"SSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}", txt)
-        else:
-            txt += f"\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}"
-        if "Wayback:" in txt:
-            txt = re.sub(r"Wayback:.*", f"Wayback: first {wb}", txt)
-        else:
-            txt += f"\nWayback: first {wb}"
+        txt = re.sub(r"WHOIS/RDAP:.*", f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}", txt)
+        txt = re.sub(r"SSL:.*", f"SSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}", txt)
+        txt = re.sub(r"Wayback:.*", f"Wayback: first {wb}", txt)
         return txt
     return txt + "\n" + block
 
@@ -273,7 +244,6 @@ def require_webhook_secret(fn):
         if WEBHOOK_HEADER_SECRET:
             header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
             if header != WEBHOOK_HEADER_SECRET:
-                app.logger.warning("[AUTH] bad header secret")
                 return ("forbidden", 403)
         return fn(*args, **kwargs)
     return wrapper
@@ -322,32 +292,6 @@ def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
-@app.route("/healthz")
-def healthz():
-    return jsonify({
-        "status": "ok",
-        "time": datetime.utcnow().isoformat(),
-        "version": APP_VERSION,
-        "allow_all_chats": (len(ALLOWED_CHAT_IDS) == 0),
-        "header_secret_required": bool(WEBHOOK_HEADER_SECRET),
-    })
-
-@app.route("/debug")
-def debug():
-    whs = WEBHOOK_SECRET[:6] + "…" if WEBHOOK_SECRET else ""
-    return jsonify({
-        "version": APP_VERSION,
-        "bot": BOT_USERNAME,
-        "env": {
-            "TELEGRAM_TOKEN_set": bool(TELEGRAM_TOKEN),
-            "WEBHOOK_SECRET_hint": whs,
-            "WEBHOOK_HEADER_SECRET_set": bool(WEBHOOK_HEADER_SECRET),
-            "ALLOWED_CHAT_IDS_count": len(ALLOWED_CHAT_IDS),
-            "CACHE_TTL_SECONDS": CACHE_TTL_SECONDS,
-            "KNOWN_SOURCES": KNOWN_SOURCES,
-        }
-    })
-
 @app.route("/debug_known")
 def debug_known():
     return jsonify({
@@ -356,19 +300,13 @@ def debug_known():
         "total_after_merge": len(KNOWN_HOMEPAGES),
     })
 
-@app.route("/qs_preview")
-def qs_preview():
-    q = request.args.get("q", "").strip()
-    if not q:
-        return jsonify({"ok": False, "error": "missing q"}), 400
-    try:
-        text_out, keyboard = quickscan_entrypoint(q, lang="en", lean=True)
-        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(q)
-        keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
-        keyboard = _compress_keyboard(keyboard)
-        return jsonify({"ok": True, "text": text_out, "keyboard": keyboard})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+@app.route("/debug")
+def debug():
+    return jsonify({
+        "version": APP_VERSION,
+        "bot": BOT_USERNAME,
+        "known_sources": KNOWN_SOURCES,
+    })
 
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
@@ -381,133 +319,136 @@ def webhook(secret):
     except Exception:
         return ("ok", 200)
 
-    try:
-        if "callback_query" in update:
-            cq = update["callback_query"]
-            chat_id = cq["message"]["chat"]["id"]
-            data = cq.get("data", "")
-            msg_obj = cq.get("message", {})
-            msg_id = str(msg_obj.get("message_id"))
-
-            if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
-                return ("ok", 200)
-
-            if data.startswith("cb:"):
-                orig = cb_cache.get(data)
-                if orig:
-                    data = orig
-                else:
-                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), LOC("en", "error"), logger=app.logger)
-                    return ("ok", 200)
-
-            cqid = cq.get("id")
-            if cqid and seen_callbacks.get(cqid):
-                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
-                return ("ok", 200)
-            if cqid:
-                seen_callbacks.set(cqid, True)
-
-            try:
-                if data.startswith("more:"):
-                    raw = data.split(":", 1)[1]
-                    addr = (
-                        (msg2addr.get(msg_id) if msg_id else None) or
-                        _extract_addr_from_text(raw) or
-                        _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {}) or
-                        _extract_addr_from_text(msg_obj.get("text") or "")
-                    )
-                    if not addr:
-                        tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "error"), logger=app.logger)
-                        return ("ok", 200)
-                    text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)
-                    if _needs_enrichment(text):
-                        text = _enrich_full(addr, text)
-                    keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
-                elif data.startswith("qs2:"):
-                    path, _, window = data.split(":", 1)[1].partition("?window=")
-                    chain, _, pair_addr = path.partition("/")
-                    window = window or "h24"
-                    text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
-                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(pair_addr)
-                    keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
-                elif data.startswith("qs:"):
-                    addr, _, window = data.split(":", 1)[1].partition("?window=")
-                    window = window or "h24"
-                    text, keyboard = quickscan_entrypoint(addr, lang="en", window=window, lean=True)
-                    keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=True)
-                else:
-                    return ("ok", 200)
-
-                keyboard = _compress_keyboard(keyboard)
-                tg_send_message(TELEGRAM_TOKEN, chat_id, NEWLINE_ESC_RE.sub("\n", text), reply_markup=keyboard, logger=app.logger)
-                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "updated"), logger=app.logger)
-            except Exception:
-                tg_answer_callback(TELEGRAM_TOKEN, cq["id"], LOC("en", "error"), logger=app.logger)
-            return ("ok", 200)
-
-        msg = update.get("message") or update.get("edited_message")
-        if not msg or (msg.get("from") or {}).get("is_bot"):
-            return ("ok", 200)
-
-        chat_id = msg["chat"]["id"]
-        text = (msg.get("text") or "").strip()
+    # CALLBACKS
+    if "callback_query" in update:
+        cq = update["callback_query"]
+        chat_id = cq["message"]["chat"]["id"]
+        data = cq.get("data", "")
+        msg_obj = cq.get("message", {})
+        msg_id = str(msg_obj.get("message_id"))
 
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
 
-        if not text:
-            _send_text(chat_id, LOC("en", "empty"), logger=app.logger)
+        # Expand compressed callback
+        if data.startswith("cb:"):
+            orig = cb_cache.get(data)
+            if orig:
+                data = orig
+            else:
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "expired", logger=app.logger)
+                return ("ok", 200)
+
+        # Debounce
+        cqid = cq.get("id")
+        if cqid and seen_callbacks.get(cqid):
+            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "updated", logger=app.logger)
             return ("ok", 200)
+        if cqid:
+            seen_callbacks.set(cqid, True)
 
-        if text.startswith("/"):
-            cmd, *rest = text.split(maxsplit=1)
-            arg = rest[0] if rest else ""
-
-            if cmd in ("/start", "/help"):
-                _send_text(chat_id, LOC("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
-                return ("ok", 200)
-
-            if cmd == "/debug_known":
-                s = "; ".join([f"{d['path']} (exists={d['exists']}, loaded={d['loaded']}, error={d['error']})" for d in KNOWN_SOURCES])
-                _send_text(chat_id, f"known_sources: {s}", logger=app.logger)
-                return ("ok", 200)
-
-            if cmd in ("/quickscan", "/scan"):
-                if not arg:
-                    _send_text(chat_id, LOC("en", "scan_usage"), logger=app.logger)
-                else:
-                    try:
-                        text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
-                        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
-                        keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
-                        keyboard = _compress_keyboard(keyboard)
-                        st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
-                        _store_addr_for_message(body, base_addr)
-                    except Exception:
-                        _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
-                return ("ok", 200)
-
-            _send_text(chat_id, LOC("en", "unknown"), logger=app.logger)
-            return ("ok", 200)
-
-        _send_text(chat_id, "Processing…", logger=app.logger)
         try:
-            text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
-            base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
-            keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
-            keyboard = _compress_keyboard(keyboard)
-            st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
-            _store_addr_for_message(body, base_addr)
+            if data.startswith("more:"):
+                # 1) строго доверяем payload-у, если это 0x…
+                payload_addr = data.split(":", 1)[1].strip()
+                addr = payload_addr if ADDR_RE.fullmatch(payload_addr) else None
+                # 2) иначе fallback к ранее сохранённому/из текста
+                if not addr:
+                    addr = (
+                        (msg2addr.get(msg_id) if msg_id else None) or
+                        _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {}) or
+                        _extract_addr_from_text(msg_obj.get("text") or "")
+                    )
+                if DEBUG_MORE:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq["id"], f"Full scan {addr}", logger=app.logger)
+                if not addr:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "address?", logger=app.logger)
+                    return ("ok", 200)
+
+                text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)
+                # всегда пытаемся обогатить, даже если что-то уже есть
+                text = _enrich_full(addr, text)
+                keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
+
+            elif data.startswith("qs2:"):
+                path, _, window = data.split(":", 1)[1].partition("?window=")
+                chain, _, pair_addr = path.partition("/")
+                window = window or "h24"
+                text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
+                base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(pair_addr)
+                keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
+
+            elif data.startswith("qs:"):
+                addr, _, window = data.split(":", 1)[1].partition("?window=")
+                window = window or "h24"
+                text, keyboard = quickscan_entrypoint(addr, lang="en", window=window, lean=True)
+                keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=True)
+            else:
+                return ("ok", 200)
+
+            keyboard = {"inline_keyboard": keyboard.get("inline_keyboard", [])} if isinstance(keyboard, dict) else keyboard
+            tg_send_message(TELEGRAM_TOKEN, chat_id, NEWLINE_ESC_RE.sub("\n", text), reply_markup=keyboard, logger=app.logger)
+            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "updated", logger=app.logger)
         except Exception:
-            _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "error", logger=app.logger)
         return ("ok", 200)
 
+    # MESSAGES
+    msg = update.get("message") or update.get("edited_message")
+    if not msg or (msg.get("from") or {}).get("is_bot"):
+        return ("ok", 200)
+
+    chat_id = msg["chat"]["id"]
+    text = (msg.get("text") or "").strip()
+    if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
+        return ("ok", 200)
+
+    if not text:
+        _send_text(chat_id, "empty", logger=app.logger)
+        return ("ok", 200)
+
+    if text.startswith("/"):
+        cmd, *rest = text.split(maxsplit=1)
+        arg = rest[0] if rest else ""
+
+        if cmd in ("/start", "/help"):
+            _send_text(chat_id, LOC("en", "help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
+            return ("ok", 200)
+
+        if cmd == "/debug_known":
+            s = "; ".join([f"{d['path']} (exists={d['exists']}, loaded={d['loaded']}, error={d['error']})" for d in KNOWN_SOURCES])
+            _send_text(chat_id, f"known_sources: {s}", logger=app.logger)
+            return ("ok", 200)
+
+        if cmd in ("/quickscan", "/scan"):
+            if not arg:
+                _send_text(chat_id, LOC("en", "scan_usage"), logger=app.logger)
+            else:
+                try:
+                    text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
+                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
+                    keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
+                    keyboard = _compress_keyboard(keyboard)
+                    st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                    _store_addr_for_message(body, base_addr)
+                except Exception:
+                    _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+            return ("ok", 200)
+
+        _send_text(chat_id, LOC("en", "unknown"), logger=app.logger)
+        return ("ok", 200)
+
+    _send_text(chat_id, "Processing…", logger=app.logger)
+    try:
+        text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
+        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
+        keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
+        keyboard = _compress_keyboard(keyboard)
+        st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+        _store_addr_for_message(body, base_addr)
     except Exception:
-        return ("ok", 200)
-
-def detect_lang(user):
-    code = (user or {}).get("language_code", "en").lower()
-    return "ru" if code.startswith("ru") else "en"
+        _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+    return ("ok", 200)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
