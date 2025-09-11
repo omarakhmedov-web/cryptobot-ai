@@ -1,4 +1,5 @@
 import os
+import time
 import hashlib
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime
@@ -7,6 +8,7 @@ import re
 import socket
 import ssl
 import json
+import threading
 
 from flask import Flask, request, jsonify
 import requests
@@ -19,7 +21,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.7c-quickscan-mvp+details")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.7d-quickscan-mvp+details")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -29,6 +31,7 @@ ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS"
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
 DEBUG_MORE = os.environ.get("DEBUG_MORE", "0") == "1"
 TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
+KNOWN_AUTORELOAD_SEC = int(os.environ.get("KNOWN_AUTORELOAD_SEC", "300"))  # 0 = disabled
 
 LOC = locale_text
 
@@ -42,6 +45,7 @@ msg2addr = SafeCache(ttl=86400)
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
 NEWLINE_ESC_RE = re.compile(r'\\n')
 
+# Built-in fallbacks
 KNOWN_HOMEPAGES = {
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "circle.com",
     "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",
@@ -50,7 +54,12 @@ KNOWN_HOMEPAGES = {
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",
 }
 
-KNOWN_SOURCES = []
+# Known-domains sources (default + env), diagnostics and reload state
+KNOWN_SOURCES = []  # list of {"path","exists","loaded","error","mtime"}
+KNOWN_PATHS = []
+KNOWN_LAST_CHECK = 0
+KNOWN_MTIME = {}
+KNOWN_LOCK = threading.Lock()
 
 def _norm_domain(url: str):
     if not url:
@@ -65,43 +74,99 @@ def _norm_domain(url: str):
     except Exception:
         return None
 
-def _merge_known_from(path: str):
-    entry = {"path": path, "exists": False, "loaded": 0, "error": ""}
+def _merge_known_from(path: str, diag_only=False):
+    """Merge one file; if diag_only=True, don't modify KNOWN_HOMEPAGES (used for diagnostics)."""
+    entry = {"path": path, "exists": False, "loaded": 0, "error": "", "mtime": None}
     try:
         if not path:
             entry["error"] = "empty path"
-            KNOWN_SOURCES.append(entry)
-            return
+            return entry
         entry["exists"] = os.path.exists(path)
         if not entry["exists"]:
-            KNOWN_SOURCES.append(entry)
-            return
+            return entry
+        entry["mtime"] = os.path.getmtime(path)
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         merged = 0
-        for k, v in (data or {}).items():
-            addr = (k or "").lower().strip()
-            if not ADDR_RE.fullmatch(addr):
-                continue
-            dom = v[0] if isinstance(v, list) else v
-            dom = _norm_domain(dom)
-            if dom:
-                KNOWN_HOMEPAGES[addr] = dom
-                merged += 1
+        if not diag_only:
+            for k, v in (data or {}).items():
+                addr = (k or "").lower().strip()
+                if not ADDR_RE.fullmatch(addr):
+                    continue
+                dom = v[0] if isinstance(v, list) else v
+                dom = _norm_domain(dom)
+                if dom:
+                    KNOWN_HOMEPAGES[addr] = dom
+                    merged += 1
+        else:
+            # count only
+            for k, v in (data or {}).items():
+                addr = (k or "").lower().strip()
+                if ADDR_RE.fullmatch(addr):
+                    merged += 1
         entry["loaded"] = merged
-        KNOWN_SOURCES.append(entry)
+        return entry
     except Exception as e:
         entry["error"] = str(e)
-        KNOWN_SOURCES.append(entry)
+        return entry
 
-def _load_known_domains():
-    default_path = os.path.join(os.path.dirname(__file__), "known_domains.json")
-    _merge_known_from(default_path)
+def _collect_paths():
+    paths = [os.path.join(os.path.dirname(__file__), "known_domains.json")]
     env_path = os.getenv("KNOWN_DOMAINS_FILE") or os.getenv("KNOWN_DOMAINS_PATH")
-    if env_path:
-        _merge_known_from(env_path)
+    if env_path and env_path not in paths:
+        paths.append(env_path)
+    return paths
 
-_load_known_domains()
+def _load_known_domains(initial=False):
+    """Load/merge from all sources; safe under lock; updates diagnostics."""
+    global KNOWN_SOURCES, KNOWN_PATHS, KNOWN_MTIME, KNOWN_LAST_CHECK
+    with KNOWN_LOCK:
+        KNOWN_PATHS = _collect_paths()
+        KNOWN_SOURCES = []
+        if initial:
+            # keep built-ins; merge files
+            pass
+        # Merge
+        for p in KNOWN_PATHS:
+            e = _merge_known_from(p, diag_only=False)
+            KNOWN_SOURCES.append(e)
+            if e["exists"]:
+                KNOWN_MTIME[p] = e["mtime"]
+        KNOWN_LAST_CHECK = time.time()
+
+def _maybe_reload_known(force=False):
+    """Hot-reload on file change or on interval; safe under lock."""
+    global KNOWN_LAST_CHECK
+    now = time.time()
+    if not force and (KNOWN_AUTORELOAD_SEC <= 0 or now - KNOWN_LAST_CHECK < KNOWN_AUTORELOAD_SEC):
+        return
+    with KNOWN_LOCK:
+        KNOWN_LAST_CHECK = now
+        paths = _collect_paths()
+        # Check if any mtime changed
+        changed = False
+        for p in paths:
+            try:
+                m = os.path.getmtime(p)
+                if KNOWN_MTIME.get(p) != m:
+                    changed = True
+            except Exception:
+                # file removed?
+                if p in KNOWN_MTIME:
+                    changed = True
+        if not changed and set(paths) == set(KNOWN_PATHS):
+            return
+        # Clear diagnostics and reload
+        KNOWN_PATHS[:] = paths
+        KNOWN_SOURCES.clear()
+        for p in KNOWN_PATHS:
+            e = _merge_known_from(p, diag_only=False)
+            KNOWN_SOURCES.append(e)
+            if e["exists"]:
+                KNOWN_MTIME[p] = e["mtime"]
+
+# initial load
+_load_known_domains(initial=True)
 
 def _extract_base_addr_from_keyboard(kb: dict):
     if not kb or not isinstance(kb, dict):
@@ -213,8 +278,9 @@ def _wayback_first(domain: str):
         if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list) and data[1]:
             ts = data[1][0]
             try:
-                dt = datetime.strptime(ts, "%Y%m%d%H%M%S")
-                return dt.date().isoformat()
+                from datetime import datetime as dt
+                dtt = dt.strptime(ts, "%Y%m%d%H%M%S")
+                return dtt.date().isoformat()
             except Exception:
                 return ts
         return "—"
@@ -225,7 +291,7 @@ def _enrich_full(addr: str, text: str):
     txt = NEWLINE_ESC_RE.sub("\n", text or "")
     domain = _cg_homepage(addr)
     if not domain:
-        return txt  # nothing to add
+        return txt
     h, created, reg = _rdap(domain)
     exp, issuer = _ssl_info(domain)
     wb = _wayback_first(domain)
@@ -278,7 +344,8 @@ def _rewrite_keyboard_to_addr(addr, kb: dict, add_more_btn: bool = True):
             data = btn.get("callback_data")
             if data and data.startswith("qs2:") and addr:
                 _, _, query = data.partition("?")
-                params = parse_qs(query)
+                from urllib.parse import parse_qs as _pq
+                params = _pq(query)
                 window = params.get("window", ["h24"])[0]
                 btn = dict(btn)
                 btn["callback_data"] = f"qs:{addr}?window={window}"
@@ -294,25 +361,31 @@ def _send_text(chat_id, text, **kwargs):
 
 @app.route("/debug_known")
 def debug_known():
-    return jsonify({
-        "sources": KNOWN_SOURCES,
-        "sample": list(KNOWN_HOMEPAGES.items())[:10],
-        "total_after_merge": len(KNOWN_HOMEPAGES),
-    })
-
-@app.route("/debug")
-def debug():
+    # expose diagnostics without modifying state
+    diags = []
+    for p in _collect_paths():
+        e = _merge_known_from(p, diag_only=True)
+        diags.append(e)
     return jsonify({
         "version": APP_VERSION,
-        "bot": BOT_USERNAME,
-        "known_sources": KNOWN_SOURCES,
+        "auto_reload_sec": KNOWN_AUTORELOAD_SEC,
+        "paths": _collect_paths(),
+        "loaded_runtime": len(KNOWN_HOMEPAGES),
+        "diagnostics": diags,
     })
+
+@app.route("/reload_known", methods=["POST", "GET"])
+def reload_known():
+    _maybe_reload_known(force=True)
+    return jsonify({"ok": True, "loaded_runtime": len(KNOWN_HOMEPAGES), "sources": KNOWN_SOURCES})
 
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
         return ("forbidden", 403)
+
+    _maybe_reload_known(force=False)  # cheap check
 
     try:
         update = request.get_json(force=True, silent=False)
@@ -330,7 +403,6 @@ def webhook(secret):
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
 
-        # Expand compressed callback
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
             if orig:
@@ -339,7 +411,6 @@ def webhook(secret):
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "expired", logger=app.logger)
                 return ("ok", 200)
 
-        # Debounce
         cqid = cq.get("id")
         if cqid and seen_callbacks.get(cqid):
             tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "updated", logger=app.logger)
@@ -349,10 +420,8 @@ def webhook(secret):
 
         try:
             if data.startswith("more:"):
-                # 1) строго доверяем payload-у, если это 0x…
                 payload_addr = data.split(":", 1)[1].strip()
                 addr = payload_addr if ADDR_RE.fullmatch(payload_addr) else None
-                # 2) иначе fallback к ранее сохранённому/из текста
                 if not addr:
                     addr = (
                         (msg2addr.get(msg_id) if msg_id else None) or
@@ -366,7 +435,6 @@ def webhook(secret):
                     return ("ok", 200)
 
                 text, keyboard = quickscan_entrypoint(addr, lang="en", lean=False)
-                # всегда пытаемся обогатить, даже если что-то уже есть
                 text = _enrich_full(addr, text)
                 keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
 
@@ -416,8 +484,17 @@ def webhook(secret):
             return ("ok", 200)
 
         if cmd == "/debug_known":
-            s = "; ".join([f"{d['path']} (exists={d['exists']}, loaded={d['loaded']}, error={d['error']})" for d in KNOWN_SOURCES])
-            _send_text(chat_id, f"known_sources: {s}", logger=app.logger)
+            # full diagnostics
+            diags = []
+            for p in _collect_paths():
+                e = _merge_known_from(p, diag_only=True)
+                diags.append(e)
+            _send_text(chat_id, f"auto_reload={KNOWN_AUTORELOAD_SEC}s; paths={_collect_paths()}; diags={diags}; loaded={len(KNOWN_HOMEPAGES)}", logger=app.logger)
+            return ("ok", 200)
+
+        if cmd == "/reload_known":
+            _maybe_reload_known(force=True)
+            _send_text(chat_id, f"reloaded; loaded={len(KNOWN_HOMEPAGES)}", logger=app.logger)
             return ("ok", 200)
 
         if cmd in ("/quickscan", "/scan"):
