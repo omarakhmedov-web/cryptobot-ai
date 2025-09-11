@@ -1,5 +1,6 @@
 import os
 import hashlib
+from urllib.parse import parse_qs
 from datetime import datetime
 from functools import wraps
 
@@ -14,7 +15,7 @@ from quickscan import (
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.4-quickscan-mvp+cbfix")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.5-quickscan-mvp+compactkb")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -43,7 +44,7 @@ def require_webhook_secret(fn):
     return wrapper
 
 def _compress_keyboard(kb: dict) -> dict:
-    """Replace long callback_data with short tokens 'cb:<8hex>' to satisfy Telegram 64-byte limit."""
+    """Replace long callback_data with short tokens 'cb:<10hex>' to satisfy Telegram 64-byte limit."""
     if not kb or not isinstance(kb, dict):
         return kb
     ik = kb.get("inline_keyboard")
@@ -55,14 +56,35 @@ def _compress_keyboard(kb: dict) -> dict:
             if not data:
                 continue
             if len(data) <= 60 and data.startswith(("qs:", "qs2:")):
-                # Already short enough
                 continue
-            # make stable short token
-            h = hashlib.sha1(data.encode("utf-8")).hexdigest()[:10]  # 10 hex = 40 bits
+            h = hashlib.sha1(data.encode("utf-8")).hexdigest()[:10]
             token = f"cb:{h}"
             cb_cache.set(token, data)
             btn["callback_data"] = token
     return {"inline_keyboard": ik}
+
+def _rewrite_keyboard_to_addr(addr: str, kb: dict) -> dict:
+    """Convert any 'qs2:...?...window=...' buttons into compact 'qs:<addr>?window=...' (<=64B, stateless)."""
+    if not kb or not isinstance(kb, dict):
+        return kb
+    ik = kb.get("inline_keyboard")
+    if not ik:
+        return kb
+    out = []
+    for row in ik:
+        new_row = []
+        for btn in row:
+            data = btn.get("callback_data")
+            if data and data.startswith("qs2:"):
+                # extract window query param (default h24)
+                _, _, query = data.partition("?")
+                params = parse_qs(query)
+                window = params.get("window", ["h24"])[0]
+                btn = dict(btn)  # copy
+                btn["callback_data"] = f"qs:{addr}?window={window}"
+            new_row.append(btn)
+        out.append(new_row)
+    return {"inline_keyboard": out}
 
 @app.route("/healthz")
 def healthz():
@@ -105,6 +127,7 @@ def qs_preview():
         return jsonify({"ok": False, "error": "missing q"}), 400
     try:
         text_out, keyboard = quickscan_entrypoint(q, lang="en", lean=True)
+        keyboard = _rewrite_keyboard_to_addr(q, keyboard)
         keyboard = _compress_keyboard(keyboard)
         return jsonify({"ok": True, "text": text_out, "keyboard": keyboard})
     except Exception as e:
@@ -124,7 +147,7 @@ def webhook(secret):
         return ("ok", 200)
 
     try:
-        # CALLBACKS (Δ)
+        # CALLBACKS
         if "callback_query" in update:
             cq = update["callback_query"]
             chat_id = cq["message"]["chat"]["id"]
@@ -135,12 +158,12 @@ def webhook(secret):
                 app.logger.info(f"[UPD] callback ignored (not allowed) chat={chat_id}")
                 return ("ok", 200)
 
-            # Expand compressed data, if any
+            # Expand compressed token if any
             if data.startswith("cb:"):
                 orig = cb_cache.get(data)
                 if orig:
                     data = orig
-                    app.logger.info(f"[CB] expanded {data[:40]}…")
+                    app.logger.info(f"[CB] expanded {data[:48]}…")
                 else:
                     tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), LOC("en", "error"), logger=app.logger)
                     return ("ok", 200)
@@ -158,10 +181,19 @@ def webhook(secret):
                     chain, _, pair_addr = path.partition("/")
                     window = window or "h24"
                     text, keyboard = quickscan_pair_entrypoint(chain, pair_addr, window=window)
+                    # try to replace with compact keyboard: use base addr from pair_addr if present, else none
+                    base_addr = None
+                    if "-" in pair_addr:
+                        parts = pair_addr.split("-")
+                        # typical composite: pool-base-quote; use base as addr
+                        if len(parts) >= 2:
+                            base_addr = parts[1]
+                    keyboard = _rewrite_keyboard_to_addr(base_addr or pair_addr, keyboard)
                 elif data.startswith("qs:"):
                     addr, _, window = data.split(":", 1)[1].partition("?window=")
                     window = window or "h24"
                     text, keyboard = quickscan_entrypoint(addr, lang="en", window=window, lean=True)
+                    keyboard = _rewrite_keyboard_to_addr(addr, keyboard)
                 else:
                     return ("ok", 200)
 
@@ -226,6 +258,7 @@ def webhook(secret):
                 else:
                     try:
                         text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
+                        keyboard = _rewrite_keyboard_to_addr(arg, keyboard)
                         keyboard = _compress_keyboard(keyboard)
                         app.logger.info(f"[QS] cmd -> len={len(text_out)}")
                         tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
@@ -241,6 +274,7 @@ def webhook(secret):
         tg_send_message(TELEGRAM_TOKEN, chat_id, "Processing…", logger=app.logger)
         try:
             text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
+            keyboard = _rewrite_keyboard_to_addr(text, keyboard)
             keyboard = _compress_keyboard(keyboard)
             app.logger.info(f"[QS] implicit -> len={len(text_out)}")
             tg_send_message(TELEGRAM_TOKEN, chat_id, text_out, reply_markup=keyboard, logger=app.logger)
