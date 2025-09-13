@@ -40,6 +40,41 @@ KNOWN_HOMEPAGES = {
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",
 }
 
+# === Domain metadata cache (RDAP/SSL/Wayback) ===
+DOMAIN_META_CACHE = {}
+try:
+    DOMAIN_META_TTL = int(os.getenv("DOMAIN_META_TTL", "2592000"))  # 30 days
+except Exception:
+    DOMAIN_META_TTL = 2592000
+
+def _normalize_date_iso(s: str):
+    try:
+        return (s or "—")[:10] if len(s or "") >= 10 else (s or "—")
+    except Exception:
+        return s or "—"
+
+def _normalize_registrar(reg: str, handle: str, domain: str):
+    reg = reg or "—"
+    h = (handle or "").upper()
+    if "GOVERNMENT OF KINGDOM OF TONGA" in reg.upper() or "TONIC" in h or domain.endswith(".to"):
+        return "Tonic (.to)"
+    return reg
+
+def _domain_meta(domain: str):
+    import time
+    now = int(time.time())
+    ent = DOMAIN_META_CACHE.get(domain)
+    if ent and (now - ent.get("t",0) < DOMAIN_META_TTL):
+        return ent["h"], ent["created"], ent["reg"], ent["exp"], ent["issuer"], ent.get("wb","—")
+    h, created, reg = _rdap(domain)
+    exp, issuer = _ssl_info(domain)
+    wb = _wayback_first(domain)
+    created = _normalize_date_iso(created)
+    exp = _normalize_date_iso(exp)
+    reg = _normalize_registrar(reg, h, domain)
+    DOMAIN_META_CACHE[domain] = {"t": now, "h": h, "created": created, "reg": reg, "exp": exp, "issuer": issuer, "wb": wb}
+    return h, created, reg, exp, issuer, wb
+
 KNOWN_SOURCES = []
 KNOWN_PATHS = []
 KNOWN_LAST_CHECK = 0
@@ -291,9 +326,7 @@ def _enrich_full(addr: str, text: str):
     if not domain:
         domain = _symbol_homepage_hint(txt)
     if not domain: return txt
-    h, created, reg = _rdap(domain)
-    exp, issuer = _ssl_info(domain)
-    wb = _wayback_first(domain)
+    h, created, reg, exp, issuer, wb = _domain_meta(domain)
     block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}\nOpen: https://{domain} | WB: https://web.archive.org/web/*/{domain}"
     import re as _re
     if "Domain:" in txt:
