@@ -13,7 +13,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.5.4-report-header")
+APP_VERSION = os.environ.get("APP_VERSION", "0.5.5-diag-errors")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -34,6 +34,14 @@ except Exception:
     DOMAIN_META_TTL_NEG = 120
 
 LOC = locale_text
+
+
+def _admin_debug(chat_id, text):
+    try:
+        if ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID):
+            _send_text(chat_id, f"DEBUG: {text}", logger=app.logger)
+    except Exception:
+        pass
 app = Flask(__name__)
 
 # Caches
@@ -884,31 +892,60 @@ def webhook(secret):
         if cmd in ("/reload_meta","/clear_meta"):
             if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
                 _send_text(chat_id, "403: forbidden", logger=app.logger); return ("ok", 200)
+if cmd in ("/diag",):
+    if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
+        _send_text(chat_id, "403: forbidden", logger=app.logger); return ("ok", 200)
+    # Basic connectivity checks
+    lines = []
+    import time as _t
+    def check(url, name):
+        import requests
+        t0=_t.time()
+        try:
+            r=requests.get(url, timeout=6, headers={"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")})
+            dt=int((_t.time()-t0)*1000)
+            return f"{name}: {r.status_code} in {dt}ms"
+        except Exception as e:
+            dt=int((_t.time()-t0)*1000)
+            return f"{name}: ERROR {type(e).__name__} {e} in {dt}ms"
+    lines.append(check("https://rdap.org/domain/circle.com","RDAP"))
+    lines.append(check("https://web.archive.org/cdx/search/cdx?url=circle.com/*&output=json&limit=1","Wayback CDX"))
+    # QuickScan smoke (won't send message, just run function to see if it throws)
+    try:
+        _ = quickscan_entrypoint("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", lang="en", lean=True)
+        lines.append("QuickScan: OK")
+    except Exception as e:
+        lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
+    _send_text(chat_id, "Diag:\n" + "\n".join(lines), logger=app.logger)
+    return ("ok", 200)
+
             DOMAIN_META_CACHE.clear()
             _send_text(chat_id, "Meta cache cleared ✅", logger=app.logger); return ("ok", 200)
         if cmd in ("/quickscan","/scan"):
             if not arg: _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
             else:
                 try:
-                    text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
-                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
-                    keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
-                    keyboard = _compress_keyboard(keyboard)
-                    st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
-                    _store_addr_for_message(body, base_addr)
-                except Exception:
-                    _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+            text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
+            base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
+            keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
+            keyboard = _compress_keyboard(keyboard)
+            st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+            _store_addr_for_message(body, base_addr)
+        except Exception as e:
+            _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
+            _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
             return ("ok", 200)
         _send_text(chat_id, LOC("en","unknown"), logger=app.logger); return ("ok", 200)
 
     _send_text(chat_id, "Processing…", logger=app.logger)
     try:
-        text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
-        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
-        keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
-        keyboard = _compress_keyboard(keyboard)
-        st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
-        _store_addr_for_message(body, base_addr)
-    except Exception:
-        _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+            text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
+            base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
+            keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
+            keyboard = _compress_keyboard(keyboard)
+            st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+            _store_addr_for_message(body, base_addr)
+        except Exception as e:
+            _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
+            _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
     return ("ok", 200)
