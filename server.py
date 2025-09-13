@@ -9,7 +9,7 @@ from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.8a-quickscan-mvp+risk+")
+APP_VERSION = os.environ.get("APP_VERSION", "0.4.0-wl")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -410,6 +410,27 @@ def _parse_domain_meta(block):
     return d
 
 # === Risk thresholds (can be tuned via ENV) ===
+# === Whitelist for top projects/contracts ===
+WL_DOMAINS_DEFAULT = {
+    "circle.com","tether.to","makerdao.com","frax.finance","binance.com","gemini.com","paxos.com",
+    "lido.fi","curve.fi","synthetix.io","liquity.org","paypal.com","firstdigital.com"
+}
+WL_ADDRESSES_DEFAULT = {
+    "0xdac17f958d2ee523a2206206994597c13d831ec7",
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "0x6b175474e89094c44da98b954eedeac495271d0f",
+    "0x853d955acef822db058eb8505911ed77f175b99e",
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+}
+def _env_set(name):
+    try:
+        v = os.getenv(name, "")
+        return set([s.strip().lower() for s in v.split(",") if s.strip()])
+    except Exception:
+        return set()
+WL_DOMAINS = set([d.lower() for d in WL_DOMAINS_DEFAULT]) | _env_set("WL_DOMAINS")
+WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADDRESSES")
+
 try:
     RISK_LIQ_LOW = float(os.getenv("RISK_LIQ_LOW", "20000"))      # <$20k => +25
     RISK_LIQ_MED = float(os.getenv("RISK_LIQ_MED", "100000"))     # <$100k => +10
@@ -423,6 +444,18 @@ except Exception:
     RISK_THRESH_CAUTION = 30; RISK_THRESH_HIGH = 60
     RISK_POSITIVE_LIQ = 1_000_000.0; RISK_POSITIVE_AGE_Y = 2018
 
+
+def _is_whitelisted(addr: str, text: str):
+    try:
+        a = (addr or "").lower()
+        if a in WL_ADDRESSES:
+            return True, "address"
+        dom = _extract_domain_from_text(text) or ""
+        if dom.lower() in WL_DOMAINS:
+            return True, "domain"
+    except Exception:
+        pass
+    return False, None
 def _risk_verdict(addr, text):
     """
     Heuristic score 0..100 (higher = riskier). Uses only what we already have in text.
@@ -431,20 +464,26 @@ def _risk_verdict(addr, text):
     score = 0
     reasons = []
     positives = []
+    whitelisted, wl_type = _is_whitelisted(addr, text)
 
     # Dex metrics (liquidity and volume)
     liq = _parse_metric_from_dexline(text, "Liq")
     vol = _parse_metric_from_dexline(text, "Vol24h")
     if liq is not None:
-        if liq < RISK_LIQ_LOW: score += 25; reasons.append(f"Low liquidity (<${int(RISK_LIQ_LOW):,})")
-        elif liq < RISK_LIQ_MED: score += 10; reasons.append(f"Moderate liquidity (<${int(RISK_LIQ_MED):,})")
-        elif liq >= RISK_POSITIVE_LIQ: positives.append(f"High liquidity (≥${int(RISK_POSITIVE_LIQ):,})")
+        if liq < RISK_LIQ_LOW:
+            score += (8 if whitelisted else 25); reasons.append(f"Low liquidity (<${int(RISK_LIQ_LOW):,})")
+        elif liq < RISK_LIQ_MED:
+            score += (3 if whitelisted else 10); reasons.append(f"Moderate liquidity (<${int(RISK_LIQ_MED):,})")
+        elif liq >= RISK_POSITIVE_LIQ:
+            positives.append(f"High liquidity (≥${int(RISK_POSITIVE_LIQ):,})")
     if vol is not None and vol < RISK_VOL_LOW:
         score += 10; reasons.append("Very low 24h volume (<$5k)")
 
     # Blue-chip pair heuristic
     try:
         t_upper = (text or "").upper()
+        if whitelisted:
+            positives.append(f"Whitelisted by {wl_type}")
         if ("USDT" in t_upper and "USDC" in t_upper) or ("WBTC" in t_upper and "ETH" in t_upper):
             positives.append("Blue-chip pair context")
     except Exception:
@@ -453,18 +492,18 @@ def _risk_verdict(addr, text):
     # Proxy / Upgradable
     proxy = _parse_bool(text, "Proxy")
     if proxy is True:
-        score += 15; reasons.append("Upgradeable proxy (owner can change logic)")
+        score += (0 if whitelisted else 15); reasons.append("Upgradeable proxy (owner can change logic)")
 
     # Owner / roles
     roles = _parse_roles(text)
     if roles.get("owner", False):
-        score += 20; reasons.append("Owner privileges present")
+        score += (0 if whitelisted else 20); reasons.append("Owner privileges present")
     if roles.get("blacklister", False):
-        score += 10; reasons.append("Blacklisting capability")
+        score += (0 if whitelisted else 10); reasons.append("Blacklisting capability")
     if roles.get("pauser", False):
-        score += 10; reasons.append("Pausing capability")
+        score += (0 if whitelisted else 10); reasons.append("Pausing capability")
     if roles.get("minter", False) or roles.get("masterMinter", False):
-        score += 10; reasons.append("Minting capability")
+        score += (0 if whitelisted else 10); reasons.append("Minting capability")
 
     # Domain metadata (age & wayback)
     dom = _parse_domain_meta(text)
@@ -493,6 +532,18 @@ def _append_verdict_block(addr, text):
     if reasons:
         lines.append("Signals: " + "; ".join(reasons))
     return text + "\\n" + "\\n".join(lines)
+
+def _extract_domain_from_text(text: str):
+    try:
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if line.startswith("Domain:"):
+                dom = line.split(":",1)[1].strip()
+                if dom and (" " not in dom) and ("." in dom):
+                    return dom
+    except Exception:
+        return None
+    return None
 def _enrich_full(addr: str, text: str):
     txt = NEWLINE_ESC_RE.sub("\n", text or "")
     domain = _cg_homepage(addr)
