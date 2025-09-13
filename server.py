@@ -9,7 +9,7 @@ from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.8-quickscan-mvp+risk")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.8a-quickscan-mvp+risk+")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -409,6 +409,20 @@ def _parse_domain_meta(block):
         pass
     return d
 
+# === Risk thresholds (can be tuned via ENV) ===
+try:
+    RISK_LIQ_LOW = float(os.getenv("RISK_LIQ_LOW", "20000"))      # <$20k => +25
+    RISK_LIQ_MED = float(os.getenv("RISK_LIQ_MED", "100000"))     # <$100k => +10
+    RISK_VOL_LOW = float(os.getenv("RISK_VOL_LOW", "5000"))       # <  $5k => +10
+    RISK_THRESH_CAUTION = int(os.getenv("RISK_THRESH_CAUTION", "30"))
+    RISK_THRESH_HIGH    = int(os.getenv("RISK_THRESH_HIGH", "60"))
+    RISK_POSITIVE_LIQ   = float(os.getenv("RISK_POSITIVE_LIQ", "1000000"))  # >$1M => positive
+    RISK_POSITIVE_AGE_Y = int(os.getenv("RISK_POSITIVE_AGE_Y", "2018"))     # domain created <=2018 => positive
+except Exception:
+    RISK_LIQ_LOW = 20000.0; RISK_LIQ_MED = 100000.0; RISK_VOL_LOW = 5000.0
+    RISK_THRESH_CAUTION = 30; RISK_THRESH_HIGH = 60
+    RISK_POSITIVE_LIQ = 1_000_000.0; RISK_POSITIVE_AGE_Y = 2018
+
 def _risk_verdict(addr, text):
     """
     Heuristic score 0..100 (higher = riskier). Uses only what we already have in text.
@@ -416,15 +430,25 @@ def _risk_verdict(addr, text):
     """
     score = 0
     reasons = []
+    positives = []
 
     # Dex metrics (liquidity and volume)
     liq = _parse_metric_from_dexline(text, "Liq")
     vol = _parse_metric_from_dexline(text, "Vol24h")
     if liq is not None:
-        if liq < 20_000: score += 25; reasons.append("Low liquidity (<$20k)")
-        elif liq < 100_000: score += 10; reasons.append("Moderate liquidity (<$100k)")
-    if vol is not None and vol < 5_000:
+        if liq < RISK_LIQ_LOW: score += 25; reasons.append(f"Low liquidity (<${int(RISK_LIQ_LOW):,})")
+        elif liq < RISK_LIQ_MED: score += 10; reasons.append(f"Moderate liquidity (<${int(RISK_LIQ_MED):,})")
+        elif liq >= RISK_POSITIVE_LIQ: positives.append(f"High liquidity (≥${int(RISK_POSITIVE_LIQ):,})")
+    if vol is not None and vol < RISK_VOL_LOW:
         score += 10; reasons.append("Very low 24h volume (<$5k)")
+
+    # Blue-chip pair heuristic
+    try:
+        t_upper = (text or "").upper()
+        if ("USDT" in t_upper and "USDC" in t_upper) or ("WBTC" in t_upper and "ETH" in t_upper):
+            positives.append("Blue-chip pair context")
+    except Exception:
+        pass
 
     # Proxy / Upgradable
     proxy = _parse_bool(text, "Proxy")
@@ -446,20 +470,22 @@ def _risk_verdict(addr, text):
     dom = _parse_domain_meta(text)
     try:
         if dom.get("created") and dom["created"] != "—":
-            # Rough age test: year threshold
             y = int(dom["created"][:4])
             if y >= 2024: score += 15; reasons.append("Very new domain")
             elif y >= 2022: score += 5; reasons.append("Newish domain")
+            elif y <= RISK_POSITIVE_AGE_Y: positives.append(f"Established domain (≤{RISK_POSITIVE_AGE_Y})")
         if dom.get("wayback") in (None, "—"):
             score += 5; reasons.append("No Wayback snapshots")
+        else:
+            positives.append("Historical presence (Wayback found)")
     except Exception:
         pass
 
     # Clamp & label
-    if score >= 60: label = "HIGH RISK 🔴"
-    elif score >= 30: label = "CAUTION 🟡"
+    if score >= RISK_THRESH_HIGH: label = "HIGH RISK 🔴"
+    elif score >= RISK_THRESH_CAUTION: label = "CAUTION 🟡"
     else: label = "LOW RISK 🟢"
-    return int(min(100, score)), label, reasons
+    return int(min(100, score)), label, {"neg": reasons, "pos": positives}
 
 def _append_verdict_block(addr, text):
     score, label, reasons = _risk_verdict(addr, text)
