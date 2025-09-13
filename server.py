@@ -168,8 +168,10 @@ def _kb_strip_prefixes(kb, prefixes):
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
     ik = base.get("inline_keyboard") or []
+    # Add 'More details' only in the first message
     if want_more and addr:
         ik.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
+    # Row with Why/Report
     row = []
     if want_why and addr:
         row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"})
@@ -177,9 +179,16 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
     if row:
         ik.append(row)
-    if want_hp and addr and _parse_rpc_urls():
-        ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
+    # Separate row for On-chain, only if RPCs configured
+    if want_hp and addr:
+        try:
+            has_rpc = bool(_parse_rpc_urls())
+        except Exception:
+            has_rpc = False
+        if has_rpc:
+            ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
     return {"inline_keyboard": ik}
+
 
 def _extract_addrs_from_pair_payload(data: str):
     try:
