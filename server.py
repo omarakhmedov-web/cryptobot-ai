@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.6.2-rpc-indexed")
+APP_VERSION = os.environ.get("APP_VERSION", "0.6.3-onchain-metadata")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -819,21 +819,49 @@ def _dec_address32(hexstr: str):
     return "0x"+hx
 
 def _dec_string(ret: str):
-    # Very simplified ABI string decoder; handles typical OZ ERC20
+    # Robust ABI string decoder: supports dynamic string (offset/len) and bytes32 fallback
     try:
         if not ret or ret == "0x":
             return None
-        data = ret[2:]
-        if len(data) < 128:
-            return None
-        off = int(data[0:64], 16)
-        ln  = int(data[64:128], 16)
-        start = 2 + off*2
-        s = ret[start:start+ln*2]
-        bytes_obj = bytes.fromhex(s)
-        return bytes_obj.decode("utf-8", errors="replace")
+        data_hex = ret[2:]
+        data = bytes.fromhex(data_hex)
+        # Try dynamic string: [offset][...][len][bytes]
+        if len(data) >= 96:
+            off = int.from_bytes(data[0:32], 'big')
+            if 0 <= off <= len(data) - 32:
+                ln = int.from_bytes(data[off:off+32], 'big')
+                start = off + 32
+                end = start + ln
+                if 0 <= ln <= len(data) and end <= len(data):
+                    s = data[start:end]
+                    try:
+                        return s.decode('utf-8', errors='replace').rstrip('\x00')
+                    except Exception:
+                        pass
+        # Fallback: bytes32-as-string (some older tokens)
+        if len(data) >= 32:
+            s = data[0:32].decode('utf-8', errors='replace').split('\x00')[0]
+            s = s.strip()
+            if s:
+                return s
+        return None
     except Exception:
         return None
+
+def _format_supply(ts, decimals):
+    try:
+        if ts is None or decimals is None:
+            return None
+        if decimals < 0 or decimals > 36:
+            return None
+        human = ts / (10 ** decimals)
+        if human >= 1e9:
+            return f"{human:,.3f}"
+        else:
+            return f"{human:,.6g}"
+    except Exception:
+        return None
+
 
 def _call_str(addr, selector):
     try:
@@ -884,6 +912,7 @@ def _call_owner(addr):
 
 EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 EIP1967_BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
+EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103"
 
 def _onchain_inspect(addr: str):
     urls = _parse_rpc_urls()
@@ -911,10 +940,10 @@ def _onchain_inspect(addr: str):
             out.append(f"Token: {(name or '?')} ({symbol or '?'})")
         if dec is not None:
             out.append(f"Decimals: {dec}")
-        if ts is not None and dec is not None and dec <= 36:
-            human = ts / (10 ** dec) if dec is not None and dec >= 0 else None
-            if human is not None:
-                out.append(f"Total supply: ~{human:.6g}")
+        if ts is not None and dec is not None:
+            fmt = _format_supply(ts, dec)
+            if fmt is not None:
+                out.append(f"Total supply: ~{fmt}")
 
         # Ownership
         owner = _call_owner(addr)
@@ -932,6 +961,7 @@ def _onchain_inspect(addr: str):
         # Proxy detection by storage slots
         impl = _eth_getStorageAt(addr, EIP1967_IMPL_SLOT)
         beacon = _eth_getStorageAt(addr, EIP1967_BEACON_SLOT)
+        admin = _eth_getStorageAt(addr, EIP1967_ADMIN_SLOT)
         proxy = False
         if impl and impl != "0x" and impl != "0x" + ("0"*64):
             impl_addr = "0x" + impl[-40:]
@@ -944,6 +974,11 @@ def _onchain_inspect(addr: str):
             info["beacon"] = beacon_addr
             proxy = True
         info["proxy"] = proxy
+        if admin and admin != "0x" and admin != "0x" + ("0"*64):
+            admin_addr = "0x" + admin[-40:]
+            out.append(f"EIP-1967 admin: {admin_addr}")
+            info["admin"] = admin_addr
+            proxy = True or proxy
         if proxy:
             out.append("Proxy: ✅ (upgrade risk)")
 
