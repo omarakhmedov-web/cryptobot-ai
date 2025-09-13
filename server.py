@@ -1,11 +1,19 @@
-import os, re, json, ssl, socket, hashlib, time, threading, tempfile
-from urllib.parse import urlparse, parse_qs
+import os
+import re
+import ssl
+import json
+import time
+import socket
+import tempfile
+import hashlib
+import threading
 from datetime import datetime
-from functools import wraps
+from urllib.parse import urlparse, parse_qs
+
 import requests
 from flask import Flask, request, jsonify
 
-# Project-local utilities
+# Project-local utilities (as in your repo)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
@@ -13,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.5.5-diag-errors")
+APP_VERSION = os.environ.get("APP_VERSION", "0.5.6-stable")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -24,6 +32,7 @@ ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS"
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
 KNOWN_AUTORELOAD_SEC = int(os.environ.get("KNOWN_AUTORELOAD_SEC", "300"))
+SCANNER_URL = os.environ.get("SCANNER_URL", "").strip()
 
 # Domain meta TTLs
 try:
@@ -34,17 +43,11 @@ except Exception:
     DOMAIN_META_TTL_NEG = 120
 
 LOC = locale_text
-
-
-def _admin_debug(chat_id, text):
-    try:
-        if ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID):
-            _send_text(chat_id, f"DEBUG: {text}", logger=app.logger)
-    except Exception:
-        pass
 app = Flask(__name__)
 
+# ========================
 # Caches
+# ========================
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)          # general cache if needed
 seen_callbacks = SafeCache(ttl=300)               # dedupe callback ids
 cb_cache = SafeCache(ttl=600)                     # long callback payloads by hash
@@ -55,7 +58,9 @@ RISK_CACHE = {}                                   # addr -> {score,label,neg,pos
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
 NEWLINE_ESC_RE = re.compile(r'\n')
 
-# Known homepages (seed); can be extended at runtime
+# ========================
+# Known homepages (seed)
+# ========================
 KNOWN_HOMEPAGES = {
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "circle.com",
     "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",
@@ -72,7 +77,9 @@ KNOWN_LAST_CHECK = 0
 KNOWN_MTIME = {}
 KNOWN_LOCK = threading.Lock()
 
+# ========================
 # Whitelists
+# ========================
 WL_DOMAINS_DEFAULT = {
     "circle.com","tether.to","makerdao.com","frax.finance","binance.com","gemini.com","paxos.com",
     "lido.fi","curve.fi","synthetix.io","liquity.org","paypal.com","firstdigital.com"
@@ -84,7 +91,7 @@ WL_ADDRESSES_DEFAULT = {
     "0x853d955acef822db058eb8505911ed77f175b99e",
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
 }
-def _env_set(name):
+def _env_set(name: str):
     try:
         v = os.getenv(name, "")
         return set([s.strip().lower() for s in v.split(",") if s.strip()])
@@ -96,148 +103,51 @@ WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADD
 # ========================
 # Helpers
 # ========================
-def _norm_domain(url: str):
-    if not url: return None
-    try:
-        u = urlparse(url.strip())
-        host = u.netloc or u.path
-        host = (host or "").lower()
-        if host.startswith("www."): host = host[4:]
-        return host.strip("/")
-    except Exception:
-        return None
-
-def _collect_paths():
-    paths = [os.path.join(os.path.dirname(__file__), "known_domains.json")]
-    envp = os.getenv("KNOWN_DOMAINS_FILE") or os.getenv("KNOWN_DOMAINS_PATH")
-    if envp and envp not in paths: paths.append(envp)
-    return paths
-
-def _merge_known_from(path: str, diag_only=False):
-    entry = {"path": path, "exists": False, "loaded": 0, "error": "", "mtime": None}
-    try:
-        if not path:
-            entry["error"] = "empty path"; return entry
-        entry["exists"] = os.path.exists(path)
-        if not entry["exists"]: return entry
-        entry["mtime"] = os.path.getmtime(path)
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        merged = 0
-        if not diag_only:
-            for k,v in (data or {}).items():
-                addr = (k or "").lower().strip()
-                if not ADDR_RE.fullmatch(addr): continue
-                dom = v[0] if isinstance(v, list) else v
-                dom = _norm_domain(dom)
-                if dom:
-                    KNOWN_HOMEPAGES[addr] = dom; merged += 1
-        else:
-            for k in (data or {}):
-                addr = (k or "").lower().strip()
-                if ADDR_RE.fullmatch(addr): merged += 1
-        entry["loaded"] = merged
-        return entry
-    except Exception as e:
-        entry["error"] = str(e); return entry
-
-def _load_known_domains():
-    global KNOWN_SOURCES, KNOWN_PATHS, KNOWN_MTIME, KNOWN_LAST_CHECK
-    with KNOWN_LOCK:
-        KNOWN_PATHS = _collect_paths()
-        KNOWN_SOURCES = []
-        for p in KNOWN_PATHS:
-            e = _merge_known_from(p, diag_only=False)
-            KNOWN_SOURCES.append(e)
-            if e["exists"]: KNOWN_MTIME[p] = e["mtime"]
-        KNOWN_LAST_CHECK = time.time()
-
-def _maybe_reload_known(force=False):
-    global KNOWN_LAST_CHECK
-    now = time.time()
-    if not force and (KNOWN_AUTORELOAD_SEC <= 0 or now - KNOWN_LAST_CHECK < KNOWN_AUTORELOAD_SEC):
-        return
-    with KNOWN_LOCK:
-        KNOWN_LAST_CHECK = now
-        paths = _collect_paths()
-        changed = False
-        for p in paths:
-            try:
-                m = os.path.getmtime(p)
-                if KNOWN_MTIME.get(p) != m: changed = True
-            except Exception:
-                if p in KNOWN_MTIME: changed = True
-        if not changed and set(paths) == set(KNOWN_PATHS): return
-        KNOWN_PATHS[:] = paths
-        KNOWN_SOURCES.clear()
-        for p in KNOWN_PATHS:
-            e = _merge_known_from(p, diag_only=False)
-            KNOWN_SOURCES.append(e)
-            if e["exists"]: KNOWN_MTIME[p] = e["mtime"]
-
-_load_known_domains()
-
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
-def _tg_send_document(token: str, chat_id: int, filepath: str, caption: str = None):
+def _admin_debug(chat_id, text):
     try:
-        url = f"https://api.telegram.org/bot{token}/sendDocument"
-        with open(filepath, "rb") as f:
-            files = {"document": (os.path.basename(filepath), f, "text/html")}
-            data = {"chat_id": chat_id}
-            if caption:
-                data["caption"] = caption[:1000]
-            r = requests.post(url, data=data, files=files, timeout=20)
-        try:
-            return True, r.json()
-        except Exception:
-            return False, {"ok": False, "status": r.status_code}
-    except Exception as e:
-        return False, {"ok": False, "error": str(e)}
+        if ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID):
+            _send_text(chat_id, f"DEBUG: {text}", logger=app.logger)
+    except Exception:
+        pass
 
 def require_webhook_secret(fn):
-    @wraps(fn)
     def wrapper(*args, **kwargs):
         if WEBHOOK_HEADER_SECRET:
             header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
             if header != WEBHOOK_HEADER_SECRET:
                 return ("forbidden", 403)
         return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
     return wrapper
 
 def _compress_keyboard(kb: dict):
-    if not kb or not isinstance(kb, dict): return kb
+    if not kb or not isinstance(kb, dict):
+        return kb
     ik = kb.get("inline_keyboard")
-    if not ik: return kb
+    if not ik:
+        return kb
     for row in ik:
         for btn in row:
             data = btn.get("callback_data")
-            if not data: continue
-            if len(data) <= 60 and data.startswith(("qs:","qs2:","more:","less:","why:","rep:","hp:","lp:","mon:")): continue
+            if not data:
+                continue
+            if len(data) <= 60 and data.startswith(("qs:","qs2:","more:","less:","why:","rep:","hp:","lp:","mon:")):
+                continue
             h = hashlib.sha1(data.encode("utf-8")).hexdigest()[:10]
-            token = f"cb:{h}"; cb_cache.set(token, data); btn["callback_data"] = token
+            token = f"cb:{h}"
+            cb_cache.set(token, data)
+            btn["callback_data"] = token
     return {"inline_keyboard": ik}
 
-def _ensure_action_buttons(addr, kb: dict, add_more=False, add_why=True, add_report=True):
-    ik = (kb or {}).get("inline_keyboard") or []
-    new_rows = []
-    if add_more and addr:
-        new_rows.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
-    row = []
-    if add_why and addr: row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"})
-    if add_report and addr: row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
-    if row: new_rows.append(row)
-    if new_rows: ik.extend(new_rows)
-    return {"inline_keyboard": ik} if ik else None
-
-
 def _kb_clone(kb):
-    if not kb or not isinstance(kb, dict): return {"inline_keyboard": []}
+    if not kb or not isinstance(kb, dict):
+        return {"inline_keyboard": []}
     ik = kb.get("inline_keyboard") or []
-    # deep-ish copy
-    return {"inline_keyboard": [ [dict(btn) for btn in row] for row in ik ]}
+    return {"inline_keyboard": [[dict(btn) for btn in row] for row in ik]}
 
 def _kb_strip_prefixes(kb, prefixes):
     base = _kb_clone(kb)
@@ -254,20 +164,9 @@ def _kb_strip_prefixes(kb, prefixes):
             out.append(new_row)
     return {"inline_keyboard": out}
 
-def _kb_has_prefix(kb, prefix):
-    if not kb or not isinstance(kb, dict): return False
-    for row in kb.get("inline_keyboard") or []:
-        for btn in row:
-            data = (btn.get("callback_data") or "")
-            if data.startswith(prefix):
-                return True
-    return False
-
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True):
-    # 1) remove duplicates (strip existing more/why/rep)
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:"))
     ik = base.get("inline_keyboard") or []
-    # 2) append requested buttons exactly once
     if want_more and addr:
         ik.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
     row = []
@@ -278,6 +177,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
     if row:
         ik.append(row)
     return {"inline_keyboard": ik}
+
 def _extract_addrs_from_pair_payload(data: str):
     try:
         path, _, _ = data.split(":", 1)[1].partition("?")
@@ -303,42 +203,149 @@ def _extract_base_addr_from_keyboard(kb: dict):
             if data.startswith("qs2:"):
                 addrs = _extract_addrs_from_pair_payload(data)
                 choice = _pick_addr(addrs)
-                if choice: return choice
+                if choice:
+                    return choice
             if data.startswith("qs:"):
                 payload = data.split(":", 1)[1]
                 addr = payload.split("?", 1)[0]
-                if ADDR_RE.fullmatch(addr): return addr.lower()
+                if ADDR_RE.fullmatch(addr):
+                    return addr.lower()
     return None
 
 def _extract_addr_from_text(s: str):
-    if not s: return None
+    if not s:
+        return None
     m = list(ADDR_RE.finditer(s))
     return m[-1].group(0).lower() if m else None
 
 def _store_addr_for_message(result_obj, addr: str):
     try:
-        if not result_obj or not isinstance(result_obj, dict) or not addr: return
+        if not result_obj or not isinstance(result_obj, dict) or not addr:
+            return
         if result_obj.get("ok") and isinstance(result_obj.get("result"), dict):
             mid = str(result_obj["result"].get("message_id"))
-            if mid and ADDR_RE.fullmatch(addr): msg2addr.set(mid, addr)
-    except Exception: pass
+            if mid and ADDR_RE.fullmatch(addr):
+                msg2addr.set(mid, addr)
+    except Exception:
+        pass
+
+# ========================
+# Known domains file auto-reload
+# ========================
+def _norm_domain(url: str):
+    if not url:
+        return None
+    try:
+        u = urlparse(url.strip())
+        host = u.netloc or u.path
+        host = (host or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host.strip("/")
+    except Exception:
+        return None
+
+def _collect_paths():
+    paths = [os.path.join(os.path.dirname(__file__), "known_domains.json")]
+    envp = os.getenv("KNOWN_DOMAINS_FILE") or os.getenv("KNOWN_DOMAINS_PATH")
+    if envp and envp not in paths:
+        paths.append(envp)
+    return paths
+
+def _merge_known_from(path: str, diag_only=False):
+    entry = {"path": path, "exists": False, "loaded": 0, "error": "", "mtime": None}
+    try:
+        if not path:
+            entry["error"] = "empty path"
+            return entry
+        entry["exists"] = os.path.exists(path)
+        if not entry["exists"]:
+            return entry
+        entry["mtime"] = os.path.getmtime(path)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        merged = 0
+        if not diag_only:
+            for k, v in (data or {}).items():
+                addr = (k or "").lower().strip()
+                if not ADDR_RE.fullmatch(addr):
+                    continue
+                dom = v[0] if isinstance(v, list) else v
+                dom = _norm_domain(dom)
+                if dom:
+                    KNOWN_HOMEPAGES[addr] = dom
+                    merged += 1
+        else:
+            for k in (data or {}):
+                addr = (k or "").lower().strip()
+                if ADDR_RE.fullmatch(addr):
+                    merged += 1
+        entry["loaded"] = merged
+        return entry
+    except Exception as e:
+        entry["error"] = str(e)
+        return entry
+
+def _load_known_domains():
+    global KNOWN_SOURCES, KNOWN_PATHS, KNOWN_MTIME, KNOWN_LAST_CHECK
+    with KNOWN_LOCK:
+        KNOWN_PATHS = _collect_paths()
+        KNOWN_SOURCES = []
+        for p in KNOWN_PATHS:
+            e = _merge_known_from(p, diag_only=False)
+            KNOWN_SOURCES.append(e)
+            if e["exists"]:
+                KNOWN_MTIME[p] = e["mtime"]
+        KNOWN_LAST_CHECK = time.time()
+
+def _maybe_reload_known(force=False):
+    global KNOWN_LAST_CHECK
+    now = time.time()
+    if not force and (KNOWN_AUTORELOAD_SEC <= 0 or now - KNOWN_LAST_CHECK < KNOWN_AUTORELOAD_SEC):
+        return
+    with KNOWN_LOCK:
+        KNOWN_LAST_CHECK = now
+        paths = _collect_paths()
+        changed = False
+        for p in paths:
+            try:
+                m = os.path.getmtime(p)
+                if KNOWN_MTIME.get(p) != m:
+                    changed = True
+            except Exception:
+                if p in KNOWN_MTIME:
+                    changed = True
+        if not changed and set(paths) == set(KNOWN_PATHS):
+            return
+        KNOWN_PATHS[:] = paths
+        KNOWN_SOURCES.clear()
+        for p in KNOWN_PATHS:
+            e = _merge_known_from(p, diag_only=False)
+            KNOWN_SOURCES.append(e)
+            if e["exists"]:
+                KNOWN_MTIME[p] = e["mtime"]
+
+_load_known_domains()
 
 # ========================
 # Domain meta (RDAP/SSL/WB)
 # ========================
 def _normalize_date_iso(s: str):
     try:
-        if not s or s == "—": return "—"
+        if not s or s == "—":
+            return "—"
         s = s.strip()
         m = re.match(r"^(\d{4}-\d{2}-\d{2})", s)
-        if m: return m.group(1)
+        if m:
+            return m.group(1)
         try:
             dt = datetime.strptime(s, "%b %d %H:%M:%S %Y %Z")
             return dt.strftime("%Y-%m-%d")
         except Exception:
             pass
         m = re.match(r"^(\d{4})(\d{2})(\d{2})", s)
-        if m: return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        if m:
+            return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
         return s
     except Exception:
         return s or "—"
@@ -353,22 +360,27 @@ def _normalize_registrar(reg: str, handle: str, domain: str):
 def _rdap(domain: str):
     try:
         r = requests.get(f"https://rdap.org/domain/{domain}", timeout=HTTP_TIMEOUT, headers={"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")})
-        if r.status_code != 200: return ("—","—","—")
+        if r.status_code != 200:
+            return ("—", "—", "—")
         j = r.json()
         handle = j.get("handle") or "—"
         created = "—"
         for ev in j.get("events", []):
             if ev.get("eventAction") == "registration":
-                created = ev.get("eventDate","—"); break
+                created = ev.get("eventDate", "—")
+                break
         registrar = "—"
         for ent in j.get("entities", []):
             if (ent.get("roles") or []) and "registrar" in ent["roles"]:
                 v = ent.get("vcardArray")
-                if isinstance(v, list) and len(v)==2:
+                if isinstance(v, list) and len(v) == 2:
                     for item in v[1]:
-                        if item and item[0]=="fn": registrar = item[3]; break
+                        if item and item[0] == "fn":
+                            registrar = item[3]
+                            break
         return (handle, created, registrar)
-    except Exception: return ("—","—","—")
+    except Exception:
+        return ("—", "—", "—")
 
 def _ssl_info(domain: str):
     try:
@@ -376,19 +388,22 @@ def _ssl_info(domain: str):
         with socket.create_connection((domain, 443), timeout=HTTP_TIMEOUT) as sock:
             with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
                 cert = ssock.getpeercert()
-        exp = cert.get("notAfter","—")
-        issuer = cert.get("issuer",[])
+        exp = cert.get("notAfter", "—")
+        issuer = cert.get("issuer", [])
         cn = "—"
         for tup in issuer:
-            for k,v in tup:
-                if k.lower()=="commonName".lower(): cn=v; break
+            for k, v in tup:
+                if k.lower() == "commonName".lower():
+                    cn = v
+                    break
         return (_normalize_date_iso(exp), cn)
-    except Exception: return ("—","—")
+    except Exception:
+        return ("—", "—")
 
 def _wayback_available(domain: str):
     try:
         headers = {"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")}
-        for scheme in ("http","https"):
+        for scheme in ("http", "https"):
             url = "https://archive.org/wayback/available"
             params = {"url": f"{scheme}://{domain}/", "timestamp": "19960101"}
             r = requests.get(url, params=params, timeout=6, headers=headers)
@@ -406,7 +421,7 @@ def _wayback_available(domain: str):
 def _wayback_cdx(domain: str, require_200: bool):
     headers = {"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")}
     for host in (domain, f"www.{domain}"):
-        for scheme in ("http","https"):
+        for scheme in ("http", "https"):
             for path in (f"{scheme}://{host}/*", f"{scheme}://{host}/"):
                 try:
                     params = {
@@ -435,9 +450,11 @@ def _wayback_cdx(domain: str, require_200: bool):
 def _wayback_first(domain: str):
     try:
         d = _wayback_cdx(domain, require_200=True)
-        if d: return d
+        if d:
+            return d
         d = _wayback_cdx(domain, require_200=False)
-        if d: return d
+        if d:
+            return d
         d = _wayback_available(domain)
         return d or "—"
     except Exception:
@@ -448,8 +465,8 @@ def _domain_meta(domain: str):
     ent = DOMAIN_META_CACHE.get(domain)
     if ent:
         ttl = DOMAIN_META_TTL_NEG if ent.get("wb") in (None, "—") else DOMAIN_META_TTL
-        if now - ent.get("t",0) < ttl:
-            return ent["h"], ent["created"], ent["reg"], ent["exp"], ent["issuer"], ent.get("wb","—")
+        if now - ent.get("t", 0) < ttl:
+            return ent["h"], ent["created"], ent["reg"], ent["exp"], ent["issuer"], ent.get("wb", "—")
     h, created, reg = _rdap(domain)
     exp, issuer = _ssl_info(domain)
     wb = _wayback_first(domain)
@@ -460,16 +477,19 @@ def _domain_meta(domain: str):
 
 def _cg_homepage(addr: str):
     addr_l = (addr or "").lower()
-    if addr_l in KNOWN_HOMEPAGES: return KNOWN_HOMEPAGES[addr_l]
+    if addr_l in KNOWN_HOMEPAGES:
+        return KNOWN_HOMEPAGES[addr_l]
     try:
         url = f"https://api.coingecko.com/api/v3/coins/ethereum/contract/{addr_l}"
         r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")})
-        if r.status_code != 200: return None
+        if r.status_code != 200:
+            return None
         data = r.json()
         hp = (data.get("links") or {}).get("homepage") or []
         for u in hp:
             d = _norm_domain(u)
-            if d: return d
+            if d:
+                return d
     except Exception:
         return None
     return None
@@ -495,7 +515,8 @@ def _symbol_homepage_hint(text: str):
         ("USDE", "ether.fi"),
     ]
     for sym, dom in hints:
-        if sym in t: return dom
+        if sym in t:
+            return dom
     return None
 
 def _extract_domain_from_text(text: str):
@@ -503,7 +524,7 @@ def _extract_domain_from_text(text: str):
         for line in (text or "").splitlines():
             line = line.strip()
             if line.startswith("Domain:"):
-                dom = line.split(":",1)[1].strip()
+                dom = line.split(":", 1)[1].strip()
                 if dom and (" " not in dom) and ("." in dom):
                     return dom
     except Exception:
@@ -530,11 +551,12 @@ def _parse_float_km(s):
     try:
         s = (s or "").strip().upper().replace("$","")
         m = re.match(r'^([0-9]+(?:\.[0-9]+)?)\s*([KMB])?$', s)
-        if not m: return None
+        if not m:
+            return None
         num = float(m.group(1))
         suf = m.group(2) or ""
         mult = {"K":1e3, "M":1e6, "B":1e9}.get(suf, 1.0)
-        return num*mult
+        return num * mult
     except Exception:
         return None
 
@@ -549,7 +571,8 @@ def _parse_metric_from_dexline(text, key):
 def _parse_bool(text, key):
     try:
         m = re.search(rf'{re.escape(key)}:\s*(✅|✔️|Yes|True|No|❌|—)', text, re.IGNORECASE)
-        if not m: return None
+        if not m:
+            return None
         val = m.group(1)
         return val in ("✅","✔️","Yes","True")
     except Exception:
@@ -559,23 +582,24 @@ def _parse_roles(text):
     roles = {}
     try:
         m = re.search(r'Roles:\s*([^\n]+)', text)
-        if not m: return roles
+        if not m:
+            return roles
         chunk = m.group(1)
         for pair in re.split(r'\s*\|\s*', chunk):
-            kv = pair.split(":",1)
-            if len(kv)==2:
+            kv = pair.split(":", 1)
+            if len(kv) == 2:
                 roles[kv[0].strip()] = ("✅" in kv[1]) or ("✔" in kv[1]) or ("Yes" in kv[1])
         return roles
     except Exception:
         return roles
 
 def _parse_domain_meta(block):
-    d={"created":None,"registrar":None,"ssl_exp":None,"wayback":None}
+    d = {"created": None, "registrar": None, "ssl_exp": None, "wayback": None}
     try:
-        m = re.search(r'Created:\s*([0-9\-TZ: ]+)', block); d["created"]=m.group(1) if m else None
-        m = re.search(r'Registrar:\s*([^\n]+)', block); d["registrar"]=m.group(1).strip() if m else None
-        m = re.search(r'Expires:\s*([0-9\-TZ: ]+)', block); d["ssl_exp"]=m.group(1) if m else None
-        m = re.search(r'Wayback:\s*first\s+([0-9\-—]+)', block); d["wayback"]=m.group(1)
+        m = re.search(r'Created:\s*([0-9\-TZ: ]+)', block); d["created"] = m.group(1) if m else None
+        m = re.search(r'Registrar:\s*([^\n]+)', block); d["registrar"] = m.group(1).strip() if m else None
+        m = re.search(r'Expires:\s*([0-9\-TZ: ]+)', block); d["ssl_exp"] = m.group(1) if m else None
+        m = re.search(r'Wayback:\s*first\s+([0-9\-—]+)', block); d["wayback"] = m.group(1) if m else None
     except Exception:
         pass
     return d
@@ -636,28 +660,38 @@ def _risk_verdict(addr, text):
     try:
         if dom.get("created") and dom["created"] != "—":
             y = int(dom["created"][:4])
-            if y >= 2024: w=15; score += w; neg.append("Very new domain"); weights_neg.append(w)
-            elif y >= 2022: w=5; score += w; neg.append("Newish domain"); weights_neg.append(w)
-            elif y <= RISK_POSITIVE_AGE_Y: w=10; pos.append(f"Established domain (≤{RISK_POSITIVE_AGE_Y})"); weights_pos.append(w)
+            if y >= 2024:
+                w = 15; score += w; neg.append("Very new domain"); weights_neg.append(w)
+            elif y >= 2022:
+                w = 5; score += w; neg.append("Newish domain"); weights_neg.append(w)
+            elif y <= RISK_POSITIVE_AGE_Y:
+                w = 10; pos.append(f"Established domain (≤{RISK_POSITIVE_AGE_Y})"); weights_pos.append(w)
         if dom.get("wayback") in (None, "—"):
             if not whitelisted:
-                w=5; score += w; neg.append("No Wayback snapshots"); weights_neg.append(w)
+                w = 5; score += w; neg.append("No Wayback snapshots"); weights_neg.append(w)
             else:
-                w=8; pos.append("Trusted (no WB penalty)"); weights_pos.append(w)
+                w = 8; pos.append("Trusted (no WB penalty)"); weights_pos.append(w)
         else:
-            w=8; pos.append("Historical presence (Wayback found)"); weights_pos.append(w)
+            w = 8; pos.append("Historical presence (Wayback found)"); weights_pos.append(w)
     except Exception:
         pass
 
-    if score >= RISK_THRESH_HIGH: label = "HIGH RISK 🔴"
-    elif score >= RISK_THRESH_CAUTION: label = "CAUTION 🟡"
-    else: label = "LOW RISK 🟢"
+    if score >= RISK_THRESH_HIGH:
+        label = "HIGH RISK 🔴"
+    elif score >= RISK_THRESH_CAUTION:
+        label = "CAUTION 🟡"
+    else:
+        label = "LOW RISK 🟢"
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
 
 def _append_verdict_block(addr, text):
     score, label, rs = _risk_verdict(addr, text)
     try:
-        RISK_CACHE[(addr or "").lower()] = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
+        RISK_CACHE[(addr or "").lower()] = {
+            "score": score, "label": label,
+            "neg": rs.get("neg", []), "pos": rs.get("pos", []),
+            "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])
+        }
     except Exception:
         pass
     lines = [f"Trust verdict: {label} (score {score}/100)"]
@@ -674,15 +708,29 @@ def _enrich_full(addr: str, text: str):
         return txt
     h, created, reg, exp, issuer, wb = _domain_meta(domain)
     block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}"
-    import re as _re
     if "Domain:" in txt:
-        txt = _re.sub(r"Domain:.*", f"Domain: {domain}", txt)
-        txt = _re.sub(r"WHOIS/RDAP:.*", f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}", txt)
-        txt = _re.sub(r"SSL:.*", f"SSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}", txt)
-        txt = _re.sub(r"Wayback:.*", f"Wayback: first {wb}", txt)
+        txt = re.sub(r"Domain:.*", f"Domain: {domain}", txt)
+        txt = re.sub(r"WHOIS/RDAP:.*", f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}", txt)
+        txt = re.sub(r"SSL:.*", f"SSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}", txt)
+        txt = re.sub(r"Wayback:.*", f"Wayback: first {wb}", txt)
         return txt
     return txt + "\n" + block
 
+def _tg_send_document(token: str, chat_id: int, filepath: str, caption: str = None):
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendDocument"
+        with open(filepath, "rb") as f:
+            files = {"document": (os.path.basename(filepath), f, "text/html")}
+            data = {"chat_id": chat_id}
+            if caption:
+                data["caption"] = caption[:1000]
+            r = requests.post(url, data=data, files=files, timeout=20)
+        try:
+            return True, r.json()
+        except Exception:
+            return False, {"ok": False, "status": r.status_code}
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
 
 def _render_report(addr: str, text: str):
     info = RISK_CACHE.get((addr or "").lower()) or {}
@@ -694,32 +742,21 @@ def _render_report(addr: str, text: str):
         out = []
         for i, t in enumerate(items):
             w = weights[i] if i < len(weights) else None
-            out.append(f"- {t}" + (f" (+{w})" if isinstance(w, (int,float)) else ""))
+            out.append(f"- {t}" + (f" (+{w})" if isinstance(w, (int, float)) else ""))
         return "\n".join(out) if out else "—"
-    # Subject parsing
     dom = _extract_domain_from_text(text) or "—"
-    pair = None; chain = None; dex = None
-    try:
-        # Example: "USDC/USDT on curve (ethereum)"
-        m = re.search(r"^\s*([A-Za-z0-9_\-\.\/]+)\s+on\s+([A-Za-z0-9_\-\.]+)\s*\(([^)]+)\)", text, re.IGNORECASE | re.MULTILINE)
-        if m:
-            pair, dex, chain = m.group(1), m.group(2), m.group(3)
-        else:
-            # Fallback: just chain in parentheses on first lines
-            m2 = re.search(r"\((ethereum|bsc|polygon|base|arbitrum|optimism|avalanche|solana|tron)[^)]*\)", text, re.IGNORECASE)
-            if m2: chain = m2.group(1)
-    except Exception:
-        pass
-    # Timestamp and optional scanner URL
+    # Try to parse pair/dex/chain from the first lines
+    pair = None; dex = None; chain = None
+    m = re.search(r"^\s*([A-Za-z0-9_\-\.\/]+)\s+on\s+([A-Za-z0-9_\-\.]+)\s*\(([^)]+)\)", text, re.IGNORECASE | re.MULTILINE)
+    if m:
+        pair, dex, chain = m.group(1), m.group(2), m.group(3)
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    scanner_url = os.getenv("SCANNER_URL", "").strip()
-    # Build HTML
     html = f"""<!doctype html>
 <html><head><meta charset='utf-8'><title>Metridex Report — {addr}</title>
 <style>body{{font-family:Arial,Helvetica,sans-serif;max-width:900px;margin:20px auto;}}h1,h2{{margin:0.5em 0}}.box{{border:1px solid #ddd;padding:12px;border-radius:8px;margin:12px 0;white-space:pre-wrap}}</style>
 </head><body>
 <h1>Metridex QuickScan — Report</h1>
-<div class="box"><b>Generated:</b> {ts}<br><b>Address:</b> {addr}<br>""" + (f"<b>Pair:</b> {pair} " if pair else "") + (f"<b>on:</b> {dex} " if dex else "") + (f"<b>Chain:</b> {chain}<br>" if chain else "<br>") + f"""<b>Domain:</b> {dom}""" + (f"<br><b>Scanner:</b> {scanner_url}" if scanner_url else "") + """</div>
+<div class="box"><b>Generated:</b> {ts}<br><b>Address:</b> {addr}<br>""" + (f"<b>Pair:</b> {pair} " if pair else "") + (f"<b>on:</b> {dex} " if dex else "") + (f"<b>Chain:</b> {chain}<br>" if chain else "<br>") + f"""<b>Domain:</b> {dom}""" + (f"<br><b>Scanner:</b> {SCANNER_URL}" if SCANNER_URL else "") + """</div>
 <div class="box"><h2>Summary</h2><pre>""" + text + """</pre></div>
 <div class="box"><h2>Risk verdict</h2><p><b>""" + str(info.get('label','?')) + " (" + str(info.get('score','?')) + """/100)</b></p>
 <h3>Signals</h3><pre>""" + lines(neg, wn) + """</pre><h3>Positives</h3><pre>""" + lines(pos, wp) + """</pre></div>
@@ -729,8 +766,7 @@ def _render_report(addr: str, text: str):
         tsf = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         safe_addr = (addr or "unknown")[:10]
         filename = f"metridex_report_{safe_addr}_{tsf}.html"
-        import tempfile, os as _os
-        path = _os.path.join(tempfile.gettempdir(), filename)
+        path = os.path.join(tempfile.gettempdir(), filename)
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
         return path, html
@@ -744,7 +780,7 @@ def _render_report(addr: str, text: str):
 def healthz():
     return jsonify({"ok": True, "version": APP_VERSION})
 
-@app.route("/reload_meta", methods=["POST","GET"])
+@app.route("/reload_meta", methods=["POST", "GET"])
 def reload_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True})
@@ -763,14 +799,17 @@ def _answer_why_quickly(cq, addr_hint=None):
             info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
         pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
         pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
-        pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int,float)) else 0, reverse=True)
-        pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int,float)) else 0, reverse=True)
-        neg_s = "; ".join([f"{t} (+{w})" for t,w in pairs_neg[:2] if t]) if pairs_neg else ""
-        pos_s = "; ".join([f"{t} (+{w})" for t,w in pairs_pos[:2] if t]) if pairs_pos else ""
+        pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
+        pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
+        neg_s = "; ".join([f"{t} (+{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
+        pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
         body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
-        if neg_s: body += f" — ⚠️ {neg_s}"
-        if pos_s: body += f" — ✅ {pos_s}"
-        if len(body) > 190: body = body[:187] + "…"
+        if neg_s:
+            body += f" — ⚠️ {neg_s}"
+        if pos_s:
+            body += f" — ✅ {pos_s}"
+        if len(body) > 190:
+            body = body[:187] + "…"
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
@@ -778,31 +817,39 @@ def _answer_why_quickly(cq, addr_hint=None):
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
-    if WEBHOOK_SECRET and secret != WEBHOOK_SECRET: return ("forbidden", 403)
+    if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
+        return ("forbidden", 403)
     _maybe_reload_known(force=False)
     try:
         update = request.get_json(force=True, silent=False)
     except Exception:
         return ("ok", 200)
 
+    # Callback queries
     if "callback_query" in update:
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
-        data = cq.get("data","")
-        msg_obj = cq.get("message",{})
-        if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS: return ("ok", 200)
+        data = cq.get("data", "")
+        msg_obj = cq.get("message", {})
+        if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
+            return ("ok", 200)
 
+        # Inflate hashed payloads
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
-            if orig: data = orig
+            if orig:
+                data = orig
             else:
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "expired", logger=app.logger)
                 return ("ok", 200)
 
+        # Dedupe
         cqid = cq.get("id")
         if cqid and seen_callbacks.get(cqid):
-            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "updated", logger=app.logger); return ("ok", 200)
-        if cqid: seen_callbacks.set(cqid, True)
+            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "updated", logger=app.logger)
+            return ("ok", 200)
+        if cqid:
+            seen_callbacks.set(cqid, True)
 
         try:
             if data.startswith("qs2:"):
@@ -811,7 +858,7 @@ def webhook(secret):
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = quickscan_pair_entrypoint(data, lang="en", lean=True)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
-                keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -822,20 +869,20 @@ def webhook(secret):
                 base_addr = payload.split("?", 1)[0]
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = quickscan_entrypoint(base_addr, lang="en", lean=True)
-                keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
                 return ("ok", 200)
 
             if data.startswith("more:"):
-                addr = data.split(":",1)[1].strip().lower()
+                addr = data.split(":", 1)[1].strip().lower()
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "loading…", logger=app.logger)
                 base_text = msg_obj.get("text") or ""
                 enriched = _enrich_full(addr, base_text)
                 enriched = _append_verdict_block(addr, enriched)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons(addr, kb0, add_more=False, add_why=True, add_report=True)
+                kb1 = _ensure_action_buttons(addr, kb0, want_more=False, want_why=True, want_report=True)
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
@@ -844,18 +891,17 @@ def webhook(secret):
             if data.startswith("why"):
                 addr_hint = None
                 if ":" in data:
-                    addr_hint = data.split(":",1)[1].strip().lower()
+                    addr_hint = data.split(":", 1)[1].strip().lower()
                 _answer_why_quickly(cq, addr_hint=addr_hint)
                 return ("ok", 200)
 
             if data.startswith("rep:"):
-                addr = data.split(":",1)[1].strip().lower()
+                addr = data.split(":", 1)[1].strip().lower()
                 act_key = f"rep:{chat_id}:{addr}"
                 if recent_actions.get(act_key):
                     tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "report already sent", logger=app.logger)
                     return ("ok", 200)
                 recent_actions.set(act_key, True)
-
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "building report…", logger=app.logger)
                 base_text = msg_obj.get("text") or ""
                 path, html = _render_report(addr, base_text)
@@ -865,7 +911,7 @@ def webhook(secret):
                     caption = f"{info.get('label','?')} (score {info.get('score','?')}/100)"
                 sent = False
                 if path:
-                    sent, resp = _tg_send_document(TELEGRAM_TOKEN, chat_id, path, caption=caption)
+                    sent, _ = _tg_send_document(TELEGRAM_TOKEN, chat_id, path, caption=caption)
                 if not sent:
                     teaser = "Report ready.\n" + (caption + "\n" if caption else "") + "⚠️/✅ details above."
                     _send_text(chat_id, teaser, logger=app.logger)
@@ -873,79 +919,88 @@ def webhook(secret):
 
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "unknown", logger=app.logger)
             return ("ok", 200)
-        except Exception:
+        except Exception as e:
+            _admin_debug(chat_id, f"callback error: {type(e).__name__}: {e}")
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "error", logger=app.logger)
             return ("ok", 200)
 
-    # Regular messages: keep simple (use /quickscan)
+    # Regular messages
     msg = update.get("message") or update.get("edited_message")
-    if not msg or (msg.get("from") or {}).get("is_bot"): return ("ok", 200)
-    chat_id = msg["chat"]["id"]; text = (msg.get("text") or "").strip()
-    if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS: return ("ok", 200)
+    if not msg or (msg.get("from") or {}).get("is_bot"):
+        return ("ok", 200)
+    chat_id = msg["chat"]["id"]
+    text = (msg.get("text") or "").strip()
+    if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
+        return ("ok", 200)
     if not text:
-        _send_text(chat_id, "empty", logger=app.logger); return ("ok", 200)
+        _send_text(chat_id, "empty", logger=app.logger)
+        return ("ok", 200)
 
     if text.startswith("/"):
-        cmd, *rest = text.split(maxsplit=1); arg = rest[0] if rest else ""
-        if cmd in ("/start","/help"):
-            _send_text(chat_id, LOC("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger); return ("ok", 200)
-        if cmd in ("/reload_meta","/clear_meta"):
+        parts = text.split(maxsplit=1)
+        cmd = parts[0]
+        arg = parts[1] if len(parts) > 1 else ""
+        if cmd in ("/start", "/help"):
+            _send_text(chat_id, LOC("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
+            return ("ok", 200)
+        if cmd in ("/reload_meta", "/clear_meta"):
             if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
-                _send_text(chat_id, "403: forbidden", logger=app.logger); return ("ok", 200)
-if cmd in ("/diag",):
-    if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
-        _send_text(chat_id, "403: forbidden", logger=app.logger); return ("ok", 200)
-    # Basic connectivity checks
-    lines = []
-    import time as _t
-    def check(url, name):
-        import requests
-        t0=_t.time()
-        try:
-            r=requests.get(url, timeout=6, headers={"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")})
-            dt=int((_t.time()-t0)*1000)
-            return f"{name}: {r.status_code} in {dt}ms"
-        except Exception as e:
-            dt=int((_t.time()-t0)*1000)
-            return f"{name}: ERROR {type(e).__name__} {e} in {dt}ms"
-    lines.append(check("https://rdap.org/domain/circle.com","RDAP"))
-    lines.append(check("https://web.archive.org/cdx/search/cdx?url=circle.com/*&output=json&limit=1","Wayback CDX"))
-    # QuickScan smoke (won't send message, just run function to see if it throws)
-    try:
-        _ = quickscan_entrypoint("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", lang="en", lean=True)
-        lines.append("QuickScan: OK")
-    except Exception as e:
-        lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
-    _send_text(chat_id, "Diag:\n" + "\n".join(lines), logger=app.logger)
-    return ("ok", 200)
-
+                _send_text(chat_id, "403: forbidden", logger=app.logger)
+                return ("ok", 200)
             DOMAIN_META_CACHE.clear()
-            _send_text(chat_id, "Meta cache cleared ✅", logger=app.logger); return ("ok", 200)
+            _send_text(chat_id, "Meta cache cleared ✅", logger=app.logger)
+            return ("ok", 200)
+        if cmd in ("/diag",):
+            if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
+                _send_text(chat_id, "403: forbidden", logger=app.logger)
+                return ("ok", 200)
+            lines = []
+            import time as _t
+            def check(url, name):
+                t0 = _t.time()
+                try:
+                    r = requests.get(url, timeout=6, headers={"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")})
+                    dt = int((_t.time()-t0)*1000)
+                    return f"{name}: {r.status_code} in {dt}ms"
+                except Exception as e:
+                    dt = int((_t.time()-t0)*1000)
+                    return f"{name}: ERROR {type(e).__name__} {e} in {dt}ms"
+            lines.append(check("https://rdap.org/domain/circle.com","RDAP"))
+            lines.append(check("https://web.archive.org/cdx/search/cdx?url=circle.com/*&output=json&limit=1","Wayback CDX"))
+            try:
+                _ = quickscan_entrypoint("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", lang="en", lean=True)
+                lines.append("QuickScan: OK")
+            except Exception as e:
+                lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
+            _send_text(chat_id, "Diag:\n" + "\n".join(lines), logger=app.logger)
+            return ("ok", 200)
         if cmd in ("/quickscan","/scan"):
-            if not arg: _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
+            if not arg:
+                _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
             else:
                 try:
-            text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
-            base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
-            keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
-            keyboard = _compress_keyboard(keyboard)
-            st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
-            _store_addr_for_message(body, base_addr)
-        except Exception as e:
-            _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
-            _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+                    text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
+                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
+                    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True)
+                    keyboard = _compress_keyboard(keyboard)
+                    st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                    _store_addr_for_message(body, base_addr)
+                except Exception as e:
+                    _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
+                    _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
             return ("ok", 200)
-        _send_text(chat_id, LOC("en","unknown"), logger=app.logger); return ("ok", 200)
+        _send_text(chat_id, LOC("en","unknown"), logger=app.logger)
+        return ("ok", 200)
 
     _send_text(chat_id, "Processing…", logger=app.logger)
     try:
-            text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
-            base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
-            keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
-            keyboard = _compress_keyboard(keyboard)
-            st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
-            _store_addr_for_message(body, base_addr)
-        except Exception as e:
-            _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
-            _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+        text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
+        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
+        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True)
+        keyboard = _compress_keyboard(keyboard)
+        st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+        _store_addr_for_message(body, base_addr)
+    except Exception as e:
+        _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
+        _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
     return ("ok", 200)
