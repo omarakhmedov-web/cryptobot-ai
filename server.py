@@ -9,7 +9,8 @@ from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.4.1-wl+why")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+APP_VERSION = os.environ.get("APP_VERSION", "0.4.3-wl+why+wbfix+cmds")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -44,8 +45,10 @@ KNOWN_HOMEPAGES = {
 DOMAIN_META_CACHE = {}
 try:
     DOMAIN_META_TTL = int(os.getenv("DOMAIN_META_TTL", "2592000"))  # 30 days
+    DOMAIN_META_TTL_NEG = int(os.getenv("DOMAIN_META_TTL_NEG", "600"))  # 10 minutes for negative WB
 except Exception:
     DOMAIN_META_TTL = 2592000
+    DOMAIN_META_TTL_NEG = 600
 
 def _normalize_date_iso(s: str):
     try:
@@ -83,8 +86,10 @@ def _domain_meta(domain: str):
     import time
     now = int(time.time())
     ent = DOMAIN_META_CACHE.get(domain)
-    if ent and (now - ent.get("t",0) < DOMAIN_META_TTL):
-        return ent["h"], ent["created"], ent["reg"], ent["exp"], ent["issuer"], ent.get("wb","—")
+    if ent:
+        ttl = DOMAIN_META_TTL_NEG if ent.get("wb") in (None, "—") else DOMAIN_META_TTL
+        if now - ent.get("t",0) < ttl:
+            return ent["h"], ent["created"], ent["reg"], ent["exp"], ent["issuer"], ent.get("wb","—")
     h, created, reg = _rdap(domain)
     exp, issuer = _ssl_info(domain)
     wb = _wayback_first(domain)
@@ -631,6 +636,18 @@ def reload_known():
     _maybe_reload_known(force=True)
     return jsonify({"ok": True, "loaded_runtime": len(KNOWN_HOMEPAGES), "sources": KNOWN_SOURCES})
 
+
+@app.route("/reload_meta", methods=["POST","GET"])
+def reload_meta():
+    DOMAIN_META_CACHE.clear()
+    return jsonify({"ok": True, "cleared": True})
+
+@app.route("/clear_meta", methods=["POST","GET"])
+def clear_meta():
+    DOMAIN_META_CACHE.clear()
+    return jsonify({"ok": True, "cleared": True})
+
+
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
@@ -666,7 +683,8 @@ from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.4.1-wl+why")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+APP_VERSION = os.environ.get("APP_VERSION", "0.4.3-wl+why+wbfix+cmds")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -701,8 +719,10 @@ KNOWN_HOMEPAGES = {
 DOMAIN_META_CACHE = {}
 try:
     DOMAIN_META_TTL = int(os.getenv("DOMAIN_META_TTL", "2592000"))  # 30 days
+    DOMAIN_META_TTL_NEG = int(os.getenv("DOMAIN_META_TTL_NEG", "600"))  # 10 minutes for negative WB
 except Exception:
     DOMAIN_META_TTL = 2592000
+    DOMAIN_META_TTL_NEG = 600
 
 def _normalize_date_iso(s: str):
     try:
@@ -1420,6 +1440,12 @@ def webhook(secret):
             _send_text(chat_id, f"paths={_collect_paths()}; loaded={len(KNOWN_HOMEPAGES)}; diags={diags}", logger=app.logger); return ("ok", 200)
         if cmd == "/reload_known":
             _maybe_reload_known(force=True); _send_text(chat_id, f"reloaded; loaded={len(KNOWN_HOMEPAGES)}", logger=app.logger); return ("ok", 200)
+        if cmd in ("/reload_meta","/clear_meta"):
+            if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
+                _send_text(chat_id, "403: forbidden", logger=app.logger); return ("ok", 200)
+            DOMAIN_META_CACHE.clear()
+            _send_text(chat_id, "Meta cache cleared ✅", logger=app.logger); return ("ok", 200)
+
         if cmd in ("/quickscan","/scan"):
             if not arg: _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
             else:
