@@ -13,7 +13,7 @@ from urllib.parse import urlparse, parse_qs
 import requests
 from flask import Flask, request, jsonify
 
-# Project-local utilities (as in your repo)
+# Project-local utilities
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.6.0-onchain-lite")
+APP_VERSION = os.environ.get("APP_VERSION", "0.6.2-rpc-indexed")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -33,6 +33,7 @@ CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
 KNOWN_AUTORELOAD_SEC = int(os.environ.get("KNOWN_AUTORELOAD_SEC", "300"))
 SCANNER_URL = os.environ.get("SCANNER_URL", "").strip()
+ETH_RPC_URLS = os.environ.get("ETH_RPC_URLS", "").strip()
 
 # Domain meta TTLs
 try:
@@ -165,7 +166,7 @@ def _kb_strip_prefixes(kb, prefixes):
     return {"inline_keyboard": out}
 
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
-    base = _kb_strip_prefixes(kb, ("more:", "why", "rep:"))
+    base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
     ik = base.get("inline_keyboard") or []
     if want_more and addr:
         ik.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
@@ -174,10 +175,10 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"})
     if want_report and addr:
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
-        if want_hp and addr and ETH_RPC_URL:
-        ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
     if row:
         ik.append(row)
+    if want_hp and addr and _parse_rpc_urls():
+        ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
     return {"inline_keyboard": ik}
 
 def _extract_addrs_from_pair_payload(data: str):
@@ -686,21 +687,85 @@ def _risk_verdict(addr, text):
         label = "LOW RISK 🟢"
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
 
+def _append_verdict_block(addr, text):
+    score, label, rs = _risk_verdict(addr, text)
+    try:
+        RISK_CACHE[(addr or "").lower()] = {
+            "score": score, "label": label,
+            "neg": rs.get("neg", []), "pos": rs.get("pos", []),
+            "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])
+        }
+    except Exception:
+        pass
+    lines = [f"Trust verdict: {label} (score {score}/100)"]
+    if rs.get("neg"):
+        lines.append("⚠️ Signals: " + "; ".join(rs["neg"]))
+    if rs.get("pos"):
+        lines.append("✅ Positives: " + "; ".join(rs["pos"]))
+    return text + "\n" + "\n".join(lines)
 
 # ========================
 # On-chain lite inspector (ETH RPC)
 # ========================
-ETH_RPC_URL = os.environ.get("ETH_RPC_URL", "").strip()
+# --- RPC provider list & failover ---
+_RPC_LAST_GOOD = 0
+
+def _mask_host(u: str):
+    try:
+        from urllib.parse import urlparse
+        o = urlparse(u)
+        return (o.hostname or u).split('@')[-1]
+    except Exception:
+        return u
+
+def _parse_rpc_urls():
+    urls = []
+    # Primary single URL
+    primary = os.environ.get("ETH_RPC_URL", "").strip()
+    if primary:
+        urls.append(primary)
+    # Indexed URLs: ETH_RPC_URL1..ETH_RPC_URL6 (we'll accept up to 12 to be safe)
+    for i in range(1, 13):
+        val = os.environ.get(f"ETH_RPC_URL{i}", "").strip()
+        if val:
+            urls.append(val)
+    # Comma-separated list
+    extra = os.environ.get("ETH_RPC_URLS", "").strip()
+    if extra:
+        urls.extend([u.strip() for u in extra.split(",") if u.strip()])
+    # Dedupe, keep order
+    seen = set()
+    ordered = []
+    for u in urls:
+        if u and u not in seen:
+            ordered.append(u); seen.add(u)
+    return ordered
 
 def _rpc_call(method, params):
-    if not ETH_RPC_URL:
-        raise RuntimeError("ETH_RPC_URL not configured")
-    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    r = requests.post(ETH_RPC_URL, json=payload, timeout=8, headers={"Content-Type":"application/json"})
-    j = r.json()
-    if "error" in j:
-        raise RuntimeError(f"RPC {method} error: {j['error']}")
-    return j.get("result")
+    urls = _parse_rpc_urls()
+    if not urls:
+        raise RuntimeError("ETH_RPC_URL(S) not configured")
+    global _RPC_LAST_GOOD
+    # Start from last known good
+    order = list(range(len(urls)))
+    if 0 <= _RPC_LAST_GOOD < len(urls):
+        order = order[_RPC_LAST_GOOD:] + order[:_RPC_LAST_GOOD]
+    last_err = None
+    for idx in order:
+        url = urls[idx]
+        try:
+            payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+            r = requests.post(url, json=payload, timeout=8, headers={"Content-Type":"application/json"})
+            j = r.json()
+            if "error" in j:
+                last_err = RuntimeError(f"RPC {method} error from {_mask_host(url)}: {j['error']}")
+                continue
+            _RPC_LAST_GOOD = idx
+            return j.get("result")
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"All RPC providers failed for {method}: {type(last_err).__name__}: {last_err}")
 
 def _eth_getCode(addr):
     return _rpc_call("eth_getCode", [addr, "latest"])
@@ -746,7 +811,6 @@ def _dec_address32(hexstr: str):
 
 def _dec_string(ret: str):
     # Very simplified ABI string decoder; handles typical OZ ERC20
-    # 0x + 64 (offset) + 64 (len) + data
     try:
         if not ret or ret == "0x":
             return None
@@ -813,8 +877,9 @@ EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505
 EIP1967_BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
 
 def _onchain_inspect(addr: str):
-    if not ETH_RPC_URL:
-        return "On-chain: not configured (set ETH_RPC_URL)", {}
+    urls = _parse_rpc_urls()
+    if not urls:
+        return "On-chain: not configured (set ETH_RPC_URL or ETH_RPC_URL1..N or ETH_RPC_URLS)", {}
     try:
         addr = addr.lower()
         out = []
@@ -824,7 +889,7 @@ def _onchain_inspect(addr: str):
         info["is_contract"] = bool(is_contract)
         out.append(f"Contract code: {'present' if is_contract else 'absent'}")
         if not is_contract:
-            return "\\n".join(out), info
+            return "\n".join(out), info
 
         # ERC20 basics
         name  = _call_str(addr, SEL_NAME)
@@ -838,7 +903,6 @@ def _onchain_inspect(addr: str):
         if dec is not None:
             out.append(f"Decimals: {dec}")
         if ts is not None and dec is not None and dec <= 36:
-            # humanized supply (approx)
             human = ts / (10 ** dec) if dec is not None and dec >= 0 else None
             if human is not None:
                 out.append(f"Total supply: ~{human:.6g}")
@@ -874,29 +938,12 @@ def _onchain_inspect(addr: str):
         if proxy:
             out.append("Proxy: ✅ (upgrade risk)")
 
-        # Honeypot note (we do not simulate sells here)
+        # Honeypot note (static)
         out.append("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)")
 
-        return "\\n".join(out), info
+        return "\n".join(out), info
     except Exception as e:
         return f"On-chain error: {type(e).__name__}: {e}", {"error": str(e)}
-
-def _append_verdict_block(addr, text):
-    score, label, rs = _risk_verdict(addr, text)
-    try:
-        RISK_CACHE[(addr or "").lower()] = {
-            "score": score, "label": label,
-            "neg": rs.get("neg", []), "pos": rs.get("pos", []),
-            "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])
-        }
-    except Exception:
-        pass
-    lines = [f"Trust verdict: {label} (score {score}/100)"]
-    if rs.get("neg"):
-        lines.append("⚠️ Signals: " + "; ".join(rs["neg"]))
-    if rs.get("pos"):
-        lines.append("✅ Positives: " + "; ".join(rs["pos"]))
-    return text + "\n" + "\n".join(lines)
 
 def _enrich_full(addr: str, text: str):
     txt = NEWLINE_ESC_RE.sub("\n", text or "")
@@ -1092,16 +1139,16 @@ def webhook(secret):
                 _answer_why_quickly(cq, addr_hint=addr_hint)
                 return ("ok", 200)
 
-            
-if data.startswith("hp:"):
-    addr = data.split(":",1)[1].strip().lower()
-    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "running on-chain…", logger=app.logger)
-    out, meta = _onchain_inspect(addr)
-    kb0 = msg_obj.get("reply_markup") or {}
-    kb1 = _ensure_action_buttons(addr, kb0, want_more=False, want_why=True, want_report=True, want_hp=True)
-    kb1 = _compress_keyboard(kb1)
-    _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
-    return ("ok", 200)
+            if data.startswith("hp:"):
+                addr = data.split(":",1)[1].strip().lower()
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "running on-chain…", logger=app.logger)
+                out, meta = _onchain_inspect(addr)
+                kb0 = msg_obj.get("reply_markup") or {}
+                kb1 = _ensure_action_buttons(addr, kb0, want_more=False, want_why=True, want_report=True, want_hp=True)
+                kb1 = _compress_keyboard(kb1)
+                _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
+                return ("ok", 200)
+
             if data.startswith("rep:"):
                 addr = data.split(":", 1)[1].strip().lower()
                 act_key = f"rep:{chat_id}:{addr}"
@@ -1174,6 +1221,23 @@ if data.startswith("hp:"):
                     return f"{name}: ERROR {type(e).__name__} {e} in {dt}ms"
             lines.append(check("https://rdap.org/domain/circle.com","RDAP"))
             lines.append(check("https://web.archive.org/cdx/search/cdx?url=circle.com/*&output=json&limit=1","Wayback CDX"))
+            # RPC providers check
+            urls = _parse_rpc_urls()
+            if urls:
+                lines.append("RPC providers: " + ", ".join([_mask_host(u) for u in urls]))
+                for u in urls:
+                    try:
+                        r = requests.post(u, json={"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}, timeout=6, headers={"Content-Type":"application/json"})
+                        ok = ""
+                        try:
+                            ok = r.json().get("result","")
+                        except Exception:
+                            ok = f"HTTP {r.status_code}"
+                        lines.append(f"RPC {_mask_host(u)}: {ok}")
+                    except Exception as e:
+                        lines.append(f"RPC {_mask_host(u)}: ERROR {type(e).__name__}: {e}")
+            else:
+                lines.append("RPC providers: none configured")
             try:
                 _ = quickscan_entrypoint("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", lang="en", lean=True)
                 lines.append("QuickScan: OK")
