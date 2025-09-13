@@ -1,4 +1,4 @@
-import os, re, json, ssl, socket, hashlib, time, threading
+import os, re, json, ssl, socket, hashlib, time, threading, tempfile
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from functools import wraps
@@ -13,7 +13,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.4.6-why+wbx")
+APP_VERSION = os.environ.get("APP_VERSION", "0.5.0-why++-report")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -28,10 +28,10 @@ KNOWN_AUTORELOAD_SEC = int(os.environ.get("KNOWN_AUTORELOAD_SEC", "300"))
 # Domain meta TTLs
 try:
     DOMAIN_META_TTL = int(os.getenv("DOMAIN_META_TTL", "2592000"))      # 30 days
-    DOMAIN_META_TTL_NEG = int(os.getenv("DOMAIN_META_TTL_NEG", "600"))  # 10 minutes for negative WB
+    DOMAIN_META_TTL_NEG = int(os.getenv("DOMAIN_META_TTL_NEG", "120"))  # 2 min for negative WB
 except Exception:
     DOMAIN_META_TTL = 2592000
-    DOMAIN_META_TTL_NEG = 600
+    DOMAIN_META_TTL_NEG = 120
 
 LOC = locale_text
 app = Flask(__name__)
@@ -41,7 +41,7 @@ cache = SafeCache(ttl=CACHE_TTL_SECONDS)          # general cache if needed
 seen_callbacks = SafeCache(ttl=300)               # dedupe callback ids
 cb_cache = SafeCache(ttl=600)                     # long callback payloads by hash
 msg2addr = SafeCache(ttl=86400)                   # message_id -> base address mapping (for Why?)
-RISK_CACHE = {}                                   # addr -> {score,label,neg,pos}
+RISK_CACHE = {}                                   # addr -> {score,label,neg,pos,weights}
 
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
 NEWLINE_ESC_RE = re.compile(r'\n')
@@ -190,35 +190,24 @@ def _compress_keyboard(kb: dict):
         for btn in row:
             data = btn.get("callback_data")
             if not data: continue
-            if len(data) <= 60 and data.startswith(("qs:","qs2:","more:","less:","why:")): continue
+            if len(data) <= 60 and data.startswith(("qs:","qs2:","more:","less:","why:","rep:","hp:","lp:","mon:")): continue
             h = hashlib.sha1(data.encode("utf-8")).hexdigest()[:10]
             token = f"cb:{h}"; cb_cache.set(token, data); btn["callback_data"] = token
     return {"inline_keyboard": ik}
 
-def _rewrite_keyboard_to_addr(addr, kb: dict, add_more_btn: bool = True, add_why_btn: bool = False):
-    """Rewrites qs2:* to qs:<addr>?window=... and optionally appends More/Why buttons."""
-    if not kb or not isinstance(kb, dict): kb = {}
-    ik = kb.get("inline_keyboard") or []
-    out = []
-    for row in ik:
-        new_row = []
-        for btn in row:
-            data = btn.get("callback_data")
-            if data and data.startswith("qs2:") and addr:
-                _, _, query = data.partition("?")
-                params = parse_qs(query)
-                window = params.get("window", ["h24"])[0]
-                btn = dict(btn); btn["callback_data"] = f"qs:{addr}?window={window}"
-            new_row.append(btn)
-        out.append(new_row)
-    if add_more_btn and addr:
-        out.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
-    if add_why_btn and addr:
-        out.append([{"text": "❓ Why?", "callback_data": f"why:{addr}"}])
-    return {"inline_keyboard": out} if out else kb
+def _append_action_buttons(addr, kb: dict, add_more=False, add_why=True, add_report=True):
+    ik = (kb or {}).get("inline_keyboard") or []
+    new_rows = []
+    if add_more:
+        new_rows.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
+    row = []
+    if add_why: row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"})
+    if add_report: row.append({"text": "📄 Report", "callback_data": f"rep:{addr}"})
+    if row: new_rows.append(row)
+    if new_rows: ik.extend(new_rows)
+    return {"inline_keyboard": ik} if ik else None
 
 def _extract_addrs_from_pair_payload(data: str):
-    # qs2:<chain>/<0xA-0xB>?window=...
     try:
         path, _, _ = data.split(":", 1)[1].partition("?")
         _, _, pair_addr = path.partition("/")
@@ -228,7 +217,6 @@ def _extract_addrs_from_pair_payload(data: str):
         return []
 
 def _pick_addr(addrs):
-    # prefer known domains, else last
     for a in addrs:
         if a.lower() in KNOWN_HOMEPAGES:
             return a.lower()
@@ -273,7 +261,6 @@ def _normalize_date_iso(s: str):
         s = s.strip()
         m = re.match(r"^(\d{4}-\d{2}-\d{2})", s)
         if m: return m.group(1)
-        # OpenSSL: "Oct 23 23:59:59 2025 GMT"
         try:
             dt = datetime.strptime(s, "%b %d %H:%M:%S %Y %Z")
             return dt.strftime("%Y-%m-%d")
@@ -328,9 +315,6 @@ def _ssl_info(domain: str):
     except Exception: return ("—","—")
 
 def _wayback_available(domain: str):
-    """
-    Wayback 'available' API: returns closest snapshot to 1996-01-01 (effectively earliest).
-    """
     try:
         headers = {"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")}
         for scheme in ("http","https"):
@@ -349,11 +333,7 @@ def _wayback_available(domain: str):
     return None
 
 def _wayback_cdx(domain: str, require_200: bool):
-    """
-    CDX API earliest query. Try both plain and www. hostnames, with/without statuscode filter.
-    """
     headers = {"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")}
-    # Prefer prefix matches; collapse to cut dupes
     for host in (domain, f"www.{domain}"):
         for scheme in ("http","https"):
             for path in (f"{scheme}://{host}/*", f"{scheme}://{host}/"):
@@ -382,20 +362,11 @@ def _wayback_cdx(domain: str, require_200: bool):
     return None
 
 def _wayback_first(domain: str):
-    """
-    Robust Wayback lookup:
-      1) CDX with status 200
-      2) CDX without status filter (accept 3xx/others)
-      3) 'available' API as last resort
-    """
     try:
-        # 1) Strict 200
         d = _wayback_cdx(domain, require_200=True)
         if d: return d
-        # 2) Any status
         d = _wayback_cdx(domain, require_200=False)
         if d: return d
-        # 3) Available
         d = _wayback_available(domain)
         return d or "—"
     except Exception:
@@ -469,7 +440,7 @@ def _extract_domain_from_text(text: str):
     return None
 
 # ========================
-# Risk engine
+# Risk engine (weighted)
 # ========================
 try:
     RISK_LIQ_LOW = float(os.getenv("RISK_LIQ_LOW", "20000"))      # <$20k => +25
@@ -497,7 +468,6 @@ def _parse_float_km(s):
         return None
 
 def _parse_metric_from_dexline(text, key):
-    # e.g. "Liq 1.11M | Vol24h 14.66K"
     try:
         patt = rf'{key}\s+([0-9\.\$]+\s*[KMB]?)'
         m = re.search(patt, text, re.IGNORECASE)
@@ -506,7 +476,6 @@ def _parse_metric_from_dexline(text, key):
         return None
 
 def _parse_bool(text, key):
-    # e.g. "Proxy: ✅"
     try:
         m = re.search(rf'{re.escape(key)}:\s*(✅|✔️|Yes|True|No|❌|—)', text, re.IGNORECASE)
         if not m: return None
@@ -516,7 +485,6 @@ def _parse_bool(text, key):
         return None
 
 def _parse_roles(text):
-    # e.g. "Roles:\s*owner: ✅ | masterMinter: ✅ | pauser: ✅ ..."
     roles = {}
     try:
         m = re.search(r'Roles:\s*([^\n]+)', text)
@@ -555,75 +523,70 @@ def _is_whitelisted(addr: str, text: str):
 
 def _risk_verdict(addr, text):
     score = 0
-    reasons = []
-    positives = []
+    neg = []
+    pos = []
+    weights_neg = []
+    weights_pos = []
     whitelisted, wl_type = _is_whitelisted(addr, text)
 
-    # Dex metrics
     liq = _parse_metric_from_dexline(text, "Liq")
     vol = _parse_metric_from_dexline(text, "Vol24h")
     if liq is not None:
         if liq < RISK_LIQ_LOW:
-            score += (8 if whitelisted else 25); reasons.append(f"Low liquidity (<${int(RISK_LIQ_LOW):,})")
+            w = (8 if whitelisted else 25); score += w; neg.append("Low liquidity (<${:,})".format(int(RISK_LIQ_LOW))); weights_neg.append(w)
         elif liq < RISK_LIQ_MED:
-            score += (3 if whitelisted else 10); reasons.append(f"Moderate liquidity (<${int(RISK_LIQ_MED):,})")
+            w = (3 if whitelisted else 10); score += w; neg.append("Moderate liquidity (<${:,})".format(int(RISK_LIQ_MED))); weights_neg.append(w)
         elif liq >= RISK_POSITIVE_LIQ:
-            positives.append(f"High liquidity (≥${int(RISK_POSITIVE_LIQ):,})")
+            w = 15; pos.append("High liquidity (≥${:,})".format(int(RISK_POSITIVE_LIQ))); weights_pos.append(w)
     if vol is not None and vol < RISK_VOL_LOW:
-        score += 10; reasons.append("Very low 24h volume (<$5k)")
+        w = 10; score += w; neg.append("Very low 24h volume (<$5k)"); weights_neg.append(w)
 
-    # Blue-chip context
-    try:
-        t_upper = (text or "").upper()
-        if whitelisted:
-            positives.append(f"Whitelisted by {wl_type}")
-        if ("USDT" in t_upper and "USDC" in t_upper) or ("WBTC" in t_upper and "ETH" in t_upper):
-            positives.append("Blue-chip pair context")
-    except Exception:
-        pass
+    t_upper = (text or "").upper()
+    if whitelisted:
+        w = 20; pos.append(f"Whitelisted by {wl_type}"); weights_pos.append(w)
+    if ("USDT" in t_upper and "USDC" in t_upper) or ("WBTC" in t_upper and "ETH" in t_upper):
+        w = 10; pos.append("Blue-chip pair context"); weights_pos.append(w)
 
-    # Proxy / Roles
     proxy = _parse_bool(text, "Proxy")
     if proxy is True:
-        score += (0 if whitelisted else 15); reasons.append("Upgradeable proxy (owner can change logic)")
+        w = (0 if whitelisted else 15); score += w; neg.append("Upgradeable proxy (owner can change logic)"); weights_neg.append(w)
 
     roles = _parse_roles(text)
     if roles.get("owner", False):
-        score += (0 if whitelisted else 20); reasons.append("Owner privileges present")
+        w = (0 if whitelisted else 20); score += w; neg.append("Owner privileges present"); weights_neg.append(w)
     if roles.get("blacklister", False):
-        score += (0 if whitelisted else 10); reasons.append("Blacklisting capability")
+        w = (0 if whitelisted else 10); score += w; neg.append("Blacklisting capability"); weights_neg.append(w)
     if roles.get("pauser", False):
-        score += (0 if whitelisted else 10); reasons.append("Pausing capability")
+        w = (0 if whitelisted else 10); score += w; neg.append("Pausing capability"); weights_neg.append(w)
     if roles.get("minter", False) or roles.get("masterMinter", False):
-        score += (0 if whitelisted else 10); reasons.append("Minting capability")
+        w = (0 if whitelisted else 10); score += w; neg.append("Minting capability"); weights_neg.append(w)
 
-    # Domain meta
     dom = _parse_domain_meta(text)
     try:
         if dom.get("created") and dom["created"] != "—":
             y = int(dom["created"][:4])
-            if y >= 2024: score += 15; reasons.append("Very new domain")
-            elif y >= 2022: score += 5; reasons.append("Newish domain")
-            elif y <= RISK_POSITIVE_AGE_Y: positives.append(f"Established domain (≤{RISK_POSITIVE_AGE_Y})")
+            if y >= 2024: w=15; score += w; neg.append("Very new domain"); weights_neg.append(w)
+            elif y >= 2022: w=5; score += w; neg.append("Newish domain"); weights_neg.append(w)
+            elif y <= RISK_POSITIVE_AGE_Y: w=10; pos.append(f"Established domain (≤{RISK_POSITIVE_AGE_Y})"); weights_pos.append(w)
         if dom.get("wayback") in (None, "—"):
             if not whitelisted:
-                score += 5; reasons.append("No Wayback snapshots")
+                w=5; score += w; neg.append("No Wayback snapshots"); weights_neg.append(w)
             else:
-                positives.append("Trusted (no WB penalty)")
+                w=8; pos.append("Trusted (no WB penalty)"); weights_pos.append(w)
         else:
-            positives.append("Historical presence (Wayback found)")
+            w=8; pos.append("Historical presence (Wayback found)"); weights_pos.append(w)
     except Exception:
         pass
 
     if score >= RISK_THRESH_HIGH: label = "HIGH RISK 🔴"
     elif score >= RISK_THRESH_CAUTION: label = "CAUTION 🟡"
     else: label = "LOW RISK 🟢"
-    return int(min(100, score)), label, {"neg": reasons, "pos": positives}
+    return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
 
 def _append_verdict_block(addr, text):
     score, label, rs = _risk_verdict(addr, text)
     try:
-        RISK_CACHE[(addr or "").lower()] = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", [])}
+        RISK_CACHE[(addr or "").lower()] = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
     except Exception:
         pass
     lines = [f"Trust verdict: {label} (score {score}/100)"]
@@ -635,9 +598,7 @@ def _append_verdict_block(addr, text):
 
 def _enrich_full(addr: str, text: str):
     txt = NEWLINE_ESC_RE.sub("\n", text or "")
-    domain = _cg_homepage(addr)
-    if not domain:
-        domain = _symbol_homepage_hint(txt)
+    domain = _cg_homepage(addr) or _symbol_homepage_hint(txt)
     if not domain:
         return txt
     h, created, reg, exp, issuer, wb = _domain_meta(domain)
@@ -651,6 +612,41 @@ def _enrich_full(addr: str, text: str):
         return txt
     return txt + "\n" + block
 
+def _render_report(addr: str, text: str):
+    info = RISK_CACHE.get((addr or "").lower()) or {}
+    neg = info.get("neg") or []
+    pos = info.get("pos") or []
+    wn = info.get("w_neg") or []
+    wp = info.get("w_pos") or []
+    def lines(items, weights):
+        out = []
+        for i, t in enumerate(items):
+            w = weights[i] if i < len(weights) else None
+            out.append(f"- {t}" + (f" ({'+' if (t in pos) else '+'}{w})" if w is not None else ""))
+        return "\n".join(out) if out else "—"
+    # Pull domain from text
+    dom = _extract_domain_from_text(text) or "—"
+    # Simple HTML
+    html = f"""<!doctype html>
+<html><head><meta charset='utf-8'><title>Metridex Report — {addr}</title>
+<style>body{{font-family:Arial,Helvetica,sans-serif;}}h1,h2{{margin:0.5em 0}}.box{{border:1px solid #ddd;padding:12px;border-radius:8px;margin:8px 0}}</style>
+</head><body>
+<h1>Metridex QuickScan — Report</h1>
+<div class="box"><b>Address:</b> {addr}<br><b>Domain:</b> {dom}</div>
+<div class="box"><h2>Summary</h2><pre>{text}</pre></div>
+<div class="box"><h2>Risk verdict</h2><p><b>{info.get('label','?')} ({info.get('score','?')}/100)</b></p>
+<h3>Signals</h3><pre>{lines(neg, wn)}</pre><h3>Positives</h3><pre>{lines(pos, wp)}</pre></div>
+<footer><small>Generated by Metridex v{APP_VERSION}</small></footer>
+</body></html>"""
+    # Save temp and return path (server side only; for Telegram we'll send a teaser)
+    try:
+        fd, path = tempfile.mkstemp(prefix="metridex_report_", suffix=".html")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(html)
+        return path, html
+    except Exception:
+        return None, html
+
 # ========================
 # HTTP routes
 # ========================
@@ -658,25 +654,8 @@ def _enrich_full(addr: str, text: str):
 def healthz():
     return jsonify({"ok": True, "version": APP_VERSION})
 
-@app.route("/debug_known")
-def debug_known():
-    diags = []
-    for p in _collect_paths():
-        diags.append(_merge_known_from(p, diag_only=True))
-    return jsonify({"version": APP_VERSION, "paths": _collect_paths(), "loaded_runtime": len(KNOWN_HOMEPAGES), "diagnostics": diags})
-
-@app.route("/reload_known", methods=["POST","GET"])
-def reload_known():
-    _maybe_reload_known(force=True)
-    return jsonify({"ok": True, "loaded_runtime": len(KNOWN_HOMEPAGES), "sources": KNOWN_SOURCES})
-
 @app.route("/reload_meta", methods=["POST","GET"])
 def reload_meta():
-    DOMAIN_META_CACHE.clear()
-    return jsonify({"ok": True, "cleared": True})
-
-@app.route("/clear_meta", methods=["POST","GET"])
-def clear_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True})
 
@@ -686,24 +665,23 @@ def clear_meta():
 def _answer_why_quickly(cq, addr_hint=None):
     try:
         msg_obj = cq.get("message", {}) or {}
-        msg_id = str(msg_obj.get("message_id"))
         text = msg_obj.get("text") or ""
-        addr = (addr_hint or msg2addr.get(msg_id) or _extract_addr_from_text(text) or "").lower()
+        addr = (addr_hint or _extract_addr_from_text(text) or "").lower()
         info = RISK_CACHE.get(addr) if addr else None
         if not info:
             score, label, rs = _risk_verdict(addr or "", text or "")
-            info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", [])}
-        neg = info.get("neg") or []
-        pos = info.get("pos") or []
-        def join_cap(lim_arr, n):
-            s = "; ".join(lim_arr[:n])
-            if len(lim_arr) > n: s += "; …"
-            return s
+            info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
+        # pick top-2 by weight
+        pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
+        pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
+        pairs_neg.sort(key=lambda x: x[1] if len(x)>1 and isinstance(x[1], (int,float)) else 0, reverse=True)
+        pairs_pos.sort(key=lambda x: x[1] if len(x)>1 and isinstance(x[1], (int,float)) else 0, reverse=True)
+        neg_s = "; ".join([f"{t} (+{w})" for t,w in pairs_neg[:2] if t]) if pairs_neg else ""
+        pos_s = "; ".join([f"{t} (+{w})" for t,w in pairs_pos[:2] if t]) if pairs_pos else ""
         body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
-        if neg: body += f" — ⚠️ {join_cap(neg, 2)}"
-        if pos: body += f" — ✅ {join_cap(pos, 2)}"
-        if len(body) > 190:
-            body = body[:187] + "…"
+        if neg_s: body += f" — ⚠️ {neg_s}"
+        if pos_s: body += f" — ✅ {pos_s}"
+        if len(body) > 190: body = body[:187] + "…"
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
@@ -712,7 +690,6 @@ def _answer_why_quickly(cq, addr_hint=None):
 @require_webhook_secret
 def webhook(secret):
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET: return ("forbidden", 403)
-    _maybe_reload_known(force=False)
     try:
         update = request.get_json(force=True, silent=False)
     except Exception:
@@ -724,7 +701,6 @@ def webhook(secret):
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data","")
         msg_obj = cq.get("message",{})
-        msg_id = str(msg_obj.get("message_id"))
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS: return ("ok", 200)
 
         # Inflate hashed payloads
@@ -741,16 +717,14 @@ def webhook(secret):
             tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "updated", logger=app.logger); return ("ok", 200)
         if cqid: seen_callbacks.set(cqid, True)
 
-        # Branches
         try:
             if data.startswith("qs2:"):
                 addrs = _extract_addrs_from_pair_payload(data)
                 base_addr = _pick_addr(addrs)
-                _, _, query = data.partition("?")
-                params = parse_qs(query); window = params.get("window", ["h24"])[0]
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = quickscan_pair_entrypoint(data, lang="en", lean=True)
-                keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
+                base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
+                keyboard = _append_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -761,7 +735,7 @@ def webhook(secret):
                 base_addr = payload.split("?", 1)[0]
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = quickscan_entrypoint(base_addr, lang="en", lean=True)
-                keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=True)
+                keyboard = _append_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -774,7 +748,7 @@ def webhook(secret):
                 enriched = _enrich_full(addr, base_text)
                 enriched = _append_verdict_block(addr, enriched)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _rewrite_keyboard_to_addr(addr, kb0, add_more_btn=False, add_why_btn=True)
+                kb1 = _append_action_buttons(addr, kb0, add_more=False, add_why=True, add_report=True)
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
@@ -785,6 +759,20 @@ def webhook(secret):
                 if ":" in data:
                     addr_hint = data.split(":",1)[1].strip().lower()
                 _answer_why_quickly(cq, addr_hint=addr_hint)
+                return ("ok", 200)
+
+            if data.startswith("rep:"):
+                addr = data.split(":",1)[1].strip().lower()
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "building report…", logger=app.logger)
+                base_text = msg_obj.get("text") or ""
+                path, html = _render_report(addr, base_text)
+                # Telegram: отправим компактный анонс + рекомендации
+                teaser = "Report ready: key points below. (HTML download available in server logs)\n\n"
+                info = RISK_CACHE.get(addr) or {}
+                teaser += f"{info.get('label','?')} (score {info.get('score','?')}/100)\n"
+                if info.get('neg'): teaser += "⚠️ " + "; ".join(info['neg'][:3]) + "\n"
+                if info.get('pos'): teaser += "✅ " + "; ".join(info['pos'][:3])
+                _send_text(chat_id, teaser, logger=app.logger)
                 return ("ok", 200)
 
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "unknown", logger=app.logger)
@@ -805,12 +793,6 @@ def webhook(secret):
         cmd, *rest = text.split(maxsplit=1); arg = rest[0] if rest else ""
         if cmd in ("/start","/help"):
             _send_text(chat_id, LOC("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger); return ("ok", 200)
-        if cmd == "/debug_known":
-            diags = []; 
-            for p in _collect_paths(): diags.append(_merge_known_from(p, diag_only=True))
-            _send_text(chat_id, f"paths={_collect_paths()}; loaded={len(KNOWN_HOMEPAGES)}; diags={diags}", logger=app.logger); return ("ok", 200)
-        if cmd == "/reload_known":
-            _maybe_reload_known(force=True); _send_text(chat_id, f"reloaded; loaded={len(KNOWN_HOMEPAGES)}", logger=app.logger); return ("ok", 200)
         if cmd in ("/reload_meta","/clear_meta"):
             if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
                 _send_text(chat_id, "403: forbidden", logger=app.logger); return ("ok", 200)
@@ -822,7 +804,7 @@ def webhook(secret):
                 try:
                     text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
                     base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
-                    keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
+                    keyboard = _append_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
                     keyboard = _compress_keyboard(keyboard)
                     st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                     _store_addr_for_message(body, base_addr)
@@ -835,7 +817,7 @@ def webhook(secret):
     try:
         text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
         base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
-        keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
+        keyboard = _append_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
         keyboard = _compress_keyboard(keyboard)
         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
         _store_addr_for_message(body, base_addr)
