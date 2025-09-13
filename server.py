@@ -13,7 +13,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.4.5-why-hotfix")
+APP_VERSION = os.environ.get("APP_VERSION", "0.4.6-why+wbx")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -327,36 +327,77 @@ def _ssl_info(domain: str):
         return (_normalize_date_iso(exp), cn)
     except Exception: return ("—","—")
 
-def _wayback_first(domain: str):
-    """Robust Wayback lookup (CDX API), returns YYYY-MM-DD or '—'."""
+def _wayback_available(domain: str):
+    """
+    Wayback 'available' API: returns closest snapshot to 1996-01-01 (effectively earliest).
+    """
     try:
-        candidates = [
-            f"http://{domain}/*",
-            f"https://{domain}/*",
-            f"http://www.{domain}/*",
-            f"https://www.{domain}/*",
-        ]
         headers = {"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")}
-        for target in candidates:
-            url = "https://web.archive.org/cdx/search/cdx"
-            params = {
-                "url": target,
-                "output": "json",
-                "fl": "timestamp,statuscode,original",
-                "filter": "statuscode:200",
-                "limit": "1",
-                "from": "2000",
-                "to": "2035",
-            }
-            r = requests.get(url, params=params, timeout=8, headers=headers)
-            if r.status_code != 200:
+        for scheme in ("http","https"):
+            url = "https://archive.org/wayback/available"
+            params = {"url": f"{scheme}://{domain}/", "timestamp": "19960101"}
+            r = requests.get(url, params=params, timeout=6, headers=headers)
+            if r.status_code != 200: 
                 continue
-            j = r.json()
-            if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and len(j[1]) >= 1:
-                ts = str(j[1][0])
-                if len(ts) >= 8:
-                    return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
-        return "—"
+            j = r.json() or {}
+            snap = (j.get("archived_snapshots") or {}).get("closest") or {}
+            ts = snap.get("timestamp")
+            if ts and len(ts) >= 8:
+                return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+    except Exception:
+        pass
+    return None
+
+def _wayback_cdx(domain: str, require_200: bool):
+    """
+    CDX API earliest query. Try both plain and www. hostnames, with/without statuscode filter.
+    """
+    headers = {"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")}
+    # Prefer prefix matches; collapse to cut dupes
+    for host in (domain, f"www.{domain}"):
+        for scheme in ("http","https"):
+            for path in (f"{scheme}://{host}/*", f"{scheme}://{host}/"):
+                try:
+                    params = {
+                        "url": path,
+                        "output": "json",
+                        "fl": "timestamp,statuscode,original",
+                        "limit": "1",
+                        "from": "1996",
+                        "to": "2035",
+                        "collapse": "timestamp:8"
+                    }
+                    if require_200:
+                        params["filter"] = "statuscode:200"
+                    r = requests.get("https://web.archive.org/cdx/search/cdx", params=params, timeout=8, headers=headers)
+                    if r.status_code != 200:
+                        continue
+                    j = r.json()
+                    if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and len(j[1]) >= 1:
+                        ts = str(j[1][0])
+                        if len(ts) >= 8:
+                            return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+                except Exception:
+                    continue
+    return None
+
+def _wayback_first(domain: str):
+    """
+    Robust Wayback lookup:
+      1) CDX with status 200
+      2) CDX without status filter (accept 3xx/others)
+      3) 'available' API as last resort
+    """
+    try:
+        # 1) Strict 200
+        d = _wayback_cdx(domain, require_200=True)
+        if d: return d
+        # 2) Any status
+        d = _wayback_cdx(domain, require_200=False)
+        if d: return d
+        # 3) Available
+        d = _wayback_available(domain)
+        return d or "—"
     except Exception:
         return "—"
 
@@ -475,7 +516,7 @@ def _parse_bool(text, key):
         return None
 
 def _parse_roles(text):
-    # e.g. "Roles: owner: ✅ | masterMinter: ✅ | pauser: ✅ ..."
+    # e.g. "Roles:\s*owner: ✅ | masterMinter: ✅ | pauser: ✅ ..."
     roles = {}
     try:
         m = re.search(r'Roles:\s*([^\n]+)', text)
@@ -490,8 +531,6 @@ def _parse_roles(text):
         return roles
 
 def _parse_domain_meta(block):
-    # expects enriched block already appended (Domain / WHOIS / SSL / Wayback)
-    # returns dict: created(date str), registrar(str), ssl_exp(str), wayback(str)
     d={"created":None,"registrar":None,"ssl_exp":None,"wayback":None}
     try:
         m = re.search(r'Created:\s*([0-9\-TZ: ]+)', block); d["created"]=m.group(1) if m else None
@@ -515,10 +554,6 @@ def _is_whitelisted(addr: str, text: str):
     return False, None
 
 def _risk_verdict(addr, text):
-    """
-    Heuristic score 0..100 (higher = riskier). Uses only what we already have in text.
-    Returns (score:int, label:str, reasons:dict[neg|pos]).
-    """
     score = 0
     reasons = []
     positives = []
@@ -580,7 +615,6 @@ def _risk_verdict(addr, text):
     except Exception:
         pass
 
-    # Clamp & label
     if score >= RISK_THRESH_HIGH: label = "HIGH RISK 🔴"
     elif score >= RISK_THRESH_CAUTION: label = "CAUTION 🟡"
     else: label = "LOW RISK 🟢"
@@ -588,7 +622,6 @@ def _risk_verdict(addr, text):
 
 def _append_verdict_block(addr, text):
     score, label, rs = _risk_verdict(addr, text)
-    # cache for Why?
     try:
         RISK_CACHE[(addr or "").lower()] = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", [])}
     except Exception:
@@ -651,7 +684,6 @@ def clear_meta():
 # Telegram webhook
 # ========================
 def _answer_why_quickly(cq, addr_hint=None):
-    """Answer callback to stop spinner. Uses RISK_CACHE or recomputes from message text. Keeps text <=200 chars."""
     try:
         msg_obj = cq.get("message", {}) or {}
         msg_id = str(msg_obj.get("message_id"))
@@ -659,10 +691,8 @@ def _answer_why_quickly(cq, addr_hint=None):
         addr = (addr_hint or msg2addr.get(msg_id) or _extract_addr_from_text(text) or "").lower()
         info = RISK_CACHE.get(addr) if addr else None
         if not info:
-            # try recompute quickly from current message text
             score, label, rs = _risk_verdict(addr or "", text or "")
             info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", [])}
-        # build compact string
         neg = info.get("neg") or []
         pos = info.get("pos") or []
         def join_cap(lim_arr, n):
@@ -714,7 +744,6 @@ def webhook(secret):
         # Branches
         try:
             if data.startswith("qs2:"):
-                # Pair payload -> choose address and run quickscan_pair
                 addrs = _extract_addrs_from_pair_payload(data)
                 base_addr = _pick_addr(addrs)
                 _, _, query = data.partition("?")
@@ -728,7 +757,6 @@ def webhook(secret):
                 return ("ok", 200)
 
             if data.startswith("qs:"):
-                # Direct quickscan for an address
                 payload = data.split(":", 1)[1]
                 base_addr = payload.split("?", 1)[0]
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
@@ -741,11 +769,10 @@ def webhook(secret):
 
             if data.startswith("more:"):
                 addr = data.split(":",1)[1].strip().lower()
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "loading…", logger=app.logger)  # stop spinner
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "loading…", logger=app.logger)
                 base_text = msg_obj.get("text") or ""
                 enriched = _enrich_full(addr, base_text)
                 enriched = _append_verdict_block(addr, enriched)
-                # keep old keyboard, add Why?
                 kb0 = msg_obj.get("reply_markup") or {}
                 kb1 = _rewrite_keyboard_to_addr(addr, kb0, add_more_btn=False, add_why_btn=True)
                 kb1 = _compress_keyboard(kb1)
@@ -754,14 +781,12 @@ def webhook(secret):
                 return ("ok", 200)
 
             if data.startswith("why"):
-                # "why" or "why:<addr>"
                 addr_hint = None
                 if ":" in data:
                     addr_hint = data.split(":",1)[1].strip().lower()
                 _answer_why_quickly(cq, addr_hint=addr_hint)
                 return ("ok", 200)
 
-            # default
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "unknown", logger=app.logger)
             return ("ok", 200)
         except Exception:
@@ -806,7 +831,6 @@ def webhook(secret):
             return ("ok", 200)
         _send_text(chat_id, LOC("en","unknown"), logger=app.logger); return ("ok", 200)
 
-    # Fallback: treat as scan request
     _send_text(chat_id, "Processing…", logger=app.logger)
     try:
         text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
