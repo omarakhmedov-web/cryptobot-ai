@@ -338,42 +338,40 @@ def webhook(secret):
         if cqid: seen_callbacks.set(cqid, True)
         try:
             send_addr = None
-if data.startswith("more:"):
-    payload_addr = data.split(":",1)[1].strip().lower()
-    addr = payload_addr if ADDR_RE.fullmatch(payload_addr) else None
-    if not addr:
-        # robust recover: try stored mapping, keyboard hints, then text
-        addr = msg2addr.get(msg_id) or _extract_base_addr_from_keyboard(msg_obj.get("reply_markup")) or _extract_addr_from_text(msg_obj.get("text") or "")
-    if DEBUG_MORE: tg_answer_callback(TELEGRAM_TOKEN, cq["id"], f"Full scan {addr or '?'}", logger=app.logger)
-    if not addr:
-        tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "address?", logger=app.logger); return ("ok", 200)
-    text, keyboard = quickscan_entrypoint(addr, lang="en", window="h24", lean=False)
-    text = _enrich_full(addr, text)
-    keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
-    keyboard = _compress_keyboard(keyboard)
-    send_addr = addr
-elif data.startswith("qs2:"):
-    # choose stable/known address from pair
-    addrs = _extract_addrs_from_pair_payload(data)
-    base_addr = _pick_addr(addrs)
-    _, _, window = data.partition("?window="); window = window or "h24"
-    chain = data.split(":",1)[1].split("/",1)[0]
-    text, keyboard = quickscan_pair_entrypoint(chain, "-".join(addrs) if addrs else "", window=window)
-    keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
-    keyboard = _compress_keyboard(keyboard)
-    send_addr = base_addr
-elif data.startswith("qs:"):
-    addr, _, window = data.split(":",1)[1].partition("?window="); window = window or "h24"
-    text, keyboard = quickscan_entrypoint(addr, lang="en", window=window, lean=True)
-    keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=True)
-    keyboard = _compress_keyboard(keyboard)
-    send_addr = addr
+            if data.startswith("more:"):
+                payload_addr = data.split(":",1)[1].strip().lower()
+                addr = payload_addr if ADDR_RE.fullmatch(payload_addr) else None
+                if not addr:
+                    addr = msg2addr.get(msg_id) or _extract_base_addr_from_keyboard(msg_obj.get("reply_markup")) or _extract_addr_from_text(msg_obj.get("text") or "")
+                if DEBUG_MORE: tg_answer_callback(TELEGRAM_TOKEN, cq["id"], f"Full scan {addr or '?' }", logger=app.logger)
+                if not addr:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "address?", logger=app.logger); return ("ok", 200)
+                text, keyboard = quickscan_entrypoint(addr, lang="en", window="h24", lean=False)
+                text = _enrich_full(addr, text)
+                keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
+                keyboard = _compress_keyboard(keyboard)
+                send_addr = addr
+            elif data.startswith("qs2:"):
+                addrs = _extract_addrs_from_pair_payload(data)
+                base_addr = _pick_addr(addrs)
+                _, _, window = data.partition("?window="); window = window or "h24"
+                chain = data.split(":",1)[1].split("/",1)[0]
+                text, keyboard = quickscan_pair_entrypoint(chain, "-".join(addrs) if addrs else "", window=window)
+                keyboard = _rewrite_keyboard_to_addr(base_addr, keyboard, add_more_btn=bool(base_addr))
+                keyboard = _compress_keyboard(keyboard)
+                send_addr = base_addr
+            elif data.startswith("qs:"):
+                addr, _, window = data.split(":",1)[1].partition("?window="); window = window or "h24"
+                text, keyboard = quickscan_entrypoint(addr, lang="en", window=window, lean=True)
+                keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=True)
+                keyboard = _compress_keyboard(keyboard)
+                send_addr = addr
             else:
                 return ("ok", 200)
 
             keyboard = {"inline_keyboard": keyboard.get("inline_keyboard", [])} if isinstance(keyboard, dict) else keyboard
-            st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, NEWLINE_ESC_RE.sub("
-", text), reply_markup=keyboard, logger=app.logger)
+            text_to_send = NEWLINE_ESC_RE.sub("\n", text).replace("\\n", "\n") if isinstance(text, str) else text
+            st, body = tg_send_message(TELEGRAM_TOKEN, chat_id, text_to_send, reply_markup=keyboard, logger=app.logger)
             _store_addr_for_message(body, send_addr)
             tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "updated", logger=app.logger)
         except Exception:
