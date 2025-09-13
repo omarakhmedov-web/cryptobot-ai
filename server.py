@@ -13,7 +13,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.5.1-report-doc-dedupe")
+APP_VERSION = os.environ.get("APP_VERSION", "0.5.2-kb-sanitize")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -212,7 +212,7 @@ def _compress_keyboard(kb: dict):
             token = f"cb:{h}"; cb_cache.set(token, data); btn["callback_data"] = token
     return {"inline_keyboard": ik}
 
-def _append_action_buttons(addr, kb: dict, add_more=False, add_why=True, add_report=True):
+def _ensure_action_buttons(addr, kb: dict, add_more=False, add_why=True, add_report=True):
     ik = (kb or {}).get("inline_keyboard") or []
     new_rows = []
     if add_more and addr:
@@ -224,6 +224,52 @@ def _append_action_buttons(addr, kb: dict, add_more=False, add_why=True, add_rep
     if new_rows: ik.extend(new_rows)
     return {"inline_keyboard": ik} if ik else None
 
+
+def _kb_clone(kb):
+    if not kb or not isinstance(kb, dict): return {"inline_keyboard": []}
+    ik = kb.get("inline_keyboard") or []
+    # deep-ish copy
+    return {"inline_keyboard": [ [dict(btn) for btn in row] for row in ik ]}
+
+def _kb_strip_prefixes(kb, prefixes):
+    base = _kb_clone(kb)
+    ik = base["inline_keyboard"]
+    out = []
+    for row in ik:
+        new_row = []
+        for btn in row:
+            data = (btn.get("callback_data") or "")
+            if any(data.startswith(p) for p in prefixes):
+                continue
+            new_row.append(btn)
+        if new_row:
+            out.append(new_row)
+    return {"inline_keyboard": out}
+
+def _kb_has_prefix(kb, prefix):
+    if not kb or not isinstance(kb, dict): return False
+    for row in kb.get("inline_keyboard") or []:
+        for btn in row:
+            data = (btn.get("callback_data") or "")
+            if data.startswith(prefix):
+                return True
+    return False
+
+def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True):
+    # 1) remove duplicates (strip existing more/why/rep)
+    base = _kb_strip_prefixes(kb, ("more:", "why", "rep:"))
+    ik = base.get("inline_keyboard") or []
+    # 2) append requested buttons exactly once
+    if want_more and addr:
+        ik.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
+    row = []
+    if want_why and addr:
+        row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"})
+    if want_report and addr:
+        row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
+    if row:
+        ik.append(row)
+    return {"inline_keyboard": ik}
 def _extract_addrs_from_pair_payload(data: str):
     try:
         path, _, _ = data.split(":", 1)[1].partition("?")
@@ -738,7 +784,7 @@ def webhook(secret):
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = quickscan_pair_entrypoint(data, lang="en", lean=True)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
-                keyboard = _append_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -749,7 +795,7 @@ def webhook(secret):
                 base_addr = payload.split("?", 1)[0]
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = quickscan_entrypoint(base_addr, lang="en", lean=True)
-                keyboard = _append_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -762,7 +808,7 @@ def webhook(secret):
                 enriched = _enrich_full(addr, base_text)
                 enriched = _append_verdict_block(addr, enriched)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _append_action_buttons(addr, kb0, add_more=False, add_why=True, add_report=True)
+                kb1 = _ensure_action_buttons(addr, kb0, add_more=False, add_why=True, add_report=True)
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
@@ -827,7 +873,7 @@ def webhook(secret):
                 try:
                     text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
                     base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
-                    keyboard = _append_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
+                    keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
                     keyboard = _compress_keyboard(keyboard)
                     st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                     _store_addr_for_message(body, base_addr)
@@ -840,7 +886,7 @@ def webhook(secret):
     try:
         text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
         base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
-        keyboard = _append_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
+        keyboard = _ensure_action_buttons(base_addr, keyboard, add_more=True, add_why=True, add_report=True)
         keyboard = _compress_keyboard(keyboard)
         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
         _store_addr_for_message(body, base_addr)
