@@ -9,7 +9,7 @@ from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.7e2-quickscan-mvp+details")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.7e3-quickscan-mvp+details")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -49,9 +49,28 @@ except Exception:
 
 def _normalize_date_iso(s: str):
     try:
-        return (s or "—")[:10] if len(s or "") >= 10 else (s or "—")
+        import re as _re
+        from datetime import datetime as _dt
+        if not s or s == "—":
+            return "—"
+        s = s.strip()
+        # Already ISO: 2025-10-24T11:51:46Z -> 2025-10-24
+        m = _re.match(r"^(\d{4}-\d{2}-\d{2})", s)
+        if m: return m.group(1)
+        # OpenSSL: "Oct 23 23:59:59 2025 GMT"
+        try:
+            dt = _dt.strptime(s, "%b %d %H:%M:%S %Y %Z")
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+        # Compact yyyymmdd
+        m = _re.match(r"^(\d{4})(\d{2})(\d{2})", s)
+        if m: return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        # Fallback: keep original (better than truncation)
+        return s
     except Exception:
         return s or "—"
+
 
 def _normalize_registrar(reg: str, handle: str, domain: str):
     reg = reg or "—"
@@ -239,6 +258,15 @@ def _symbol_homepage_hint(text: str):
         ("FRAX", "frax.finance"),
         ("WBTC", "wbtc.network"),
         ("ETH", "ethereum.org"),
+        ("BUSD", "binance.com"),
+        ("USDP", "paxos.com"),
+        ("GUSD", "gemini.com"),
+        ("PYUSD", "paypal.com"),
+        ("FDUSD", "firstdigital.com"),
+        ("LUSD", "liquity.org"),
+        ("SUSD", "synthetix.io"),
+        ("CRVUSD", "curve.fi"),
+        ("USDE", "ether.fi"),
     ]
     for sym, dom in hints:
         if sym in t:
@@ -432,6 +460,20 @@ def webhook(secret):
                 text = _enrich_full(addr, text)
                 keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
                 keyboard = _compress_keyboard(keyboard)
+                # Add URL buttons if domain present
+                try:
+                    _dom = _extract_domain_from_text(text)
+                    if _dom:
+                        btns = [{"text": "🌐 Open website", "url": f"https://{_dom}"},
+                                {"text": "🗂️ Archive", "url": f"https://web.archive.org/web/*/{_dom}"}]
+                        if isinstance(keyboard, dict):
+                            ik = keyboard.get("inline_keyboard", [])
+                        else:
+                            ik = keyboard or []
+                        ik.append(btns)
+                        keyboard = {"inline_keyboard": ik}
+                except Exception:
+                    pass
                 send_addr = addr
             elif data.startswith("qs2:"):
                 addrs = _extract_addrs_from_pair_payload(data)
@@ -447,6 +489,20 @@ def webhook(secret):
                 text, keyboard = quickscan_entrypoint(addr, lang="en", window=window, lean=True)
                 keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=True)
                 keyboard = _compress_keyboard(keyboard)
+                # Add URL buttons if domain present
+                try:
+                    _dom = _extract_domain_from_text(text)
+                    if _dom:
+                        btns = [{"text": "🌐 Open website", "url": f"https://{_dom}"},
+                                {"text": "🗂️ Archive", "url": f"https://web.archive.org/web/*/{_dom}"}]
+                        if isinstance(keyboard, dict):
+                            ik = keyboard.get("inline_keyboard", [])
+                        else:
+                            ik = keyboard or []
+                        ik.append(btns)
+                        keyboard = {"inline_keyboard": ik}
+                except Exception:
+                    pass
                 send_addr = addr
             else:
                 return ("ok", 200)
