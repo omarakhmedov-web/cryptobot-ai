@@ -189,6 +189,28 @@ def _cg_homepage(addr: str):
     except Exception: return None
     return None
 
+
+def _symbol_homepage_hint(text: str):
+    """
+    Fallback mapping when contract->homepage cannot be resolved (non-ETH chains, bridges).
+    Looks for well-known stable/bluechip symbols in the text block and returns canonical domain.
+    """
+    t = (text or "").upper()
+    hints = [
+        ("USDT", "tether.to"),
+        ("USDC", "circle.com"),
+        ("DAI", "makerdao.com"),
+        ("TUSD", "tusd.io"),
+        ("FRAX", "frax.finance"),
+        ("WBTC", "wbtc.network"),
+        ("ETH", "ethereum.org"),
+    ]
+    for sym, dom in hints:
+        if sym in t:
+            return dom
+    return None
+
+
 def _rdap(domain: str):
     try:
         r = requests.get(f"https://rdap.org/domain/{domain}", timeout=TIMEOUT, headers={"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")})
@@ -241,6 +263,8 @@ def _wayback_first(domain: str):
 def _enrich_full(addr: str, text: str):
     txt = NEWLINE_ESC_RE.sub("\n", text or "")
     domain = _cg_homepage(addr)
+    if not domain:
+        domain = _symbol_homepage_hint(txt)
     if not domain: return txt
     h, created, reg = _rdap(domain)
     exp, issuer = _ssl_info(domain)
