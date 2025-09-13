@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.5.6-stable")
+APP_VERSION = os.environ.get("APP_VERSION", "0.6.0-onchain-lite")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -164,7 +164,7 @@ def _kb_strip_prefixes(kb, prefixes):
             out.append(new_row)
     return {"inline_keyboard": out}
 
-def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True):
+def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:"))
     ik = base.get("inline_keyboard") or []
     if want_more and addr:
@@ -174,6 +174,8 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"})
     if want_report and addr:
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
+        if want_hp and addr and ETH_RPC_URL:
+        ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
     if row:
         ik.append(row)
     return {"inline_keyboard": ik}
@@ -684,6 +686,201 @@ def _risk_verdict(addr, text):
         label = "LOW RISK 🟢"
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
 
+
+# ========================
+# On-chain lite inspector (ETH RPC)
+# ========================
+ETH_RPC_URL = os.environ.get("ETH_RPC_URL", "").strip()
+
+def _rpc_call(method, params):
+    if not ETH_RPC_URL:
+        raise RuntimeError("ETH_RPC_URL not configured")
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    r = requests.post(ETH_RPC_URL, json=payload, timeout=8, headers={"Content-Type":"application/json"})
+    j = r.json()
+    if "error" in j:
+        raise RuntimeError(f"RPC {method} error: {j['error']}")
+    return j.get("result")
+
+def _eth_getCode(addr):
+    return _rpc_call("eth_getCode", [addr, "latest"])
+
+def _eth_getStorageAt(addr, slot):
+    return _rpc_call("eth_getStorageAt", [addr, slot, "latest"])
+
+def _eth_call(addr, data, from_addr=None):
+    callobj = {"to": addr, "data": data}
+    if from_addr:
+        callobj["from"] = from_addr
+    return _rpc_call("eth_call", [callobj, "latest"])
+
+# Known selectors (precomputed)
+SEL_NAME            = "0x06fdde03"
+SEL_SYMBOL          = "0x95d89b41"
+SEL_DECIMALS        = "0x313ce567"
+SEL_TOTAL_SUPPLY    = "0x18160ddd"
+SEL_BALANCE_OF      = "0x70a08231"
+SEL_OWNER           = "0x8da5cb5b"
+SEL_GET_OWNER       = "0x8f32d59b"  # may fail; optional
+SEL_PAUSED          = "0x5c975abb"
+
+def _pad32(hex_no0x: str):
+    return hex_no0x.rjust(64, "0")
+
+def _enc_addr(addr: str):
+    a = (addr.lower().replace("0x","").rjust(64,"0"))
+    return a
+
+def _dec_uint(hexstr: str):
+    try:
+        return int(hexstr, 16)
+    except Exception:
+        return None
+
+def _dec_bool32(hexstr: str):
+    return _dec_uint(hexstr) == 1
+
+def _dec_address32(hexstr: str):
+    hx = hexstr[-40:]
+    return "0x"+hx
+
+def _dec_string(ret: str):
+    # Very simplified ABI string decoder; handles typical OZ ERC20
+    # 0x + 64 (offset) + 64 (len) + data
+    try:
+        if not ret or ret == "0x":
+            return None
+        data = ret[2:]
+        if len(data) < 128:
+            return None
+        off = int(data[0:64], 16)
+        ln  = int(data[64:128], 16)
+        start = 2 + off*2
+        s = ret[start:start+ln*2]
+        bytes_obj = bytes.fromhex(s)
+        return bytes_obj.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+def _call_str(addr, selector):
+    try:
+        ret = _eth_call(addr, selector)
+        return _dec_string(ret)
+    except Exception:
+        return None
+
+def _call_u8(addr, selector):
+    try:
+        ret = _eth_call(addr, selector)
+        if not ret or ret=="0x": return None
+        return _dec_uint(ret[2+64-2:2+64])
+    except Exception:
+        return None
+
+def _call_u256(addr, selector):
+    try:
+        ret = _eth_call(addr, selector)
+        if not ret or ret=="0x": return None
+        return _dec_uint(ret[2:])
+    except Exception:
+        return None
+
+def _call_bool(addr, selector):
+    try:
+        ret = _eth_call(addr, selector)
+        if not ret or ret=="0x": return None
+        return _dec_bool32(ret[2:66])
+    except Exception:
+        return None
+
+def _call_owner(addr):
+    # try owner() then getOwner()
+    try:
+        ret = _eth_call(addr, SEL_OWNER)
+        if ret and len(ret)>=66:
+            return _dec_address32(ret[2:66])
+    except Exception:
+        pass
+    try:
+        ret = _eth_call(addr, SEL_GET_OWNER)
+        if ret and len(ret)>=66:
+            return _dec_address32(ret[2:66])
+    except Exception:
+        pass
+    return None
+
+EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+EIP1967_BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
+
+def _onchain_inspect(addr: str):
+    if not ETH_RPC_URL:
+        return "On-chain: not configured (set ETH_RPC_URL)", {}
+    try:
+        addr = addr.lower()
+        out = []
+        info = {}
+        code = _eth_getCode(addr)
+        is_contract = code and code != "0x"
+        info["is_contract"] = bool(is_contract)
+        out.append(f"Contract code: {'present' if is_contract else 'absent'}")
+        if not is_contract:
+            return "\\n".join(out), info
+
+        # ERC20 basics
+        name  = _call_str(addr, SEL_NAME)
+        symbol= _call_str(addr, SEL_SYMBOL)
+        dec   = _call_u8(addr, SEL_DECIMALS)
+        ts    = _call_u256(addr, SEL_TOTAL_SUPPLY)
+        info.update({"name": name, "symbol": symbol, "decimals": dec, "total_supply": ts})
+
+        if name or symbol:
+            out.append(f"Token: {(name or '?')} ({symbol or '?'})")
+        if dec is not None:
+            out.append(f"Decimals: {dec}")
+        if ts is not None and dec is not None and dec <= 36:
+            # humanized supply (approx)
+            human = ts / (10 ** dec) if dec is not None and dec >= 0 else None
+            if human is not None:
+                out.append(f"Total supply: ~{human:.6g}")
+
+        # Ownership
+        owner = _call_owner(addr)
+        if owner:
+            info["owner"] = owner
+            out.append(f"Owner: {owner}")
+        paused = _call_bool(addr, SEL_PAUSED)
+        if paused is True:
+            out.append("Paused: ✅")
+            info["paused"] = True
+        elif paused is False:
+            out.append("Paused: ❌")
+            info["paused"] = False
+
+        # Proxy detection by storage slots
+        impl = _eth_getStorageAt(addr, EIP1967_IMPL_SLOT)
+        beacon = _eth_getStorageAt(addr, EIP1967_BEACON_SLOT)
+        proxy = False
+        if impl and impl != "0x" and impl != "0x" + ("0"*64):
+            impl_addr = "0x" + impl[-40:]
+            out.append(f"EIP-1967 impl: {impl_addr}")
+            info["impl"] = impl_addr
+            proxy = True
+        if beacon and beacon != "0x" and beacon != "0x" + ("0"*64):
+            beacon_addr = "0x" + beacon[-40:]
+            out.append(f"EIP-1967 beacon: {beacon_addr}")
+            info["beacon"] = beacon_addr
+            proxy = True
+        info["proxy"] = proxy
+        if proxy:
+            out.append("Proxy: ✅ (upgrade risk)")
+
+        # Honeypot note (we do not simulate sells here)
+        out.append("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)")
+
+        return "\\n".join(out), info
+    except Exception as e:
+        return f"On-chain error: {type(e).__name__}: {e}", {"error": str(e)}
+
 def _append_verdict_block(addr, text):
     score, label, rs = _risk_verdict(addr, text)
     try:
@@ -858,7 +1055,7 @@ def webhook(secret):
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = quickscan_pair_entrypoint(data, lang="en", lean=True)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
-                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -869,7 +1066,7 @@ def webhook(secret):
                 base_addr = payload.split("?", 1)[0]
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = quickscan_entrypoint(base_addr, lang="en", lean=True)
-                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -882,7 +1079,7 @@ def webhook(secret):
                 enriched = _enrich_full(addr, base_text)
                 enriched = _append_verdict_block(addr, enriched)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons(addr, kb0, want_more=False, want_why=True, want_report=True)
+                kb1 = _ensure_action_buttons(addr, kb0, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
@@ -895,6 +1092,16 @@ def webhook(secret):
                 _answer_why_quickly(cq, addr_hint=addr_hint)
                 return ("ok", 200)
 
+            
+if data.startswith("hp:"):
+    addr = data.split(":",1)[1].strip().lower()
+    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "running on-chain…", logger=app.logger)
+    out, meta = _onchain_inspect(addr)
+    kb0 = msg_obj.get("reply_markup") or {}
+    kb1 = _ensure_action_buttons(addr, kb0, want_more=False, want_why=True, want_report=True, want_hp=True)
+    kb1 = _compress_keyboard(kb1)
+    _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
+    return ("ok", 200)
             if data.startswith("rep:"):
                 addr = data.split(":", 1)[1].strip().lower()
                 act_key = f"rep:{chat_id}:{addr}"
@@ -974,6 +1181,14 @@ def webhook(secret):
                 lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
             _send_text(chat_id, "Diag:\n" + "\n".join(lines), logger=app.logger)
             return ("ok", 200)
+        if cmd in ("/onchain",):
+            if not arg:
+                _send_text(chat_id, "Usage: /onchain <contract_address>", logger=app.logger)
+            else:
+                base_addr = _extract_addr_from_text(arg) or arg.strip()
+                details, meta = _onchain_inspect(base_addr)
+                _send_text(chat_id, "On-chain\n" + details, logger=app.logger)
+            return ("ok", 200)
         if cmd in ("/quickscan","/scan"):
             if not arg:
                 _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
@@ -981,7 +1196,7 @@ def webhook(secret):
                 try:
                     text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
                     base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
-                    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True)
+                    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
                     st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                     _store_addr_for_message(body, base_addr)
@@ -996,7 +1211,7 @@ def webhook(secret):
     try:
         text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
         base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
-        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True)
+        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
         _store_addr_for_message(body, base_addr)
