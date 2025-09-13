@@ -9,7 +9,7 @@ from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.7e3-quickscan-mvp+details")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.8-quickscan-mvp+risk")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -348,6 +348,125 @@ def _wayback_first(domain: str):
         return "—"
 
 
+
+# === Simple risk engine (heuristic, no extra APIs) ===
+def _parse_float_km(s):
+    try:
+        s = (s or "").strip().upper().replace("$","")
+        m = re.match(r'^([0-9]+(?:\.[0-9]+)?)\s*([KMB])?$', s)
+        if not m: return None
+        num = float(m.group(1))
+        suf = m.group(2) or ""
+        mult = {"K":1e3, "M":1e6, "B":1e9}.get(suf, 1.0)
+        return num*mult
+    except Exception:
+        return None
+
+def _parse_metric_from_dexline(text, key):
+    # e.g. "Liq 1.11M | Vol24h 14.66K"
+    try:
+        patt = rf'{key}\s+([0-9\.\$]+\s*[KMB]?)'
+        m = re.search(patt, text, re.IGNORECASE)
+        return _parse_float_km(m.group(1)) if m else None
+    except Exception:
+        return None
+
+def _parse_bool(text, key):
+    # e.g. "Proxy: ✅"
+    try:
+        m = re.search(rf'{re.escape(key)}:\s*(✅|✔️|Yes|True|No|❌|—)', text, re.IGNORECASE)
+        if not m: return None
+        val = m.group(1)
+        return val in ("✅","✔️","Yes","True")
+    except Exception:
+        return None
+
+def _parse_roles(text):
+    # e.g. "Roles: owner: ✅ | masterMinter: ✅ | pauser: ✅ ..."
+    roles = {}
+    try:
+        m = re.search(r'Roles:\s*([^\n]+)', text)
+        if not m: return roles
+        chunk = m.group(1)
+        for pair in re.split(r'\s*\|\s*', chunk):
+            kv = pair.split(":",1)
+            if len(kv)==2:
+                roles[kv[0].strip()] = ("✅" in kv[1]) or ("✔" in kv[1]) or ("Yes" in kv[1])
+        return roles
+    except Exception:
+        return roles
+
+def _parse_domain_meta(block):
+    # expects enriched block already appended (Domain / WHOIS / SSL / Wayback)
+    # returns dict: created(date str), registrar(str), ssl_exp(str), wayback(str)
+    d={"created":None,"registrar":None,"ssl_exp":None,"wayback":None}
+    try:
+        m = re.search(r'Created:\s*([0-9\-TZ: ]+)', block); d["created"]=m.group(1) if m else None
+        m = re.search(r'Registrar:\s*([^\n]+)', block); d["registrar"]=m.group(1).strip() if m else None
+        m = re.search(r'Expires:\s*([0-9\-TZ: ]+)', block); d["ssl_exp"]=m.group(1) if m else None
+        m = re.search(r'Wayback:\s*first\s+([0-9\-—]+)', block); d["wayback"]=m.group(1)
+    except Exception:
+        pass
+    return d
+
+def _risk_verdict(addr, text):
+    """
+    Heuristic score 0..100 (higher = riskier). Uses only what we already have in text.
+    Returns (score:int, label:str, reasons:list[str])
+    """
+    score = 0
+    reasons = []
+
+    # Dex metrics (liquidity and volume)
+    liq = _parse_metric_from_dexline(text, "Liq")
+    vol = _parse_metric_from_dexline(text, "Vol24h")
+    if liq is not None:
+        if liq < 20_000: score += 25; reasons.append("Low liquidity (<$20k)")
+        elif liq < 100_000: score += 10; reasons.append("Moderate liquidity (<$100k)")
+    if vol is not None and vol < 5_000:
+        score += 10; reasons.append("Very low 24h volume (<$5k)")
+
+    # Proxy / Upgradable
+    proxy = _parse_bool(text, "Proxy")
+    if proxy is True:
+        score += 15; reasons.append("Upgradeable proxy (owner can change logic)")
+
+    # Owner / roles
+    roles = _parse_roles(text)
+    if roles.get("owner", False):
+        score += 20; reasons.append("Owner privileges present")
+    if roles.get("blacklister", False):
+        score += 10; reasons.append("Blacklisting capability")
+    if roles.get("pauser", False):
+        score += 10; reasons.append("Pausing capability")
+    if roles.get("minter", False) or roles.get("masterMinter", False):
+        score += 10; reasons.append("Minting capability")
+
+    # Domain metadata (age & wayback)
+    dom = _parse_domain_meta(text)
+    try:
+        if dom.get("created") and dom["created"] != "—":
+            # Rough age test: year threshold
+            y = int(dom["created"][:4])
+            if y >= 2024: score += 15; reasons.append("Very new domain")
+            elif y >= 2022: score += 5; reasons.append("Newish domain")
+        if dom.get("wayback") in (None, "—"):
+            score += 5; reasons.append("No Wayback snapshots")
+    except Exception:
+        pass
+
+    # Clamp & label
+    if score >= 60: label = "HIGH RISK 🔴"
+    elif score >= 30: label = "CAUTION 🟡"
+    else: label = "LOW RISK 🟢"
+    return int(min(100, score)), label, reasons
+
+def _append_verdict_block(addr, text):
+    score, label, reasons = _risk_verdict(addr, text)
+    lines = [f"Trust verdict: {label} (score {score}/100)"]
+    if reasons:
+        lines.append("Signals: " + "; ".join(reasons))
+    return text + "\\n" + "\\n".join(lines)
 def _enrich_full(addr: str, text: str):
     txt = NEWLINE_ESC_RE.sub("\n", text or "")
     domain = _cg_homepage(addr)
@@ -355,7 +474,7 @@ def _enrich_full(addr: str, text: str):
         domain = _symbol_homepage_hint(txt)
     if not domain: return txt
     h, created, reg, exp, issuer, wb = _domain_meta(domain)
-    block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}\nOpen: https://{domain} | WB: https://web.archive.org/web/*/{domain}"
+    block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}"
     import re as _re
     if "Domain:" in txt:
         txt = _re.sub(r"Domain:.*", f"Domain: {domain}", txt)
@@ -458,6 +577,7 @@ def webhook(secret):
                     tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "address?", logger=app.logger); return ("ok", 200)
                 text, keyboard = quickscan_entrypoint(addr, lang="en", window="h24", lean=False)
                 text = _enrich_full(addr, text)
+                text = _append_verdict_block(addr, text)
                 keyboard = _rewrite_keyboard_to_addr(addr, keyboard, add_more_btn=False)
                 keyboard = _compress_keyboard(keyboard)
                 # Add URL buttons if domain present
