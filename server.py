@@ -246,19 +246,44 @@ def _ssl_info(domain: str):
         return (exp, cn)
     except Exception: return ("—","—")
 
+
 def _wayback_first(domain: str):
+    """
+    Robust Wayback lookup using CDX API with multiple candidates:
+    http/https + with/without www. Returns '—' if nothing found.
+    """
     try:
-        url = f"https://web.archive.org/cdx/search/cdx?url={domain}&output=json&limit=1&fl=timestamp&filter=statuscode:200&from=2000"
-        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")})
-        if r.status_code != 200: return "—"
-        data = r.json()
-        if isinstance(data, list) and len(data)>1 and isinstance(data[1], list) and data[1]:
-            ts = data[1][0]
-            from datetime import datetime as dt
-            try: return dt.strptime(ts,"%Y%m%d%H%M%S").date().isoformat()
-            except Exception: return ts
+        import requests, os
+        candidates = [
+            f"http://{domain}/*",
+            f"https://{domain}/*",
+            f"http://www.{domain}/*",
+            f"https://www.{domain}/*",
+        ]
+        headers = {"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")}
+        for target in candidates:
+            url = "https://web.archive.org/cdx/search/cdx"
+            params = {
+                "url": target,
+                "output": "json",
+                "fl": "timestamp,statuscode,original",
+                "filter": "statuscode:200",
+                "limit": "1",
+                "from": "2000",
+                "to": "2035",
+            }
+            r = requests.get(url, params=params, timeout=8, headers=headers)
+            if r.status_code != 200: 
+                continue
+            j = r.json()
+            if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and len(j[1]) >= 1:
+                ts = str(j[1][0])
+                if len(ts) >= 8:
+                    return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
         return "—"
-    except Exception: return "—"
+    except Exception:
+        return "—"
+
 
 def _enrich_full(addr: str, text: str):
     txt = NEWLINE_ESC_RE.sub("\n", text or "")
@@ -269,7 +294,7 @@ def _enrich_full(addr: str, text: str):
     h, created, reg = _rdap(domain)
     exp, issuer = _ssl_info(domain)
     wb = _wayback_first(domain)
-    block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}"
+    block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}\nOpen: https://{domain} | WB: https://web.archive.org/web/*/{domain}"
     import re as _re
     if "Domain:" in txt:
         txt = _re.sub(r"Domain:.*", f"Domain: {domain}", txt)
