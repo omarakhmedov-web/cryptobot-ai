@@ -53,6 +53,90 @@ app = Flask(__name__)
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)          # general cache if needed
 seen_callbacks = SafeCache(ttl=300)               # dedupe callback ids
 cb_cache = SafeCache(ttl=600)                     # long callback payloads by hash
+
+# ===== Δ timeframe (DexScreener) helpers =====
+try:
+    DEX_BASE = os.environ.get("DEX_BASE", "https://api.dexscreener.com").rstrip("/")
+except Exception:
+    DEX_BASE = "https://api.dexscreener.com"
+
+_DELTA_CACHE = {}  # addr_l -> {"ts": epoch, "changes": {"m5": v, "h1": v, "h6": v, "h24": v}}
+
+def _delta_cache_get(addr_l: str, ttl=60):
+    try:
+        rec = _DELTA_CACHE.get(addr_l or "")
+        if not rec:
+            return None
+        if time.time() - rec.get("ts", 0) > ttl:
+            return None
+        return rec.get("changes")
+    except Exception:
+        return None
+
+def _delta_cache_put(addr_l: str, changes: dict):
+    try:
+        _DELTA_CACHE[addr_l or ""] = {"ts": time.time(), "changes": changes or {}}
+    except Exception:
+        pass
+
+def _ds_pick_best_pair(pairs):
+    if not isinstance(pairs, list):
+        return None
+    # prefer ethereum, then by liquidity.usd desc
+    best = None
+    best_liq = -1
+    for p in pairs:
+        try:
+            liq = float((((p or {}).get("liquidity") or {}).get("usd")) or 0.0)
+        except Exception:
+            liq = 0.0
+        # prefer ethereum slightly
+        bonus = 1.0 if (p or {}).get("chainId") == "ethereum" else 0.0
+        score = liq + bonus * 1e9
+        if score > best_liq:
+            best_liq = score
+            best = p
+    return best or (pairs[0] if pairs else None)
+
+def _ds_token_changes(addr_l: str) -> dict:
+    """Return {'m5':..,'h1':..,'h6':..,'h24':..} or {}. Uses DEX_BASE /latest/dex/tokens/<addr>"""
+    if not addr_l:
+        return {}
+    try:
+        cached = _delta_cache_get(addr_l)
+        if cached:
+            return cached
+        url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
+        r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
+        if r.status_code != 200:
+            return {}
+        body = r.json() if hasattr(r, "json") else {}
+        pairs = body.get("pairs") or []
+        p = _ds_pick_best_pair(pairs)
+        changes = (p or {}).get("priceChange") or {}
+        # normalize to strings with sign
+        out = {}
+        for k_src, k_dst in (("m5","m5"), ("h1","h1"), ("h6","h6"), ("h24","h24")):
+            v = changes.get(k_src)
+            try:
+                if v is None or v == "":
+                    continue
+                v = float(v)
+                out[k_dst] = ("+" if v>=0 else "") + f"{v:.2f}%"
+            except Exception:
+                # already a string like "+0.12%"
+                vstr = str(v)
+                if not vstr.endswith("%"):
+                    vstr += "%"
+                if not vstr.startswith(("+","-")):
+                    vstr = "+" + vstr
+                out[k_dst] = vstr
+        if out:
+            _delta_cache_put(addr_l, out)
+        return out
+    except Exception:
+        return {}
+# ===== /Δ timeframe helpers =====
 msg2addr = SafeCache(ttl=86400)                   # message_id -> base address mapping (for Why?)
 recent_actions = SafeCache(ttl=20)                # action-level dedupe across messages/taps
 RISK_CACHE = {}                                   # addr -> {score,label,neg,pos,w_neg,w_pos}
@@ -199,6 +283,16 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             has_rpc = False
         if has_rpc:
             ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
+    # Δ timeframe row (stateless)
+    try:
+        ik.append([
+            {"text": "5m",  "callback_data": "tf:5"},
+            {"text": "1h",  "callback_data": "tf:1"},
+            {"text": "6h",  "callback_data": "tf:6"},
+            {"text": "24h", "callback_data": "tf:24"},
+        ])
+    except Exception:
+        pass
     return {"inline_keyboard": ik}
 
 def _extract_addrs_from_pair_payload(data: str):
@@ -1143,6 +1237,7 @@ def _tg_send_document(token: str, chat_id: int, filepath: str, caption: str = No
         return False, {"ok": False, "error": str(e)}
 
 def _render_report(addr: str, text: str):
+    text = _enrich_full(addr, text)
     info = RISK_CACHE.get((addr or "").lower()) or {}
     neg = info.get("neg") or []
     pos = info.get("pos") or []
@@ -1298,8 +1393,22 @@ def webhook(secret):
             if orig:
                 data = orig
             else:
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "expired", logger=app.logger)
-                return ("ok", 200)
+                txt = (msg_obj.get("text") or "") if 'msg_obj' in locals() else ""
+m = re.search(r"Δ24h[^
+]*", txt)
+ans = m.group(0) if m else None
+if not ans:
+    try:
+        addr_fallback = _extract_addr_from_text((msg_obj.get("text") or ""))
+        ch = _ds_token_changes((addr_fallback or "").lower()) if addr_fallback else {}
+        if ch.get("h24"):
+            ans = f"Δ24h {ch['h24']}"
+    except Exception:
+        pass
+if not ans:
+    ans = "expired"
+tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
+return ("ok", 200)
 
         # Dedupe
         cqid = cq.get("id")
@@ -1345,19 +1454,42 @@ def webhook(secret):
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
                 return ("ok", 200)
+            
             # Δ timeframe buttons: accept plain "5","1","6","24" and command-like "/24h"
             if data in {"5","1","6","24","/24h"} or data.startswith("tf:"):
-                # Normalize to label
                 lab = data.replace("/", "").replace("tf:", "")
-                if lab == "24h" or lab == "24":
-                    # Try to extract Δ24h line from the current message text
+                # Get base addr from this message if possible
+                try:
+                    mid = str((msg_obj or {}).get("message_id"))
+                except Exception:
+                    mid = None
+                addr0 = None
+                if mid:
+                    try:
+                        addr0 = msg2addr.get(mid)
+                    except Exception:
+                        addr0 = None
+                if not addr0:
+                    addr0 = _extract_addr_from_text(msg_obj.get("text") or "")
+                addr_l = (addr0 or "").lower()
+
+                # Fetch DexScreener priceChange deltas
+                changes = _ds_token_changes(addr_l) if ADDR_RE.fullmatch(addr_l or "") else {}
+
+                key = {"5":"m5","1":"h1","6":"h6","24":"h24","24h":"h24"}.get(lab, None)
+                ans = None
+                if key and changes.get(key):
+                    # Pretty label
+                    pretty = {"m5":"5m","h1":"1h","h6":"6h","h24":"24h"}[key]
+                    ans = f"Δ{pretty} {changes[key]}"
+                elif lab in {"24","24h"}:
+                    # fallback: try to extract Δ24h from current message text
                     txt = (msg_obj.get("text") or "")
                     m = re.search(r"Δ24h[^\n]*", txt)
                     ans = m.group(0) if m else "Δ24h: n/a"
-                elif lab in {"5","1","6"}:
-                    ans = f"Δ{lab}{'m' if lab=='5' else 'h'}: not available in this build"
                 else:
-                    ans = "updated"
+                    ans = "Temporarily unavailable"
+
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
                 return ("ok", 200)
 
