@@ -498,6 +498,92 @@ def _domain_meta(domain: str):
     DOMAIN_META_CACHE[domain] = {"t": now, "h": h, "created": created, "reg": reg, "exp": exp, "issuer": issuer, "wb": wb}
     return h, created, reg, exp, issuer, wb
 
+def _enrich_full(addr: str, base_text: str) -> str:
+    """
+    Enriches quickscan text with Domain / RDAP / SSL / Wayback in one deduplicated block.
+    Safe: any missing helper raises no error; returns original text on failure.
+    """
+    try:
+        text = base_text or ""
+        addr_l = (addr or "").lower()
+
+        # Determine domain from the text or known hints
+        dom = None
+        try:
+            if ' _extract_domain_from_text' or True:
+                dom = _extract_domain_from_text(text)  # may raise
+        except Exception:
+            dom = None
+        try:
+            if not dom and 'ADDR_RE' in globals() and 'KNOWN_HOMEPAGES' in globals() and addr_l:
+                if ADDR_RE.fullmatch(addr_l):
+                    dom = KNOWN_HOMEPAGES.get(addr_l)
+        except Exception:
+            pass
+        try:
+            if not dom and '_symbol_homepage_hint' in globals():
+                hint = _symbol_homepage_hint(text)
+                if hint:
+                    dom = hint
+        except Exception:
+            pass
+        try:
+            if not dom and addr_l and 'ADDR_RE' in globals() and ADDR_RE.fullmatch(addr_l) and '_cg_homepage' in globals():
+                dom = _cg_homepage(addr_l)
+        except Exception:
+            pass
+
+        if not dom:
+            return text  # nothing to add
+
+        # Fetch domain meta (cached)
+        h = created = reg = exp = issuer = wb = "—"
+        try:
+            if '_domain_meta' in globals():
+                tup = _domain_meta(dom)
+                # allow variable-length tuples from older versions
+                h = tup[0] if len(tup) > 0 else "—"
+                created = tup[1] if len(tup) > 1 else "—"
+                reg = tup[2] if len(tup) > 2 else "—"
+                exp = tup[3] if len(tup) > 3 else "—"
+                issuer = tup[4] if len(tup) > 4 else "—"
+                wb = tup[5] if len(tup) > 5 else "—"
+        except Exception:
+            pass
+
+        # Normalize registrar if helper exists
+        try:
+            if '_normalize_registrar' in globals():
+                reg = _normalize_registrar(reg, h, dom)
+        except Exception:
+            pass
+
+        # Compose lines
+        domain_line = f"Domain: {dom}"
+        ssl_prefix = "SSL: OK" if exp and exp != "—" else "SSL: —"
+        whois_line  = f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}"
+        ssl_line    = f"{ssl_prefix} | Expires: {exp or '—'} | Issuer: {issuer or '—'}"
+        wayback_line= f"Wayback: first {wb if wb else '—'}"
+
+        # Replace existing lines or append (no duplicates)
+        def _replace_or_append(body: str, label: str, newline: str) -> str:
+            patt = re.compile(rf"(?m)^{re.escape(label)}[^\n]*$")
+            if patt.search(body or ""):
+                return patt.sub(newline, body)
+            if body and not body.endswith("\\n"):
+                body += "\\n"
+            return body + newline
+
+        text = _replace_or_append(text, "Domain:",     domain_line)
+        text = _replace_or_append(text, "WHOIS/RDAP:", whois_line)
+        text = _replace_or_append(text, "SSL:",        ssl_line)
+        text = _replace_or_append(text, "Wayback:",    wayback_line)
+
+        return text
+    except Exception:
+        return base_text or ""
+
+
 def _cg_homepage(addr: str):
     addr_l = (addr or "").lower()
     if addr_l in KNOWN_HOMEPAGES:
