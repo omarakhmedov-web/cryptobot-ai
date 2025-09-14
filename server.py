@@ -826,6 +826,33 @@ def _risk_verdict(addr, text):
         label = "LOW RISK 🟢"
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
 
+
+def _wrap_kv_line(prefix: str, items, width: int = 96, indent: int = 2) -> str:
+    """Wrap a 'Key: a; b; c; ...' line across multiple lines,
+    keeping words intact and indenting continuation lines."""
+    try:
+        items = [str(x) for x in (items or []) if str(x).strip()]
+        if not items:
+            return f"{prefix}: n/a"
+        head = f"{prefix}: "
+        avail = max(20, width) - len(head)
+        out_lines = []
+        cur = ""
+        for i, it in enumerate(items):
+            sep = "" if i == 0 else "; "
+            token = sep + it
+            if len(cur) + len(token) <= avail:
+                cur += token
+            else:
+                out_lines.append(head + cur)
+                head = " " * (len(prefix) + 2 + indent)
+                avail = max(20, width) - len(head)
+                cur = it
+        if cur:
+            out_lines.append(head + cur)
+        return "\n".join(out_lines)
+    except Exception:
+        return f"{prefix}: " + "; ".join(items or [])
 def _append_verdict_block(addr, text):
     score, label, rs = _risk_verdict(addr, text)
     try:
@@ -838,9 +865,9 @@ def _append_verdict_block(addr, text):
         pass
     lines = [f"Trust verdict: {label} (score {score}/100)"]
     if rs.get("neg"):
-        lines.append("⚠️ Signals: " + "; ".join(rs["neg"]))
+        lines.append(_wrap_kv_line("⚠️ Signals", rs.get("neg")))
     if rs.get("pos"):
-        lines.append("✅ Positives: " + "; ".join(rs["pos"]))
+        lines.append(_wrap_kv_line("✅ Positives", rs.get("pos")))
     return text + "\n" + "\n".join(lines)
 
 # ========================
