@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.6.7-rpc-nullfix")
+APP_VERSION = os.environ.get("APP_VERSION", "0.6.9-enrich-hotfix")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -58,7 +58,7 @@ recent_actions = SafeCache(ttl=20)                # action-level dedupe across m
 RISK_CACHE = {}                                   # addr -> {score,label,neg,pos,w_neg,w_pos}
 
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
-NEWLINE_ESC_RE = re.compile(r'\n')
+NEWLINE_ESC_RE = re.compile(r'\\n')
 
 # ========================
 # Known homepages (seed)
