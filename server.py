@@ -1345,6 +1345,22 @@ def webhook(secret):
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
                 return ("ok", 200)
+            # Δ timeframe buttons: accept plain "5","1","6","24" and command-like "/24h"
+            if data in {"5","1","6","24","/24h"} or data.startswith("tf:"):
+                # Normalize to label
+                lab = data.replace("/", "").replace("tf:", "")
+                if lab == "24h" or lab == "24":
+                    # Try to extract Δ24h line from the current message text
+                    txt = (msg_obj.get("text") or "")
+                    m = re.search(r"Δ24h[^\n]*", txt)
+                    ans = m.group(0) if m else "Δ24h: n/a"
+                elif lab in {"5","1","6"}:
+                    ans = f"Δ{lab}{'m' if lab=='5' else 'h'}: not available in this build"
+                else:
+                    ans = "updated"
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
+                return ("ok", 200)
+
 
             if data.startswith("why"):
                 addr_hint = None
