@@ -8,12 +8,12 @@ import tempfile
 import hashlib
 import threading
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, request, jsonify
 
-# Project-local utilities
+# Project-local utilities (must exist in your project)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.6.6-admin-secret")
+APP_VERSION = os.environ.get("APP_VERSION", "0.6.7-rpc-nullfix")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -116,6 +116,15 @@ def _admin_debug(chat_id, text):
     except Exception:
         pass
 
+def require_webhook_secret(fn):
+    def wrapper(*args, **kwargs):
+        if WEBHOOK_HEADER_SECRET:
+            header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if header != WEBHOOK_HEADER_SECRET:
+                return ("forbidden", 403)
+        return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
+    return wrapper
 
 def require_admin_secret(fn):
     def wrapper(*args, **kwargs):
@@ -124,15 +133,6 @@ def require_admin_secret(fn):
         header = request.headers.get("X-Admin-Secret", "")
         if header != ADMIN_SECRET:
             return ("forbidden", 403)
-        return fn(*args, **kwargs)
-    wrapper.__name__ = fn.__name__
-    return wrapper
-def require_webhook_secret(fn):
-    def wrapper(*args, **kwargs):
-        if WEBHOOK_HEADER_SECRET:
-            header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-            if header != WEBHOOK_HEADER_SECRET:
-                return ("forbidden", 403)
         return fn(*args, **kwargs)
     wrapper.__name__ = fn.__name__
     return wrapper
@@ -200,7 +200,6 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         if has_rpc:
             ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
     return {"inline_keyboard": ik}
-
 
 def _extract_addrs_from_pair_payload(data: str):
     try:
@@ -708,44 +707,6 @@ def _risk_verdict(addr, text):
         label = "LOW RISK 🟢"
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
 
-
-def _merge_onchain_into_risk(addr: str, info: dict):
-    try:
-        key = (addr or "").lower()
-        if not key:
-            return
-        entry = RISK_CACHE.get(key) or {"score": 0, "label": "LOW RISK 🟢", "neg": [], "pos": [], "w_neg": [], "w_pos": []}
-        added = False
-        # Prepare helper to add unique reason
-        def add_neg(reason, weight):
-            nonlocal added
-            if not reason:
-                return
-            if reason not in entry["neg"]:
-                entry["neg"].append(reason)
-                entry["w_neg"].append(weight)
-                entry["score"] = int(min(100, entry.get("score", 0) + (weight or 0)))
-                added = True
-
-        # Merge proxy/paused/owner
-        if info.get("proxy"):
-            add_neg("Upgradeable proxy (owner can change logic)", 15)
-        if info.get("paused") is True:
-            add_neg("Contract is paused", 20)
-        if info.get("owner"):
-            add_neg("Owner privileges present", 20)
-
-        # Recompute label
-        if entry["score"] >= RISK_THRESH_HIGH:
-            entry["label"] = "HIGH RISK 🔴"
-        elif entry["score"] >= RISK_THRESH_CAUTION:
-            entry["label"] = "CAUTION 🟡"
-        else:
-            entry["label"] = "LOW RISK 🟢"
-        if added:
-            RISK_CACHE[key] = entry
-    except Exception:
-        pass
 def _append_verdict_block(addr, text):
     score, label, rs = _risk_verdict(addr, text)
     try:
@@ -771,7 +732,6 @@ _RPC_LAST_GOOD = 0
 
 def _mask_host(u: str):
     try:
-        from urllib.parse import urlparse
         o = urlparse(u)
         return (o.hostname or u).split('@')[-1]
     except Exception:
@@ -783,7 +743,7 @@ def _parse_rpc_urls():
     primary = os.environ.get("ETH_RPC_URL", "").strip()
     if primary:
         urls.append(primary)
-    # Indexed URLs: ETH_RPC_URL1..ETH_RPC_URL6 (we'll accept up to 12 to be safe)
+    # Indexed URLs: ETH_RPC_URL1..ETH_RPC_URL6 (accept up to 12)
     for i in range(1, 13):
         val = os.environ.get(f"ETH_RPC_URL{i}", "").strip()
         if val:
@@ -819,8 +779,12 @@ def _rpc_call(method, params):
             if "error" in j:
                 last_err = RuntimeError(f"RPC {method} error from {_mask_host(url)}: {j['error']}")
                 continue
+            res = j.get("result")
+            if res in (None, "", []):
+                last_err = RuntimeError(f"RPC {method} null/empty result from {_mask_host(url)}")
+                continue
             _RPC_LAST_GOOD = idx
-            return j.get("result")
+            return res
         except Exception as e:
             last_err = e
             continue
@@ -848,13 +812,6 @@ SEL_OWNER           = "0x8da5cb5b"
 SEL_GET_OWNER       = "0x8f32d59b"  # may fail; optional
 SEL_PAUSED          = "0x5c975abb"
 
-def _pad32(hex_no0x: str):
-    return hex_no0x.rjust(64, "0")
-
-def _enc_addr(addr: str):
-    a = (addr.lower().replace("0x","").rjust(64,"0"))
-    return a
-
 def _dec_uint(hexstr: str):
     try:
         return int(hexstr, 16)
@@ -869,7 +826,7 @@ def _dec_address32(hexstr: str):
     return "0x"+hx
 
 def _dec_string(ret: str):
-    # Robust ABI string decoder: supports dynamic string (offset/len) and bytes32 fallback
+    # Robust ABI string decoder: supports dynamic string and bytes32 fallback
     try:
         if not ret or ret == "0x":
             return None
@@ -911,7 +868,6 @@ def _format_supply(ts, decimals):
             return f"{human:,.6g}"
     except Exception:
         return None
-
 
 def _call_str(addr, selector):
     try:
@@ -987,7 +943,7 @@ def _onchain_inspect(addr: str):
         info.update({"name": name, "symbol": symbol, "decimals": dec, "total_supply": ts})
 
         if name or symbol:
-            out.append(f"Token: {(name or '?')} ({symbol or '?'})")
+            out.append(f"Token: {name or '?'} ({symbol or '?'})")
         if dec is not None:
             out.append(f"Decimals: {dec}")
         if ts is not None and dec is not None:
@@ -1023,12 +979,12 @@ def _onchain_inspect(addr: str):
             out.append(f"EIP-1967 beacon: {beacon_addr}")
             info["beacon"] = beacon_addr
             proxy = True
-        info["proxy"] = proxy
         if admin and admin != "0x" and admin != "0x" + ("0"*64):
             admin_addr = "0x" + admin[-40:]
             out.append(f"EIP-1967 admin: {admin_addr}")
             info["admin"] = admin_addr
             proxy = True or proxy
+        info["proxy"] = proxy
         if proxy:
             out.append("Proxy: ✅ (upgrade risk)")
 
@@ -1039,21 +995,51 @@ def _onchain_inspect(addr: str):
     except Exception as e:
         return f"On-chain error: {type(e).__name__}: {e}", {"error": str(e)}
 
-def _enrich_full(addr: str, text: str):
-    txt = NEWLINE_ESC_RE.sub("\n", text or "")
-    domain = _cg_homepage(addr) or _symbol_homepage_hint(txt)
-    if not domain:
-        return txt
-    h, created, reg, exp, issuer, wb = _domain_meta(domain)
-    block = f"Domain: {domain}\nWHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}\nSSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}\nWayback: first {wb}"
-    if "Domain:" in txt:
-        txt = re.sub(r"Domain:.*", f"Domain: {domain}", txt)
-        txt = re.sub(r"WHOIS/RDAP:.*", f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}", txt)
-        txt = re.sub(r"SSL:.*", f"SSL: {('OK' if exp!='—' else '—')} | Expires: {exp} | Issuer: {issuer}", txt)
-        txt = re.sub(r"Wayback:.*", f"Wayback: first {wb}", txt)
-        return txt
-    return txt + "\n" + block
+def _merge_onchain_into_risk(addr: str, info: dict):
+    try:
+        key = (addr or "").lower()
+        if not key:
+            return
+        entry = RISK_CACHE.get(key) or {"score": 0, "label": "LOW RISK 🟢", "neg": [], "pos": [], "w_neg": [], "w_pos": []}
+        # Address-level whitelist: de-weight negatives
+        is_wl_addr = key in WL_ADDRESSES
+        def W(w):
+            return 0 if is_wl_addr else w
 
+        added = False
+        def add_neg(reason, weight):
+            nonlocal added
+            if not reason:
+                return
+            if reason not in entry["neg"]:
+                entry["neg"].append(reason)
+                entry["w_neg"].append(weight)
+                entry["score"] = int(min(100, entry.get("score", 0) + (weight or 0)))
+                added = True
+
+        # Merge proxy/paused/owner (weights adapt to whitelist)
+        if info.get("proxy"):
+            add_neg("Upgradeable proxy (owner can change logic)", W(15))
+        if info.get("paused") is True:
+            add_neg("Contract is paused", W(20))
+        if info.get("owner"):
+            add_neg("Owner privileges present", W(20))
+
+        # Recompute label
+        if entry["score"] >= RISK_THRESH_HIGH:
+            entry["label"] = "HIGH RISK 🔴"
+        elif entry["score"] >= RISK_THRESH_CAUTION:
+            entry["label"] = "CAUTION 🟡"
+        else:
+            entry["label"] = "LOW RISK 🟢"
+        if added:
+            RISK_CACHE[key] = entry
+    except Exception:
+        pass
+
+# ========================
+# Report (HTML)
+# ========================
 def _tg_send_document(token: str, chat_id: int, filepath: str, caption: str = None):
     try:
         url = f"https://api.telegram.org/bot{token}/sendDocument"
@@ -1083,7 +1069,7 @@ def _render_report(addr: str, text: str):
             out.append(f"- {t}" + (f" (+{w})" if isinstance(w, (int, float)) else ""))
         return "\n".join(out) if out else "—"
     dom = _extract_domain_from_text(text) or "—"
-    # Try to parse pair/dex/chain from the first lines
+    # Parse pair/dex/chain from the first lines
     pair = None; dex = None; chain = None
     m = re.search(r"^\s*([A-Za-z0-9_\-\.\/]+)\s+on\s+([A-Za-z0-9_\-\.]+)\s*\(([^)]+)\)", text, re.IGNORECASE | re.MULTILINE)
     if m:
@@ -1156,16 +1142,20 @@ def admin_diag():
     for u in urls:
         try:
             r = requests.post(u, json={"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}, timeout=6, headers={"Content-Type":"application/json"})
-            body = {}
             try:
                 body = r.json()
             except Exception:
                 body = {"http": r.status_code}
-            rpc.append({"url": _mask_host(u), "result": body.get("result"), "status": r.status_code})
+            rec = {"url": _mask_host(u), "status": r.status_code}
+            if isinstance(body, dict) and "error" in body:
+                rec["error"] = body.get("error")
+            rec["result"] = body.get("result")
+            if rec.get("result") in (None, "", []):
+                rec.setdefault("note", "null/empty result")
+            rpc.append(rec)
         except Exception as e:
             rpc.append({"url": _mask_host(u), "error": str(e)})
     return jsonify({"ok": True, "version": APP_VERSION, "diag": lines, "rpc": rpc})
-
 
 # ========================
 # Telegram webhook & callbacks
