@@ -2330,3 +2330,51 @@ def _html_sanitize_risk(risk):
     except Exception:
         pass
     return risk
+
+
+# ========================
+# Post-processing wrappers (safe, non-invasive)
+# ========================
+try:
+    import re as _re_patch
+
+    # Wrap _enrich_full to adjust Honeypot line for whitelisted tokens
+    if '_enrich_full' in globals():
+        _enrich_full__orig = _enrich_full
+        def _enrich_full(addr: str, base_text: str) -> str:  # type: ignore[override]
+            s = _enrich_full__orig(addr, base_text)
+            try:
+                whitelisted, _ = _is_whitelisted(addr, s)
+                if whitelisted and "Honeypot quick-test: ⚠️ static only (no DEX sell simulation)" in s:
+                    s = s.replace(
+                        "Honeypot quick-test: ⚠️ static only (no DEX sell simulation)",
+                        "Honeypot: ℹ️ skipped for centralized/whitelisted token"
+                    )
+            except Exception:
+                pass
+            return s
+
+    # Wrap _render_report HTML to sanitize Signals and Positives
+    if '_render_report' in globals():
+        _render_report__orig = _render_report
+        def _render_report(addr: str, text: str):  # type: ignore[override]
+            html = _render_report__orig(addr, text)
+            try:
+                # Remove zero-weight negative line "Owner privileges present (+0)"
+                html = _re_patch.sub(r"(?m)^-\s*Owner privileges present \(\+0\)\s*$", "", html)
+                # If Positives section is just "—", replace with expected-admin positive (+0)
+                html = html.replace("<h3>Positives</h3><pre>—</pre>",
+                                    "<h3>Positives</h3><pre>Admin privileges expected for centralized/whitelisted token (+0)</pre>")
+                # Also adjust honeypot line in the rendered Summary for whitelisted tokens
+                if "Honeypot quick-test: ⚠️ static only (no DEX sell simulation)" in html:
+                    whitelisted, _ = _is_whitelisted(addr, text)
+                    if whitelisted:
+                        html = html.replace(
+                            "Honeypot quick-test: ⚠️ static only (no DEX sell simulation)",
+                            "Honeypot: ℹ️ skipped for centralized/whitelisted token"
+                        )
+            except Exception:
+                pass
+            return html
+except Exception:
+    pass
