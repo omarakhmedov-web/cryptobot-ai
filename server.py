@@ -233,6 +233,13 @@ def _compress_keyboard(kb: dict):
             token = f"cb:{h}"
             cb_cache.set(token, data)
             btn["callback_data"] = token
+    # Δ timeframe row (single)
+    ik.append([
+        {"text": "5m",  "callback_data": "tf:5"},
+        {"text": "1h",  "callback_data": "tf:1"},
+        {"text": "6h",  "callback_data": "tf:6"},
+        {"text": "24h", "callback_data": "tf:24"},
+    ])
     return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _kb_clone(kb):
@@ -260,7 +267,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
     ik = base.get("inline_keyboard") or []
     base = _kb_strip_tf_rows(base)
-    ik = base.get(\"inline_keyboard\") or []
+    ik = base.get("inline_keyboard") or []
     # Add 'More details' only in the first message
     if want_more and addr:
         ik.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
@@ -280,6 +287,13 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             has_rpc = False
         if has_rpc:
             ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
+    # Δ timeframe row (single)
+    ik.append([
+        {"text": "5m",  "callback_data": "tf:5"},
+        {"text": "1h",  "callback_data": "tf:1"},
+        {"text": "6h",  "callback_data": "tf:6"},
+        {"text": "24h", "callback_data": "tf:24"},
+    ])
     return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _extract_addrs_from_pair_payload(data: str):
