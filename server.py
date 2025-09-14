@@ -95,6 +95,24 @@ CHAIN_NAME_TO_ID = {
     "base": 8453,
 }
 
+
+
+# Known blue‑chip token addresses (ETH mainnet, lowercase)
+BLUECHIP_ADDRS = {
+    # USDC, USDT, WETH, WBTC, DAI
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "0xdac17f958d2ee523a2206206994597c13d831ec7",
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+    "0x6b175474e89094c44da98b954eedeac495271d0f",
+}
+
+def _is_bluechip_addr(addr: str) -> bool:
+    try:
+        return (addr or "").lower() in BLUECHIP_ADDRS
+    except Exception:
+        return False
+
 def _hp_cache_get(key, ttl):
     try:
         ent = (_HP_CACHE if key.startswith("ISH:") else _TOPH_CACHE).get(key)
@@ -545,7 +563,7 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         wneg = [_to_int_or_default(w, 10) for w in wneg]
         wpos = [_to_int_or_default(w, 10) for w in wpos]
 
-        is_whitelisted = any("Whitelisted by address" in p for p in pos) or any("Blue-chip pair context" in p for p in pos)
+        is_whitelisted = any("Whitelisted by address" in p for p in pos) or any("Blue-chip pair context" in p for p in pos) or _is_bluechip_addr(addr)
         if is_whitelisted and "Owner privileges present" in neg:
             try:
                 idxs = [i for i,r in enumerate(neg) if r == "Owner privileges present"]
@@ -1426,7 +1444,7 @@ def _onchain_inspect(addr: str):
                 pass
             _cache_ent = RISK_CACHE.get((addr or '').lower()) or {}
             _pos = _cache_ent.get('pos') or []
-            is_whitelisted = any('Whitelisted by address' in p for p in _pos) or any('Blue-chip pair context' in p for p in _pos)
+            is_whitelisted = any('Whitelisted by address' in p for p in _pos) or any('Blue-chip pair context' in p for p in _pos) or _is_bluechip_addr(addr)
 
             out.append(f"Taxes: buy={bt if bt is not None else '—'}% | sell={st if st is not None else '—'}% | transfer={tt if tt is not None else '—'}%")
         if not sim_ok and hp.get("simulationError"):
