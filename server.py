@@ -579,11 +579,14 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
             for (reason, w) in zip(items, weights):
                 sym = "−" if sign=="neg" else "+"
                 w = _to_int_or_default(w, 10)
-                lines.append(f"{sym}{abs(w):>2}  {reason}")
+                lines.append(f"{sym}  {reason}" if (w == 0 or str(w)=="0") else f"{sym}{abs(w):>2}  {reason}")
 
         fmt(neg, wneg, "neg")
-        if pos:
+
+        if neg and pos:
+
             lines.append("—")
+
         fmt(pos, wpos, "pos")
 
         if not lines:
@@ -1145,6 +1148,36 @@ def _risk_verdict(addr, text):
         label = "CAUTION 🟡"
     else:
         label = "LOW RISK 🟢"
+
+# --- Whitelist post-filter: drop zero-weight negatives and add a single positive marker ---
+try:
+    if whitelisted or vars().get('is_whitelisted') or vars().get('whitelist_hit'):
+        # normalize containers
+        neg_list = neg if 'neg' in locals() else []
+        wneg_list = weights_neg if 'weights_neg' in locals() else []
+        pos_list = pos if 'pos' in locals() else []
+        wpos_list = weights_pos if 'weights_pos' in locals() else []
+
+        # remove zero-weight negatives
+        neg2, wneg2 = [], []
+        for r, w in zip(neg_list, wneg_list):
+            try:
+                wi = int(w)
+            except Exception:
+                wi = 10
+            if wi > 0:
+                neg2.append(r); wneg2.append(w)
+        neg, weights_neg = neg2, wneg2
+
+        # add expected-admin positive once
+        expected_msg = "Admin privileges expected for centralized/whitelisted token"
+        if not any(expected_msg in p for p in pos_list):
+            pos_list.append(expected_msg); wpos_list.append(0)
+
+        pos, weights_pos = pos_list, wpos_list
+except NameError:
+    pass
+
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
 
 
@@ -1420,9 +1453,9 @@ def _short_addr(a: str, take: int = 6) -> str:
         return a
 def _onchain_inspect(addr: str):
     out = []
-    info = {}
-    
-    # --- Honeypot.is simulation & LP/holders ---
+
+    # info reset removed by patch
+# --- Honeypot.is simulation & LP/holders ---
     try:
         pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
     except Exception:
