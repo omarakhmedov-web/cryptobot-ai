@@ -1378,38 +1378,6 @@ def webhook(secret):
 
         
         
-# Δ timeframe buttons
-        # Δ timeframe buttons
-            lab = data.replace("tf:","").replace("/","")
-            # Determine base address from message mapping or text
-            try:
-                mid = str((msg_obj or {}).get("message_id"))
-            except Exception:
-                mid = None
-            addr0 = None
-            if mid:
-                try:
-                    addr0 = msg2addr.get(mid)
-                except Exception:
-                    addr0 = None
-            if not addr0:
-                addr0 = _extract_addr_from_text(msg_obj.get("text") or "")
-            addr_l = (addr0 or "").lower()
-            # Ask DexScreener for priceChange deltas
-            changes = _ds_token_changes(addr_l) if ADDR_RE.fullmatch(addr_l or "") else {}
-            key = {"5":"m5","1":"h1","6":"h6","24":"h24","24h":"h24"}.get(lab, None)
-            if key and changes.get(key):
-                pretty = {"m5":"5m","h1":"1h","h6":"6h","h24":"24h"}[key]
-                ans = f"Δ{pretty} {changes[key]}"
-            elif lab in {"24","24h"}:
-                # fallback – read Δ24h from current message text
-                txt = (msg_obj.get("text") or "")
-                m_ = re.search(r"Δ24h[^\n]*", txt)
-                ans = m_.group(0) if m_ else "Δ24h: n/a"
-            else:
-                ans = "Δ: n/a"
-            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
-            return ("ok", 200)
 # Dedupe
         cqid = cq.get("id")
         if cqid and seen_callbacks.get(cqid):
