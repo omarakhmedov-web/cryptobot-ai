@@ -227,7 +227,7 @@ def _compress_keyboard(kb: dict):
             data = btn.get("callback_data")
             if not data:
                 continue
-            if len(data) <= 60 and data.startswith(("qs:","qs2:","more:","less:","why:","rep:","hp:","lp:","mon:")):
+            if len(data) <= 60 and data.startswith(("qs:","qs2:","more:","less:","why:","rep:","hp:","lp:","mon:","tf:")):
                 continue
             h = hashlib.sha1(data.encode("utf-8")).hexdigest()[:10]
             token = f"cb:{h}"
@@ -235,12 +235,12 @@ def _compress_keyboard(kb: dict):
             btn["callback_data"] = token
     # Δ timeframe row (single)
     ik.append([
-        {"text": "5m",  "callback_data": "tf:5"},
-        {"text": "1h",  "callback_data": "tf:1"},
-        {"text": "6h",  "callback_data": "tf:6"},
-        {"text": "24h", "callback_data": "tf:24"},
+        {"text": "Δ 5m",  "callback_data": "tf:5"},
+        {"text": "Δ 1h",  "callback_data": "tf:1"},
+        {"text": "Δ 6h",  "callback_data": "tf:6"},
+        {"text": "Δ 24h", "callback_data": "tf:24"},
     ])
-    return _kb_dedupe_all({"inline_keyboard": ik})
+return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _kb_clone(kb):
     if not kb or not isinstance(kb, dict):
