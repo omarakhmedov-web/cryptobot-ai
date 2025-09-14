@@ -82,7 +82,6 @@ def _delta_cache_put(addr_l: str, changes: dict):
 def _ds_pick_best_pair(pairs):
     if not isinstance(pairs, list):
         return None
-    # prefer ethereum, then by liquidity.usd desc
     best = None
     best_liq = -1
     for p in pairs:
@@ -90,7 +89,6 @@ def _ds_pick_best_pair(pairs):
             liq = float((((p or {}).get("liquidity") or {}).get("usd")) or 0.0)
         except Exception:
             liq = 0.0
-        # prefer ethereum slightly
         bonus = 1.0 if (p or {}).get("chainId") == "ethereum" else 0.0
         score = liq + bonus * 1e9
         if score > best_liq:
@@ -99,7 +97,6 @@ def _ds_pick_best_pair(pairs):
     return best or (pairs[0] if pairs else None)
 
 def _ds_token_changes(addr_l: str) -> dict:
-    """Return {'m5':..,'h1':..,'h6':..,'h24':..} or {}. Uses DEX_BASE /latest/dex/tokens/<addr>"""
     if not addr_l:
         return {}
     try:
@@ -114,7 +111,6 @@ def _ds_token_changes(addr_l: str) -> dict:
         pairs = body.get("pairs") or []
         p = _ds_pick_best_pair(pairs)
         changes = (p or {}).get("priceChange") or {}
-        # normalize to strings with sign
         out = {}
         for k_src, k_dst in (("m5","m5"), ("h1","h1"), ("h6","h6"), ("h24","h24")):
             v = changes.get(k_src)
@@ -124,7 +120,6 @@ def _ds_token_changes(addr_l: str) -> dict:
                 v = float(v)
                 out[k_dst] = ("+" if v>=0 else "") + f"{v:.2f}%"
             except Exception:
-                # already a string like "+0.12%"
                 vstr = str(v)
                 if not vstr.endswith("%"):
                     vstr += "%"
@@ -238,7 +233,7 @@ def _compress_keyboard(kb: dict):
             token = f"cb:{h}"
             cb_cache.set(token, data)
             btn["callback_data"] = token
-    return {"inline_keyboard": ik}
+    return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _kb_clone(kb):
     if not kb or not isinstance(kb, dict):
@@ -264,6 +259,8 @@ def _kb_strip_prefixes(kb, prefixes):
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
     ik = base.get("inline_keyboard") or []
+    base = _kb_strip_tf_rows(base)
+    ik = base.get(\"inline_keyboard\") or []
     # Add 'More details' only in the first message
     if want_more and addr:
         ik.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
@@ -283,17 +280,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             has_rpc = False
         if has_rpc:
             ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
-    # Δ timeframe row (stateless)
-    try:
-        ik.append([
-            {"text": "5m",  "callback_data": "tf:5"},
-            {"text": "1h",  "callback_data": "tf:1"},
-            {"text": "6h",  "callback_data": "tf:6"},
-            {"text": "24h", "callback_data": "tf:24"},
-        ])
-    except Exception:
-        pass
-    return {"inline_keyboard": ik}
+    return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _extract_addrs_from_pair_payload(data: str):
     try:
@@ -591,92 +578,6 @@ def _domain_meta(domain: str):
     reg = _normalize_registrar(reg, h, domain)
     DOMAIN_META_CACHE[domain] = {"t": now, "h": h, "created": created, "reg": reg, "exp": exp, "issuer": issuer, "wb": wb}
     return h, created, reg, exp, issuer, wb
-
-def _enrich_full(addr: str, base_text: str) -> str:
-    """
-    Enriches quickscan text with Domain / RDAP / SSL / Wayback in one deduplicated block.
-    Safe: any missing helper raises no error; returns original text on failure.
-    """
-    try:
-        text = base_text or ""
-        addr_l = (addr or "").lower()
-
-        # Determine domain from the text or known hints
-        dom = None
-        try:
-            if ' _extract_domain_from_text' or True:
-                dom = _extract_domain_from_text(text)  # may raise
-        except Exception:
-            dom = None
-        try:
-            if not dom and 'ADDR_RE' in globals() and 'KNOWN_HOMEPAGES' in globals() and addr_l:
-                if ADDR_RE.fullmatch(addr_l):
-                    dom = KNOWN_HOMEPAGES.get(addr_l)
-        except Exception:
-            pass
-        try:
-            if not dom and '_symbol_homepage_hint' in globals():
-                hint = _symbol_homepage_hint(text)
-                if hint:
-                    dom = hint
-        except Exception:
-            pass
-        try:
-            if not dom and addr_l and 'ADDR_RE' in globals() and ADDR_RE.fullmatch(addr_l) and '_cg_homepage' in globals():
-                dom = _cg_homepage(addr_l)
-        except Exception:
-            pass
-
-        if not dom:
-            return text  # nothing to add
-
-        # Fetch domain meta (cached)
-        h = created = reg = exp = issuer = wb = "—"
-        try:
-            if '_domain_meta' in globals():
-                tup = _domain_meta(dom)
-                # allow variable-length tuples from older versions
-                h = tup[0] if len(tup) > 0 else "—"
-                created = tup[1] if len(tup) > 1 else "—"
-                reg = tup[2] if len(tup) > 2 else "—"
-                exp = tup[3] if len(tup) > 3 else "—"
-                issuer = tup[4] if len(tup) > 4 else "—"
-                wb = tup[5] if len(tup) > 5 else "—"
-        except Exception:
-            pass
-
-        # Normalize registrar if helper exists
-        try:
-            if '_normalize_registrar' in globals():
-                reg = _normalize_registrar(reg, h, dom)
-        except Exception:
-            pass
-
-        # Compose lines
-        domain_line = f"Domain: {dom}"
-        ssl_prefix = "SSL: OK" if exp and exp != "—" else "SSL: —"
-        whois_line  = f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}"
-        ssl_line    = f"{ssl_prefix} | Expires: {exp or '—'} | Issuer: {issuer or '—'}"
-        wayback_line= f"Wayback: first {wb if wb else '—'}"
-
-        # Replace existing lines or append (no duplicates)
-        def _replace_or_append(body: str, label: str, newline: str) -> str:
-            patt = re.compile(rf"(?m)^{re.escape(label)}[^\n]*$")
-            if patt.search(body or ""):
-                return patt.sub(newline, body)
-            if body and not body.endswith("\\n"):
-                body += "\\n"
-            return body + newline
-
-        text = _replace_or_append(text, "Domain:",     domain_line)
-        text = _replace_or_append(text, "WHOIS/RDAP:", whois_line)
-        text = _replace_or_append(text, "SSL:",        ssl_line)
-        text = _replace_or_append(text, "Wayback:",    wayback_line)
-
-        return text
-    except Exception:
-        return base_text or ""
-
 
 def _cg_homepage(addr: str):
     addr_l = (addr or "").lower()
@@ -1393,21 +1294,8 @@ def webhook(secret):
             if orig:
                 data = orig
             else:
-                            txt = (msg_obj.get("text") or "") if 'msg_obj' in locals() else ""
-            m = re.search(r"Δ24h[^\n]*", txt)
-            ans = m.group(0) if m else None
-            if not ans:
-                try:
-                    addr_fallback = _extract_addr_from_text((msg_obj.get("text") or ""))
-                    ch = _ds_token_changes((addr_fallback or "").lower()) if addr_fallback else {}
-                    if ch.get("h24"):
-                        ans = f"Δ24h {ch['h24']}"
-                except Exception:
-                    pass
-            if not ans:
-                ans = "expired"
-            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
-            return ("ok", 200)
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "expired", logger=app.logger)
+                return ("ok", 200)
 
         # Dedupe
         cqid = cq.get("id")
@@ -1453,11 +1341,11 @@ def webhook(secret):
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
                 return ("ok", 200)
+
             
-            # Δ timeframe buttons: accept plain "5","1","6","24" and command-like "/24h"
+            # Δ timeframe buttons
             if data in {"5","1","6","24","/24h"} or data.startswith("tf:"):
                 lab = data.replace("/", "").replace("tf:", "")
-                # Get base addr from this message if possible
                 try:
                     mid = str((msg_obj or {}).get("message_id"))
                 except Exception:
@@ -1471,27 +1359,20 @@ def webhook(secret):
                 if not addr0:
                     addr0 = _extract_addr_from_text(msg_obj.get("text") or "")
                 addr_l = (addr0 or "").lower()
-
-                # Fetch DexScreener priceChange deltas
                 changes = _ds_token_changes(addr_l) if ADDR_RE.fullmatch(addr_l or "") else {}
-
                 key = {"5":"m5","1":"h1","6":"h6","24":"h24","24h":"h24"}.get(lab, None)
                 ans = None
                 if key and changes.get(key):
-                    # Pretty label
                     pretty = {"m5":"5m","h1":"1h","h6":"6h","h24":"24h"}[key]
                     ans = f"Δ{pretty} {changes[key]}"
                 elif lab in {"24","24h"}:
-                    # fallback: try to extract Δ24h from current message text
                     txt = (msg_obj.get("text") or "")
                     m = re.search(r"Δ24h[^\n]*", txt)
                     ans = m.group(0) if m else "Δ24h: n/a"
                 else:
-                    ans = "Temporarily unavailable"
-
+                    ans = "Δ: n/a"
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
                 return ("ok", 200)
-
 
             if data.startswith("why"):
                 addr_hint = None
@@ -1646,3 +1527,99 @@ def webhook(secret):
         _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
         _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
     return ("ok", 200)
+
+
+def _enrich_full(addr: str, base_text: str) -> str:
+    try:
+        text = base_text or ""
+        addr_l = (addr or "").lower()
+        dom = None
+        try:
+            dom = _extract_domain_from_text(text)
+        except Exception:
+            dom = None
+        try:
+            if not dom and ADDR_RE.fullmatch(addr_l or ""):
+                dom = KNOWN_HOMEPAGES.get(addr_l)
+        except Exception:
+            pass
+        try:
+            if not dom:
+                hint = _symbol_homepage_hint(text)
+                if hint:
+                    dom = hint
+        except Exception:
+            pass
+        try:
+            if not dom and ADDR_RE.fullmatch(addr_l or ""):
+                dom = _cg_homepage(addr_l)
+        except Exception:
+            pass
+        if not dom:
+            return text
+        try:
+            h, created, reg, exp, issuer, wb = _domain_meta(dom)
+        except Exception:
+            h, created, reg, exp, issuer, wb = ("—", "—", "—", "—", "—", "—")
+        try:
+            reg = _normalize_registrar(reg, h, dom)
+        except Exception:
+            pass
+        domain_line = f"Domain: {dom}"
+        whois_line  = f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}"
+        ssl_prefix  = "SSL: OK" if exp and exp != "—" else "SSL: —"
+        ssl_line    = f"{ssl_prefix} | Expires: {exp or '—'} | Issuer: {issuer or '—'}"
+        wayback_line= f"Wayback: first {wb if wb else '—'}"
+        import re as _re
+        def _replace_or_append(body, label, newline):
+            patt = _re.compile(rf"(?m)^{_re.escape(label)}[^\n]*$")
+            if patt.search(body or ""):
+                return patt.sub(newline, body)
+            if body and not body.endswith("\n"):
+                body += "\n"
+            return body + newline
+        text = _replace_or_append(text, "Domain:",     domain_line)
+        text = _replace_or_append(text, "WHOIS/RDAP:", whois_line)
+        text = _replace_or_append(text, "SSL:",        ssl_line)
+        text = _replace_or_append(text, "Wayback:",    wayback_line)
+        return text
+    except Exception:
+        return base_text or ""
+
+
+def _kb_dedupe_all(kb: dict) -> dict:
+    try:
+        ik = (kb or {}).get("inline_keyboard") or []
+        out = []
+        seen = set()
+        for row in ik:
+            new_row = []
+            for btn in (row or []):
+                cd = str((btn or {}).get("callback_data") or "")
+                key = ("cd", cd) if cd else ("tx", str((btn or {}).get("text") or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                new_row.append(btn)
+            if new_row:
+                out.append(new_row)
+        return {"inline_keyboard": out}
+    except Exception:
+        return kb or {}
+
+def _kb_strip_tf_rows(kb: dict) -> dict:
+    try:
+        ik = (kb or {}).get("inline_keyboard") or []
+        out = []
+        for row in ik:
+            new_row = []
+            for btn in (row or []):
+                cd = str((btn or {}).get("callback_data") or "")
+                if cd.startswith("tf:") or cd in {"5","1","6","24","/24h"}:
+                    continue
+                new_row.append(btn)
+            if new_row:
+                out.append(new_row)
+        return {"inline_keyboard": out}
+    except Exception:
+        return kb or {}
