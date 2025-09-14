@@ -1573,8 +1573,17 @@ def _onchain_inspect(addr: str):
         if proxy:
             out.append("Proxy: ✅ (upgrade risk)")
 
-        # Honeypot note (static)
-        out.append("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)")
+        # Honeypot note (fallback only if not set yet)
+        try:
+            prior_hp = any(isinstance(x, str) and 'honeypot' in x.lower() for x in out)
+            wl, _ = _is_whitelisted(addr, "\n".join(out))
+            if not prior_hp:
+                if wl:
+                    out.append("Honeypot: ℹ️ skipped for centralized/whitelisted token")
+                else:
+                    out.append("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)")
+        except Exception:
+            pass
 
         return "\n".join(out), info
     except Exception as e:
