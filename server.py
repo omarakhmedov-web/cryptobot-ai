@@ -1428,7 +1428,7 @@ def webhook(secret):
                 enriched = _enrich_full(addr, base_text)
                 enriched = _append_verdict_block(addr, enriched)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
+                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=False)
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
@@ -1475,11 +1475,28 @@ def webhook(secret):
 
             if data.startswith("hp:"):
                 addr = data.split(":",1)[1].strip().lower()
+                # Override with the base address from this message if available
+                try:
+                    mid = str((msg_obj or {}).get("message_id"))
+                except Exception:
+                    mid = None
+                if mid:
+                    try:
+                        addr_m = msg2addr.get(mid)
+                    except Exception:
+                        addr_m = None
+                    if addr_m and ADDR_RE.fullmatch(addr_m or ""):
+                        addr = addr_m.lower()
+                # Fallback to scanning address seen in the message text
+                if not ADDR_RE.fullmatch(addr or ""):
+                    addr_t = _extract_addr_from_text(msg_obj.get("text") or "")
+                    if addr_t and ADDR_RE.fullmatch(addr_t or ""):
+                        addr = addr_t.lower()
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "running on-chain…", logger=app.logger)
                 out, meta = _onchain_inspect(addr)
                 _merge_onchain_into_risk(addr, meta)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
+                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=False)
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
                 return ("ok", 200)
