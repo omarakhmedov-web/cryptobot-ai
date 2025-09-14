@@ -305,25 +305,33 @@ def _pick_addr(addrs):
             return a.lower()
     return addrs[-1].lower() if addrs else None
 
+
 def _extract_base_addr_from_keyboard(kb: dict):
     if not kb or not isinstance(kb, dict):
         return None
     ik = kb.get("inline_keyboard") or []
     for row in ik:
-        for btn in row:
-            data = (btn.get("callback_data") or "")
-            if data.startswith("qs2:"):
-                addrs = _extract_addrs_from_pair_payload(data)
-                choice = _pick_addr(addrs)
-                if choice:
-                    return choice
-            if data.startswith("qs:"):
-                payload = data.split(":", 1)[1]
-                addr = payload.split("?", 1)[0]
-                if ADDR_RE.fullmatch(addr):
-                    return addr.lower()
+        for btn in row or []:
+            data = str((btn or {}).get("callback_data") or "")
+            # Fast path: any known prefixes ('qs2:', 'qs:', 'more:', 'why:', 'rep:', 'hp:') may carry the addr
+            for prefix in ("qs2:","qs:","more:","why:","rep:","hp:"):
+                if data.startswith(prefix):
+                    payload = data.split(":", 1)[1]
+                    # Cut after first ? if present
+                    payload = payload.split("?", 1)[0]
+                    # Extract first address-looking token
+                    m = ADDR_RE.search(payload) if hasattr(ADDR_RE, "search") else None
+                    if m:
+                        return m.group(0).lower()
+                    # Fallback: split and test tokens
+                    for tok in re.split(r"[,|;/\s]+", payload):
+                        if ADDR_RE.fullmatch(tok or ""):
+                            return tok.lower()
+            # Last resort: search address anywhere in callback_data
+            m2 = ADDR_RE.search(data) if hasattr(ADDR_RE, "search") else None
+            if m2:
+                return m2.group(0).lower()
     return None
-
 def _extract_addr_from_text(s: str):
     if not s:
         return None
@@ -1389,7 +1397,7 @@ def webhook(secret):
                 enriched = _enrich_full(addr, base_text)
                 enriched = _append_verdict_block(addr, enriched)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons(addr, kb0, want_more=False, want_why=True, want_report=True, want_hp=True)
+                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
@@ -1440,7 +1448,7 @@ def webhook(secret):
                 out, meta = _onchain_inspect(addr)
                 _merge_onchain_into_risk(addr, meta)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons(addr, kb0, want_more=False, want_why=True, want_report=True, want_hp=True)
+                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
                 return ("ok", 200)
