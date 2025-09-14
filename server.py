@@ -335,6 +335,12 @@ def _extract_base_addr_from_keyboard(kb: dict):
                     payload = data.split(":", 1)[1]
                     # Cut after first ? if present
                     payload = payload.split("?", 1)[0]
+                    # Prefer qs2 pair parsing (addr1-addr2)
+                    if payload.startswith("/pair/"):
+                        addrs = _extract_addrs_from_pair_payload(data)
+                        picked = _pick_addr(addrs)
+                        if picked:
+                            return picked
                     # Extract first address-looking token
                     m = ADDR_RE.search(payload) if hasattr(ADDR_RE, "search") else None
                     if m:
@@ -1378,6 +1384,11 @@ def webhook(secret):
 
         
         
+# Δ timeframe buttons
+        # Δ timeframe buttons
+            
+# [removed duplicate TF handler]
+
 # Dedupe
         cqid = cq.get("id")
         if cqid and seen_callbacks.get(cqid):
@@ -1688,17 +1699,27 @@ def _kb_dedupe_all(kb: dict) -> dict:
     except Exception:
         return kb or {}
 
+
 def _kb_strip_tf_rows(kb: dict) -> dict:
+    """Remove any Δ timeframe rows regardless of encoding."""
     try:
-        ik = (kb or {}).get("inline_keyboard") or []
+        base = _kb_clone(kb)
+        ik = (base or {}).get("inline_keyboard") or []
         out = []
         for row in ik:
+            delta_like = 0
             new_row = []
             for btn in (row or []):
                 cd = str((btn or {}).get("callback_data") or "")
+                tx = str((btn or {}).get("text") or "")
                 if cd.startswith("tf:") or cd in {"5","1","6","24","/24h"}:
                     continue
-                new_row.append(btn)
+                if tx.strip().startswith("Δ"):
+                    delta_like += 1
+                else:
+                    new_row.append(btn)
+            if delta_like >= 3:
+                continue
             if new_row:
                 out.append(new_row)
         return {"inline_keyboard": out}
