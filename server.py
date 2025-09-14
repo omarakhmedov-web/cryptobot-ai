@@ -1149,35 +1149,35 @@ def _risk_verdict(addr, text):
     else:
         label = "LOW RISK 🟢"
 
-# --- Whitelist post-filter: drop zero-weight negatives and add a single positive marker ---
-try:
-    if whitelisted or vars().get('is_whitelisted') or vars().get('whitelist_hit'):
-        # normalize containers
-        neg_list = neg if 'neg' in locals() else []
-        wneg_list = weights_neg if 'weights_neg' in locals() else []
-        pos_list = pos if 'pos' in locals() else []
-        wpos_list = weights_pos if 'weights_pos' in locals() else []
-
-        # remove zero-weight negatives
-        neg2, wneg2 = [], []
-        for r, w in zip(neg_list, wneg_list):
-            try:
-                wi = int(w)
-            except Exception:
-                wi = 10
-            if wi > 0:
-                neg2.append(r); wneg2.append(w)
-        neg, weights_neg = neg2, wneg2
-
-        # add expected-admin positive once
-        expected_msg = "Admin privileges expected for centralized/whitelisted token"
-        if not any(expected_msg in p for p in pos_list):
-            pos_list.append(expected_msg); wpos_list.append(0)
-
-        pos, weights_pos = pos_list, wpos_list
-except NameError:
-    pass
-
+    # --- Whitelist post-filter: drop zero-weight negatives and add a single positive marker ---
+    try:
+        if whitelisted or vars().get('is_whitelisted') or vars().get('whitelist_hit'):
+            # normalize containers
+            neg_list = neg if 'neg' in locals() else []
+            wneg_list = weights_neg if 'weights_neg' in locals() else []
+            pos_list = pos if 'pos' in locals() else []
+            wpos_list = weights_pos if 'weights_pos' in locals() else []
+    
+            # remove zero-weight negatives
+            neg2, wneg2 = [], []
+            for r, w in zip(neg_list, wneg_list):
+                try:
+                    wi = int(w)
+                except Exception:
+                    wi = 10
+                if wi > 0:
+                    neg2.append(r); wneg2.append(w)
+            neg, weights_neg = neg2, wneg2
+    
+            # add expected-admin positive once
+            expected_msg = "Admin privileges expected for centralized/whitelisted token"
+            if not any(expected_msg in p for p in pos_list):
+                pos_list.append(expected_msg); wpos_list.append(0)
+    
+            pos, weights_pos = pos_list, wpos_list
+    except NameError:
+        pass
+    
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
 
 
