@@ -1595,7 +1595,7 @@ def webhook(secret):
             else:
                 try:
                     text_out, keyboard = _qs_call_safe(quickscan_entrypoint, arg)
-                    base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
+                    base_addr = _extract_addr_from_text(arg) or _extract_base_addr_from_keyboard(keyboard)
                     keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
                     st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
@@ -1610,7 +1610,7 @@ def webhook(secret):
     _send_text(chat_id, "Processing…", logger=app.logger)
     try:
         text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
-        base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
+        base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
         keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
