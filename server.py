@@ -234,6 +234,8 @@ def _compress_keyboard(kb: dict):
             cb_cache.set(token, data)
             btn["callback_data"] = token
 
+    return _kb_dedupe_all({"inline_keyboard": ik})
+
 def _kb_clone(kb):
     if not kb or not isinstance(kb, dict):
         return {"inline_keyboard": []}
