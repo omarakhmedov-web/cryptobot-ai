@@ -1116,28 +1116,665 @@ def _onchain_inspect(addr: str):
 
 
 def _wrap_kv_line(prefix: str, items, width: int = 96, indent: int = 2) -> str:
-    """Wrap a 'Key: a; b; c; ...' line across multiple lines,
+    """Wrap a 'Key: a; b; c; ...' line to multiple lines,
     keeping words intact and indenting continuation lines."""
     try:
         items = [str(x) for x in (items or []) if str(x).strip()]
         if not items:
-            return f"{prefix}: n/a"
-        head = f"{prefix}: "
+            return prefix + ": n/a"
+        head = prefix + ": "
         avail = max(20, width) - len(head)
         out_lines = []
         cur = ""
         for i, it in enumerate(items):
             sep = "" if i == 0 else "; "
-            token = sep + it
+            token = (sep + it)
             if len(cur) + len(token) <= avail:
                 cur += token
             else:
-                out_lines.append(head + cur)
-                head = " " * (len(prefix) + 2 + indent)
-                avail = max(20, width) - len(head)
-                cur = it
+                if cur:
+                    out_lines.append(head + cur)
+                    head = " " * (len(prefix) + 2 + indent)  # indent continuation
+                    avail = max(20, width) - len(head)
+                    cur = it
+                else:
+                    # very long first token, hard-break
+                    out_lines.append(head + token.strip())
+                    head = " " * (len(prefix) + 2 + indent)
+                    avail = max(20, width) - len(head)
+                    cur = ""
         if cur:
             out_lines.append(head + cur)
         return "\n".join(out_lines)
     except Exception:
-        return f"{prefix}: " + "; ".join(items or [])
+        # Fallback to single-line join
+        return prefix + ": " + "; ".join(items or [])
+def _merge_onchain_into_risk(addr: str, info: dict):
+    try:
+        key = (addr or "").lower()
+        if not key:
+            return
+        entry = RISK_CACHE.get(key) or {"score": 0, "label": "LOW RISK 🟢", "neg": [], "pos": [], "w_neg": [], "w_pos": []}
+        # Address-level whitelist: de-weight negatives
+        is_wl_addr = key in WL_ADDRESSES
+        def W(w):
+            return 0 if is_wl_addr else w
+
+        added = False
+        def add_neg(reason, weight):
+            nonlocal added
+            if not reason:
+                return
+            if reason not in entry["neg"]:
+                entry["neg"].append(reason)
+                entry["w_neg"].append(weight)
+                entry["score"] = int(min(100, entry.get("score", 0) + (weight or 0)))
+                added = True
+
+        # Merge proxy/paused/owner (weights adapt to whitelist)
+        if info.get("proxy"):
+            add_neg("Upgradeable proxy (owner can change logic)", W(15))
+        if info.get("paused") is True:
+            add_neg("Contract is paused", W(20))
+        if info.get("owner"):
+            add_neg("Owner privileges present", W(20))
+
+        # Recompute label
+        if entry["score"] >= RISK_THRESH_HIGH:
+            entry["label"] = "HIGH RISK 🔴"
+        elif entry["score"] >= RISK_THRESH_CAUTION:
+            entry["label"] = "CAUTION 🟡"
+        else:
+            entry["label"] = "LOW RISK 🟢"
+        if added:
+            RISK_CACHE[key] = entry
+    except Exception:
+        pass
+
+# ========================
+# Report (HTML)
+# ========================
+def _tg_send_document(token: str, chat_id: int, filepath: str, caption: str = None):
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendDocument"
+        with open(filepath, "rb") as f:
+            files = {"document": (os.path.basename(filepath), f, "text/html")}
+            data = {"chat_id": chat_id}
+            if caption:
+                data["caption"] = caption[:1000]
+            r = requests.post(url, data=data, files=files, timeout=20)
+        try:
+            return True, r.json()
+        except Exception:
+            return False, {"ok": False, "status": r.status_code}
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+def _render_report(addr: str, text: str):
+    text = _enrich_full(addr, text)
+    info = RISK_CACHE.get((addr or "").lower()) or {}
+    neg = info.get("neg") or []
+    pos = info.get("pos") or []
+    wn = info.get("w_neg") or []
+    wp = info.get("w_pos") or []
+    def lines(items, weights):
+        out = []
+        for i, t in enumerate(items):
+            w = weights[i] if i < len(weights) else None
+            out.append(f"- {t}" + (f" (+{w})" if isinstance(w, (int, float)) else ""))
+        return "\n".join(out) if out else "—"
+    dom = _extract_domain_from_text(text) or "—"
+    # Parse pair/dex/chain from the first lines
+    pair = None; dex = None; chain = None
+    m = re.search(r"^\s*([A-Za-z0-9_\-\.\/]+)\s+on\s+([A-Za-z0-9_\-\.]+)\s*\(([^)]+)\)", text, re.IGNORECASE | re.MULTILINE)
+    if m:
+        pair, dex, chain = m.group(1), m.group(2), m.group(3)
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    html = f"""<!doctype html>
+<html><head><meta charset='utf-8'><title>Metridex Report — {addr}</title>
+<style>
+pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;}body{{font-family:Arial,Helvetica,sans-serif;max-width:900px;margin:20px auto;}}h1,h2{{margin:0.5em 0}}.box{{border:1px solid #ddd;padding:12px;border-radius:8px;margin:12px 0;white-space:pre-wrap}}</style>
+</head><body>
+<h1>Metridex QuickScan — Report</h1>
+<div class="box"><b>Generated:</b> {ts}<br><b>Address:</b> {addr}<br>""" + (f"<b>Pair:</b> {pair} " if pair else "") + (f"<b>on:</b> {dex} " if dex else "") + (f"<b>Chain:</b> {chain}<br>" if chain else "<br>") + f"""<b>Domain:</b> {dom}""" + (f"<br><b>Scanner:</b> {SCANNER_URL}" if SCANNER_URL else "") + """</div>
+<div class="box"><h2>Summary</h2><pre>""" + text + """</pre></div>
+<div class="box"><h2>Risk verdict</h2><p><b>""" + str(info.get('label','?')) + " (" + str(info.get('score','?')) + """/100)</b></p>
+<h3>Signals</h3><pre>""" + "\n".join(neg or []) + """</pre><h3>Positives</h3><pre>""" + "\n".join(pos or []) + """</pre></div>
+<footer><small>Generated by Metridex</small></footer>
+</body></html>"""
+    try:
+        tsf = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        safe_addr = (addr or "unknown")[:10]
+        filename = f"metridex_report_{safe_addr}_{tsf}.html"
+        path = os.path.join(tempfile.gettempdir(), filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        return path, html
+    except Exception:
+        return None, html
+
+# ========================
+# HTTP routes
+# ========================
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok": True, "version": APP_VERSION})
+
+@app.route("/reload_meta", methods=["POST", "GET"])
+def reload_meta():
+    DOMAIN_META_CACHE.clear()
+    return jsonify({"ok": True, "cleared": True})
+
+@app.route("/admin/reload_meta", methods=["POST"])
+@require_admin_secret
+def admin_reload_meta():
+    DOMAIN_META_CACHE.clear()
+    return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
+
+@app.route("/admin/clear_meta", methods=["POST"])
+@require_admin_secret
+def admin_clear_meta():
+    DOMAIN_META_CACHE.clear()
+    return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
+
+@app.route("/admin/diag", methods=["GET"])
+@require_admin_secret
+def admin_diag():
+    lines = []
+    # Wayback/RDAP
+    try:
+        r = requests.get("https://rdap.org/domain/circle.com", timeout=6)
+        lines.append({"name":"RDAP", "status": r.status_code})
+    except Exception as e:
+        lines.append({"name":"RDAP", "error": str(e)})
+    try:
+        r = requests.get("https://web.archive.org/cdx/search/cdx?url=circle.com/*&output=json&limit=1", timeout=6)
+        lines.append({"name":"Wayback CDX", "status": r.status_code})
+    except Exception as e:
+        lines.append({"name":"Wayback CDX", "error": str(e)})
+    # RPCs
+    urls = _parse_rpc_urls()
+    rpc = []
+    for u in urls:
+        try:
+            r = requests.post(u, json={"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}, timeout=6, headers={"Content-Type":"application/json"})
+            try:
+                body = r.json()
+            except Exception:
+                body = {"http": r.status_code}
+            rec = {"url": _mask_host(u), "status": r.status_code}
+            if isinstance(body, dict) and "error" in body:
+                rec["error"] = body.get("error")
+            rec["result"] = body.get("result")
+            if rec.get("result") in (None, "", []):
+                rec.setdefault("note", "null/empty result")
+            rpc.append(rec)
+        except Exception as e:
+            rpc.append({"url": _mask_host(u), "error": str(e)})
+    return jsonify({"ok": True, "version": APP_VERSION, "diag": lines, "rpc": rpc})
+
+# ========================
+# Telegram webhook & callbacks
+# ========================
+def _answer_why_quickly(cq, addr_hint=None):
+    try:
+        msg_obj = cq.get("message", {}) or {}
+        text = msg_obj.get("text") or ""
+        addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
+        info = RISK_CACHE.get(addr) if addr else None
+        if not info:
+            score, label, rs = _risk_verdict(addr or "", text or "")
+            info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
+        pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
+        pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
+        pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
+        pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
+        neg_s = "; ".join([f"{t} (+{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
+        pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
+        body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
+        if neg_s:
+            body += f" — ⚠️ {neg_s}"
+        if pos_s:
+            body += f" — ✅ {pos_s}"
+        if len(body) > 190:
+            body = body[:187] + "…"
+        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+    except Exception:
+        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
+
+@app.route("/webhook/<secret>", methods=["POST"])
+@require_webhook_secret
+def webhook(secret):
+    if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
+        return ("forbidden", 403)
+    _maybe_reload_known(force=False)
+    try:
+        update = request.get_json(force=True, silent=False)
+    except Exception:
+        return ("ok", 200)
+
+    # Callback queries
+    if "callback_query" in update:
+        cq = update["callback_query"]
+        chat_id = cq["message"]["chat"]["id"]
+        data = cq.get("data", "")
+        msg_obj = cq.get("message", {})
+        if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
+            return ("ok", 200)
+
+        # Inflate hashed payloads early
+        if data.startswith("cb:"):
+            orig = cb_cache.get(data)
+            if orig:
+                data = orig
+            else:
+                # Smart fallback: try to extract Δ24h from the message text, else reply n/a
+                txt = (msg_obj.get("text") or "")
+                m_ = re.search(r"Δ24h[^\n]*", txt)
+                ans = m_.group(0) if m_ else None
+                if not ans:
+                    addr_fb = _extract_addr_from_text(txt) or _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {})
+                    ch = _ds_token_changes((addr_fb or "").lower()) if addr_fb else {}
+                    if ch.get("h24"):
+                        ans = f"Δ24h {ch['h24']}"
+                if not ans:
+                    ans = "Δ: n/a"
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
+                return ("ok", 200)
+
+        # >>> TF_HANDLER_EARLY
+        if isinstance(data, str) and re.match(r'^(tf:(5|1|6|24)|/24h|5|1|6|24)$', data):
+            lab = data.replace("tf:","").replace("/","")
+            # Determine base address from message map or text or keyboard
+            try:
+                mid = str((msg_obj or {}).get("message_id"))
+            except Exception:
+                mid = None
+            addr0 = None
+            if mid:
+                try:
+                    addr0 = msg2addr.get(mid)
+                except Exception:
+                    addr0 = None
+            if not addr0:
+                addr0 = _extract_addr_from_text(msg_obj.get("text") or "")
+            if not addr0:
+                addr0 = _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {})
+            addr_l = (addr0 or "").lower()
+            changes = _ds_token_changes(addr_l) if ADDR_RE.fullmatch(addr_l or "") else {}
+            key = {"5":"m5","1":"h1","6":"h6","24":"h24","24h":"h24"}.get(lab, None)
+            if key and changes.get(key):
+                pretty = {"m5":"5m","h1":"1h","h6":"6h","h24":"24h"}[key]
+                ans = f"Δ{pretty} {changes[key]}"
+            elif lab in {"24","24h"}:
+                txt = (msg_obj.get("text") or "")
+                m_ = re.search(r"Δ24h[^\n]*", txt)
+                ans = m_.group(0) if m_ else "Δ24h n/a"
+            else:
+                ans = "Δ: n/a"
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
+            return ("ok", 200)
+        # <<< TF_HANDLER_EARLY
+            # <<< TF_HANDLER_EARLY
+
+
+        
+        
+# Δ timeframe buttons
+        # Δ timeframe buttons
+            
+# [removed duplicate TF handler]
+
+# Dedupe
+        cqid = cq.get("id")
+        if cqid and seen_callbacks.get(cqid):
+            tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "updated", logger=app.logger)
+            return ("ok", 200)
+        if cqid:
+            seen_callbacks.set(cqid, True)
+
+        try:
+            if data.startswith("qs2:"):
+                addrs = _extract_addrs_from_pair_payload(data)
+                base_addr = _pick_addr(addrs)
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
+                text_out, keyboard = _qs_call_safe(quickscan_pair_entrypoint, data)
+                base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _compress_keyboard(keyboard)
+                st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                _store_addr_for_message(body, base_addr)
+                return ("ok", 200)
+
+            if data.startswith("qs:"):
+                payload = data.split(":", 1)[1]
+                base_addr = payload.split("?", 1)[0]
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
+                text_out, keyboard = _qs_call_safe(quickscan_entrypoint, base_addr)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _compress_keyboard(keyboard)
+                st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                _store_addr_for_message(body, base_addr)
+                return ("ok", 200)
+
+            if data.startswith("more:"):
+                addr = data.split(":", 1)[1].strip().lower()
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "loading…", logger=app.logger)
+                base_text = msg_obj.get("text") or ""
+                enriched = _enrich_full(addr, base_text)
+                enriched = _append_verdict_block(addr, enriched)
+                kb0 = msg_obj.get("reply_markup") or {}
+                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
+                kb1 = _compress_keyboard(kb1)
+                st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
+                _store_addr_for_message(body, addr)
+                return ("ok", 200)
+
+            
+            # Δ timeframe buttons
+            if data in {"5","1","6","24","/24h"} or data.startswith("tf:"):
+                lab = data.replace("/", "").replace("tf:", "")
+                try:
+                    mid = str((msg_obj or {}).get("message_id"))
+                except Exception:
+                    mid = None
+                addr0 = None
+                if mid:
+                    try:
+                        addr0 = msg2addr.get(mid)
+                    except Exception:
+                        addr0 = None
+                if not addr0:
+                    addr0 = _extract_addr_from_text(msg_obj.get("text") or "")
+                addr_l = (addr0 or "").lower()
+                changes = _ds_token_changes(addr_l) if ADDR_RE.fullmatch(addr_l or "") else {}
+                key = {"5":"m5","1":"h1","6":"h6","24":"h24","24h":"h24"}.get(lab, None)
+                ans = None
+                if key and changes.get(key):
+                    pretty = {"m5":"5m","h1":"1h","h6":"6h","h24":"24h"}[key]
+                    ans = f"Δ{pretty} {changes[key]}"
+                elif lab in {"24","24h"}:
+                    txt = (msg_obj.get("text") or "")
+                    m = re.search(r"Δ24h[^\n]*", txt)
+                    ans = m.group(0) if m else "Δ24h: n/a"
+                else:
+                    ans = "Δ: n/a"
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
+                return ("ok", 200)
+
+            if data.startswith("why"):
+                addr_hint = None
+                if ":" in data:
+                    addr_hint = data.split(":", 1)[1].strip().lower()
+                _answer_why_quickly(cq, addr_hint=addr_hint)
+                return ("ok", 200)
+
+            if data.startswith("hp:"):
+                addr = data.split(":",1)[1].strip().lower()
+                # Override with the base address from this message if available
+                try:
+                    mid = str((msg_obj or {}).get("message_id"))
+                except Exception:
+                    mid = None
+                if mid:
+                    try:
+                        addr_m = msg2addr.get(mid)
+                    except Exception:
+                        addr_m = None
+                    if addr_m and ADDR_RE.fullmatch(addr_m or ""):
+                        addr = addr_m.lower()
+                # Fallback to scanning address seen in the message text
+                if not ADDR_RE.fullmatch(addr or ""):
+                    addr_t = _extract_addr_from_text(msg_obj.get("text") or "")
+                    if addr_t and ADDR_RE.fullmatch(addr_t or ""):
+                        addr = addr_t.lower()
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "running on-chain…", logger=app.logger)
+                out, meta = _onchain_inspect(addr)
+                _merge_onchain_into_risk(addr, meta)
+                kb0 = msg_obj.get("reply_markup") or {}
+                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=False)
+                kb1 = _compress_keyboard(kb1)
+                _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
+                return ("ok", 200)
+
+            if data.startswith("rep:"):
+                addr = data.split(":", 1)[1].strip().lower()
+                act_key = f"rep:{chat_id}:{addr}"
+                if recent_actions.get(act_key):
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "report already sent", logger=app.logger)
+                    return ("ok", 200)
+                recent_actions.set(act_key, True)
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "building report…", logger=app.logger)
+                base_text = msg_obj.get("text") or ""
+                path, html = _render_report(addr, base_text)
+                caption = ""
+                info = RISK_CACHE.get(addr) or {}
+                if info:
+                    caption = f"{info.get('label','?')} (score {info.get('score','?')}/100)"
+                sent = False
+                if path:
+                    sent, _ = _tg_send_document(TELEGRAM_TOKEN, chat_id, path, caption=caption)
+                if not sent:
+                    teaser = "Report ready.\n" + (caption + "\n" if caption else "") + "⚠️/✅ details above."
+                    _send_text(chat_id, teaser, logger=app.logger)
+                return ("ok", 200)
+
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "unknown", logger=app.logger)
+            return ("ok", 200)
+        except Exception as e:
+            _admin_debug(chat_id, f"callback error: {type(e).__name__}: {e}")
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "error", logger=app.logger)
+            return ("ok", 200)
+
+    # Regular messages
+    msg = update.get("message") or update.get("edited_message")
+    if not msg or (msg.get("from") or {}).get("is_bot"):
+        return ("ok", 200)
+    chat_id = msg["chat"]["id"]
+    text = (msg.get("text") or "").strip()
+    if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
+        return ("ok", 200)
+    if not text:
+        _send_text(chat_id, "empty", logger=app.logger)
+        return ("ok", 200)
+
+    if text.startswith("/"):
+        parts = text.split(maxsplit=1)
+        cmd = parts[0]
+        arg = parts[1] if len(parts) > 1 else ""
+        if cmd in ("/start", "/help"):
+            _send_text(chat_id, LOC("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
+            return ("ok", 200)
+        if cmd in ("/reload_meta", "/clear_meta"):
+            if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
+                _send_text(chat_id, "403: forbidden", logger=app.logger)
+                return ("ok", 200)
+            DOMAIN_META_CACHE.clear()
+            _send_text(chat_id, "Meta cache cleared ✅", logger=app.logger)
+            return ("ok", 200)
+        if cmd in ("/diag",):
+            if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
+                _send_text(chat_id, "403: forbidden", logger=app.logger)
+                return ("ok", 200)
+            lines = []
+            import time as _t
+            def check(url, name):
+                t0 = _t.time()
+                try:
+                    r = requests.get(url, timeout=6, headers={"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")})
+                    dt = int((_t.time()-t0)*1000)
+                    return f"{name}: {r.status_code} in {dt}ms"
+                except Exception as e:
+                    dt = int((_t.time()-t0)*1000)
+                    return f"{name}: ERROR {type(e).__name__} {e} in {dt}ms"
+            lines.append(check("https://rdap.org/domain/circle.com","RDAP"))
+            lines.append(check("https://web.archive.org/cdx/search/cdx?url=circle.com/*&output=json&limit=1","Wayback CDX"))
+            # RPC providers check
+            urls = _parse_rpc_urls()
+            if urls:
+                lines.append("RPC providers: " + ", ".join([_mask_host(u) for u in urls]))
+                for u in urls:
+                    try:
+                        r = requests.post(u, json={"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}, timeout=6, headers={"Content-Type":"application/json"})
+                        ok = ""
+                        try:
+                            ok = r.json().get("result","")
+                        except Exception:
+                            ok = f"HTTP {r.status_code}"
+                        lines.append(f"RPC {_mask_host(u)}: {ok}")
+                    except Exception as e:
+                        lines.append(f"RPC {_mask_host(u)}: ERROR {type(e).__name__}: {e}")
+            else:
+                lines.append("RPC providers: none configured")
+            try:
+                _ = _qs_call_safe(quickscan_entrypoint, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+                lines.append("QuickScan: OK")
+            except Exception as e:
+                lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
+            _send_text(chat_id, "Diag:\n" + "\n".join(lines), logger=app.logger)
+            return ("ok", 200)
+        if cmd in ("/onchain",):
+            if not arg:
+                _send_text(chat_id, "Usage: /onchain <contract_address>", logger=app.logger)
+            else:
+                base_addr = _extract_addr_from_text(arg) or arg.strip()
+                details, meta = _onchain_inspect(base_addr)
+                _merge_onchain_into_risk(base_addr, meta)
+                _send_text(chat_id, "On-chain\n" + details, logger=app.logger)
+            return ("ok", 200)
+        if cmd in ("/quickscan","/scan"):
+            if not arg:
+                _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
+            else:
+                try:
+                    text_out, keyboard = _qs_call_safe(quickscan_entrypoint, arg)
+                    base_addr = _extract_addr_from_text(arg) or _extract_base_addr_from_keyboard(keyboard)
+                    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                    keyboard = _compress_keyboard(keyboard)
+                    st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+                    _store_addr_for_message(body, base_addr)
+                except Exception as e:
+                    _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
+                    _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+            return ("ok", 200)
+        _send_text(chat_id, LOC("en","unknown"), logger=app.logger)
+        return ("ok", 200)
+
+    _send_text(chat_id, "Processing…", logger=app.logger)
+    try:
+        text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
+        base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
+        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+        keyboard = _compress_keyboard(keyboard)
+        st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+        _store_addr_for_message(body, base_addr)
+    except Exception as e:
+        _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
+        _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
+    return ("ok", 200)
+
+
+def _enrich_full(addr: str, base_text: str) -> str:
+    try:
+        text = base_text or ""
+        addr_l = (addr or "").lower()
+        dom = None
+        try:
+            dom = _extract_domain_from_text(text)
+        except Exception:
+            dom = None
+        try:
+            if not dom and ADDR_RE.fullmatch(addr_l or ""):
+                dom = KNOWN_HOMEPAGES.get(addr_l)
+        except Exception:
+            pass
+        try:
+            if not dom:
+                hint = _symbol_homepage_hint(text)
+                if hint:
+                    dom = hint
+        except Exception:
+            pass
+        try:
+            if not dom and ADDR_RE.fullmatch(addr_l or ""):
+                dom = _cg_homepage(addr_l)
+        except Exception:
+            pass
+        if not dom:
+            return text
+        try:
+            h, created, reg, exp, issuer, wb = _domain_meta(dom)
+        except Exception:
+            h, created, reg, exp, issuer, wb = ("—", "—", "—", "—", "—", "—")
+        try:
+            reg = _normalize_registrar(reg, h, dom)
+        except Exception:
+            pass
+        domain_line = f"Domain: {dom}"
+        whois_line  = f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}"
+        ssl_prefix  = "SSL: OK" if exp and exp != "—" else "SSL: —"
+        ssl_line    = f"{ssl_prefix} | Expires: {exp or '—'} | Issuer: {issuer or '—'}"
+        wayback_line= f"Wayback: first {wb if wb else '—'}"
+        import re as _re
+        def _replace_or_append(body, label, newline):
+            patt = _re.compile(rf"(?m)^{_re.escape(label)}[^\n]*$")
+            if patt.search(body or ""):
+                return patt.sub(newline, body)
+            if body and not body.endswith("\n"):
+                body += "\n"
+            return body + newline
+        text = _replace_or_append(text, "Domain:",     domain_line)
+        text = _replace_or_append(text, "WHOIS/RDAP:", whois_line)
+        text = _replace_or_append(text, "SSL:",        ssl_line)
+        text = _replace_or_append(text, "Wayback:",    wayback_line)
+        return text
+    except Exception:
+        return base_text or ""
+
+
+def _kb_dedupe_all(kb: dict) -> dict:
+    try:
+        ik = (kb or {}).get("inline_keyboard") or []
+        out = []
+        seen = set()
+        for row in ik:
+            new_row = []
+            for btn in (row or []):
+                cd = str((btn or {}).get("callback_data") or "")
+                key = ("cd", cd) if cd else ("tx", str((btn or {}).get("text") or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                new_row.append(btn)
+            if new_row:
+                out.append(new_row)
+        return {"inline_keyboard": out}
+    except Exception:
+        return kb or {}
+
+
+def _kb_strip_tf_rows(kb: dict) -> dict:
+    """Remove any Δ timeframe rows regardless of encoding."""
+    try:
+        base = _kb_clone(kb)
+        ik = (base or {}).get("inline_keyboard") or []
+        out = []
+        for row in ik:
+            delta_like = 0
+            new_row = []
+            for btn in (row or []):
+                cd = str((btn or {}).get("callback_data") or "")
+                tx = str((btn or {}).get("text") or "")
+                if cd.startswith("tf:") or cd in {"5","1","6","24","/24h"}:
+                    continue
+                if tx.strip().startswith("Δ"):
+                    delta_like += 1
+                else:
+                    new_row.append(btn)
+            if delta_like >= 3:
+                continue
+            if new_row:
+                out.append(new_row)
+        return {"inline_keyboard": out}
+    except Exception:
+        return kb or {}
