@@ -1452,6 +1452,7 @@ def _short_addr(a: str, take: int = 6) -> str:
     except Exception:
         return a
 def _onchain_inspect(addr: str):
+    info = {}
     out = []
 
     # info reset removed by patch
@@ -1578,7 +1579,6 @@ def _onchain_inspect(addr: str):
         return "\n".join(out), info
     except Exception as e:
         return f"On-chain error: {type(e).__name__}: {e}", {"error": str(e)}
-
 def _merge_onchain_into_risk(addr: str, info: dict):
     try:
         key = (addr or "").lower()
