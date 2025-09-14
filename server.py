@@ -518,6 +518,7 @@ def _kb_strip_prefixes(kb, prefixes):
 
 
 
+
 def _answer_why_deep(cq: dict, addr_hint: str = None):
     try:
         msg = cq.get("message") or {}
@@ -527,27 +528,39 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         text = msg.get("text") or ""
         addr = (addr_hint or _extract_addr_from_text(text) or "").lower()
         ent = RISK_CACHE.get(addr) or {}
-        neg = ent.get("neg") or []
-        pos = ent.get("pos") or []
-        wneg = ent.get("w_neg") or []
-        wpos = ent.get("w_pos") or []
+        neg = list(ent.get("neg") or [])
+        pos = list(ent.get("pos") or [])
+        wneg = list(ent.get("w_neg") or [])
+        wpos = list(ent.get("w_pos") or [])
 
-        # Normalize weight arrays to match reasons length (fallback=10, no zeros)
         if len(wneg) < len(neg):
             wneg = list(wneg) + [10] * (len(neg) - len(wneg))
         if len(wpos) < len(pos):
             wpos = list(wpos) + [10] * (len(pos) - len(wpos))
-        wneg = [1 if (w is None or int(w) == 0) else int(w) for w in wneg]
-        wpos = [1 if (w is None or int(w) == 0) else int(w) for w in wpos]
+        def _to_int_or_default(x, default=10):
+            try:
+                return int(x)
+            except Exception:
+                return default
+        wneg = [_to_int_or_default(w, 10) for w in wneg]
+        wpos = [_to_int_or_default(w, 10) for w in wpos]
+
+        is_whitelisted = any("Whitelisted by address" in p for p in pos) or any("Blue-chip pair context" in p for p in pos)
+        if is_whitelisted and "Owner privileges present" in neg:
+            try:
+                idxs = [i for i,r in enumerate(neg) if r == "Owner privileges present"]
+                for i in reversed(idxs):
+                    neg.pop(i); wneg.pop(i)
+                pos.append("Admin privileges expected for centralized/whitelisted token")
+                wpos.append(0)
+            except Exception:
+                pass
 
         lines = []
         def fmt(items, weights, sign):
             for (reason, w) in zip(items, weights):
                 sym = "−" if sign=="neg" else "+"
-                try:
-                    w = int(w)
-                except Exception:
-                    w = 10
+                w = _to_int_or_default(w, 10)
                 lines.append(f"{sym}{abs(w):>2}  {reason}")
 
         fmt(neg, wneg, "neg")
@@ -560,7 +573,6 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         _send_text(chat_id, "Why++ factors\n" + "\n".join(lines[:40]), logger=app.logger)
     except Exception:
         pass
-
 
 
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
@@ -1404,8 +1416,28 @@ def _onchain_inspect(addr: str):
         sim = hp.get("simulationResult") or {}
         bt = sim.get("buyTax"); st = sim.get("sellTax"); tt = sim.get("transferTax")
         if bt is not None or st is not None or tt is not None:
+            ## FIXED4 CONTEXT: detect blue-chip / whitelist / liquidity
+            liq_usd = None
+            try:
+                _p, _chain = _ds_resolve_pair_and_chain(addr)
+                if _p:
+                    liq_usd = ((_p.get('liquidity') or {}).get('usd'))
+            except Exception:
+                pass
+            _cache_ent = RISK_CACHE.get((addr or '').lower()) or {}
+            _pos = _cache_ent.get('pos') or []
+            is_whitelisted = any('Whitelisted by address' in p for p in _pos) or any('Blue-chip pair context' in p for p in _pos)
+
             out.append(f"Taxes: buy={bt if bt is not None else '—'}% | sell={st if st is not None else '—'}% | transfer={tt if tt is not None else '—'}%")
         if not sim_ok and hp.get("simulationError"):
+            try:
+                if ("is_whitelisted" in locals() and is_whitelisted) or ("liq_usd" in locals() and (liq_usd is not None) and isinstance(liq_usd,(int,float)) and liq_usd >= 1_000_000):
+                    out.append("Honeypot quick-test: ℹ️ skipped DEX simulation (blue-chip/centralized)")
+                else:
+                    out.append("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)")
+            except Exception:
+                out.append("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)")
+            
             out.append(f"SimError: {str(hp.get('simulationError'))[:140]}")
         info['hp'] = {"risk": ((hp.get('summary') or {}).get('risk')),
                       "riskLevel": ((hp.get('summary') or {}).get('riskLevel')),
