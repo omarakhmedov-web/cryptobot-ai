@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.6.3-onchain-metadata")
+APP_VERSION = os.environ.get("APP_VERSION", "0.6.4-onchain-to-why")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -696,6 +696,44 @@ def _risk_verdict(addr, text):
         label = "LOW RISK 🟢"
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
 
+
+def _merge_onchain_into_risk(addr: str, info: dict):
+    try:
+        key = (addr or "").lower()
+        if not key:
+            return
+        entry = RISK_CACHE.get(key) or {"score": 0, "label": "LOW RISK 🟢", "neg": [], "pos": [], "w_neg": [], "w_pos": []}
+        added = False
+        # Prepare helper to add unique reason
+        def add_neg(reason, weight):
+            nonlocal added
+            if not reason:
+                return
+            if reason not in entry["neg"]:
+                entry["neg"].append(reason)
+                entry["w_neg"].append(weight)
+                entry["score"] = int(min(100, entry.get("score", 0) + (weight or 0)))
+                added = True
+
+        # Merge proxy/paused/owner
+        if info.get("proxy"):
+            add_neg("Upgradeable proxy (owner can change logic)", 15)
+        if info.get("paused") is True:
+            add_neg("Contract is paused", 20)
+        if info.get("owner"):
+            add_neg("Owner privileges present", 20)
+
+        # Recompute label
+        if entry["score"] >= RISK_THRESH_HIGH:
+            entry["label"] = "HIGH RISK 🔴"
+        elif entry["score"] >= RISK_THRESH_CAUTION:
+            entry["label"] = "CAUTION 🟡"
+        else:
+            entry["label"] = "LOW RISK 🟢"
+        if added:
+            RISK_CACHE[key] = entry
+    except Exception:
+        pass
 def _append_verdict_block(addr, text):
     score, label, rs = _risk_verdict(addr, text)
     try:
@@ -1187,6 +1225,7 @@ def webhook(secret):
                 addr = data.split(":",1)[1].strip().lower()
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "running on-chain…", logger=app.logger)
                 out, meta = _onchain_inspect(addr)
+                _merge_onchain_into_risk(addr, meta)
                 kb0 = msg_obj.get("reply_markup") or {}
                 kb1 = _ensure_action_buttons(addr, kb0, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _compress_keyboard(kb1)
@@ -1295,6 +1334,7 @@ def webhook(secret):
             else:
                 base_addr = _extract_addr_from_text(arg) or arg.strip()
                 details, meta = _onchain_inspect(base_addr)
+                _merge_onchain_into_risk(base_addr, meta)
                 _send_text(chat_id, "On-chain\n" + details, logger=app.logger)
             return ("ok", 200)
         if cmd in ("/quickscan","/scan"):
