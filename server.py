@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.6.9-enrich-hotfix")
+APP_VERSION = os.environ.get("APP_VERSION", "0.7.0-stable-enrich")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
