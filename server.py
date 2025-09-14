@@ -1374,6 +1374,8 @@ def _short_addr(a: str, take: int = 6) -> str:
     except Exception:
         return a
 def _onchain_inspect(addr: str):
+    out = []
+    info = {}
     
     # --- Honeypot.is simulation & LP/holders ---
     try:
