@@ -1305,7 +1305,14 @@ def webhook(secret):
                 # Smart fallback: try to extract Δ24h from the message text, else reply n/a
                 txt = (msg_obj.get("text") or "")
                 m_ = re.search(r"Δ24h[^\n]*", txt)
-                ans = m_.group(0) if m_ else "Δ: n/a"
+                ans = m_.group(0) if m_ else None
+                if not ans:
+                    addr_fb = _extract_addr_from_text(txt) or _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {})
+                    ch = _ds_token_changes((addr_fb or "").lower()) if addr_fb else {}
+                    if ch.get("h24"):
+                        ans = f"Δ24h {ch['h24']}"
+                if not ans:
+                    ans = "Δ: n/a"
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
                 return ("ok", 200)
 
