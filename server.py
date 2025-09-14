@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.7.0-stable-enrich")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.8-quickscan+delta-fallback")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -99,19 +99,70 @@ def _ds_pick_best_pair(pairs):
     if not isinstance(pairs, list):
         return None
     best = None
-    best_liq = -1
+    best = None
+    best_score = -1.0
     for p in pairs:
         try:
             liq = float((((p or {}).get("liquidity") or {}).get("usd")) or 0.0)
         except Exception:
             liq = 0.0
-        bonus = 1.0 if (p or {}).get("chainId") == "ethereum" else 0.0
-        score = liq + bonus * 1e9
-        if score > best_liq:
-            best_liq = score
+        ch = ((p or {}).get("priceChange") or {})
+        coverage = sum(1 for k in ("m5","h1","h6","h24") if ch.get(k) not in (None, ""))
+        on_eth = 1.0 if (p or {}).get("chainId") == "ethereum" else 0.0
+        score = coverage * 1e12 + liq * 1e3 + on_eth * 1e2
+        if score > best_score:
+            best_score = score
             best = p
     return best or (pairs[0] if pairs else None)
 
+
+def _ds_candle_delta(pair: dict, tf: str) -> tuple:
+    """
+    Try to compute Δ% from candles when priceChange[tf] is missing.
+    Returns (value_str, src_tag) or (None, None).
+    """
+    try:
+        pair_id = (pair or {}).get("pairId") or ""
+        chain = (pair or {}).get("chainId") or ""
+        addr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
+        endpoints = []
+        if pair_id:
+            endpoints.append(f"{DEX_BASE}/candles/pairs/{pair_id}?timeframe={tf}&limit=2")
+            endpoints.append(f"{DEX_BASE}/candles?pairId={pair_id}&tf={tf}&limit=2")
+        if chain and addr:
+            endpoints.append(f"{DEX_BASE}/candles/pairs/{chain}/{addr}?timeframe={tf}&limit=2")
+        for url in endpoints:
+            try:
+                r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
+                if r.status_code != 200:
+                    continue
+                js = r.json() if hasattr(r, "json") else {}
+                candles = js.get("candles") or js.get("data") or js.get("result") or []
+                if not isinstance(candles, list) or len(candles) < 2:
+                    continue
+                c1 = candles[-2]; c2 = candles[-1]
+                def _get_close(c):
+                    return c.get("c") or c.get("close") or c.get("price") or c.get("last")
+                v1 = _get_close(c1); v2 = _get_close(c2)
+                v1 = float(v1) if v1 is not None else None
+                v2 = float(v2) if v2 is not None else None
+                if not v1 or not v2:
+                    continue
+                pct = (v2 - v1) / v1 * 100.0
+                return (("+" if pct>=0 else "") + f"{pct:.2f}%", "calc")
+            except Exception:
+                continue
+        return (None, None)
+    except Exception:
+        return (None, None)
+
+
+def _delta_src_tag(changes: dict, key: str) -> str:
+    try:
+        s = (changes or {}).get(f"_src_{key}") or ""
+        return " ·computed" if s == "calc" else ""
+    except Exception:
+        return ""
 def _ds_token_changes(addr_l: str) -> dict:
     if not addr_l:
         return {}
@@ -132,16 +183,25 @@ def _ds_token_changes(addr_l: str) -> dict:
             v = changes.get(k_src)
             try:
                 if v is None or v == "":
-                    continue
+                    raise ValueError("no ds value")
                 v = float(v)
                 out[k_dst] = ("+" if v>=0 else "") + f"{v:.2f}%"
+                out[f"_src_{k_dst}"] = "ds"
             except Exception:
                 vstr = str(v)
-                if not vstr.endswith("%"):
-                    vstr += "%"
-                if not vstr.startswith(("+","-")):
-                    vstr = "+" + vstr
-                out[k_dst] = vstr
+                if v not in (None, ""):
+                    if not vstr.endswith("%"):
+                        vstr += "%"
+                    if not vstr.startswith(("+","-")):
+                        vstr = "+" + vstr
+                    out[k_dst] = vstr
+                    out[f"_src_{k_dst}"] = "ds"
+        for tf in ("m5","h1","h6"):
+            if not out.get(tf):
+                val, src = _ds_candle_delta(p, tf)
+                if val:
+                    out[tf] = val
+                    out[f"_src_{tf}"] = src or "calc"
         if out:
             _delta_cache_put(addr_l, out)
         return out
@@ -1030,6 +1090,17 @@ def _call_u8(addr, selector):
     except Exception:
         return None
 
+
+def _call_bytes32(addr: str, selector_hex: str):
+    try:
+        data = selector_hex if selector_hex.startswith("0x") else ("0x" + selector_hex)
+        out = _eth_call(addr, data)
+        if out and isinstance(out, str) and out.startswith("0x") and len(out) >= 66:
+            return out[:66]
+        return None
+    except Exception:
+        return None
+
 def _call_u256(addr, selector):
     try:
         ret = _eth_call(addr, selector)
@@ -1066,6 +1137,26 @@ EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505
 EIP1967_BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
 EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103"
 
+
+def _fmt_int(v):
+    try:
+        n = int(v)
+        return f"{n:,}"
+    except Exception:
+        try:
+            f = float(v)
+            return f"{f:,.0f}"
+        except Exception:
+            return str(v)
+
+def _short_addr(a: str, take: int = 6) -> str:
+    try:
+        a = str(a or "")
+        if len(a) <= 2 + take*2:
+            return a
+        return a[:2+take] + "…" + a[-take:]
+    except Exception:
+        return a
 def _onchain_inspect(addr: str):
     urls = _parse_rpc_urls()
     if not urls:
@@ -1101,7 +1192,7 @@ def _onchain_inspect(addr: str):
         owner = _call_owner(addr)
         if owner:
             info["owner"] = owner
-            out.append(f"Owner: {owner}")
+            out.append(f"Owner: {_short_addr(owner)}")
         paused = _call_bool(addr, SEL_PAUSED)
         if paused is True:
             out.append("Paused: ✅")
@@ -1247,6 +1338,15 @@ def _render_report(addr: str, text: str):
 # ========================
 # HTTP routes
 # ========================
+
+@app.route("/version", methods=["GET"])
+def version():
+    try:
+        import hashlib, inspect
+        h = hashlib.sha256(inspect.getsourcefile(version).encode() if hasattr(version, "__code__") else b"").hexdigest()[:12]
+    except Exception:
+        h = ""
+    return jsonify({"ok": True, "version": APP_VERSION, "code_hash": h})
 @app.route("/healthz")
 def healthz():
     return jsonify({"ok": True, "version": APP_VERSION})
@@ -1369,7 +1469,7 @@ def webhook(secret):
                     if ch.get("h24"):
                         ans = f"Δ24h {ch['h24']}"
                 if not ans:
-                    ans = "Δ: n/a"
+                    ans = "Δ: n/a (no data from source)"
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
                 return ("ok", 200)
 
@@ -1396,13 +1496,13 @@ def webhook(secret):
             key = {"5":"m5","1":"h1","6":"h6","24":"h24","24h":"h24"}.get(lab, None)
             if key and changes.get(key):
                 pretty = {"m5":"5m","h1":"1h","h6":"6h","h24":"24h"}[key]
-                ans = f"Δ{pretty} {changes[key]}"
+                ans = f"Δ{pretty} {changes[key]}" + (" ·computed" if changes.get(f"_src_{key}")=="calc" else "")
             elif lab in {"24","24h"}:
                 txt = (msg_obj.get("text") or "")
                 m_ = re.search(r"Δ24h[^\n]*", txt)
                 ans = m_.group(0) if m_ else "Δ24h n/a"
             else:
-                ans = "Δ: n/a"
+                ans = "Δ: n/a (no data from source)"
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
             return ("ok", 200)
         # <<< TF_HANDLER_EARLY
@@ -1489,7 +1589,7 @@ def webhook(secret):
                     m = re.search(r"Δ24h[^\n]*", txt)
                     ans = m.group(0) if m else "Δ24h: n/a"
                 else:
-                    ans = "Δ: n/a"
+                    ans = "Δ: n/a (no data from source)"
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
                 return ("ok", 200)
 
