@@ -62,6 +62,22 @@ except Exception:
 
 _DELTA_CACHE = {}  # addr_l -> {"ts": epoch, "changes": {"m5": v, "h1": v, "h6": v, "h24": v}}
 
+
+def _qs_call_safe(func, *args, **kwargs):
+    """Call quickscan entrypoints safely, dropping unsupported kwargs like 'lang'/'lean'."""
+    try:
+        return func(*args, **kwargs)
+    except TypeError:
+        # Drop lang/lean if present
+        for k in ("lang","lean"):
+            if k in kwargs:
+                kwargs.pop(k, None)
+        try:
+            return func(*args, **kwargs)
+        except TypeError:
+            # Try positional-only
+            return func(*args)
+
 def _delta_cache_get(addr_l: str, ttl=60):
     try:
         rec = _DELTA_CACHE.get(addr_l or "")
@@ -1297,6 +1313,39 @@ def webhook(secret):
 
     # Callback queries
     if "callback_query" in update:
+
+            # >>> TF_HANDLER_EARLY
+            if isinstance(data, str) and re.match(r'^(tf:(5|1|6|24)|/24h|5|1|6|24)$', data):
+                lab = data.replace("tf:","").replace("/","")
+                try:
+                    mid = str((msg_obj or {}).get("message_id"))
+                except Exception:
+                    mid = None
+                addr0 = None
+                if mid:
+                    try:
+                        addr0 = msg2addr.get(mid)
+                    except Exception:
+                        addr0 = None
+                if not addr0:
+                    addr0 = _extract_addr_from_text(msg_obj.get("text") or "")
+                if not addr0:
+                    addr0 = _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {})
+                addr_l = (addr0 or "").lower()
+                changes = _ds_token_changes(addr_l) if ADDR_RE.fullmatch(addr_l or "") else {}
+                key = {"5":"m5","1":"h1","6":"h6","24":"h24","24h":"h24"}.get(lab, None)
+                if key and changes.get(key):
+                    pretty = {"m5":"5m","h1":"1h","h6":"6h","h24":"24h"}[key]
+                    ans = f"Δ{pretty} {changes[key]}"
+                elif lab in {"24","24h"}:
+                    txt = (msg_obj.get("text") or "")
+                    m_ = re.search(r"Δ24h[^\n]*", txt)
+                    ans = m_.group(0) if m_ else "Δ24h n/a"
+                else:
+                    ans = "Δ: n/a"
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
+                return ("ok", 200)
+            # <<< TF_HANDLER_EARLY
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
@@ -1411,7 +1460,7 @@ def webhook(secret):
                 addrs = _extract_addrs_from_pair_payload(data)
                 base_addr = _pick_addr(addrs)
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
-                text_out, keyboard = quickscan_pair_entrypoint(data)
+                text_out, keyboard = _qs_call_safe(quickscan_pair_entrypoint, data)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
                 keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
@@ -1423,7 +1472,7 @@ def webhook(secret):
                 payload = data.split(":", 1)[1]
                 base_addr = payload.split("?", 1)[0]
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
-                text_out, keyboard = quickscan_entrypoint(base_addr)
+                text_out, keyboard = _qs_call_safe(quickscan_entrypoint, base_addr)
                 keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
@@ -1583,7 +1632,7 @@ def webhook(secret):
             else:
                 lines.append("RPC providers: none configured")
             try:
-                _ = quickscan_entrypoint("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+                _ = _qs_call_safe(quickscan_entrypoint, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
                 lines.append("QuickScan: OK")
             except Exception as e:
                 lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
@@ -1603,7 +1652,7 @@ def webhook(secret):
                 _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
             else:
                 try:
-                    text_out, keyboard = quickscan_entrypoint(arg)
+                    text_out, keyboard = _qs_call_safe(quickscan_entrypoint, arg)
                     base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
                     keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
@@ -1618,7 +1667,7 @@ def webhook(secret):
 
     _send_text(chat_id, "Processing…", logger=app.logger)
     try:
-        text_out, keyboard = quickscan_entrypoint(text)
+        text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
         base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
         keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
