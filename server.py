@@ -55,6 +55,202 @@ seen_callbacks = SafeCache(ttl=300)               # dedupe callback ids
 cb_cache = SafeCache(ttl=600)                     # long callback payloads by hash
 
 # ===== Δ timeframe (DexScreener) helpers =====
+
+# ===== Honeypot.is & LP lock helpers =====
+HP_API_BASE = os.environ.get("HP_API_BASE", "https://api.honeypot.is").rstrip("/")
+_HP_CACHE = {}   # key -> {ts, body}
+_HP_TTL = int(os.environ.get("HP_TTL", "600"))  # 10min
+_TOPH_CACHE = {} # key -> {ts, body}
+_TOPH_TTL = int(os.environ.get("TOPH_TTL", "1200"))  # 20min
+
+# Known locker / burn addresses per chain for quick LP lock inference
+DEAD_ADDRS = {
+    "0x0000000000000000000000000000000000000000",
+    "0x000000000000000000000000000000000000dEaD",
+    "0xdead000000000000000042069420694206942069",
+}
+UNCX_LOCKERS = {
+    # V2
+    "ethereum": {"v2":"0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214", "v3":"0x7f5c649856f900d15c83741f45ae46f5c6858234"},
+    "bsc":      {"v2":"0xc765bddb93b0d1c1a88282ba0fa6b2d00e3e0c83", "v3":"0x0d29598ec01fa03665feead91d4fb423f393886c"},
+    "polygon":  {"v2":"0xadb2437e6f65682b85f814fbc12fec0508a7b1d0", "v3":"0xc22218406983bf88bb634bb4bf15fa4e0a1a8c84"},
+    "arbitrum": {"v2":"0x275720567e5955f5f2d53a7a1ab8a0fc643de50e", "v3":"0xfa104eb3925a27e6263e05acc88f2e983a890637"},
+    "base":     {"v2":"0xc4e637d37113192f4f1f060daebd7758de7f4131", "v3":"0x231278edd38b00b07fbd52120cef685b9baebcc1"},
+}
+TEAMFINANCE_LOCKERS = {
+    # Publicly known main locker on Ethereum
+    "ethereum": ["0xe2fe530c047f2d85298b07d9333c05737f1435fb".lower()],
+    # Extend optionally per-chain via env var TEAMFINANCE_LOCKERS_JSON
+}
+try:
+    _extra_tf = os.environ.get("TEAMFINANCE_LOCKERS_JSON","").strip()
+    if _extra_tf:
+        TEAMFINANCE_LOCKERS.update(json.loads(_extra_tf))
+except Exception:
+    pass
+
+CHAIN_NAME_TO_ID = {
+    "ethereum": 1,
+    "eth": 1,
+    "bsc": 56,
+    "bnb": 56,
+    "polygon": 137,
+    "matic": 137,
+    "arbitrum": 42161,
+    "arb": 42161,
+    "base": 8453,
+}
+
+def _hp_cache_get(key, ttl):
+    try:
+        ent = (_HP_CACHE if key.startswith("ISH:") else _TOPH_CACHE).get(key)
+        if ent and time.time() - ent.get("ts", 0) < ttl:
+            return ent.get("body")
+    except Exception:
+        return None
+
+def _hp_cache_put(key, body):
+    try:
+        cache = _HP_CACHE if key.startswith("ISH:") else _TOPH_CACHE
+        cache[key] = {"ts": time.time(), "body": body}
+    except Exception:
+        pass
+
+def _hp_ish(addr: str, chain_name: str = None) -> dict:
+    """Call Honeypot.is IsHoneypot. Returns dict or {}. Cached."""
+    try:
+        addr_l = (addr or "").lower()
+        chain_id = CHAIN_NAME_TO_ID.get((chain_name or "").lower())
+        key = f"ISH:{addr_l}:{chain_id or 'auto'}"
+        cached = _hp_cache_get(key, _HP_TTL)
+        if cached is not None:
+            return cached
+        params = {"address": addr_l}
+        if chain_id:
+            params["chainID"] = chain_id
+        headers = {"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
+        url = f"{HP_API_BASE}/v2/IsHoneypot"
+        r = requests.get(url, params=params, headers=headers, timeout=8)
+        body = r.json() if hasattr(r,"json") else {}
+        if r.status_code != 200:
+            body = {}
+        _hp_cache_put(key, body)
+        return body or {}
+    except Exception:
+        return {}
+
+def _hp_top_holders(token_or_lp_addr: str, chain_name: str) -> dict:
+    """Top 50 holders via Honeypot.is TopHolders (requires chainID)."""
+    try:
+        addr_l = (token_or_lp_addr or "").lower()
+        chain_id = CHAIN_NAME_TO_ID.get((chain_name or "").lower())
+        if not chain_id:
+            return {}
+        key = f"TOP:{addr_l}:{chain_id}"
+        cached = _hp_cache_get(key, _TOPH_TTL)
+        if cached is not None:
+            return cached
+        headers = {"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
+        url = f"{HP_API_BASE}/v1/TopHolders"
+        r = requests.get(url, params={"address": addr_l, "chainID": chain_id}, headers=headers, timeout=8)
+        body = r.json() if hasattr(r,"json") else {}
+        if r.status_code != 200:
+            body = {}
+        _hp_cache_put(key, body)
+        return body or {}
+    except Exception:
+        return {}
+
+def _percent(n, d, decimals=2):
+    try:
+        if d and d != 0:
+            return round(100.0 * float(n) / float(d), decimals)
+    except Exception:
+        pass
+    return 0.0
+
+def _infer_lp_status(pair_addr: str, chain_name: str) -> dict:
+    """Infer LP burn/lock percentages by scanning LP token (pair) holders."""
+    try:
+        data = _hp_top_holders(pair_addr, chain_name) or {}
+        holders = data.get("holders") or []
+        ts = int(data.get("totalSupply") or 0)
+        dead_pct = 0.0
+        uncx_pct = 0.0
+        tf_pct = 0.0
+        top_holder = None
+        top_holder_pct = 0.0
+        locks_map = {k.lower() for k in (TEAMFINANCE_LOCKERS.get(chain_name.lower()) or [])}
+        # include UNCX v2/v3 for chain
+        try:
+            _uncx = UNCX_LOCKERS.get(chain_name.lower()) or {}
+            for v in _uncx.values():
+                locks_map.add(str(v).lower())
+        except Exception:
+            pass
+        for h in holders:
+            addr = (h.get("address") or "").lower()
+            bal  = int(h.get("balance") or 0)
+            pct  = _percent(bal, ts)
+            if top_holder is None or pct > top_holder_pct:
+                top_holder, top_holder_pct = addr, pct
+            if addr in DEAD_ADDRS:
+                dead_pct += pct
+            elif addr in locks_map:
+                # Sum across lockers
+                if addr in set(map(str.lower, TEAMFINANCE_LOCKERS.get(chain_name.lower()) or [])):
+                    tf_pct += pct
+                else:
+                    uncx_pct += pct
+        return {
+            "totalSupply": ts,
+            "dead_pct": round(dead_pct, 2),
+            "uncx_pct": round(uncx_pct, 2),
+            "team_finance_pct": round(tf_pct, 2),
+            "top_holder": top_holder,
+            "top_holder_pct": round(top_holder_pct, 2),
+            "holders_count": len(holders)
+        }
+    except Exception:
+        return {}
+
+def _holder_concentration(token_addr: str, chain_name: str) -> dict:
+    """Compute >5% and >10% concentration among top 50 token holders."""
+    try:
+        data = _hp_top_holders(token_addr, chain_name) or {}
+        holders = data.get("holders") or []
+        ts = int(data.get("totalSupply") or 0)
+        gt5 = 0; gt10 = 0
+        top_n = min( len([h for h in holders if int(h.get("balance") or 0) > 0]), 20 )
+        top_total = 0
+        for h in holders[:top_n]:
+            bal = int(h.get("balance") or 0)
+            pct = _percent(bal, ts)
+            if pct >= 10: gt10 += 1
+            if pct >= 5:  gt5  += 1
+            top_total += pct
+        return {"gt5": gt5, "gt10": gt10, "topN": top_n, "topTotalPct": round(top_total, 2)}
+    except Exception:
+        return {}
+
+def _ds_resolve_pair_and_chain(addr_l: str) -> tuple:
+    """Get DexScreener best pair and chain name for token address."""
+    try:
+        url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
+        r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
+        if r.status_code != 200:
+            return None, None
+        body = r.json() if hasattr(r, "json") else {}
+        pairs = body.get("pairs") or []
+        p = _ds_pick_best_pair(pairs)
+        if not p:
+            return None, None
+        chain = (p or {}).get("chainId") or (p or {}).get("chain")
+        return p, (chain or "").lower()
+    except Exception:
+        return None, None
+
+
 try:
     DEX_BASE = os.environ.get("DEX_BASE", "https://api.dexscreener.com").rstrip("/")
 except Exception:
@@ -344,7 +540,8 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
     # Row with Why/Report
     row = []
     if want_why and addr:
-        row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"})
+        row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"});
+        row.append({"text": "ℹ️ Why++", "callback_data": f"why2:{addr}"})
     if want_report and addr:
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
     if row:
@@ -1158,6 +1355,39 @@ def _short_addr(a: str, take: int = 6) -> str:
     except Exception:
         return a
 def _onchain_inspect(addr: str):
+# --- Honeypot.is simulation & taxes ---
+    try:
+        pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
+    except Exception:
+        pair_from_ds, chain_name = None, None
+    hp = _hp_ish(addr, chain_name=chain_name) if ADDR_RE.fullmatch(addr or "") else {}
+    if hp:
+        sim_ok = hp.get("simulationSuccess", False)
+        out.append(f"Honeypot.is: simulation={'OK' if sim_ok else 'FAIL'} | risk={((hp.get('summary') or {}).get('risk') or '—')} | level={((hp.get('summary') or {}).get('riskLevel') or '—')}")
+        sim = hp.get("simulationResult") or {}
+        bt = sim.get("buyTax"); st = sim.get("sellTax"); tt = sim.get("transferTax")
+        if bt is not None or st is not None or tt is not None:
+            out.append(f"Taxes: buy={bt if bt is not None else '—'}% | sell={st if st is not None else '—'}% | transfer={tt if tt is not None else '—'}%")
+        if not sim_ok and hp.get("simulationError"):
+            out.append(f"SimError: {hp.get('simulationError')[:140]}")
+        # Store into info for risk merge
+        info['hp'] = {
+            "risk": ((hp.get("summary") or {}).get("risk")),
+            "riskLevel": ((hp.get("summary") or {}).get("riskLevel")),
+            "isHoneypot": ((hp.get("honeypotResult") or {}).get("isHoneypot")),
+            "buyTax": bt, "sellTax": st, "transferTax": tt,
+        }
+        # LP & holders via HP + DS
+        pair_addr = ( (hp.get("pair") or {}).get("pair") or {} ).get("address") or (pair_from_ds or {}).get("pairAddress")
+        if pair_addr and chain_name:
+            lp = _infer_lp_status(pair_addr, chain_name)
+            if lp:
+                out.append(f"LP: burned={lp.get('dead_pct',0)}% | UNCX={lp.get('uncx_pct',0)}% | TeamFinance={lp.get('team_finance_pct',0)}% | topHolder={lp.get('top_holder_pct',0)}%")
+                info['lp'] = lp
+            conc = _holder_concentration(addr, chain_name)
+            if conc:
+                out.append(f"Holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
+                info['holders'] = conc
     urls = _parse_rpc_urls()
     if not urls:
         return "On-chain: not configured (set ETH_RPC_URL or ETH_RPC_URL1..N or ETH_RPC_URLS)", {}
@@ -1261,6 +1491,53 @@ def _merge_onchain_into_risk(addr: str, info: dict):
             add_neg("Contract is paused", W(20))
         if info.get("owner"):
             add_neg("Owner privileges present", W(20))
+# Honeypot.is based signals
+hp = info.get("hp") or {}
+try:
+    if hp.get("isHoneypot"):
+        add_neg("Honeypot detected by Honeypot.is", W(90))
+    rl = hp.get("riskLevel")
+    if isinstance(rl, (int, float)) and rl >= 80:
+        add_neg(f"Honeypot.is risk level {rl}", W(40))
+    for k, label in (("buyTax","High buy tax"), ("sellTax","High sell tax"), ("transferTax","High transfer tax")):
+        v = hp.get(k)
+        if isinstance(v, (int,float)):
+            if v >= 25:
+                add_neg(f"{label}: {v}%", W(35))
+            elif v >= 10:
+                add_neg(f"{label}: {v}%", W(20))
+except Exception:
+    pass
+
+# LP lock/burn inference
+lp = info.get("lp") or {}
+try:
+    dead = lp.get("dead_pct") or 0.0
+    uncx = lp.get("uncx_pct") or 0.0
+    tf   = lp.get("team_finance_pct") or 0.0
+    topH = lp.get("top_holder_pct") or 0.0
+    if dead >= 50:
+        add_pos(f"LP burned: {dead}% in dead/zero addresses", 25)
+    if (uncx + tf) >= 50:
+        add_pos(f"LP locked via lockers: {round(uncx+tf,2)}%", 20)
+    if topH >= 40 and (uncx + tf + dead) < 30:
+        add_neg(f"LP concentrated in a single holder: {topH}%", W(30))
+except Exception:
+    pass
+
+# Holder concentration (token)
+hc = info.get("holders") or {}
+try:
+    if (hc.get("gt10") or 0) >= 2:
+        add_neg(f"Many large holders (>=10%): {hc.get('gt10')}", W(25))
+    elif (hc.get("gt5") or 0) >= 5:
+        add_neg(f"Top holders concentration (>=5%): {hc.get('gt5')}", W(15))
+    top_total = hc.get("topTotalPct")
+    if isinstance(top_total, (int,float)) and top_total >= 80:
+        add_neg(f"Top holders (top {hc.get('topN')}) own {top_total}%", W(25))
+except Exception:
+    pass
+
 
         # Recompute label
         if entry["score"] >= RISK_THRESH_HIGH:
@@ -1407,6 +1684,34 @@ def admin_diag():
 # ========================
 # Telegram webhook & callbacks
 # ========================
+def _answer_why_deep(cq: dict, addr_hint: str = None):
+    try:
+        msg = cq.get("message") or {}
+        chat_id = int((msg.get("chat") or {}).get("id") or 0)
+        if chat_id == 0:
+            return
+        text = msg.get("text") or ""
+        addr = addr_hint or _extract_addr_from_text(text) or ""
+        ent = RISK_CACHE.get((addr or "").lower()) or {}
+        neg = ent.get("neg") or []
+        pos = ent.get("pos") or []
+        wneg = ent.get("w_neg") or []
+        wpos = ent.get("w_pos") or []
+        lines = []
+        def fmt(items, weights, sign):
+            for i,(reason,w) in enumerate(zip(items, weights)):
+                w = int(w or 0)
+                sym = "−" if sign=="neg" else "+"
+                lines.append(f"{sym}{abs(w):>2}  {reason}")
+        fmt(neg, wneg, "neg")
+        if pos: lines.append("—")
+        fmt(pos, wpos, "pos")
+        if not lines:
+            lines = ["No weighted factors captured yet. Tap 🧪 On-chain first."]
+        _send_text(chat_id, "Why++ factors\n" + "\n".join(lines[:30]), logger=app.logger)
+    except Exception:
+        pass
+
 def _answer_why_quickly(cq, addr_hint=None):
     try:
         msg_obj = cq.get("message", {}) or {}
@@ -1470,8 +1775,27 @@ def webhook(secret):
                         ans = f"Δ24h {ch['h24']}"
                 if not ans:
                     ans = "Δ: n/a (no data from source)"
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
-                return ("ok", 200)
+                # Attach lightweight driver info for 24h
+if lab in {"24","24h","h24"} and ADDR_RE.fullmatch(addr_l or ""):
+    try:
+        url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
+        r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
+        if r.status_code == 200:
+            body = r.json() if hasattr(r, "json") else {}
+            p = _ds_pick_best_pair(body.get("pairs") or [])
+            if p:
+                liq = ((p.get("liquidity") or {}).get("usd"))
+                tx = (p.get("txns") or {}).get("h24") or {}
+                buys = tx.get("buys"); sells = tx.get("sells")
+                add = []
+                if liq is not None: add.append(f"liq≈${int(liq):,}")
+                if buys is not None and sells is not None: add.append(f"buys:sells={buys}:{sells}")
+                if add:
+                    ans = ans + " | " + " • ".join(add)
+    except Exception:
+        pass
+tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
+return ("ok", 200)
 
         # >>> TF_HANDLER_EARLY
         if isinstance(data, str) and re.match(r'^(tf:(5|1|6|24)|/24h|5|1|6|24)$', data):
@@ -1591,6 +1915,11 @@ def webhook(secret):
                 else:
                     ans = "Δ: n/a (no data from source)"
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
+                return ("ok", 200)
+
+            if data.startswith("why2:"):
+                addr_hint = data.split(":",1)[1].strip().lower()
+                _answer_why_deep(cq, addr_hint=addr_hint)
                 return ("ok", 200)
 
             if data.startswith("why"):
