@@ -2292,3 +2292,41 @@ def _kb_strip_tf_rows(kb: dict) -> dict:
         return {"inline_keyboard": out}
     except Exception:
         return kb or {}
+
+def _normalize_hp_line(addr, text, block:str) -> str:
+    """Post-process on-chain block: if token is whitelisted/centralized,
+    replace 'Honeypot quick-test: ⚠️ static only...' with a neutral skip note."""
+    try:
+        whitelisted, _ = _is_whitelisted(addr, text)
+        if whitelisted:
+            return _normalize_hp_line(addr, text, block).replace("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)",
+                                 "Honeypot: ℹ️ skipped for centralized/whitelisted token")
+        return _normalize_hp_line(addr, text, block)
+    except Exception:
+        return _normalize_hp_line(addr, text, block)
+
+
+def _html_sanitize_risk(risk):
+    try:
+        neg = list(risk.get("neg") or [])
+        wneg = list(risk.get("w_neg") or [])
+        pos = list(risk.get("pos") or [])
+        wpos = list(risk.get("w_pos") or [])
+        # drop zero-weight negatives
+        neg2, wneg2 = [], []
+        for r, w in zip(neg, wneg):
+            try:
+                wi = int(w)
+            except Exception:
+                wi = 10
+            if wi > 0:
+                neg2.append(r); wneg2.append(w)
+        risk["neg"], risk["w_neg"] = neg2, wneg2
+        # ensure expected-admin positive once
+        expected = "Admin privileges expected for centralized/whitelisted token"
+        if not any(expected in p for p in pos):
+            pos.append(expected); wpos.append(0)
+        risk["pos"], risk["w_pos"] = pos, wpos
+    except Exception:
+        pass
+    return risk
