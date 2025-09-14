@@ -1393,22 +1393,21 @@ def webhook(secret):
             if orig:
                 data = orig
             else:
-                txt = (msg_obj.get("text") or "") if 'msg_obj' in locals() else ""
-m = re.search(r"Δ24h[^
-]*", txt)
-ans = m.group(0) if m else None
-if not ans:
-    try:
-        addr_fallback = _extract_addr_from_text((msg_obj.get("text") or ""))
-        ch = _ds_token_changes((addr_fallback or "").lower()) if addr_fallback else {}
-        if ch.get("h24"):
-            ans = f"Δ24h {ch['h24']}"
-    except Exception:
-        pass
-if not ans:
-    ans = "expired"
-tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
-return ("ok", 200)
+                            txt = (msg_obj.get("text") or "") if 'msg_obj' in locals() else ""
+            m = re.search(r"Δ24h[^\n]*", txt)
+            ans = m.group(0) if m else None
+            if not ans:
+                try:
+                    addr_fallback = _extract_addr_from_text((msg_obj.get("text") or ""))
+                    ch = _ds_token_changes((addr_fallback or "").lower()) if addr_fallback else {}
+                    if ch.get("h24"):
+                        ans = f"Δ24h {ch['h24']}"
+                except Exception:
+                    pass
+            if not ans:
+                ans = "expired"
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
+            return ("ok", 200)
 
         # Dedupe
         cqid = cq.get("id")
