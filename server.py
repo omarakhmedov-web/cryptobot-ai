@@ -1313,39 +1313,6 @@ def webhook(secret):
 
     # Callback queries
     if "callback_query" in update:
-
-            # >>> TF_HANDLER_EARLY
-            if isinstance(data, str) and re.match(r'^(tf:(5|1|6|24)|/24h|5|1|6|24)$', data):
-                lab = data.replace("tf:","").replace("/","")
-                try:
-                    mid = str((msg_obj or {}).get("message_id"))
-                except Exception:
-                    mid = None
-                addr0 = None
-                if mid:
-                    try:
-                        addr0 = msg2addr.get(mid)
-                    except Exception:
-                        addr0 = None
-                if not addr0:
-                    addr0 = _extract_addr_from_text(msg_obj.get("text") or "")
-                if not addr0:
-                    addr0 = _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {})
-                addr_l = (addr0 or "").lower()
-                changes = _ds_token_changes(addr_l) if ADDR_RE.fullmatch(addr_l or "") else {}
-                key = {"5":"m5","1":"h1","6":"h6","24":"h24","24h":"h24"}.get(lab, None)
-                if key and changes.get(key):
-                    pretty = {"m5":"5m","h1":"1h","h6":"6h","h24":"24h"}[key]
-                    ans = f"Δ{pretty} {changes[key]}"
-                elif lab in {"24","24h"}:
-                    txt = (msg_obj.get("text") or "")
-                    m_ = re.search(r"Δ24h[^\n]*", txt)
-                    ans = m_.group(0) if m_ else "Δ24h n/a"
-                else:
-                    ans = "Δ: n/a"
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
-                return ("ok", 200)
-            # <<< TF_HANDLER_EARLY
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
@@ -1353,7 +1320,7 @@ def webhook(secret):
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
 
-        # Inflate hashed payloads
+        # Inflate hashed payloads early
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
             if orig:
@@ -1373,11 +1340,8 @@ def webhook(secret):
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
                 return ("ok", 200)
 
-
-        
-        
-        # Δ timeframe buttons (handle early)
-        if data in {"tf:5","tf:1","tf:6","tf:24","5","1","6","24","/24h"}:
+        # >>> TF_HANDLER_EARLY
+        if isinstance(data, str) and re.match(r'^(tf:(5|1|6|24)|/24h|5|1|6|24)$', data):
             lab = data.replace("tf:","").replace("/","")
             # Determine base address from message map or text or keyboard
             try:
@@ -1395,28 +1359,27 @@ def webhook(secret):
             if not addr0:
                 addr0 = _extract_base_addr_from_keyboard(msg_obj.get("reply_markup") or {})
             addr_l = (addr0 or "").lower()
-
             changes = _ds_token_changes(addr_l) if ADDR_RE.fullmatch(addr_l or "") else {}
-
             key = {"5":"m5","1":"h1","6":"h6","24":"h24","24h":"h24"}.get(lab, None)
             if key and changes.get(key):
                 pretty = {"m5":"5m","h1":"1h","h6":"6h","h24":"24h"}[key]
                 ans = f"Δ{pretty} {changes[key]}"
             elif lab in {"24","24h"}:
-                # fallback – read Δ24h from text, or compute via DS if possible
                 txt = (msg_obj.get("text") or "")
                 m_ = re.search(r"Δ24h[^\n]*", txt)
-                if m_:
-                    ans = m_.group(0)
-                else:
-                    ch = _ds_token_changes(addr_l) if addr_l else {}
-                    ans = f"Δ24h {ch.get('h24','n/a')}" if ch else "Δ24h n/a"
+                ans = m_.group(0) if m_ else "Δ24h n/a"
             else:
                 ans = "Δ: n/a"
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
             return ("ok", 200)
+        # <<< TF_HANDLER_EARLY
+            # <<< TF_HANDLER_EARLY
+
+
+        
+        
 # Δ timeframe buttons
-        if data in {"tf:5","tf:1","tf:6","tf:24","5","1","6","24","/24h"}:
+        # Δ timeframe buttons
             lab = data.replace("tf:","").replace("/","")
             # Determine base address from message mapping or text
             try:
