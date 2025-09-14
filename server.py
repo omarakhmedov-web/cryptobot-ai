@@ -517,6 +517,7 @@ def _kb_strip_prefixes(kb, prefixes):
 
 
 
+
 def _answer_why_deep(cq: dict, addr_hint: str = None):
     try:
         msg = cq.get("message") or {}
@@ -530,23 +531,37 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         pos = ent.get("pos") or []
         wneg = ent.get("w_neg") or []
         wpos = ent.get("w_pos") or []
+
+        # Normalize weight arrays to match reasons length (fallback=10, no zeros)
+        if len(wneg) < len(neg):
+            wneg = list(wneg) + [10] * (len(neg) - len(wneg))
+        if len(wpos) < len(pos):
+            wpos = list(wpos) + [10] * (len(pos) - len(wpos))
+        wneg = [1 if (w is None or int(w) == 0) else int(w) for w in wneg]
+        wpos = [1 if (w is None or int(w) == 0) else int(w) for w in wpos]
+
         lines = []
         def fmt(items, weights, sign):
             for (reason, w) in zip(items, weights):
-                try:
-                    w = int(w or 0)
-                except Exception:
-                    w = 0
                 sym = "−" if sign=="neg" else "+"
+                try:
+                    w = int(w)
+                except Exception:
+                    w = 10
                 lines.append(f"{sym}{abs(w):>2}  {reason}")
+
         fmt(neg, wneg, "neg")
-        if pos: lines.append("—")
+        if pos:
+            lines.append("—")
         fmt(pos, wpos, "pos")
+
         if not lines:
             lines = ["No weighted factors captured yet. Tap 🧪 On-chain first."]
-        _send_text(chat_id, "Why++ factors\n" + "\n".join(lines[:30]), logger=app.logger)
+        _send_text(chat_id, "Why++ factors\n" + "\n".join(lines[:40]), logger=app.logger)
     except Exception:
         pass
+
+
 
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
@@ -1950,6 +1965,11 @@ def webhook(secret):
 
             if data.startswith("rep:"):
                 addr = data.split(":", 1)[1].strip().lower()
+                # Ensure on-chain factors are present in cache (best-effort)
+                try:
+                    _onchain_inspect(addr)
+                except Exception:
+                    pass
                 act_key = f"rep:{chat_id}:{addr}"
                 if recent_actions.get(act_key):
                     tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "report already sent", logger=app.logger)
