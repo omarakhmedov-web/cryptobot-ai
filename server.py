@@ -21,12 +21,13 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.6.5-whitelist-merge")
+APP_VERSION = os.environ.get("APP_VERSION", "0.6.6-admin-secret")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 WEBHOOK_HEADER_SECRET = os.environ.get("WEBHOOK_HEADER_SECRET", "")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # numeric string
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
 
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
@@ -115,6 +116,17 @@ def _admin_debug(chat_id, text):
     except Exception:
         pass
 
+
+def require_admin_secret(fn):
+    def wrapper(*args, **kwargs):
+        if not ADMIN_SECRET:
+            return ("forbidden: admin secret not set", 403)
+        header = request.headers.get("X-Admin-Secret", "")
+        if header != ADMIN_SECRET:
+            return ("forbidden", 403)
+        return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
+    return wrapper
 def require_webhook_secret(fn):
     def wrapper(*args, **kwargs):
         if WEBHOOK_HEADER_SECRET:
@@ -1110,6 +1122,50 @@ def healthz():
 def reload_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True})
+
+@app.route("/admin/reload_meta", methods=["POST"])
+@require_admin_secret
+def admin_reload_meta():
+    DOMAIN_META_CACHE.clear()
+    return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
+
+@app.route("/admin/clear_meta", methods=["POST"])
+@require_admin_secret
+def admin_clear_meta():
+    DOMAIN_META_CACHE.clear()
+    return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
+
+@app.route("/admin/diag", methods=["GET"])
+@require_admin_secret
+def admin_diag():
+    lines = []
+    # Wayback/RDAP
+    try:
+        r = requests.get("https://rdap.org/domain/circle.com", timeout=6)
+        lines.append({"name":"RDAP", "status": r.status_code})
+    except Exception as e:
+        lines.append({"name":"RDAP", "error": str(e)})
+    try:
+        r = requests.get("https://web.archive.org/cdx/search/cdx?url=circle.com/*&output=json&limit=1", timeout=6)
+        lines.append({"name":"Wayback CDX", "status": r.status_code})
+    except Exception as e:
+        lines.append({"name":"Wayback CDX", "error": str(e)})
+    # RPCs
+    urls = _parse_rpc_urls()
+    rpc = []
+    for u in urls:
+        try:
+            r = requests.post(u, json={"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}, timeout=6, headers={"Content-Type":"application/json"})
+            body = {}
+            try:
+                body = r.json()
+            except Exception:
+                body = {"http": r.status_code}
+            rpc.append({"url": _mask_host(u), "result": body.get("result"), "status": r.status_code})
+        except Exception as e:
+            rpc.append({"url": _mask_host(u), "error": str(e)})
+    return jsonify({"ok": True, "version": APP_VERSION, "diag": lines, "rpc": rpc})
+
 
 # ========================
 # Telegram webhook & callbacks
