@@ -283,10 +283,10 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
     # Δ timeframe row (single)
     ik.append([
-        {"text": "5m",  "callback_data": "tf:5"},
-        {"text": "1h",  "callback_data": "tf:1"},
-        {"text": "6h",  "callback_data": "tf:6"},
-        {"text": "24h", "callback_data": "tf:24"},
+        {"text": "Δ 5m",  "callback_data": "tf:5"},
+        {"text": "Δ 1h",  "callback_data": "tf:1"},
+        {"text": "Δ 6h",  "callback_data": "tf:6"},
+        {"text": "Δ 24h", "callback_data": "tf:24"},
     ])
     return _kb_dedupe_all({"inline_keyboard": ik})
 
@@ -1371,7 +1371,7 @@ def webhook(secret):
                 addrs = _extract_addrs_from_pair_payload(data)
                 base_addr = _pick_addr(addrs)
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
-                text_out, keyboard = quickscan_pair_entrypoint(data, lang="en", lean=True)
+                text_out, keyboard = quickscan_pair_entrypoint(data, lean=True)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
                 keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
@@ -1383,7 +1383,7 @@ def webhook(secret):
                 payload = data.split(":", 1)[1]
                 base_addr = payload.split("?", 1)[0]
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
-                text_out, keyboard = quickscan_entrypoint(base_addr, lang="en", lean=True)
+                text_out, keyboard = quickscan_entrypoint(base_addr, lean=True)
                 keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
@@ -1543,7 +1543,7 @@ def webhook(secret):
             else:
                 lines.append("RPC providers: none configured")
             try:
-                _ = quickscan_entrypoint("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", lang="en", lean=True)
+                _ = quickscan_entrypoint("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", lean=True)
                 lines.append("QuickScan: OK")
             except Exception as e:
                 lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
@@ -1563,7 +1563,7 @@ def webhook(secret):
                 _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
             else:
                 try:
-                    text_out, keyboard = quickscan_entrypoint(arg, lang="en", lean=True)
+                    text_out, keyboard = quickscan_entrypoint(arg, lean=True)
                     base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(arg)
                     keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
@@ -1578,7 +1578,7 @@ def webhook(secret):
 
     _send_text(chat_id, "Processing…", logger=app.logger)
     try:
-        text_out, keyboard = quickscan_entrypoint(text, lang="en", lean=True)
+        text_out, keyboard = quickscan_entrypoint(text, lean=True)
         base_addr = _extract_base_addr_from_keyboard(keyboard) or _extract_addr_from_text(text)
         keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
