@@ -233,14 +233,6 @@ def _compress_keyboard(kb: dict):
             token = f"cb:{h}"
             cb_cache.set(token, data)
             btn["callback_data"] = token
-    # Δ timeframe row (single)
-    ik.append([
-        {"text": "Δ 5m",  "callback_data": "tf:5"},
-        {"text": "Δ 1h",  "callback_data": "tf:1"},
-        {"text": "Δ 6h",  "callback_data": "tf:6"},
-        {"text": "Δ 24h", "callback_data": "tf:24"},
-    ])
-return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _kb_clone(kb):
     if not kb or not isinstance(kb, dict):
