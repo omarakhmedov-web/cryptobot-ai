@@ -1457,6 +1457,7 @@ def _short_addr(a: str, take: int = 6) -> str:
     except Exception:
         return a
 def _onchain_inspect(addr: str):
+    urls = []
 
     # --- Chain-aware RPC routing (POLYROUTE) ---
     # We pick RPCs based on inferred chain (ethereum/bsc/polygon). Minimal & safe.
@@ -1500,10 +1501,7 @@ def _onchain_inspect(addr: str):
                 pass
         return [u for u in urls if u]
 
-        urls = _parse_rpc_urls()
-    if urls is None:
-        urls = []
-    # info reset removed by patch
+    # (polyroute) cleaned stray urls init
 # --- Honeypot.is simulation & LP/holders ---
     try:
         pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
