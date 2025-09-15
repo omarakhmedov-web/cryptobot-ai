@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.11-core1")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.11-core1+multi+metrics")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -2392,18 +2392,9 @@ except Exception:
 
 
 # ========================
-# core1 wrappers: LP burned % and fee-sim scaffold (idempotent)
+# core1: LP burned % and fee-sim scaffold
 # ========================
-def _qs_eth_rpc_url():
-    import os
-    for k in ("ETH_RPC_URL","RPC_URL","WEB3_RPC_URL","ALCHEMY_HTTP","INFURA_HTTP"):
-        v = os.environ.get(k)
-        if v:
-            return v
-    return None
-
 def _qs_eth_call(addr_to: str, data_hex: str, rpc_url: str) -> int:
-    # returns int value from hex result, or 0
     import requests, json
     payload = {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":addr_to,"data":data_hex},"latest"]}
     r = requests.post(rpc_url, json=payload, timeout=8, headers={"User-Agent":"metridex-bot"})
@@ -2418,22 +2409,96 @@ def _qs_pad32(hex_addr: str) -> str:
     return hex_addr.rjust(64, "0")
 
 def _qs_eth_balance_of(token: str, holder: str, rpc_url: str) -> int:
-    # balanceOf(address) -> 0x70a08231 + 32-byte addr
     data = "0x70a08231" + _qs_pad32(holder.lower().replace("0x",""))
     return _qs_eth_call(token, data, rpc_url)
 
 def _qs_eth_total_supply(token: str, rpc_url: str) -> int:
-    # totalSupply() -> 0x18160ddd
     return _qs_eth_call(token, "0x18160ddd", rpc_url)
 
+def _qs_fee_sim_scaffold(addr: str, chain_name: str) -> dict:
+    try:
+        return {"ready": True, "chain": (chain_name or ""), "buy_eth": 0.01, "sell_eth": 0.01, "status": "scaffold"}
+    except Exception:
+        return {"ready": False}
+
+def _qs_wrap_onchain_inspect(fn):
+    base = getattr(fn, "_qs_orig", fn)
+    def wrapped(addr: str):  # type: ignore[override]
+        text, info = base(addr)
+        try:
+            # late-initialize fee-sim
+            try:
+                info = info or {}
+                info["fee_sim"] = _qs_fee_sim_scaffold(addr, (info or {}).get("chain"))
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return text, info
+    wrapped._qs_orig = base  # type: ignore[attr-defined]
+    return wrapped
+
+try:
+    if '_onchain_inspect' in globals():
+        _onchain_inspect = _qs_wrap_onchain_inspect(_onchain_inspect)
+except Exception:
+    pass
+
+
+# ========================
+# multichain: RPC per chain + DS resolver
+# ========================
+def _qs_rpc_for_chain(chain_name: str):
+    import os, json
+    if not chain_name:
+        return None
+    c = str(chain_name).strip().lower()
+    if c in ("eth","ethereum","mainnet"):
+        keys = ["ETH_RPC_URL","RPC_ETH","RPC_URL"]
+    elif c in ("bsc","bnb","binance-smart-chain","binance"):
+        keys = ["BSC_RPC_URL","BNB_RPC_URL","RPC_BSC","RPC_URL_BSC","RPC_URL"]
+    elif c in ("polygon","matic","pol","matic-mainnet"):
+        keys = ["POLYGON_RPC_URL","MATIC_RPC_URL","RPC_POLYGON","RPC_URL_POLYGON","RPC_URL"]
+    else:
+        keys = ["RPC_URL"]
+    m = os.environ.get("RPC_URLS")
+    if m:
+        try:
+            mp = json.loads(m)
+            for k in (c, c.upper(), c.capitalize()):
+                if isinstance(mp, dict) and k in mp and mp[k]:
+                    return mp[k]
+        except Exception:
+            pass
+    for k in keys:
+        v = os.environ.get(k)
+        if v:
+            return v
+    return None
+
+def _qs_resolve_pair_and_chain(addr: str):
+    try:
+        if '_ds_search' in globals():
+            j = _ds_search(addr)
+            pairs = (j or {}).get("pairs") or []
+            p = _ds_pick_best_pair(pairs) if pairs and '_ds_pick_best_pair' in globals() else (pairs[0] if pairs else None)
+            if p:
+                chain = p.get("chainId") or p.get("chain") or p.get("chainid")
+                return p, chain
+    except Exception:
+        pass
+    try:
+        if '_ds_resolve_pair_and_chain' in globals():
+            return _ds_resolve_pair_and_chain(addr)
+    except Exception:
+        pass
+    return None, None
+
 def _qs_lp_burned_pct(pair_addr: str, chain_name: str) -> tuple:
-    # Returns (pct_float, source_str) or (None, reason)
     try:
         if not pair_addr or not chain_name:
             return None, "n/a"
-        if str(chain_name).lower() not in ("eth","ethereum","mainnet"):
-            return None, "n/a"
-        rpc = _qs_eth_rpc_url()
+        rpc = _qs_rpc_for_chain(chain_name)
         if not rpc:
             return None, "rpc-missing"
         dead = ["0x0000000000000000000000000000000000000000",
@@ -2452,72 +2517,40 @@ def _qs_lp_burned_pct(pair_addr: str, chain_name: str) -> tuple:
     except Exception:
         return None, "err"
 
-def _qs_fee_sim_scaffold(addr: str, chain_name: str) -> dict:
-    # Skeleton returning placeholders; real swap sim to be added in next sprint
-    try:
-        return {
-            "ready": True,
-            "chain": (chain_name or ""),
-            "buy_eth": 0.01,
-            "sell_eth": 0.01,
-            "status": "scaffold",
-            "note": "Swap simulation stub; enables UI and logging paths"
-        }
-    except Exception:
-        return {"ready": False}
-
-def _qs_wrap_onchain_inspect(fn):
-    base = getattr(fn, "_qs_orig", fn)
-    def wrapped(addr: str):  # type: ignore[override]
-        text, info = base(addr)
-        try:
-            # resolve pair/chain using existing helper (if available)
-            try:
-                pair, chain = _ds_resolve_pair_and_chain(addr)
-            except Exception:
-                pair, chain = None, None
-            pair_addr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
-            # LP burned%
-            pct, source = _qs_lp_burned_pct(pair_addr, chain) if pair_addr else (None, "n/a")
-            lp_line = None
-            if pct is None:
-                if source == "rpc-missing":
-                    lp_line = "LP burned (dead/zero): n/a (RPC not set)"
-                else:
-                    lp_line = "LP burned (dead/zero): n/a"
-            else:
-                lp_line = f"LP burned (dead/zero): ~{pct:.2f}%"
-            # inject into On-chain block (after Honeypot line if present)
-            lines = (text or "").splitlines()
-            inserted = False
-            for i, ln in enumerate(lines):
-                if ln.strip().lower().startswith("honeypot"):
-                    lines.insert(i+1, lp_line); inserted = True; break
-            if not inserted:
-                lines.append(lp_line)
-            text = "\n".join(lines)
-
-            # fee-sim scaffold to info
-            try:
-                info = info or {}
-                info["fee_sim"] = _qs_fee_sim_scaffold(addr, chain)
-            except Exception:
-                pass
-        except Exception:
-            pass
-        return text, info
-    wrapped._qs_orig = base  # type: ignore[attr-defined]
-    return wrapped
-
+# Re-wrap onchain to add LP burned% line with multichain
 try:
     if '_onchain_inspect' in globals():
-        _onchain_inspect = _qs_wrap_onchain_inspect(_onchain_inspect)
+        base = getattr(_onchain_inspect, "_qs_orig", _onchain_inspect)
+        def _onchain_inspect(addr: str):  # type: ignore[override]
+            text, info = base(addr)
+            try:
+                pair, chain = _qs_resolve_pair_and_chain(addr)
+                pair_addr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
+                pct, source = _qs_lp_burned_pct(pair_addr, chain) if pair_addr else (None, "n/a")
+                lp_line = "LP burned (dead/zero): n/a" if pct is None else f"LP burned (dead/zero): ~{pct:.2f}%"
+                if pct is None and source == "rpc-missing":
+                    lp_line = "LP burned (dead/zero): n/a (RPC not set)"
+                lines = (text or "").splitlines()
+                inserted = False
+                for i, ln in enumerate(lines):
+                    if ln.strip().lower().startswith("honeypot"):
+                        lines.insert(i+1, lp_line); inserted = True; break
+                if not inserted:
+                    lines.append(lp_line)
+                text = "\n".join(lines)
+                info = info or {}
+                info["chain"] = chain
+                info.setdefault("fee_sim", {"ready": True, "chain": chain, "status": "scaffold"})
+            except Exception:
+                pass
+            return text, info
+        _onchain_inspect._qs_orig = base  # type: ignore[attr-defined]
 except Exception:
     pass
 
 
 # ========================
-# QS polish wrappers (idempotent)
+# polish: Why++/HTML normalization (idempotent)
 # ========================
 def _qs_wrap_answer_why_deep(fn):
     base = getattr(fn, "_qs_orig", fn)
@@ -2551,6 +2584,7 @@ def _qs_wrap_render_report(fn):
         html = base(addr, text)
         try:
             import re as _re
+            # Drop (+0) in Signals
             def _clean_signals(m):
                 block = m.group(2)
                 lines = [ln for ln in block.splitlines() if "(+0)" not in ln and "+0)" not in ln]
@@ -2558,6 +2592,7 @@ def _qs_wrap_render_report(fn):
                 return m.group(1) + cleaned + m.group(3)
             html = _re.sub(r'(<h3>Signals</h3><pre>)(.*?)(</pre>)', _clean_signals, html, flags=_re.S)
 
+            # Ensure expected-admin once
             expected = "Admin privileges expected for centralized/whitelisted token"
             mpos = _re.search(r'(<h3>Positives</h3><pre>)(.*?)(</pre>)', html, flags=_re.S)
             if mpos:
@@ -2573,6 +2608,7 @@ def _qs_wrap_render_report(fn):
                 new_body = "\n".join(new_lines)
                 html = html[:mpos.start(2)] + new_body + html[mpos.end(2):]
 
+            # Links box
             def _extract_domain_from_text_local(t: str):
                 for line in (t or "").splitlines():
                     line = line.strip()
@@ -2607,125 +2643,81 @@ except Exception:
 
 
 # ========================
-# core1-multi: multi-chain RPC + DS resolver (ETH/BSC/Polygon)
+# metrics: Δ snapshot + Why++ counts into HTML
 # ========================
-def _qs_rpc_for_chain(chain_name: str):
-    import os, json
-    if not chain_name:
-        return None
-    c = str(chain_name).strip().lower()
-    # Normalize aliases
-    if c in ("eth","ethereum","mainnet"):
-        key_list = ["ETH_RPC_URL","RPC_ETH","RPC_URL"]
-    elif c in ("bsc","bnb","binance-smart-chain","binance"):
-        key_list = ["BSC_RPC_URL","BNB_RPC_URL","RPC_BSC","RPC_BNB","RPC_URL_BSC","RPC_URL"]
-    elif c in ("polygon","matic","pol","matic-mainnet"):
-        key_list = ["POLYGON_RPC_URL","MATIC_RPC_URL","RPC_POLYGON","RPC_MATIC","RPC_URL_POLYGON","RPC_URL"]
-    else:
-        key_list = ["RPC_URL"]
-    # JSON map override
-    m = os.environ.get("RPC_URLS")
-    if m:
-        try:
-            mp = json.loads(m)
-            if isinstance(mp, dict):
-                for k in (c, c.upper(), c.capitalize()):
-                    if k in mp and mp[k]:
-                        return mp[k]
-        except Exception:
-            pass
-    for k in key_list:
-        v = os.environ.get(k)
-        if v:
-            return v
-    return None
-
-def _qs_resolve_pair_and_chain(addr: str):
-    # Try local DS functions to resolve best pair + chain
+def _qs_metrics_resolve_pair(addr: str):
     try:
-        if '_ds_search' in globals():
-            j = _ds_search(addr)  # expected: dict with "pairs": [ ... ]
-            pairs = (j or {}).get("pairs") or []
-            if pairs and '_ds_pick_best_pair' in globals():
-                p = _ds_pick_best_pair(pairs)
-            else:
-                p = pairs[0] if pairs else None
-            if p:
-                chain = p.get("chainId") or p.get("chain") or p.get("chainid")
-                return p, chain
-    except Exception:
-        pass
-    # Fallback to any provided resolver
-    try:
-        if '_ds_resolve_pair_and_chain' in globals():
-            return _ds_resolve_pair_and_chain(addr)
+        if '_qs_resolve_pair_and_chain' in globals():
+            return _qs_resolve_pair_and_chain(addr)
     except Exception:
         pass
     return None, None
 
-# Patch wrapper to use multi-chain RPC
-try:
-    if '_qs_wrap_onchain_inspect' in globals() and '_onchain_inspect' in globals():
-        _onchain_inspect = _qs_wrap_onchain_inspect(getattr(_onchain_inspect, "_qs_orig", _onchain_inspect))
-except Exception:
-    pass
-
-# Override helpers to use multi-chain RPC inside burned% calc
-try:
-    def _qs_lp_burned_pct(pair_addr: str, chain_name: str) -> tuple:
-        # Returns (pct_float, source_str) or (None, reason)
-        try:
-            if not pair_addr or not chain_name:
-                return None, "n/a"
-            rpc = _qs_rpc_for_chain(chain_name)
-            if not rpc:
-                return None, "rpc-missing"
-            dead = ["0x0000000000000000000000000000000000000000",
-                    "0x000000000000000000000000000000000000dead",
-                    "0x000000000000000000000000000000000000dEaD"]
-            total = _qs_eth_total_supply(pair_addr, rpc)
-            if not total:
-                return None, "total=0"
-            burned = 0
-            for d in dead:
-                burned += _qs_eth_balance_of(pair_addr, d, rpc)
-            if burned <= 0:
-                return 0.0, "on-chain"
-            pct = (burned / total) * 100.0
-            return pct, "on-chain"
-        except Exception:
-            return None, "err"
-except Exception:
-    pass
-
-# Re-wrap onchain to use local resolver if core didn't provide one
-try:
-    if '_onchain_inspect' in globals():
-        base = getattr(_onchain_inspect, "_qs_orig", _onchain_inspect)
-        def _onchain_inspect(addr: str):  # type: ignore[override]
-            text, info = base(addr)
+def _qs_metric_delta_for_pair(pair: dict, tf: str):
+    try:
+        pc = (pair or {}).get("priceChange") or {}
+        v = pc.get(tf)
+        if v is None and '_ds_candle_delta' in globals():
             try:
-                pair, chain = _qs_resolve_pair_and_chain(addr)
-                pair_addr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
-                pct, source = _qs_lp_burned_pct(pair_addr, chain) if pair_addr else (None, "n/a")
-                lp_line = None
-                if pct is None:
-                    lp_line = "LP burned (dead/zero): n/a (RPC not set)" if source == "rpc-missing" else "LP burned (dead/zero): n/a"
-                else:
-                    lp_line = f"LP burned (dead/zero): ~{pct:.2f}%"
-                lines = (text or "").splitlines()
-                inserted = False
-                for i, ln in enumerate(lines):
-                    if ln.strip().lower().startswith("honeypot"):
-                        lines.insert(i+1, lp_line); inserted = True; break
-                if not inserted:
-                    lines.append(lp_line)
-                text = "\n".join(lines)
-                info = info or {}
-                info.setdefault("fee_sim", {"ready": True, "chain": chain, "status":"scaffold"})
+                v, _, _ = _ds_candle_delta(pair, tf)
             except Exception:
-                pass
-            return text, info
-        _onchain_inspect._qs_orig = base  # type: ignore[attr-defined]
+                v = None
+        return v
+    except Exception:
+        return None
+
+def _qs_metrics_block(addr: str, plain_text: str):
+    try:
+        pair, chain = _qs_metrics_resolve_pair(addr)
+        tfs = ("m5","h1","h6","h24")
+        parts = []
+        for tf in tfs:
+            v = _qs_metric_delta_for_pair(pair, tf) if pair else None
+            s = "n/a" if (v is None) else (f"{float(v):+.2f}%")
+            parts.append((tf, s))
+        deltas = " ".join([f"{tf[1:]}: {s}" if tf[0] in ("m","h") else f"{tf}: {s}" for tf, s in parts])
+
+        pos = neg = 0
+        for ln in (plain_text or "").splitlines():
+            t = ln.strip()
+            if t.startswith("+"): pos += 1
+            elif t.startswith("-"): neg += 1
+
+        hp = ""
+        for ln in (plain_text or "").splitlines():
+            if ln.lower().startswith("honeypot"):
+                hp = ln.strip(); break
+
+        lines = []
+        lines.append(f"Δ snapshot ({chain or 'n/a'}): {deltas}")
+        if hp:
+            lines.append(hp)
+        lines.append(f"Why++ counts: +{pos} / -{neg}")
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+def _qs_wrap_render_report_metrics(fn):
+    base = getattr(fn, "_qs_orig", fn)
+    def wrapped(addr: str, text: str):  # type: ignore[override]
+        html = base(addr, text)
+        try:
+            metrics = _qs_metrics_block(addr, text)
+            if metrics:
+                import re as _re
+                box = f"<div class=\"box\"><h2>Metrics</h2><pre>{metrics}</pre></div>"
+                if "<b>Links:" in html:
+                    html = html.replace("</div></div><div class=\"box\"><b>Links:", f"</div></div>{box}<div class=\"box\"><b>Links:", 1)
+                else:
+                    html = _re.sub(r'(<div class="box"><h2>Summary</h2><pre>.*?</pre></div>)', r'\1' + box, html, flags=_re.S, count=1)
+        except Exception:
+            pass
+        return html
+    wrapped._qs_orig = base  # type: ignore[attr-defined]
+    return wrapped
+
+try:
+    if '_render_report' in globals():
+        _render_report = _qs_wrap_render_report_metrics(_render_report)
 except Exception:
     pass
