@@ -26,7 +26,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.16-polyroute-inline")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.17-chain-override")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1243,6 +1243,12 @@ def _mask_host(u: str):
         return u
 
 def _parse_rpc_urls():
+    # Chain override
+    try:
+        if __OVERRIDE_RPC_URLS:
+            return list(__OVERRIDE_RPC_URLS)
+    except NameError:
+        pass
     urls = []
     # Primary single URL
     primary = os.environ.get("ETH_RPC_URL", "").strip()
@@ -1467,40 +1473,36 @@ def _onchain_inspect(addr: str):
 # --- Honeypot.is simulation & LP/holders ---
     try:
         pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
-    except Exception:
-        pair_from_ds, chain_name = None, None
-    # --- POLYROUTE (inline, safe) ---
-    # Re-route RPC URLs by detected chain (polygon/bsc) using ENV/JSON; keep ETH defaults intact.
-    _poly_urls = []
+    # --- CHAIN OVERRIDE SETUP ---
+    _chain_urls = []
     try:
         _rpc_json = os.environ.get("RPC_URLS", "").strip()
         _j = json.loads(_rpc_json) if _rpc_json else {}
     except Exception:
         _j = {}
-
-    def _poly_add(u):
+    _ch = (chain_name or "").lower()
+    def _add_url(u):
         if isinstance(u, str):
             u = u.strip()
-            if u and u not in _poly_urls:
-                _poly_urls.append(u)
-
-    _ch = (chain_name or "").lower()
+            if u and u not in _chain_urls:
+                _chain_urls.append(u)
     if _ch in ("polygon", "matic"):
-        _poly_add(_j.get("polygon") or _j.get("matic"))
-        _poly_add(os.environ.get("POLYGON_RPC_URL", ""))
-        _poly_add(os.environ.get("MATIC_RPC_URL", ""))
+        _add_url(_j.get("polygon") or _j.get("matic"))
+        _add_url(os.environ.get("POLYGON_RPC_URL", ""))
+        _add_url(os.environ.get("MATIC_RPC_URL", ""))
         if os.environ.get("POLY_RPC_FALLBACK") == "1":
-            _poly_add("https://polygon-rpc.com")
+            _add_url("https://polygon-rpc.com")
     elif _ch in ("bsc", "bnb"):
-        _poly_add(_j.get("bsc"))
-        _poly_add(os.environ.get("BSC_RPC_URL", ""))
-        _poly_add(os.environ.get("BNB_RPC_URL", ""))
-        _poly_add("https://bsc-dataseed.binance.org")
+        _add_url(_j.get("bsc"))
+        _add_url(os.environ.get("BSC_RPC_URL", ""))
+        _add_url(os.environ.get("BNB_RPC_URL", ""))
+        _add_url("https://bsc-dataseed.binance.org")
+    if _chain_urls:
+        _set_chain_rpc_override(_chain_urls)
+    # --- /CHAIN OVERRIDE SETUP ---
 
-    if _poly_urls:
-        urls = _poly_urls
-    # --- /POLYROUTE ---
-
+    except Exception:
+        pair_from_ds, chain_name = None, None
     hp = _hp_ish(addr, chain_name=chain_name) if ADDR_RE.fullmatch(addr or "") else {}
     if hp:
         sim_ok = hp.get("simulationSuccess", False)
@@ -1548,7 +1550,8 @@ def _onchain_inspect(addr: str):
     
         urls = _parse_rpc_urls()
     if not urls:
-        return "On-chain: not configured (set ETH_RPC_URL or ETH_RPC_URL1..N or ETH_RPC_URLS)", {}
+        _clear_chain_rpc_override()
+return "On-chain: not configured (set ETH_RPC_URL or ETH_RPC_URL1..N or ETH_RPC_URLS)", {}
     try:
         addr = addr.lower()
         out = []
@@ -1625,9 +1628,13 @@ def _onchain_inspect(addr: str):
         except Exception:
             pass
 
-        return "\n".join(out), info
+        _clear_chain_rpc_override()
+return "\n".join(out), info
     except Exception as e:
-        return f"On-chain error: {type(e).__name__}: {e}", {"error": str(e)}
+        _clear_chain_rpc_override()
+return f"On-chain error: {type(e).__name__}: {e}", {"error": str(e)}
+        _clear_chain_rpc_override()
+
 def _merge_onchain_into_risk(addr: str, info: dict):
     try:
         key = (addr or "").lower()
@@ -2568,3 +2575,16 @@ try:
         _render_report = _qs_wrap_render_report(_render_report)
 except Exception:
     pass
+
+
+# === BEGIN: CHAIN RPC OVERRIDE HELPERS ===
+__OVERRIDE_RPC_URLS = []
+
+def _set_chain_rpc_override(urls):
+    global __OVERRIDE_RPC_URLS
+    __OVERRIDE_RPC_URLS = [u.strip() for u in (urls or []) if isinstance(u, str) and u.strip()]
+
+def _clear_chain_rpc_override():
+    global __OVERRIDE_RPC_URLS
+    __OVERRIDE_RPC_URLS = []
+# === END: CHAIN RPC OVERRIDE HELPERS ===
