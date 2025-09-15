@@ -1500,46 +1500,7 @@ def _onchain_inspect(addr: str):
                 pass
         return [u for u in urls if u]
 
-    @contextmanager
-    def __with_chain_rpc_env(chain_name_hint: str):
-        """Temporarily override ETH_RPC_URL(S) to chain-specific list."""
-        chain_urls = __chain_rpc_urls(chain_name_hint)
-        # Snapshot old env
-        old = {
-            "ETH_RPC_URL": os.environ.get("ETH_RPC_URL", ""),
-            "ETH_RPC_URLS": os.environ.get("ETH_RPC_URLS", ""),
-        }
-        for i in range(1, 13):
-            k = f"ETH_RPC_URL{i}"
-            old[k] = os.environ.get(k, "")
-        try:
-            if chain_urls:
-                # Clear single and indexed ETH URLs to avoid mixing chains
-                os.environ["ETH_RPC_URL"] = ""
-                for i in range(1, 13):
-                    os.environ.pop(f"ETH_RPC_URL{i}", None)
-                os.environ["ETH_RPC_URLS"] = ",".join(chain_urls)
-            yield
-        finally:
-            # Restore
-            if old["ETH_RPC_URL"]:
-                os.environ["ETH_RPC_URL"] = old["ETH_RPC_URL"]
-            else:
-                os.environ.pop("ETH_RPC_URL", None)
-            if old["ETH_RPC_URLS"]:
-                os.environ["ETH_RPC_URLS"] = old["ETH_RPC_URLS"]
-            else:
-                os.environ.pop("ETH_RPC_URLS", None)
-            for i in range(1, 13):
-                k = f"ETH_RPC_URL{i}"
-                if old[k]:
-                    os.environ[k] = old[k]
-                else:
-                    os.environ.pop(k, None)
-    info = {}
-    out = []
-
-    urls = _parse_rpc_urls()
+        urls = _parse_rpc_urls()
     if urls is None:
         urls = []
     # info reset removed by patch
