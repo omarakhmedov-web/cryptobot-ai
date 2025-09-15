@@ -1593,15 +1593,14 @@ def _onchain_inspect(addr: str):
                 out.append(f"Holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
                 info['holders'] = conc
     
-        urls = _parse_rpc_urls()
+        urls = __chain_rpc_urls(chain_name) or _parse_rpc_urls()
     if not urls:
         return "On-chain: not configured (set ETH_RPC_URL or ETH_RPC_URL1..N or ETH_RPC_URLS)", {}
     try:
         addr = addr.lower()
         out = []
         info = {}
-                        with __with_chain_rpc_env(chain_name):
-code = _eth_getCode(addr)
+        code = _eth_getCode(addr)
         is_contract = code and code != "0x"
         info["is_contract"] = bool(is_contract)
         out.append(f"Contract code: {'present' if is_contract else 'absent'}")
