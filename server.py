@@ -26,7 +26,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.15-polyroute-aftex")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.16-polyroute-inline")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1469,42 +1469,34 @@ def _onchain_inspect(addr: str):
         pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
     except Exception:
         pair_from_ds, chain_name = None, None
-    # --- POLYROUTE (safe, after try/except) ---
-    # Re-route RPC URLs by detected chain (polygon/bsc) using ENV/JSON, keep ETH defaults intact.
-    def __chain_rpc_urls(chain_name_hint: str):
-        urls_local = []
-        chain = (chain_name_hint or "").lower().strip()
+    # --- POLYROUTE (inline, safe) ---
+    # Re-route RPC URLs by detected chain (polygon/bsc) using ENV/JSON; keep ETH defaults intact.
+    _poly_urls = []
+    try:
+        _rpc_json = os.environ.get("RPC_URLS", "").strip()
+        _j = json.loads(_rpc_json) if _rpc_json else {}
+    except Exception:
+        _j = {}
 
-        def add(u):
-            if u and isinstance(u, str):
-                u = u.strip()
-                if u and u not in urls_local:
-                    urls_local.append(u)
+    def _poly_add(u):
+        if isinstance(u, str):
+            u = u.strip()
+            if u and u not in _poly_urls:
+                _poly_urls.append(u)
 
-        # JSON map: RPC_URLS='{"polygon":"https://...","bsc":"https://..."}'
-        j = {}
-        raw = os.environ.get("RPC_URLS", "")
-        if raw and isinstance(raw, str):
-            try:
-                j = json.loads(raw)
-            except Exception:
-                j = {}
+    _ch = (chain_name or "").lower()
+    if _ch in ("polygon", "matic"):
+        _poly_add(_j.get("polygon") or _j.get("matic"))
+        _poly_add(os.environ.get("POLYGON_RPC_URL", ""))
+        _poly_add(os.environ.get("MATIC_RPC_URL", ""))
+        if os.environ.get("POLY_RPC_FALLBACK") == "1":
+            _poly_add("https://polygon-rpc.com")
+    elif _ch in ("bsc", "bnb"):
+        _poly_add(_j.get("bsc"))
+        _poly_add(os.environ.get("BSC_RPC_URL", ""))
+        _poly_add(os.environ.get("BNB_RPC_URL", ""))
+        _poly_add("https://bsc-dataseed.binance.org")
 
-        if chain in ("polygon", "matic"):
-            add(j.get("polygon") or j.get("matic"))
-            add(os.environ.get("POLYGON_RPC_URL", ""))
-            add(os.environ.get("MATIC_RPC_URL", ""))
-            if os.environ.get("POLY_RPC_FALLBACK") == "1":
-                add("https://polygon-rpc.com")
-        elif chain in ("bsc", "bnb"):
-            add(j.get("bsc"))
-            add(os.environ.get("BSC_RPC_URL", ""))
-            add(os.environ.get("BNB_RPC_URL", ""))
-            add("https://bsc-dataseed.binance.org")
-
-        return [u for u in urls_local if u]
-
-    _poly_urls = __chain_rpc_urls(chain_name)
     if _poly_urls:
         urls = _poly_urls
     # --- /POLYROUTE ---
