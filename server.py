@@ -26,7 +26,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.13-polyroute2")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.14-polyroute-clean")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1457,58 +1457,56 @@ def _short_addr(a: str, take: int = 6) -> str:
     except Exception:
         return a
 def _onchain_inspect(addr: str):
-    urls = []
+    info = {}
+    out = []
 
-    # --- Chain-aware RPC routing (POLYROUTE) ---
-    # We pick RPCs based on inferred chain (ethereum/bsc/polygon). Minimal & safe.
-    
-def __chain_rpc_urls(chain_name_hint: str):
+    urls = _parse_rpc_urls()
+    if urls is None:
         urls = []
+    # info reset removed by patch
+# --- Honeypot.is simulation & LP/holders ---
+    try:
+        pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
+
+    # --- POLYROUTE begin ---
+    # Re-route RPC URLs by detected chain (polygon/bsc). Keeps existing ETH logic intact.
+    def __chain_rpc_urls(chain_name_hint: str):
+        urls_local = []
         chain = (chain_name_hint or "").lower().strip()
-        # Parse JSON map if present
-        j = {}
-        try:
-            raw = os.environ.get("RPC_URLS", "").strip()
-            if raw:
-                j = json.loads(raw)
-        except Exception:
-            j = {}
 
         def add(u):
             if u and isinstance(u, str):
                 u = u.strip()
-                if u and u not in urls:
-                    urls.append(u)
+                if u and u not in urls_local:
+                    urls_local.append(u)
+
+        # Try JSON map
+        try:
+            _rpc_json = os.environ.get("RPC_URLS", "") or ""
+            j = json.loads(_rpc_json) if _rpc_json.strip() else {}
+        except Exception:
+            j = {}
 
         if chain in ("polygon", "matic"):
-            add(j.get("polygon")); add(j.get("matic"))
+            add(j.get("polygon") or j.get("matic"))
             add(os.environ.get("POLYGON_RPC_URL", ""))
             add(os.environ.get("MATIC_RPC_URL", ""))
             if os.environ.get("POLY_RPC_FALLBACK") == "1":
                 add("https://polygon-rpc.com")
-            add(os.environ.get("ETH_RPC_URL_POLYGON", ""))
         elif chain in ("bsc", "bnb"):
             add(j.get("bsc"))
             add(os.environ.get("BSC_RPC_URL", ""))
             add(os.environ.get("BNB_RPC_URL", ""))
+            # conservative default
             add("https://bsc-dataseed.binance.org")
-        elif chain in ("eth", "ethereum", "mainnet"):
-            # leave to _parse_rpc_urls, which already handles ETH variables
-            pass
-        else:
-            # Unknown chain hint: aggregate known per-chain env/JSON so we don't end up empty
-            add(j.get("polygon")); add(j.get("matic"))
-            add(os.environ.get("POLYGON_RPC_URL", ""))
-            add(os.environ.get("MATIC_RPC_URL", ""))
-            add(j.get("bsc")); add(os.environ.get("BSC_RPC_URL", "")); add(os.environ.get("BNB_RPC_URL", ""))
-            # Do NOT add ETH here; we'll allow fallback to _parse_rpc_urls later to include ETH list
 
-        return [u for u in urls if u]
+        return [u for u in urls_local if u]
 
-    # (polyroute) cleaned stray urls init
-# --- Honeypot.is simulation & LP/holders ---
-    try:
-        pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
+    _poly_urls = __chain_rpc_urls(chain_name)
+    if _poly_urls:
+        urls = _poly_urls
+    # --- POLYROUTE end ---
+
     except Exception:
         pair_from_ds, chain_name = None, None
     hp = _hp_ish(addr, chain_name=chain_name) if ADDR_RE.fullmatch(addr or "") else {}
@@ -1556,7 +1554,7 @@ def __chain_rpc_urls(chain_name_hint: str):
                 out.append(f"Holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
                 info['holders'] = conc
     
-        urls = __chain_rpc_urls(chain_name) or __chain_rpc_urls('') or _parse_rpc_urls()
+        urls = _parse_rpc_urls()
     if not urls:
         return "On-chain: not configured (set ETH_RPC_URL or ETH_RPC_URL1..N or ETH_RPC_URLS)", {}
     try:
