@@ -17,6 +17,11 @@ from flask import Flask, request, jsonify
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
+try:
+    from polydebug_rpc import init_polydebug
+    init_polydebug()  # запустится только при POLY_DEBUG=1
+except Exception as e:
+    print(f"[POLYDEBUG] init skipped: {e}")
 
 # ========================
 # Environment & constants
