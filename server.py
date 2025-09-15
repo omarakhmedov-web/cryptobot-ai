@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.8-quickscan+delta-fallback")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.10-qs-polish")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -2382,6 +2382,98 @@ try:
                             "Honeypot quick-test: ⚠️ static only (no DEX sell simulation)",
                             "Honeypot: ℹ️ skipped for centralized/whitelisted token"
                         )
+            except Exception:
+                pass
+            return html
+except Exception:
+    pass
+
+
+# ========================
+# QS polish wrappers (non-invasive)
+# ========================
+try:
+    # 1) Why++ dedup (pre-sanitize cache entry, then call original)
+    if '_answer_why_deep' in globals():
+        _answer_why_deep__orig = _answer_why_deep
+        def _answer_why_deep(cq, addr_hint=None):  # type: ignore[override]
+            try:
+                msg = (cq or {}).get("message") or {}
+                text_src = msg.get("text") or ""
+                addr = (addr_hint or _extract_addr_from_text(text_src) or "").lower()
+                ent = RISK_CACHE.get(addr) if 'RISK_CACHE' in globals() else None
+                if isinstance(ent, dict):
+                    pos = list(ent.get("pos") or [])
+                    wpos = list(ent.get("w_pos") or [])
+                    # pad wpos
+                    if len(wpos) < len(pos):
+                        wpos = list(wpos) + [0] * (len(pos) - len(wpos))
+                    seen = set()
+                    pos2, wpos2 = [], []
+                    for r, w in zip(pos, wpos):
+                        key = str(r).strip().lower()
+                        if key not in seen:
+                            seen.add(key)
+                            pos2.append(r); wpos2.append(w)
+                    ent["pos"], ent["w_pos"] = pos2, wpos2
+                    RISK_CACHE[addr] = ent
+            except Exception:
+                pass
+            return _answer_why_deep__orig(cq, addr_hint)
+
+    # 2) HTML post-processor: drop zero-weight negatives; ensure expected-admin once; inject links box
+    if '_render_report' in globals():
+        _render_report__orig = _render_report
+        def _render_report(addr: str, text: str):  # type: ignore[override]
+            html = _render_report__orig(addr, text)
+            try:
+                import re as _re
+
+                # Drop (+0) lines inside Signals
+                def _clean_signals(m):
+                    block = m.group(2)
+                    lines = [ln for ln in block.splitlines() if "(+0)" not in ln and "+0)" not in ln]
+                    cleaned = "\n".join(lines).strip() or "—"
+                    return m.group(1) + cleaned + m.group(3)
+                html = _re.sub(r'(<h3>Signals</h3><pre>)(.*?)(</pre>)', _clean_signals, html, flags=_re.S)
+
+                # Ensure expected-admin appears once in Positives
+                expected = "Admin privileges expected for centralized/whitelisted token"
+                mpos = _re.search(r'(<h3>Positives</h3><pre>)(.*?)(</pre>)', html, flags=_re.S)
+                if mpos:
+                    body = mpos.group(2)
+                    lines = [ln for ln in body.splitlines() if ln.strip()]
+                    seen = set()
+                    new_lines = []
+                    for ln in lines:
+                        key = ln.strip().lower()
+                        if key not in seen:
+                            seen.add(key); new_lines.append(ln)
+                    if expected.lower() not in seen:
+                        new_lines.append(expected + " (+0)")
+                    new_body = "\n".join(new_lines)
+                    html = html[:mpos.start(2)] + new_body + html[mpos.end(2):]
+
+                # Inject links box after Summary
+                def _extract_domain_from_text_local(t: str):
+                    for line in (t or "").splitlines():
+                        line = line.strip()
+                        if line.startswith("Domain:"):
+                            dom = line.split(":", 1)[1].strip()
+                            if dom and (" " not in dom) and ("." in dom):
+                                return dom
+                    return None
+                dom = _extract_domain_from_text_local(text)
+                etherscan = f"https://etherscan.io/address/{addr}"
+                dexs = f"https://dexscreener.com/search?q={addr}"
+                links = [("Etherscan", etherscan), ("DexScreener", dexs)]
+                if dom:
+                    links += [("RDAP", f"https://rdap.org/domain/{dom}"),
+                              ("Wayback", f"https://web.archive.org/*/{dom}")]
+                links_html = " | ".join([f"<a href='{u}' target='_blank'>{n}</a>" for n, u in links])
+                inject = f"<div class=\"box\"><b>Links:</b> {links_html}</div>"
+                html = _re.sub(r'(<div class="box"><h2>Summary</h2><pre>.*?</pre></div>)', r'\1' + inject, html, flags=_re.S, count=1)
+
             except Exception:
                 pass
             return html
