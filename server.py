@@ -26,7 +26,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.11-core1+POLYFIX")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.12-polyroute")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1457,6 +1457,85 @@ def _short_addr(a: str, take: int = 6) -> str:
     except Exception:
         return a
 def _onchain_inspect(addr: str):
+
+    # --- Chain-aware RPC routing (POLYROUTE) ---
+    # We pick RPCs based on inferred chain (ethereum/bsc/polygon). Minimal & safe.
+    def __chain_rpc_urls(chain_name_hint: str):
+        urls = []
+        chain = (chain_name_hint or "").lower().strip()
+        # Parse JSON map if present
+        j = {}
+        try:
+            raw = os.environ.get("RPC_URLS", "").strip()
+            if raw:
+                j = json.loads(raw)
+        except Exception:
+            j = {}
+
+        def add(u):
+            if u and isinstance(u, str):
+                u = u.strip()
+                if u and u not in urls:
+                    urls.append(u)
+
+        if chain in ("polygon", "matic"):
+            add(j.get("polygon")); add(j.get("matic"))
+            add(os.environ.get("POLYGON_RPC_URL", ""))
+            add(os.environ.get("MATIC_RPC_URL", ""))
+            if os.environ.get("POLY_RPC_FALLBACK") == "1":
+                add("https://polygon-rpc.com")
+            # As a last resort, allow explicit ETH_RPC_URL_POLYGON if user added it
+            add(os.environ.get("ETH_RPC_URL_POLYGON", ""))
+        elif chain in ("bsc", "bnb"):
+            add(j.get("bsc"))
+            add(os.environ.get("BSC_RPC_URL", ""))
+            add(os.environ.get("BNB_RPC_URL", ""))
+            add("https://bsc-dataseed.binance.org")
+        else:
+            # Default to existing ETH list
+            try:
+                for u in _parse_rpc_urls():
+                    add(u)
+            except Exception:
+                pass
+        return [u for u in urls if u]
+
+    @contextmanager
+    def __with_chain_rpc_env(chain_name_hint: str):
+        """Temporarily override ETH_RPC_URL(S) to chain-specific list."""
+        chain_urls = __chain_rpc_urls(chain_name_hint)
+        # Snapshot old env
+        old = {
+            "ETH_RPC_URL": os.environ.get("ETH_RPC_URL", ""),
+            "ETH_RPC_URLS": os.environ.get("ETH_RPC_URLS", ""),
+        }
+        for i in range(1, 13):
+            k = f"ETH_RPC_URL{i}"
+            old[k] = os.environ.get(k, "")
+        try:
+            if chain_urls:
+                # Clear single and indexed ETH URLs to avoid mixing chains
+                os.environ["ETH_RPC_URL"] = ""
+                for i in range(1, 13):
+                    os.environ.pop(f"ETH_RPC_URL{i}", None)
+                os.environ["ETH_RPC_URLS"] = ",".join(chain_urls)
+            yield
+        finally:
+            # Restore
+            if old["ETH_RPC_URL"]:
+                os.environ["ETH_RPC_URL"] = old["ETH_RPC_URL"]
+            else:
+                os.environ.pop("ETH_RPC_URL", None)
+            if old["ETH_RPC_URLS"]:
+                os.environ["ETH_RPC_URLS"] = old["ETH_RPC_URLS"]
+            else:
+                os.environ.pop("ETH_RPC_URLS", None)
+            for i in range(1, 13):
+                k = f"ETH_RPC_URL{i}"
+                if old[k]:
+                    os.environ[k] = old[k]
+                else:
+                    os.environ.pop(k, None)
     info = {}
     out = []
 
@@ -1521,7 +1600,8 @@ def _onchain_inspect(addr: str):
         addr = addr.lower()
         out = []
         info = {}
-        code = _eth_getCode(addr)
+                        with __with_chain_rpc_env(chain_name):
+code = _eth_getCode(addr)
         is_contract = code and code != "0x"
         info["is_contract"] = bool(is_contract)
         out.append(f"Contract code: {'present' if is_contract else 'absent'}")
