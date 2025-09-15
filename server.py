@@ -21,7 +21,7 @@ from tg_safe import tg_send_message, tg_answer_callback
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.11-core1+multi+metrics")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.11-core1+POLYFIX")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -322,17 +322,15 @@ def _ds_candle_delta(pair: dict, tf: str) -> tuple:
     Returns (value_str, src_tag) or (None, None).
     """
     try:
-        tf_map = {'m5':'5m','h1':'1h','h6':'6h','h24':'24h'}
-        tfq = tf_map.get(tf, tf)
         pair_id = (pair or {}).get("pairId") or ""
         chain = (pair or {}).get("chainId") or ""
         addr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
         endpoints = []
         if pair_id:
-            endpoints.append(f"{DEX_BASE}/candles/pairs/{pair_id}?timeframe={tfq}&limit=2")
-            endpoints.append(f"{DEX_BASE}/candles?pairId={pair_id}&tf={tfq}&limit=2")
+            endpoints.append(f"{DEX_BASE}/candles/pairs/{pair_id}?timeframe={tf}&limit=2")
+            endpoints.append(f"{DEX_BASE}/candles?pairId={pair_id}&tf={tf}&limit=2")
         if chain and addr:
-            endpoints.append(f"{DEX_BASE}/candles/pairs/{chain}/{addr}?timeframe={tfq}&limit=2")
+            endpoints.append(f"{DEX_BASE}/candles/pairs/{chain}/{addr}?timeframe={tf}&limit=2")
         for url in endpoints:
             try:
                 r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
@@ -398,7 +396,7 @@ def _ds_token_changes(addr_l: str) -> dict:
                         vstr = "+" + vstr
                     out[k_dst] = vstr
                     out[f"_src_{k_dst}"] = "ds"
-        for tf in ("m5","h1","h6","h24"):
+        for tf in ("m5","h1","h6"):
             if not out.get(tf):
                 val, src = _ds_candle_delta(p, tf)
                 if val:
@@ -1457,6 +1455,9 @@ def _onchain_inspect(addr: str):
     info = {}
     out = []
 
+    urls = _parse_rpc_urls()
+    if urls is None:
+        urls = []
     # info reset removed by patch
 # --- Honeypot.is simulation & LP/holders ---
     try:
@@ -1697,6 +1698,26 @@ def _tg_send_document(token: str, chat_id: int, filepath: str, caption: str = No
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
 
+
+
+
+# === Idempotent wrapper for Telegram document send (30s window)
+try:
+    _tg_send_document_orig = _tg_send_document
+    _LAST_DOC_SEND = {}
+    def _tg_send_document(token: str, chat_id: int, filepath: str, caption: str = None):
+        import os, time
+        key = (chat_id, os.path.basename(filepath or ""))
+        now = time.time()
+        ts = _LAST_DOC_SEND.get(key, 0)
+        if now - ts < 30:
+            return True, {"skipped":"idempotent"}
+        ok, resp = _tg_send_document_orig(token, chat_id, filepath, caption=caption)
+        if ok:
+            _LAST_DOC_SEND[key] = now
+        return ok, resp
+except Exception:
+    pass
 def _render_report(addr: str, text: str):
     text = _enrich_full(addr, text)
     info = RISK_CACHE.get((addr or "").lower()) or {}
@@ -2391,268 +2412,10 @@ except Exception:
     pass
 
 
-# ========================
-# core1: LP burned % and fee-sim scaffold
-# ========================
-def _qs_eth_call(addr_to: str, data_hex: str, rpc_url: str) -> int:
-    import requests, json
-    payload = {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":addr_to,"data":data_hex},"latest"]}
-    r = requests.post(rpc_url, json=payload, timeout=8, headers={"User-Agent":"metridex-bot"})
-    try:
-        body = r.json()
-        v = (body or {}).get("result") or "0x0"
-        return int(v, 16) if isinstance(v, str) and v.startswith("0x") else 0
-    except Exception:
-        return 0
-
-def _qs_pad32(hex_addr: str) -> str:
-    return hex_addr.rjust(64, "0")
-
-def _qs_eth_balance_of(token: str, holder: str, rpc_url: str) -> int:
-    data = "0x70a08231" + _qs_pad32(holder.lower().replace("0x",""))
-    return _qs_eth_call(token, data, rpc_url)
-
-def _qs_eth_total_supply(token: str, rpc_url: str) -> int:
-    return _qs_eth_call(token, "0x18160ddd", rpc_url)
-
-def _qs_fee_sim_scaffold(addr: str, chain_name: str) -> dict:
-    try:
-        return {"ready": True, "chain": (chain_name or ""), "buy_eth": 0.01, "sell_eth": 0.01, "status": "scaffold"}
-    except Exception:
-        return {"ready": False}
-
-def _qs_wrap_onchain_inspect(fn):
-    base = getattr(fn, "_qs_orig", fn)
-    def wrapped(addr: str):  # type: ignore[override]
-        text, info = base(addr)
-        try:
-            # late-initialize fee-sim
-            try:
-                info = info or {}
-                info["fee_sim"] = _qs_fee_sim_scaffold(addr, (info or {}).get("chain"))
-            except Exception:
-                pass
-        except Exception:
-            pass
-        return text, info
-    wrapped._qs_orig = base  # type: ignore[attr-defined]
-    return wrapped
-
-try:
-    if '_onchain_inspect' in globals():
-        _onchain_inspect = _qs_wrap_onchain_inspect(_onchain_inspect)
-except Exception:
-    pass
-
 
 # ========================
-# multichain: RPC per chain + DS resolver
+# HTML post-processing: Links + Metrics + Signals cleanup (POLYFIX)
 # ========================
-def _qs_rpc_for_chain(chain_name: str):
-    import os, json
-    if not chain_name:
-        return None
-    c = str(chain_name).strip().lower()
-    if c in ("eth","ethereum","mainnet"):
-        keys = ["ETH_RPC_URL","RPC_ETH","RPC_URL"]
-    elif c in ("bsc","bnb","binance-smart-chain","binance"):
-        keys = ["BSC_RPC_URL","BNB_RPC_URL","RPC_BSC","RPC_URL_BSC","RPC_URL"]
-    elif c in ("polygon","matic","pol","matic-mainnet"):
-        keys = ["POLYGON_RPC_URL","MATIC_RPC_URL","RPC_POLYGON","RPC_URL_POLYGON","RPC_URL"]
-    else:
-        keys = ["RPC_URL"]
-    m = os.environ.get("RPC_URLS")
-    if m:
-        try:
-            mp = json.loads(m)
-            for k in (c, c.upper(), c.capitalize()):
-                if isinstance(mp, dict) and k in mp and mp[k]:
-                    return mp[k]
-        except Exception:
-            pass
-    for k in keys:
-        v = os.environ.get(k)
-        if v:
-            return v
-    return None
-
-def _qs_resolve_pair_and_chain(addr: str):
-    try:
-        if '_ds_search' in globals():
-            j = _ds_search(addr)
-            pairs = (j or {}).get("pairs") or []
-            p = _ds_pick_best_pair(pairs) if pairs and '_ds_pick_best_pair' in globals() else (pairs[0] if pairs else None)
-            if p:
-                chain = p.get("chainId") or p.get("chain") or p.get("chainid")
-                return p, chain
-    except Exception:
-        pass
-    try:
-        if '_ds_resolve_pair_and_chain' in globals():
-            return _ds_resolve_pair_and_chain(addr)
-    except Exception:
-        pass
-    return None, None
-
-def _qs_lp_burned_pct(pair_addr: str, chain_name: str) -> tuple:
-    try:
-        if not pair_addr or not chain_name:
-            return None, "n/a"
-        rpc = _qs_rpc_for_chain(chain_name)
-        if not rpc:
-            return None, "rpc-missing"
-        dead = ["0x0000000000000000000000000000000000000000",
-                "0x000000000000000000000000000000000000dead",
-                "0x000000000000000000000000000000000000dEaD"]
-        total = _qs_eth_total_supply(pair_addr, rpc)
-        if not total:
-            return None, "total=0"
-        burned = 0
-        for d in dead:
-            burned += _qs_eth_balance_of(pair_addr, d, rpc)
-        if burned <= 0:
-            return 0.0, "on-chain"
-        pct = (burned / total) * 100.0
-        return pct, "on-chain"
-    except Exception:
-        return None, "err"
-
-# Re-wrap onchain to add LP burned% line with multichain
-try:
-    if '_onchain_inspect' in globals():
-        base = getattr(_onchain_inspect, "_qs_orig", _onchain_inspect)
-        def _onchain_inspect(addr: str):  # type: ignore[override]
-            text, info = base(addr)
-            try:
-                pair, chain = _qs_resolve_pair_and_chain(addr)
-                pair_addr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
-                pct, source = _qs_lp_burned_pct(pair_addr, chain) if pair_addr else (None, "n/a")
-                lp_line = "LP burned (dead/zero): n/a" if pct is None else f"LP burned (dead/zero): ~{pct:.2f}%"
-                if pct is None and source == "rpc-missing":
-                    lp_line = "LP burned (dead/zero): n/a (RPC not set)"
-                lines = (text or "").splitlines()
-                inserted = False
-                for i, ln in enumerate(lines):
-                    if ln.strip().lower().startswith("honeypot"):
-                        lines.insert(i+1, lp_line); inserted = True; break
-                if not inserted:
-                    lines.append(lp_line)
-                text = "\n".join(lines)
-                info = info or {}
-                info["chain"] = chain
-                info.setdefault("fee_sim", {"ready": True, "chain": chain, "status": "scaffold"})
-            except Exception:
-                pass
-            return text, info
-        _onchain_inspect._qs_orig = base  # type: ignore[attr-defined]
-except Exception:
-    pass
-
-
-# ========================
-# polish: Why++/HTML normalization (idempotent)
-# ========================
-def _qs_wrap_answer_why_deep(fn):
-    base = getattr(fn, "_qs_orig", fn)
-    def wrapped(cq, addr_hint=None):  # type: ignore[override]
-        try:
-            msg = (cq or {}).get("message") or {}
-            text_src = msg.get("text") or ""
-            addr = (addr_hint or _extract_addr_from_text(text_src) or "").lower()
-            ent = RISK_CACHE.get(addr) if 'RISK_CACHE' in globals() else None
-            if isinstance(ent, dict):
-                pos = list(ent.get("pos") or [])
-                wpos = list(ent.get("w_pos") or [])
-                if len(wpos) < len(pos):
-                    wpos = list(wpos) + [0] * (len(pos) - len(wpos))
-                seen = set(); pos2, wpos2 = [], []
-                for r, w in zip(pos, wpos):
-                    key = str(r).strip().lower()
-                    if key not in seen:
-                        seen.add(key); pos2.append(r); wpos2.append(w)
-                ent["pos"], ent["w_pos"] = pos2, wpos2
-                RISK_CACHE[addr] = ent
-        except Exception:
-            pass
-        return base(cq, addr_hint)
-    wrapped._qs_orig = base  # type: ignore[attr-defined]
-    return wrapped
-
-def _qs_wrap_render_report(fn):
-    base = getattr(fn, "_qs_orig", fn)
-    def wrapped(addr: str, text: str):  # type: ignore[override]
-        html = base(addr, text)
-        try:
-            import re as _re
-            # Drop (+0) in Signals
-            def _clean_signals(m):
-                block = m.group(2)
-                lines = [ln for ln in block.splitlines() if "(+0)" not in ln and "+0)" not in ln]
-                cleaned = "\n".join(lines).strip() or "—"
-                return m.group(1) + cleaned + m.group(3)
-            html = _re.sub(r'(<h3>Signals</h3><pre>)(.*?)(</pre>)', _clean_signals, html, flags=_re.S)
-
-            # Ensure expected-admin once
-            expected = "Admin privileges expected for centralized/whitelisted token"
-            mpos = _re.search(r'(<h3>Positives</h3><pre>)(.*?)(</pre>)', html, flags=_re.S)
-            if mpos:
-                body = mpos.group(2)
-                lines = [ln for ln in body.splitlines() if ln.strip()]
-                seen = set(); new_lines = []
-                for ln in lines:
-                    key = ln.strip().lower()
-                    if key not in seen:
-                        seen.add(key); new_lines.append(ln)
-                if expected.lower() not in seen:
-                    new_lines.append(expected + " (+0)")
-                new_body = "\n".join(new_lines)
-                html = html[:mpos.start(2)] + new_body + html[mpos.end(2):]
-
-            # Links box
-            def _extract_domain_from_text_local(t: str):
-                for line in (t or "").splitlines():
-                    line = line.strip()
-                    if line.startswith("Domain:"):
-                        dom = line.split(":", 1)[1].strip()
-                        if dom and (" " not in dom) and ("." in dom):
-                            return dom
-                return None
-            dom = _extract_domain_from_text_local(text)
-            etherscan = f"https://etherscan.io/address/{addr}"
-            dexs = f"https://dexscreener.com/search?q={addr}"
-            links = [("Etherscan", etherscan), ("DexScreener", dexs)]
-            if dom:
-                links += [("RDAP", f"https://rdap.org/domain/{dom}"),
-                          ("Wayback", f"https://web.archive.org/*/{dom}")]
-            links_html = " | ".join([f"<a href='{u}' target='_blank'>{n}</a>" for n, u in links])
-            inject = f"<div class=\"box\"><b>Links:</b> {links_html}</div>"
-            html = _re.sub(r'(<div class="box"><h2>Summary</h2><pre>.*?</pre></div>)', r'\1' + inject, html, flags=_re.S, count=1)
-        except Exception:
-            pass
-        return html
-    wrapped._qs_orig = base  # type: ignore[attr-defined]
-    return wrapped
-
-try:
-    if '_answer_why_deep' in globals():
-        _answer_why_deep = _qs_wrap_answer_why_deep(_answer_why_deep)
-    if '_render_report' in globals():
-        _render_report = _qs_wrap_render_report(_render_report)
-except Exception:
-    pass
-
-
-# ========================
-# metrics: Δ snapshot + Why++ counts into HTML
-# ========================
-def _qs_metrics_resolve_pair(addr: str):
-    try:
-        if '_qs_resolve_pair_and_chain' in globals():
-            return _qs_resolve_pair_and_chain(addr)
-    except Exception:
-        pass
-    return None, None
-
 def _qs_metric_delta_for_pair(pair: dict, tf: str):
     try:
         pc = (pair or {}).get("priceChange") or {}
@@ -2666,9 +2429,26 @@ def _qs_metric_delta_for_pair(pair: dict, tf: str):
     except Exception:
         return None
 
+def _qs_resolve_pair_and_chain(addr: str):
+    try:
+        if '_ds_resolve_pair_and_chain' in globals():
+            return _ds_resolve_pair_and_chain(addr)
+    except Exception:
+        pass
+    try:
+        if '_ds_search' in globals():
+            j = _ds_search(addr)
+            pairs = (j or {}).get("pairs") or []
+            p = pairs[0] if pairs else None
+            chain = p.get("chainId") or p.get("chain") if p else None
+            return p, chain
+    except Exception:
+        pass
+    return None, None
+
 def _qs_metrics_block(addr: str, plain_text: str):
     try:
-        pair, chain = _qs_metrics_resolve_pair(addr)
+        pair, chain = _qs_resolve_pair_and_chain(addr)
         tfs = ("m5","h1","h6","h24")
         parts = []
         for tf in tfs:
@@ -2689,35 +2469,65 @@ def _qs_metrics_block(addr: str, plain_text: str):
                 hp = ln.strip(); break
 
         lines = []
-        lines.append(f"Δ snapshot ({chain or 'n/a'}): {deltas}")
+        lines.append(f"Δ snapshot ({(chain or 'n/a')}): {deltas}")
         if hp:
             lines.append(hp)
         lines.append(f"Why++ counts: +{pos} / -{neg}")
-        return "\n".join(lines)
+        return "\\n".join(lines)
     except Exception:
         return None
 
-def _qs_wrap_render_report_metrics(fn):
+def _qs_wrap_render_report(fn):
     base = getattr(fn, "_qs_orig", fn)
-    def wrapped(addr: str, text: str):  # type: ignore[override]
+    def wrapped(addr: str, text: str):
         html = base(addr, text)
         try:
+            import re as _re
+            def _clean_signals(m):
+                block = m.group(2)
+                lines = [ln for ln in block.splitlines() if "(+0)" not in ln and "+0)" not in ln]
+                cleaned = "\n".join(lines).strip() or "—"
+                return m.group(1) + cleaned + m.group(3)
+            html = _re.sub(r'(<h3>Signals</h3><pre>)(.*?)(</pre>)', _clean_signals, html, flags=_re.S)
+            expected = "Admin privileges expected for centralized/whitelisted token"
+            mpos = _re.search(r'(<h3>Positives</h3><pre>)(.*?)(</pre>)', html, flags=_re.S)
+            if mpos:
+                body = mpos.group(2)
+                lines = [ln for ln in body.splitlines() if ln.strip()]
+                seen = set([ln.strip().lower() for ln in lines])
+                if expected.lower() not in seen:
+                    lines.append(expected + " (+0)")
+                html = html[:mpos.start(2)] + "\n".join(lines) + html[mpos.end(2):]
+            def _extract_domain_from_text_local(t: str):
+                for line in (t or "").splitlines():
+                    line = line.strip()
+                    if line.startswith("Domain:"):
+                        dom = line.split(":", 1)[1].strip()
+                        if dom and (" " not in dom) and ("." in dom):
+                            return dom
+                return None
+            dom = _extract_domain_from_text_local(text)
+            etherscan = f"https://etherscan.io/address/{addr}"
+            dexs = f"https://dexscreener.com/search?q={addr}"
+            links = [("Etherscan", etherscan), ("DexScreener", dexs)]
+            if dom:
+                links += [("RDAP", f"https://rdap.org/domain/{dom}"),
+                          ("Wayback", f"https://web.archive.org/*/{dom}")]
+            links_html = " | ".join([f"<a href='{u}' target='_blank'>{n}</a>" for n, u in links])
+            inject_links = f'<div class="box"><b>Links:</b> {links_html}</div>'
+            html = _re.sub(r'(<div class="box"><h2>Summary</h2><pre>.*?</pre></div>)', r'\1' + inject_links, html, flags=_re.S, count=1)
             metrics = _qs_metrics_block(addr, text)
             if metrics:
-                import re as _re
-                box = f"<div class=\"box\"><h2>Metrics</h2><pre>{metrics}</pre></div>"
-                if "<b>Links:" in html:
-                    html = html.replace("</div></div><div class=\"box\"><b>Links:", f"</div></div>{box}<div class=\"box\"><b>Links:", 1)
-                else:
-                    html = _re.sub(r'(<div class="box"><h2>Summary</h2><pre>.*?</pre></div>)', r'\1' + box, html, flags=_re.S, count=1)
+                inject_metrics = f'<div class="box"><h2>Metrics</h2><pre>{metrics}</pre></div>'
+                html = html.replace(inject_links, inject_links + inject_metrics, 1)
         except Exception:
             pass
         return html
-    wrapped._qs_orig = base  # type: ignore[attr-defined]
+    wrapped._qs_orig = base
     return wrapped
 
 try:
     if '_render_report' in globals():
-        _render_report = _qs_wrap_render_report_metrics(_render_report)
+        _render_report = _qs_wrap_render_report(_render_report)
 except Exception:
     pass
