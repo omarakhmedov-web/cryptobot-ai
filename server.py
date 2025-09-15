@@ -26,7 +26,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.14-polyroute-clean")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.15-polyroute-aftex")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1467,9 +1467,10 @@ def _onchain_inspect(addr: str):
 # --- Honeypot.is simulation & LP/holders ---
     try:
         pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
-
-    # --- POLYROUTE begin ---
-    # Re-route RPC URLs by detected chain (polygon/bsc). Keeps existing ETH logic intact.
+    except Exception:
+        pair_from_ds, chain_name = None, None
+    # --- POLYROUTE (safe, after try/except) ---
+    # Re-route RPC URLs by detected chain (polygon/bsc) using ENV/JSON, keep ETH defaults intact.
     def __chain_rpc_urls(chain_name_hint: str):
         urls_local = []
         chain = (chain_name_hint or "").lower().strip()
@@ -1480,12 +1481,14 @@ def _onchain_inspect(addr: str):
                 if u and u not in urls_local:
                     urls_local.append(u)
 
-        # Try JSON map
-        try:
-            _rpc_json = os.environ.get("RPC_URLS", "") or ""
-            j = json.loads(_rpc_json) if _rpc_json.strip() else {}
-        except Exception:
-            j = {}
+        # JSON map: RPC_URLS='{"polygon":"https://...","bsc":"https://..."}'
+        j = {}
+        raw = os.environ.get("RPC_URLS", "")
+        if raw and isinstance(raw, str):
+            try:
+                j = json.loads(raw)
+            except Exception:
+                j = {}
 
         if chain in ("polygon", "matic"):
             add(j.get("polygon") or j.get("matic"))
@@ -1497,7 +1500,6 @@ def _onchain_inspect(addr: str):
             add(j.get("bsc"))
             add(os.environ.get("BSC_RPC_URL", ""))
             add(os.environ.get("BNB_RPC_URL", ""))
-            # conservative default
             add("https://bsc-dataseed.binance.org")
 
         return [u for u in urls_local if u]
@@ -1505,10 +1507,8 @@ def _onchain_inspect(addr: str):
     _poly_urls = __chain_rpc_urls(chain_name)
     if _poly_urls:
         urls = _poly_urls
-    # --- POLYROUTE end ---
+    # --- /POLYROUTE ---
 
-    except Exception:
-        pair_from_ds, chain_name = None, None
     hp = _hp_ish(addr, chain_name=chain_name) if ADDR_RE.fullmatch(addr or "") else {}
     if hp:
         sim_ok = hp.get("simulationSuccess", False)
