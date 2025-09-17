@@ -111,7 +111,8 @@ def init_polydebug() -> None:
         res = code["result"]
         if isinstance(res, str):
             l = len(res)
-            print(f"[POLYDEBUG] eth_getCode(len) for QUICK: {l} ("0x" => no bytecode)")
+            note = " ('0x' => no bytecode)" if res == "0x" else ""
+            print(f"[POLYDEBUG] eth_getCode(len) for QUICK: {l}{note}")
             if res == "0x":
                 print("[POLYDEBUG] Bytecode absent — either EOA (not a contract) or wrong network/endpoint.")
         else:
