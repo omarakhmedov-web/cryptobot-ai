@@ -26,7 +26,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.17-chain-override")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.18-polyfix2+deltas")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -2588,3 +2588,179 @@ def _clear_chain_rpc_override():
     global __OVERRIDE_RPC_URLS
     __OVERRIDE_RPC_URLS = []
 # === END: CHAIN RPC OVERRIDE HELPERS ===
+
+
+
+# === PATCH: 0.3.18-polyfix2+deltas ===
+# Robust Δ-candles fallback (supports DEX_CANDLES_BASE) and chain-override fallback for Polygon/BSC.
+
+# Re-define _ds_candle_delta to add multi-base fallback
+def _ds_candle_delta(pair: dict, tf: str) -> tuple:
+    try:
+        pair_id = (pair or {}).get("pairId") or ""
+        chain = (pair or {}).get("chainId") or ""
+        addr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
+        # Build base list: prefer DEX_CANDLES_BASE if provided, then DEX_BASE, then DexScreener official
+        bases = []
+        try:
+            cand_base = (os.environ.get("DEX_CANDLES_BASE","") or "").strip().rstrip("/")
+        except Exception:
+            cand_base = ""
+        for b in [cand_base, DEX_BASE, "https://api.dexscreener.com"]:
+            if b and b not in bases:
+                bases.append(b)
+        # Construct endpoints across bases
+        endpoints = []
+        for BASE in bases:
+            if pair_id:
+                endpoints.append(f"{BASE}/candles/pairs/{pair_id}?timeframe={tf}&limit=2")
+                endpoints.append(f"{BASE}/candles?pairId={pair_id}&tf={tf}&limit=2")
+            if chain and addr:
+                endpoints.append(f"{BASE}/candles/pairs/{chain}/{addr}?timeframe={tf}&limit=2")
+        for url in endpoints:
+            try:
+                r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
+                if r.status_code != 200:
+                    continue
+                js = r.json() if hasattr(r, "json") else {}
+                candles = js.get("candles") or js.get("data") or js.get("result") or []
+                if not isinstance(candles, list) or len(candles) < 2:
+                    continue
+                c1 = candles[-2]; c2 = candles[-1]
+                def _get_close(c):
+                    return c.get("c") or c.get("close") or c.get("price") or c.get("last")
+                v1 = _get_close(c1); v2 = _get_close(c2)
+                v1 = float(v1) if v1 is not None else None
+                v2 = float(v2) if v2 is not None else None
+                if not v1 or not v2:
+                    continue
+                pct = (v2 - v1) / v1 * 100.0
+                return (("+" if pct>=0 else "") + f"{pct:.2f}%", "calc")
+            except Exception:
+                continue
+        return (None, None)
+    except Exception:
+        return (None, None)
+
+# Keep a reference to the original inspector and provide a chain-fallback wrapper
+try:
+    _onchain_inspect_base  # type: ignore
+except NameError:
+    try:
+        _onchain_inspect_base = _onchain_inspect  # save original
+    except NameError:
+        _onchain_inspect_base = None  # in case code moved
+
+def _collect_chain_rpc_candidates():
+    """Collect chain-specific RPC URL lists from env to probe when chain autodetect fails."""
+    out = []
+    # Read JSON mapping if provided
+    try:
+        rpc_json = json.loads(os.environ.get("RPC_URLS","") or "{}")
+    except Exception:
+        rpc_json = {}
+    # Helper to normalize lists
+    def _norm(lst):
+        return [u.strip() for u in lst if isinstance(u, str) and u and u.strip()]
+    # Polygon
+    poly = _norm([rpc_json.get("polygon") or rpc_json.get("matic"),
+                  os.environ.get("POLYGON_RPC_URL",""),
+                  os.environ.get("MATIC_RPC_URL","")])
+    if os.environ.get("POLY_RPC_FALLBACK","") == "1":
+        poly.append("https://polygon-rpc.com")
+    # BSC
+    bsc = _norm([rpc_json.get("bsc"),
+                 os.environ.get("BSC_RPC_URL",""),
+                 os.environ.get("BNB_RPC_URL",""),
+                 "https://bsc-dataseed.binance.org"])
+    if poly:
+        out.append(("polygon", poly))
+    if bsc:
+        out.append(("bsc", bsc))
+    return out
+
+def _try_with_urls(addr_l: str, urls: list):
+    """Temporarily override RPC set and check for contract code presence."""
+    if not urls:
+        return False
+    _set_chain_rpc_override(urls)
+    try:
+        try:
+            # Reset last-good index so we start from the first provider
+            globals()['_RPC_LAST_GOOD'] = 0
+        except Exception:
+            pass
+        code = _eth_getCode(addr_l)
+        return bool(code and code != "0x")
+    except Exception:
+        return False
+    finally:
+        _clear_chain_rpc_override()
+
+def _onchain_inspect(addr: str):
+    """Wrapper that falls back to Polygon/BSC RPCs when chain autodetect fails (fixes 'Contract code: absent')."""
+    # First, try original behavior
+    if callable(globals().get('_onchain_inspect_base', None)):
+        text, info = _onchain_inspect_base(addr)
+    else:
+        # No base available (unexpected) -> short path
+        addr_l = (addr or "").lower()
+        if not addr_l:
+            return "On-chain: invalid address", {}
+        text, info = ("", {})
+    try:
+        # If contract detected already — done
+        if "Contract code: present" in (text or "") or (info or {}).get("is_contract"):
+            return text, info
+    except Exception:
+        pass
+
+    # Otherwise probe configured chains explicitly
+    addr_l = (addr or "").lower()
+    for chain, urls in _collect_chain_rpc_candidates():
+        if not urls:
+            continue
+        if _try_with_urls(addr_l, urls):
+            # Lock override for full re-run to gather token/roles/proxy info
+            _set_chain_rpc_override(urls)
+            try:
+                try:
+                    globals()['_RPC_LAST_GOOD'] = 0
+                except Exception:
+                    pass
+                # Re-run original inspector under this chain
+                text2, info2 = _onchain_inspect_base(addr_l) if callable(globals().get('_onchain_inspect_base', None)) else (text, info)
+                return text2 or text, info2 or info
+            finally:
+                _clear_chain_rpc_override()
+
+    # Fallback: return whatever we had
+    return text, info
+# === /PATCH: 0.3.18-polyfix2+deltas ===
+
+
+
+
+# === PATCH: uptime & polydebug guard ===
+try:
+    from flask import request, Response
+    _ = request  # silence linters
+    # Root OK for UptimeRobot (HEAD/GET)
+    @app.route("/", methods=["GET","HEAD"])
+    def root_ok():
+        if request.method == "HEAD":
+            return Response(status=200)
+        return "OK", 200
+except Exception as _e:
+    # If Flask app not yet defined here, ignore — main app likely declares routes elsewhere.
+    pass
+
+# Optionally disable noisy polydebug via env (without failing init)
+try:
+    if os.environ.get("POLYDEBUG","0") in ("0","false","False",""):
+        os.environ.pop("POLYDEBUG_ADDR", None)
+        os.environ.pop("POLYDEBUG_TX", None)
+except Exception:
+    pass
+# === /PATCH: uptime & polydebug guard ===
+
