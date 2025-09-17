@@ -1462,114 +1462,84 @@ def _short_addr(a: str, take: int = 6) -> str:
         return a[:2+take] + "…" + a[-take:]
     except Exception:
         return a
+
 def _onchain_inspect(addr: str):
-    info = {}
-    out = []
-
-    urls = _parse_rpc_urls()
-    if urls is None:
-        urls = []
-    # info reset removed by patch
-# --- Honeypot.is simulation & LP/holders ---
+    """
+    Robust on-chain inspector with optional Polygon/BSC fallback via RPC_URLS env.
+    Returns (text, info_dict).
+    """
     try:
-        pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
-    # --- CHAIN OVERRIDE SETUP ---
-    _chain_urls = []
-    try:
-        _rpc_json = os.environ.get("RPC_URLS", "").strip()
-        _j = json.loads(_rpc_json) if _rpc_json else {}
-    except Exception:
-        _j = {}
-    _ch = (chain_name or "").lower()
-    def _add_url(u):
-        if isinstance(u, str):
-            u = u.strip()
-            if u and u not in _chain_urls:
-                _chain_urls.append(u)
-    if _ch in ("polygon", "matic"):
-        _add_url(_j.get("polygon") or _j.get("matic"))
-        _add_url(os.environ.get("POLYGON_RPC_URL", ""))
-        _add_url(os.environ.get("MATIC_RPC_URL", ""))
-        if os.environ.get("POLY_RPC_FALLBACK") == "1":
-            _add_url("https://polygon-rpc.com")
-    elif _ch in ("bsc", "bnb"):
-        _add_url(_j.get("bsc"))
-        _add_url(os.environ.get("BSC_RPC_URL", ""))
-        _add_url(os.environ.get("BNB_RPC_URL", ""))
-        _add_url("https://bsc-dataseed.binance.org")
-    if _chain_urls:
-        _set_chain_rpc_override(_chain_urls)
-    # --- /CHAIN OVERRIDE SETUP ---
-
-    except Exception:
-        pair_from_ds, chain_name = None, None
-    hp = _hp_ish(addr, chain_name=chain_name) if ADDR_RE.fullmatch(addr or "") else {}
-    if hp:
-        sim_ok = hp.get("simulationSuccess", False)
-        out.append(f"Honeypot.is: simulation={'OK' if sim_ok else 'FAIL'} | risk={((hp.get('summary') or {}).get('risk') or '—')} | level={((hp.get('summary') or {}).get('riskLevel') or '—')}")
-        sim = hp.get("simulationResult") or {}
-        bt = sim.get("buyTax"); st = sim.get("sellTax"); tt = sim.get("transferTax")
-        if bt is not None or st is not None or tt is not None:
-            ## FIXED4 CONTEXT: detect blue-chip / whitelist / liquidity
-            liq_usd = None
-            try:
-                _p, _chain = _ds_resolve_pair_and_chain(addr)
-                if _p:
-                    liq_usd = ((_p.get('liquidity') or {}).get('usd'))
-            except Exception:
-                pass
-            _cache_ent = RISK_CACHE.get((addr or '').lower()) or {}
-            _pos = _cache_ent.get('pos') or []
-            is_whitelisted = any('Whitelisted by address' in p for p in _pos) or any('Blue-chip pair context' in p for p in _pos) or _is_bluechip_addr(addr)
-
-            out.append(f"Taxes: buy={bt if bt is not None else '—'}% | sell={st if st is not None else '—'}% | transfer={tt if tt is not None else '—'}%")
-        if not sim_ok and hp.get("simulationError"):
-            try:
-                if ("is_whitelisted" in locals() and is_whitelisted) or ("liq_usd" in locals() and (liq_usd is not None) and isinstance(liq_usd,(int,float)) and liq_usd >= 1_000_000):
-                    out.append("Honeypot quick-test: ℹ️ skipped DEX simulation (blue-chip/centralized)")
-                else:
-                    out.append("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)")
-            except Exception:
-                out.append("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)")
-            
-            out.append(f"SimError: {str(hp.get('simulationError'))[:140]}")
-        info['hp'] = {"risk": ((hp.get('summary') or {}).get('risk')),
-                      "riskLevel": ((hp.get('summary') or {}).get('riskLevel')),
-                      "isHoneypot": ((hp.get('honeypotResult') or {}).get('isHoneypot')),
-                      "buyTax": bt, "sellTax": st, "transferTax": tt}
-        pair_addr = ((hp.get("pair") or {}).get("pair") or {}).get("address") or (pair_from_ds or {}).get("pairAddress")
-        if pair_addr and chain_name:
-            lp = _infer_lp_status(pair_addr, chain_name)
-            if lp:
-                out.append(f"LP: burned={lp.get('dead_pct',0)}% | UNCX={lp.get('uncx_pct',0)}% | TeamFinance={lp.get('team_finance_pct',0)}% | topHolder={lp.get('top_holder_pct',0)}%")
-                info['lp'] = lp
-            conc = _holder_concentration(addr, chain_name)
-            if conc:
-                out.append(f"Holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
-                info['holders'] = conc
-    
-        urls = _parse_rpc_urls()
-    if not urls:
-        _clear_chain_rpc_override()
-return "On-chain: not configured (set ETH_RPC_URL or ETH_RPC_URL1..N or ETH_RPC_URLS)", {}
-    try:
-        addr = addr.lower()
+        addr = (addr or "").lower()
         out = []
         info = {}
-        code = _eth_getCode(addr)
-        is_contract = code and code != "0x"
-        info["is_contract"] = bool(is_contract)
+
+        try:
+            pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
+        except Exception:
+            pair_from_ds, chain_name = None, None
+
+        try:
+            code = _eth_getCode(addr)
+        except Exception:
+            code = None
+        is_contract = bool(code and code != "0x")
+        info["is_contract"] = is_contract
         out.append(f"Contract code: {'present' if is_contract else 'absent'}")
-        if not is_contract:
+
+        if not is_contract and chain_name in ("polygon", "matic", "bsc", "bnb", "binance"):
+            def _norm_list(x):
+                if isinstance(x, (list, tuple)):
+                    return [u.strip() for u in x if isinstance(u, str) and u.strip()]
+                return []
+            try:
+                rpc_json = json.loads(os.environ.get("RPC_URLS", "") or "{}")
+            except Exception:
+                rpc_json = {}
+            candidates = []
+            if chain_name in ("polygon", "matic"):
+                poly = _norm_list(rpc_json.get("polygon") or rpc_json.get("matic")) + \
+                       _norm_list([os.environ.get("POLYGON_RPC_URL"), os.environ.get("MATIC_RPC_URL")])
+                if os.environ.get("POLY_RPC_FALLBACK") == "1":
+                    poly.append("https://polygon-rpc.com")
+                if poly: candidates.append(poly)
+            else:
+                bsc = _norm_list(rpc_json.get("bsc")) + \
+                      _norm_list([os.environ.get("BSC_RPC_URL"), os.environ.get("BNB_RPC_URL"), "https://bsc-dataseed.binance.org"])
+                if bsc: candidates.append(bsc)
+            for urls in candidates:
+                try:
+                    if '_set_chain_rpc_override' in globals():
+                        _set_chain_rpc_override(urls)
+                    globals().setdefault('_RPC_LAST_GOOD', 0)
+                    globals()['_RPC_LAST_GOOD'] = 0
+                    code2 = _eth_getCode(addr)
+                    if code2 and code2 != "0x":
+                        info["is_contract"] = True
+                        out[0] = "Contract code: present"
+                        try:
+                            if '_onchain_inspect_deep' in globals():
+                                text2, info2 = _onchain_inspect_deep(addr)  # type: ignore
+                                return text2, (info2 or {"is_contract": True})
+                        except Exception:
+                            pass
+                        break
+                except Exception:
+                    continue
+                finally:
+                    try:
+                        if '_clear_chain_rpc_override' in globals():
+                            _clear_chain_rpc_override()
+                    except Exception:
+                        pass
+
+        if not info.get("is_contract"):
             return "\n".join(out), info
 
-        # ERC20 basics
         name  = _call_str(addr, SEL_NAME)
         symbol= _call_str(addr, SEL_SYMBOL)
         dec   = _call_u8(addr, SEL_DECIMALS)
         ts    = _call_u256(addr, SEL_TOTAL_SUPPLY)
         info.update({"name": name, "symbol": symbol, "decimals": dec, "total_supply": ts})
-
         if name or symbol:
             out.append(f"Token: {name or '?'} ({symbol or '?'})")
         if dec is not None:
@@ -1579,61 +1549,61 @@ return "On-chain: not configured (set ETH_RPC_URL or ETH_RPC_URL1..N or ETH_RPC_
             if fmt is not None:
                 out.append(f"Total supply: ~{fmt}")
 
-        # Ownership
         owner = _call_owner(addr)
         if owner:
             info["owner"] = owner
             out.append(f"Owner: {_short_addr(owner)}")
         paused = _call_bool(addr, SEL_PAUSED)
         if paused is True:
-            out.append("Paused: ✅")
-            info["paused"] = True
+            out.append("Paused: ✅"); info["paused"] = True
         elif paused is False:
-            out.append("Paused: ❌")
-            info["paused"] = False
+            out.append("Paused: ❌"); info["paused"] = False
 
-        # Proxy detection by storage slots
         impl = _eth_getStorageAt(addr, EIP1967_IMPL_SLOT)
         beacon = _eth_getStorageAt(addr, EIP1967_BEACON_SLOT)
         admin = _eth_getStorageAt(addr, EIP1967_ADMIN_SLOT)
         proxy = False
         if impl and impl != "0x" and impl != "0x" + ("0"*64):
-            impl_addr = "0x" + impl[-40:]
-            out.append(f"EIP-1967 impl: {impl_addr}")
-            info["impl"] = impl_addr
-            proxy = True
+            impl_addr = "0x" + impl[-40:]; out.append(f"EIP-1967 impl: {impl_addr}"); info["impl"] = impl_addr; proxy = True
         if beacon and beacon != "0x" and beacon != "0x" + ("0"*64):
-            beacon_addr = "0x" + beacon[-40:]
-            out.append(f"EIP-1967 beacon: {beacon_addr}")
-            info["beacon"] = beacon_addr
-            proxy = True
+            beacon_addr = "0x" + beacon[-40:]; out.append(f"EIP-1967 beacon: {beacon_addr}"); info["beacon"] = beacon_addr; proxy = True
         if admin and admin != "0x" and admin != "0x" + ("0"*64):
-            admin_addr = "0x" + admin[-40:]
-            out.append(f"EIP-1967 admin: {admin_addr}")
-            info["admin"] = admin_addr
-            proxy = True or proxy
+            admin_addr = "0x" + admin[-40:]; out.append(f"EIP-1967 admin: {admin_addr}"); info["admin"] = admin_addr; proxy = True or proxy
         info["proxy"] = proxy
-        if proxy:
-            out.append("Proxy: ✅ (upgrade risk)")
+        if proxy: out.append("Proxy: ✅ (upgrade risk)")
 
-        # Honeypot note (fallback only if not set yet)
         try:
-            prior_hp = any(isinstance(x, str) and 'honeypot' in x.lower() for x in out)
-            wl, _ = _is_whitelisted(addr, "\n".join(out))
-            if not prior_hp:
-                if wl:
-                    out.append("Honeypot: ℹ️ skipped for centralized/whitelisted token")
-                else:
+            hp = _hp_ish(addr, chain_name=chain_name) if ADDR_RE.fullmatch(addr or "") else {}
+            if hp:
+                sim_ok = hp.get("simulationSuccess", False)
+                out.append(f"Honeypot.is: simulation={'OK' if sim_ok else 'FAIL'} | risk={((hp.get('summary') or {}).get('risk') or '—')} | level={((hp.get('summary') or {}).get('riskLevel') or '—')}")
+                sim = hp.get("simulationResult") or {}
+                bt = sim.get("buyTax"); st = sim.get("sellTax"); tt = sim.get("transferTax")
+                if bt is not None or st is not None or tt is not None:
+                    out.append(f"Taxes: buy={bt if bt is not None else '—'}% | sell={st if st is not None else '—'}% | transfer={tt if tt is not None else '—'}%")
+                if not sim_ok and hp.get("simulationError"):
                     out.append("Honeypot quick-test: ⚠️ static only (no DEX sell simulation)")
+                    out.append(f"SimError: {str(hp.get('simulationError'))[:140]}")
+                info['hp'] = {"risk": ((hp.get('summary') or {}).get('risk')),
+                              "riskLevel": ((hp.get('summary') or {}).get('riskLevel')),
+                              "isHoneypot": ((hp.get('honeypotResult') or {}).get('isHoneypot')),
+                              "buyTax": bt, "sellTax": st, "transferTax": tt}
+                pair_addr = ((hp.get("pair") or {}).get("pair") or {}).get("address") or (pair_from_ds or {}).get("pairAddress")
+                if pair_addr and chain_name:
+                    lp = _infer_lp_status(pair_addr, chain_name)
+                    if lp:
+                        out.append(f"LP: burned={lp.get('dead_pct',0)}% | UNCX={lp.get('uncx_pct',0)}% | TeamFinance={lp.get('team_finance_pct',0)}% | topHolder={lp.get('top_holder_pct',0)}%")
+                        info['lp'] = lp
+                    conc = _holder_concentration(addr, chain_name)
+                    if conc:
+                        out.append(f"Holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
+                        info['holders'] = conc
         except Exception:
             pass
 
-        _clear_chain_rpc_override()
-return "\n".join(out), info
+        return "\n".join(out), info
     except Exception as e:
-        _clear_chain_rpc_override()
-return f"On-chain error: {type(e).__name__}: {e}", {"error": str(e)}
-        _clear_chain_rpc_override()
+        return f"On-chain: error: {e.__class__.__name__}", {}
 
 def _merge_onchain_into_risk(addr: str, info: dict):
     try:
@@ -2764,3 +2734,16 @@ except Exception:
     pass
 # === /PATCH: uptime & polydebug guard ===
 
+
+# --- Health route for uptime monitors (GET/HEAD /) ---
+try:
+    from flask import request, Response
+    if 'app' in globals():
+        @app.route("/", methods=["GET","HEAD"])
+        def __root_health__():
+            if request.method == "HEAD":
+                return Response(status=200)
+            return "OK", 200
+except Exception:
+    pass
+# --- /Health route ---
