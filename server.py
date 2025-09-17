@@ -17,6 +17,7 @@ from flask import Flask, request, jsonify
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
+from metri_domain_rdap import _rdap as __rdap_impl  # injected
 try:
     from polydebug_rpc import init_polydebug
     init_polydebug()  # запустится только при POLY_DEBUG=1
@@ -829,29 +830,7 @@ def _normalize_registrar(reg: str, handle: str, domain: str):
     return reg
 
 def _rdap(domain: str):
-    try:
-        r = requests.get(f"https://rdap.org/domain/{domain}", timeout=HTTP_TIMEOUT, headers={"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")})
-        if r.status_code != 200:
-            return ("—", "—", "—")
-        j = r.json()
-        handle = j.get("handle") or "—"
-        created = "—"
-        for ev in j.get("events", []):
-            if ev.get("eventAction") == "registration":
-                created = ev.get("eventDate", "—")
-                break
-        registrar = "—"
-        for ent in j.get("entities", []):
-            if (ent.get("roles") or []) and "registrar" in ent["roles"]:
-                v = ent.get("vcardArray")
-                if isinstance(v, list) and len(v) == 2:
-                    for item in v[1]:
-                        if item and item[0] == "fn":
-                            registrar = item[3]
-                            break
-        return (handle, created, registrar)
-    except Exception:
-        return ("—", "—", "—")
+    return __rdap_impl(domain)
 
 def _ssl_info(domain: str):
     try:
