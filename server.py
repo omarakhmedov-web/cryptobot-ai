@@ -9,21 +9,19 @@ import hashlib
 import threading
 from datetime import datetime
 from urllib.parse import urlparse
-
 import requests
 from flask import Flask, request, jsonify
-
 # Project-local utilities (must exist in your project)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 from metri_domain_rdap import _rdap as __rdap_impl  # injected
+from flask import Flask
 try:
     from polydebug_rpc import init_polydebug
     init_polydebug()  # запустится только при POLY_DEBUG=1
 except Exception as e:
     print(f"[POLYDEBUG] init skipped: {e}")
-
 # ========================
 # Environment & constants
 # ========================
@@ -35,13 +33,11 @@ WEBHOOK_HEADER_SECRET = os.environ.get("WEBHOOK_HEADER_SECRET", "")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # numeric string
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
-
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
 KNOWN_AUTORELOAD_SEC = int(os.environ.get("KNOWN_AUTORELOAD_SEC", "300"))
 SCANNER_URL = os.environ.get("SCANNER_URL", "").strip()
 ETH_RPC_URLS = os.environ.get("ETH_RPC_URLS", "").strip()
-
 # Domain meta TTLs
 try:
     DOMAIN_META_TTL = int(os.getenv("DOMAIN_META_TTL", "2592000"))      # 30 days
@@ -49,69 +45,8 @@ try:
 except Exception:
     DOMAIN_META_TTL = 2592000
     DOMAIN_META_TTL_NEG = 120
-
 LOC = locale_text
 app = Flask(__name__)
-
-# ========================
-# UPGRADE (safe, URL-only buttons)
-# ========================
-def _ux_resolve_lang(txt: str, user_lang: str) -> str:
-    t = (txt or "").lower().strip()
-    if t.endswith(" ru") or t == "ru":
-        return "ru"
-    if t.endswith(" en") or t == "en":
-        return "en"
-    return "en"
-
-def _ux_upgrade_text(lang: str = "en") -> str:
-    import os
-    pro = int(os.getenv("PRO_MONTHLY", "29") or "29")
-    teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
-    day = int(os.getenv("DAY_PASS", "9") or "9")
-    deep = int(os.getenv("DEEP_REPORT", "3") or "3")
-    if str(lang).lower().startswith("ru"):
-        return (
-            f"**Metridex Pro** — полный доступ к QuickScan\\n"
-            f"• Pro ${pro}/мес — быстрый режим, Deep‑отчёты, экспорт\\n"
-            f"• Teams ${teams}/мес — для команд/каналов\\n"
-            f"• Day‑Pass ${day} — сутки Pro\\n"
-            f"• Deep Report ${deep} — разовый подробный отчёт\\n\\n"
-            "Выбирай доступ ниже. Поддержка: @MetridexBot"
-        )
-    return (
-        f"**Metridex Pro** — full QuickScan access\\n"
-        f"• Pro ${pro}/mo — fast lane, Deep reports, export\\n"
-        f"• Teams ${teams}/mo — for teams/channels\\n"
-        f"• Day‑Pass ${day} — 24h of Pro\\n"
-        f"• Deep Report ${deep} — one detailed report\\n\\n"
-        "Choose your access below. Support: @MetridexBot"
-    )
-
-def _ux_upgrade_keyboard(lang: str = "en") -> dict:
-    import os
-    pro = int(os.getenv("PRO_MONTHLY", "29") or "29")
-    teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
-    day = int(os.getenv("DAY_PASS", "9") or "9")
-    deep = int(os.getenv("DEEP_REPORT", "3") or "3")
-    # All buttons are URL-based to avoid touching callback handlers
-    if str(lang).lower().startswith("ru"):
-        return {"inline_keyboard": [
-            [{"text": f"Оформить Pro ${pro}", "url": "https://metridex.com/#pricing"},
-             {"text": f"Day‑Pass ${day}", "url": "https://metridex.com/#pricing"}],
-            [{"text": f"Deep ${deep}", "url": "https://metridex.com/#pricing"},
-             {"text": f"Teams ${teams}", "url": "https://metridex.com/#pricing"}],
-            [{"text": "English version", "callback_data": "noop"}]
-        ]}
-    return {"inline_keyboard": [
-        [{"text": f"Upgrade to Pro ${pro}", "url": "https://metridex.com/#pricing"},
-         {"text": f"Day‑Pass ${day}", "url": "https://metridex.com/#pricing"}],
-        [{"text": f"Deep ${deep}", "url": "https://metridex.com/#pricing"},
-         {"text": f"Teams ${teams}", "url": "https://metridex.com/#pricing"}],
-        [{"text": "Русская версия", "callback_data": "noop"}]
-    ]}
-(__name__)
-
 # ========================
 # Pricing & Limits (non-invasive helpers)
 # ========================
@@ -126,28 +61,24 @@ try:
     USAGE_PATH = os.getenv("USAGE_PATH", "./usage.json")
 except Exception:
     FREE_LIFETIME = 2; PRO_MONTHLY = 29; TEAMS_MONTHLY = 99; DAY_PASS = 9; DEEP_REPORT = 3; PRO_OVERAGE_PER_100 = 5; SLOW_LANE_MS_FREE = 3000; USAGE_PATH = "./usage.json"
-
 def _usage_load():
     try:
         with open(USAGE_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
-
 def _usage_save(data):
     try:
         with open(USAGE_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f)
     except Exception:
         app.logger.exception("save usage failed")
-
 def plan_of(user_id: int) -> str:
     try:
         rec = _usage_load().get(str(user_id)) or {}
         return rec.get("plan","free")
     except Exception:
         return "free"
-
 def free_left(user_id: int) -> int:
     try:
         rec = _usage_load().get(str(user_id)) or {}
@@ -155,7 +86,6 @@ def free_left(user_id: int) -> int:
         return max(0, FREE_LIFETIME - used)
     except Exception:
         return max(0, FREE_LIFETIME)
-
 def inc_free(user_id: int) -> int:
     try:
         db = _usage_load()
@@ -167,14 +97,12 @@ def inc_free(user_id: int) -> int:
         return rec["free_used"]
     except Exception:
         return 0
-
 def maybe_slow_lane(user_id: int):
     try:
         if plan_of(user_id) == "free" and SLOW_LANE_MS_FREE > 0:
             time.sleep(SLOW_LANE_MS_FREE / 1000.0)
     except Exception:
         pass
-
 # Optional helper texts (can be used by upstream webhook server)
 UPSELL_TEXT_EN = {
     "after_first": "You have 1 free QuickScan left. Unlock Deep, export and fast lane: Pro $29/mo or Day‑Pass $9.",
@@ -184,10 +112,6 @@ UPSELL_TEXT_RU = {
     "after_first": "Осталась 1 бесплатная проверка. Открой Deep, экспорт и быстрый доступ: Pro $29/мес или Day‑Pass $9.",
     "exhausted": "Бесплатные проверки закончились. Доступ:\n• Pro $29/мес — 300 проверок + Deep + экспорт\n• Day‑Pass $9 — сутки Pro\n• Deep Report $3 — разовый отчёт",
 }
-
-
-
-
 def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
     """Send a short upsell message (EN/RU). Non‑blocking; safe to call anywhere."""
     try:
@@ -205,22 +129,18 @@ def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)          # general cache if needed
 seen_callbacks = SafeCache(ttl=300)               # dedupe callback ids
 cb_cache = SafeCache(ttl=600)                     # long callback payloads by hash
-
 # ===== Δ timeframe (DexScreener) helpers =====
-
 # ===== Honeypot.is & LP lock helpers =====
 HP_API_BASE = os.environ.get("HP_API_BASE", "https://api.honeypot.is").rstrip("/")
 _HP_CACHE = {}
 _HP_TTL = int(os.environ.get("HP_TTL", "600"))
 _TOPH_CACHE = {}
 _TOPH_TTL = int(os.environ.get("TOPH_TTL", "1200"))
-
 DEAD_ADDRS = {
     "0x0000000000000000000000000000000000000000",
     "0x000000000000000000000000000000000000dEaD",
     "0xdead000000000000000042069420694206942069",
 }
-
 UNCX_LOCKERS = {
     "ethereum": {"v2":"0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214", "v3":"0x7f5c649856f900d15c83741f45ae46f5c6858234"},
     "bsc":      {"v2":"0xc765bddb93b0d1c1a88282ba0fa6b2d00e3e0c83", "v3":"0x0d29598ec01fa03665feead91d4fb423f393886c"},
@@ -228,7 +148,6 @@ UNCX_LOCKERS = {
     "arbitrum": {"v2":"0x275720567e5955f5f2d53a7a1ab8a0fc643de50e", "v3":"0xfa104eb3925a27e6263e05acc88f2e983a890637"},
     "base":     {"v2":"0xc4e637d37113192f4f1f060daebd7758de7f4131", "v3":"0x231278edd38b00b07fbd52120cef685b9baebcc1"},
 }
-
 TEAMFINANCE_LOCKERS = {
     "ethereum": ["0xe2fe530c047f2d85298b07d9333c05737f1435fb"],
 }
@@ -238,7 +157,6 @@ try:
         TEAMFINANCE_LOCKERS.update(json.loads(_extra_tf))
 except Exception:
     pass
-
 CHAIN_NAME_TO_ID = {
     "ethereum": 1, "eth": 1,
     "bsc": 56, "bnb":56,
@@ -246,9 +164,6 @@ CHAIN_NAME_TO_ID = {
     "arbitrum": 42161, "arb":42161,
     "base": 8453,
 }
-
-
-
 # Known blue‑chip token addresses (ETH mainnet, lowercase)
 BLUECHIP_ADDRS = {
     # USDC, USDT, WETH, WBTC, DAI
@@ -258,13 +173,11 @@ BLUECHIP_ADDRS = {
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
     "0x6b175474e89094c44da98b954eedeac495271d0f",
 }
-
 def _is_bluechip_addr(addr: str) -> bool:
     try:
         return (addr or "").lower() in BLUECHIP_ADDRS
     except Exception:
         return False
-
 def _hp_cache_get(key, ttl):
     try:
         ent = (_HP_CACHE if key.startswith("ISH:") else _TOPH_CACHE).get(key)
@@ -272,14 +185,12 @@ def _hp_cache_get(key, ttl):
             return ent.get("body")
     except Exception:
         return None
-
 def _hp_cache_put(key, body):
     try:
         cache = _HP_CACHE if key.startswith("ISH:") else _TOPH_CACHE
         cache[key] = {"ts": time.time(), "body": body}
     except Exception:
         pass
-
 def _hp_ish(addr: str, chain_name: str = None) -> dict:
     try:
         addr_l = (addr or "").lower()
@@ -301,7 +212,6 @@ def _hp_ish(addr: str, chain_name: str = None) -> dict:
         return body or {}
     except Exception:
         return {}
-
 def _hp_top_holders(token_or_lp_addr: str, chain_name: str) -> dict:
     try:
         addr_l = (token_or_lp_addr or "").lower()
@@ -322,7 +232,6 @@ def _hp_top_holders(token_or_lp_addr: str, chain_name: str) -> dict:
         return body or {}
     except Exception:
         return {}
-
 def _percent(n, d, decimals=2):
     try:
         if d and d != 0:
@@ -330,7 +239,6 @@ def _percent(n, d, decimals=2):
     except Exception:
         pass
     return 0.0
-
 def _infer_lp_status(pair_addr: str, chain_name: str) -> dict:
     try:
         data = _hp_top_holders(pair_addr, chain_name) or {}
@@ -372,7 +280,6 @@ def _infer_lp_status(pair_addr: str, chain_name: str) -> dict:
         }
     except Exception:
         return {}
-
 def _holder_concentration(token_addr: str, chain_name: str) -> dict:
     try:
         data = _hp_top_holders(token_addr, chain_name) or {}
@@ -390,7 +297,6 @@ def _holder_concentration(token_addr: str, chain_name: str) -> dict:
         return {"gt5": gt5, "gt10": gt10, "topN": top_n, "topTotalPct": round(top_total, 2)}
     except Exception:
         return {}
-
 def _ds_resolve_pair_and_chain(addr_l: str) -> tuple:
     try:
         url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
@@ -406,15 +312,11 @@ def _ds_resolve_pair_and_chain(addr_l: str) -> tuple:
         return p, (chain or "").lower()
     except Exception:
         return None, None
-
 try:
     DEX_BASE = os.environ.get("DEX_BASE", "https://api.dexscreener.com").rstrip("/")
 except Exception:
     DEX_BASE = "https://api.dexscreener.com"
-
 _DELTA_CACHE = {}  # addr_l -> {"ts": epoch, "changes": {"m5": v, "h1": v, "h6": v, "h24": v}}
-
-
 def _qs_call_safe(func, *args, **kwargs):
     """Call quickscan entrypoints safely, dropping unsupported kwargs like 'lang'/'lean'."""
     try:
@@ -429,7 +331,6 @@ def _qs_call_safe(func, *args, **kwargs):
         except TypeError:
             # Try positional-only
             return func(*args)
-
 def _delta_cache_get(addr_l: str, ttl=60):
     try:
         rec = _DELTA_CACHE.get(addr_l or "")
@@ -440,13 +341,11 @@ def _delta_cache_get(addr_l: str, ttl=60):
         return rec.get("changes")
     except Exception:
         return None
-
 def _delta_cache_put(addr_l: str, changes: dict):
     try:
         _DELTA_CACHE[addr_l or ""] = {"ts": time.time(), "changes": changes or {}}
     except Exception:
         pass
-
 def _ds_pick_best_pair(pairs):
     if not isinstance(pairs, list):
         return None
@@ -466,8 +365,6 @@ def _ds_pick_best_pair(pairs):
             best_score = score
             best = p
     return best or (pairs[0] if pairs else None)
-
-
 def _ds_candle_delta(pair: dict, tf: str) -> tuple:
     """
     Try to compute Δ% from candles when priceChange[tf] is missing.
@@ -507,8 +404,6 @@ def _ds_candle_delta(pair: dict, tf: str) -> tuple:
         return (None, None)
     except Exception:
         return (None, None)
-
-
 def _delta_src_tag(changes: dict, key: str) -> str:
     try:
         s = (changes or {}).get(f"_src_{key}") or ""
@@ -563,10 +458,8 @@ def _ds_token_changes(addr_l: str) -> dict:
 msg2addr = SafeCache(ttl=86400)                   # message_id -> base address mapping (for Why?)
 recent_actions = SafeCache(ttl=20)                # action-level dedupe across messages/taps
 RISK_CACHE = {}                                   # addr -> {score,label,neg,pos,w_neg,w_pos}
-
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
 NEWLINE_ESC_RE = re.compile(r'\\n')
-
 # ========================
 # Known homepages (seed)
 # ========================
@@ -577,7 +470,6 @@ KNOWN_HOMEPAGES = {
     "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "ethereum.org",
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",
 }
-
 # Domain metadata cache
 DOMAIN_META_CACHE = {}  # domain -> {t, h, created, reg, exp, issuer, wb}
 KNOWN_SOURCES = []
@@ -585,7 +477,6 @@ KNOWN_PATHS = []
 KNOWN_LAST_CHECK = 0
 KNOWN_MTIME = {}
 KNOWN_LOCK = threading.Lock()
-
 # ========================
 # Whitelists
 # ========================
@@ -608,21 +499,18 @@ def _env_set(name: str):
         return set()
 WL_DOMAINS = set([d.lower() for d in WL_DOMAINS_DEFAULT]) | _env_set("WL_DOMAINS")
 WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADDRESSES")
-
 # ========================
 # Helpers
 # ========================
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
-
 def _admin_debug(chat_id, text):
     try:
         if ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID):
             _send_text(chat_id, f"DEBUG: {text}", logger=app.logger)
     except Exception:
         pass
-
 def require_webhook_secret(fn):
     def wrapper(*args, **kwargs):
         if WEBHOOK_HEADER_SECRET:
@@ -632,7 +520,6 @@ def require_webhook_secret(fn):
         return fn(*args, **kwargs)
     wrapper.__name__ = fn.__name__
     return wrapper
-
 def require_admin_secret(fn):
     def wrapper(*args, **kwargs):
         if not ADMIN_SECRET:
@@ -643,7 +530,6 @@ def require_admin_secret(fn):
         return fn(*args, **kwargs)
     wrapper.__name__ = fn.__name__
     return wrapper
-
 def _compress_keyboard(kb: dict):
     if not kb or not isinstance(kb, dict):
         return kb
@@ -661,15 +547,12 @@ def _compress_keyboard(kb: dict):
             token = f"cb:{h}"
             cb_cache.set(token, data)
             btn["callback_data"] = token
-
     return _kb_dedupe_all({"inline_keyboard": ik})
-
 def _kb_clone(kb):
     if not kb or not isinstance(kb, dict):
         return {"inline_keyboard": []}
     ik = kb.get("inline_keyboard") or []
     return {"inline_keyboard": [[dict(btn) for btn in row] for row in ik]}
-
 def _kb_strip_prefixes(kb, prefixes):
     base = _kb_clone(kb)
     ik = base["inline_keyboard"]
@@ -684,11 +567,6 @@ def _kb_strip_prefixes(kb, prefixes):
         if new_row:
             out.append(new_row)
     return {"inline_keyboard": out}
-
-
-
-
-
 def _answer_why_deep(cq: dict, addr_hint: str = None):
     try:
         msg = cq.get("message") or {}
@@ -702,7 +580,6 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         pos = list(ent.get("pos") or [])
         wneg = list(ent.get("w_neg") or [])
         wpos = list(ent.get("w_pos") or [])
-
         if len(wneg) < len(neg):
             wneg = list(wneg) + [10] * (len(neg) - len(wneg))
         if len(wpos) < len(pos):
@@ -714,7 +591,6 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
                 return default
         wneg = [_to_int_or_default(w, 10) for w in wneg]
         wpos = [_to_int_or_default(w, 10) for w in wpos]
-
         is_whitelisted = any("Whitelisted by address" in p for p in pos) or any("Blue-chip pair context" in p for p in pos) or _is_bluechip_addr(addr)
         if is_whitelisted and "Owner privileges present" in neg:
             try:
@@ -725,29 +601,21 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
                 wpos.append(0)
             except Exception:
                 pass
-
         lines = []
         def fmt(items, weights, sign):
             for (reason, w) in zip(items, weights):
                 sym = "−" if sign=="neg" else "+"
                 w = _to_int_or_default(w, 10)
                 lines.append(f"{sym}  {reason}" if (w == 0 or str(w)=="0") else f"{sym}{abs(w):>2}  {reason}")
-
         fmt(neg, wneg, "neg")
-
         if neg and pos:
-
             lines.append("—")
-
         fmt(pos, wpos, "pos")
-
         if not lines:
             lines = ["No weighted factors captured yet. Tap 🧪 On-chain first."]
         _send_text(chat_id, "Why++ factors\n" + "\n".join(lines[:40]), logger=app.logger)
     except Exception:
         pass
-
-
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
     ik = base.get("inline_keyboard") or []
@@ -781,7 +649,6 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         {"text": "Δ 24h", "callback_data": "tf:24"},
     ])
     return _kb_dedupe_all({"inline_keyboard": ik})
-
 def _extract_addrs_from_pair_payload(data: str):
     try:
         path, _, _ = data.split(":", 1)[1].partition("?")
@@ -790,14 +657,11 @@ def _extract_addrs_from_pair_payload(data: str):
         return [p.lower() for p in parts]
     except Exception:
         return []
-
 def _pick_addr(addrs):
     for a in addrs:
         if a.lower() in KNOWN_HOMEPAGES:
             return a.lower()
     return addrs[-1].lower() if addrs else None
-
-
 def _extract_base_addr_from_keyboard(kb: dict):
     if not kb or not isinstance(kb, dict):
         return None
@@ -835,7 +699,6 @@ def _extract_addr_from_text(s: str):
         return None
     m = list(ADDR_RE.finditer(s))
     return m[-1].group(0).lower() if m else None
-
 def _store_addr_for_message(result_obj, addr: str):
     try:
         if not result_obj or not isinstance(result_obj, dict) or not addr:
@@ -846,7 +709,6 @@ def _store_addr_for_message(result_obj, addr: str):
                 msg2addr.set(mid, addr)
     except Exception:
         pass
-
 # ========================
 # Known domains file auto-reload
 # ========================
@@ -862,14 +724,12 @@ def _norm_domain(url: str):
         return host.strip("/")
     except Exception:
         return None
-
 def _collect_paths():
     paths = [os.path.join(os.path.dirname(__file__), "known_domains.json")]
     envp = os.getenv("KNOWN_DOMAINS_FILE") or os.getenv("KNOWN_DOMAINS_PATH")
     if envp and envp not in paths:
         paths.append(envp)
     return paths
-
 def _merge_known_from(path: str, diag_only=False):
     entry = {"path": path, "exists": False, "loaded": 0, "error": "", "mtime": None}
     try:
@@ -903,7 +763,6 @@ def _merge_known_from(path: str, diag_only=False):
     except Exception as e:
         entry["error"] = str(e)
         return entry
-
 def _load_known_domains():
     global KNOWN_SOURCES, KNOWN_PATHS, KNOWN_MTIME, KNOWN_LAST_CHECK
     with KNOWN_LOCK:
@@ -915,7 +774,6 @@ def _load_known_domains():
             if e["exists"]:
                 KNOWN_MTIME[p] = e["mtime"]
         KNOWN_LAST_CHECK = time.time()
-
 def _maybe_reload_known(force=False):
     global KNOWN_LAST_CHECK
     now = time.time()
@@ -942,9 +800,7 @@ def _maybe_reload_known(force=False):
             KNOWN_SOURCES.append(e)
             if e["exists"]:
                 KNOWN_MTIME[p] = e["mtime"]
-
 _load_known_domains()
-
 # ========================
 # Domain meta (RDAP/SSL/WB)
 # ========================
@@ -967,17 +823,14 @@ def _normalize_date_iso(s: str):
         return s
     except Exception:
         return s or "—"
-
 def _normalize_registrar(reg: str, handle: str, domain: str):
     reg = reg or "—"
     h = (handle or "").upper()
     if "GOVERNMENT OF KINGDOM OF TONGA" in reg.upper() or "TONIC" in h or domain.endswith(".to"):
         return "Tonic (.to)"
     return reg
-
 def _rdap(domain: str):
     return __rdap_impl(domain)
-
 def _ssl_info(domain: str):
     try:
         ctx = ssl.create_default_context()
@@ -995,7 +848,6 @@ def _ssl_info(domain: str):
         return (_normalize_date_iso(exp), cn)
     except Exception:
         return ("—", "—")
-
 def _wayback_available(domain: str):
     try:
         headers = {"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")}
@@ -1013,7 +865,6 @@ def _wayback_available(domain: str):
     except Exception:
         pass
     return None
-
 def _wayback_cdx(domain: str, require_200: bool):
     headers = {"User-Agent": os.getenv("USER_AGENT", "MetridexBot/1.0")}
     for host in (domain, f"www.{domain}"):
@@ -1042,7 +893,6 @@ def _wayback_cdx(domain: str, require_200: bool):
                 except Exception:
                     continue
     return None
-
 def _wayback_first(domain: str):
     try:
         d = _wayback_cdx(domain, require_200=True)
@@ -1055,7 +905,6 @@ def _wayback_first(domain: str):
         return d or "—"
     except Exception:
         return "—"
-
 def _domain_meta(domain: str):
     now = int(time.time())
     ent = DOMAIN_META_CACHE.get(domain)
@@ -1070,7 +919,6 @@ def _domain_meta(domain: str):
     reg = _normalize_registrar(reg, h, domain)
     DOMAIN_META_CACHE[domain] = {"t": now, "h": h, "created": created, "reg": reg, "exp": exp, "issuer": issuer, "wb": wb}
     return h, created, reg, exp, issuer, wb
-
 def _cg_homepage(addr: str):
     addr_l = (addr or "").lower()
     if addr_l in KNOWN_HOMEPAGES:
@@ -1089,7 +937,6 @@ def _cg_homepage(addr: str):
     except Exception:
         return None
     return None
-
 def _symbol_homepage_hint(text: str):
     t = (text or "").upper()
     hints = [
@@ -1114,7 +961,6 @@ def _symbol_homepage_hint(text: str):
         if sym in t:
             return dom
     return None
-
 def _extract_domain_from_text(text: str):
     try:
         for line in (text or "").splitlines():
@@ -1126,7 +972,6 @@ def _extract_domain_from_text(text: str):
     except Exception:
         return None
     return None
-
 # ========================
 # Risk engine (weighted)
 # ========================
@@ -1142,7 +987,6 @@ except Exception:
     RISK_LIQ_LOW = 20000.0; RISK_LIQ_MED = 100000.0; RISK_VOL_LOW = 5000.0
     RISK_THRESH_CAUTION = 30; RISK_THRESH_HIGH = 60
     RISK_POSITIVE_LIQ = 1_000_000.0; RISK_POSITIVE_AGE_Y = 2018
-
 def _parse_float_km(s):
     try:
         s = (s or "").strip().upper().replace("$","")
@@ -1155,7 +999,6 @@ def _parse_float_km(s):
         return num * mult
     except Exception:
         return None
-
 def _parse_metric_from_dexline(text, key):
     try:
         patt = rf'{key}\s+([0-9\.\$]+\s*[KMB]?)'
@@ -1163,7 +1006,6 @@ def _parse_metric_from_dexline(text, key):
         return _parse_float_km(m.group(1)) if m else None
     except Exception:
         return None
-
 def _parse_bool(text, key):
     try:
         m = re.search(rf'{re.escape(key)}:\s*(✅|✔️|Yes|True|No|❌|—)', text, re.IGNORECASE)
@@ -1173,7 +1015,6 @@ def _parse_bool(text, key):
         return val in ("✅","✔️","Yes","True")
     except Exception:
         return None
-
 def _parse_roles(text):
     roles = {}
     try:
@@ -1188,7 +1029,6 @@ def _parse_roles(text):
         return roles
     except Exception:
         return roles
-
 def _parse_domain_meta(block):
     d = {"created": None, "registrar": None, "ssl_exp": None, "wayback": None}
     try:
@@ -1199,7 +1039,6 @@ def _parse_domain_meta(block):
     except Exception:
         pass
     return d
-
 def _is_whitelisted(addr: str, text: str):
     try:
         a = (addr or "").lower()
@@ -1211,7 +1050,6 @@ def _is_whitelisted(addr: str, text: str):
     except Exception:
         pass
     return False, None
-
 def _risk_verdict(addr, text):
     score = 0
     neg = []
@@ -1219,7 +1057,6 @@ def _risk_verdict(addr, text):
     weights_neg = []
     weights_pos = []
     whitelisted, wl_type = _is_whitelisted(addr, text)
-
     liq = _parse_metric_from_dexline(text, "Liq")
     vol = _parse_metric_from_dexline(text, "Vol24h")
     if liq is not None:
@@ -1231,17 +1068,14 @@ def _risk_verdict(addr, text):
             w = 15; pos.append("High liquidity (≥${:,})".format(int(RISK_POSITIVE_LIQ))); weights_pos.append(w)
     if vol is not None and vol < RISK_VOL_LOW:
         w = 10; score += w; neg.append("Very low 24h volume (<$5k)"); weights_neg.append(w)
-
     t_upper = (text or "").upper()
     if whitelisted:
         w = 20; pos.append(f"Whitelisted by {wl_type}"); weights_pos.append(w)
     if ("USDT" in t_upper and "USDC" in t_upper) or ("WBTC" in t_upper and "ETH" in t_upper):
         w = 10; pos.append("Blue-chip pair context"); weights_pos.append(w)
-
     proxy = _parse_bool(text, "Proxy")
     if proxy is True:
         w = (0 if whitelisted else 15); score += w; neg.append("Upgradeable proxy (owner can change logic)"); weights_neg.append(w)
-
     roles = _parse_roles(text)
     if roles.get("owner", False):
         w = (0 if whitelisted else 20); score += w; neg.append("Owner privileges present"); weights_neg.append(w)
@@ -1251,7 +1085,6 @@ def _risk_verdict(addr, text):
         w = (0 if whitelisted else 10); score += w; neg.append("Pausing capability"); weights_neg.append(w)
     if roles.get("minter", False) or roles.get("masterMinter", False):
         w = (0 if whitelisted else 10); score += w; neg.append("Minting capability"); weights_neg.append(w)
-
     dom = _parse_domain_meta(text)
     try:
         if dom.get("created") and dom["created"] != "—":
@@ -1271,14 +1104,12 @@ def _risk_verdict(addr, text):
             w = 8; pos.append("Historical presence (Wayback found)"); weights_pos.append(w)
     except Exception:
         pass
-
     if score >= RISK_THRESH_HIGH:
         label = "HIGH RISK 🔴"
     elif score >= RISK_THRESH_CAUTION:
         label = "CAUTION 🟡"
     else:
         label = "LOW RISK 🟢"
-
     # --- Whitelist post-filter: drop zero-weight negatives and add a single positive marker ---
     try:
         if whitelisted or vars().get('is_whitelisted') or vars().get('whitelist_hit'):
@@ -1309,8 +1140,6 @@ def _risk_verdict(addr, text):
         pass
     
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
-
-
 def _wrap_kv_line(prefix: str, items, width: int = 96, indent: int = 2) -> str:
     """Wrap a 'Key: a; b; c; ...' line across multiple lines,
     keeping words intact and indenting continuation lines."""
@@ -1353,20 +1182,17 @@ def _append_verdict_block(addr, text):
     if rs.get("pos"):
         lines.append(_wrap_kv_line("✅ Positives", rs.get("pos")))
     return text + "\n" + "\n".join(lines)
-
 # ========================
 # On-chain lite inspector (ETH RPC)
 # ========================
 # --- RPC provider list & failover ---
 _RPC_LAST_GOOD = 0
-
 def _mask_host(u: str):
     try:
         o = urlparse(u)
         return (o.hostname or u).split('@')[-1]
     except Exception:
         return u
-
 def _parse_rpc_urls():
     # Chain override
     try:
@@ -1395,7 +1221,6 @@ def _parse_rpc_urls():
         if u and u not in seen:
             ordered.append(u); seen.add(u)
     return ordered
-
 def _rpc_call(method, params):
     urls = _parse_rpc_urls()
     if not urls:
@@ -1425,19 +1250,15 @@ def _rpc_call(method, params):
             last_err = e
             continue
     raise RuntimeError(f"All RPC providers failed for {method}: {type(last_err).__name__}: {last_err}")
-
 def _eth_getCode(addr):
     return _rpc_call("eth_getCode", [addr, "latest"])
-
 def _eth_getStorageAt(addr, slot):
     return _rpc_call("eth_getStorageAt", [addr, slot, "latest"])
-
 def _eth_call(addr, data, from_addr=None):
     callobj = {"to": addr, "data": data}
     if from_addr:
         callobj["from"] = from_addr
     return _rpc_call("eth_call", [callobj, "latest"])
-
 # Known selectors (precomputed)
 SEL_NAME            = "0x06fdde03"
 SEL_SYMBOL          = "0x95d89b41"
@@ -1447,20 +1268,16 @@ SEL_BALANCE_OF      = "0x70a08231"
 SEL_OWNER           = "0x8da5cb5b"
 SEL_GET_OWNER       = "0x8f32d59b"  # may fail; optional
 SEL_PAUSED          = "0x5c975abb"
-
 def _dec_uint(hexstr: str):
     try:
         return int(hexstr, 16)
     except Exception:
         return None
-
 def _dec_bool32(hexstr: str):
     return _dec_uint(hexstr) == 1
-
 def _dec_address32(hexstr: str):
     hx = hexstr[-40:]
     return "0x"+hx
-
 def _dec_string(ret: str):
     # Robust ABI string decoder: supports dynamic string and bytes32 fallback
     try:
@@ -1490,7 +1307,6 @@ def _dec_string(ret: str):
         return None
     except Exception:
         return None
-
 def _format_supply(ts, decimals):
     try:
         if ts is None or decimals is None:
@@ -1504,14 +1320,12 @@ def _format_supply(ts, decimals):
             return f"{human:,.6g}"
     except Exception:
         return None
-
 def _call_str(addr, selector):
     try:
         ret = _eth_call(addr, selector)
         return _dec_string(ret)
     except Exception:
         return None
-
 def _call_u8(addr, selector):
     try:
         ret = _eth_call(addr, selector)
@@ -1519,8 +1333,6 @@ def _call_u8(addr, selector):
         return _dec_uint(ret[2+64-2:2+64])
     except Exception:
         return None
-
-
 def _call_bytes32(addr: str, selector_hex: str):
     try:
         data = selector_hex if selector_hex.startswith("0x") else ("0x" + selector_hex)
@@ -1530,7 +1342,6 @@ def _call_bytes32(addr: str, selector_hex: str):
         return None
     except Exception:
         return None
-
 def _call_u256(addr, selector):
     try:
         ret = _eth_call(addr, selector)
@@ -1538,7 +1349,6 @@ def _call_u256(addr, selector):
         return _dec_uint(ret[2:])
     except Exception:
         return None
-
 def _call_bool(addr, selector):
     try:
         ret = _eth_call(addr, selector)
@@ -1546,7 +1356,6 @@ def _call_bool(addr, selector):
         return _dec_bool32(ret[2:66])
     except Exception:
         return None
-
 def _call_owner(addr):
     # try owner() then getOwner()
     try:
@@ -1562,12 +1371,9 @@ def _call_owner(addr):
     except Exception:
         pass
     return None
-
 EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 EIP1967_BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
 EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103"
-
-
 def _fmt_int(v):
     try:
         n = int(v)
@@ -1578,7 +1384,6 @@ def _fmt_int(v):
             return f"{f:,.0f}"
         except Exception:
             return str(v)
-
 def _short_addr(a: str, take: int = 6) -> str:
     try:
         a = str(a or "")
@@ -1587,7 +1392,6 @@ def _short_addr(a: str, take: int = 6) -> str:
         return a[:2+take] + "…" + a[-take:]
     except Exception:
         return a
-
 def _onchain_inspect(addr: str):
     """
     Robust on-chain inspector with optional Polygon/BSC fallback via RPC_URLS env.
@@ -1597,12 +1401,10 @@ def _onchain_inspect(addr: str):
         addr = (addr or "").lower()
         out = []
         info = {}
-
         try:
             pair_from_ds, chain_name = _ds_resolve_pair_and_chain(addr)
         except Exception:
             pair_from_ds, chain_name = None, None
-
         try:
             code = _eth_getCode(addr)
         except Exception:
@@ -1610,7 +1412,6 @@ def _onchain_inspect(addr: str):
         is_contract = bool(code and code != "0x")
         info["is_contract"] = is_contract
         out.append(f"Contract code: {'present' if is_contract else 'absent'}")
-
         if not is_contract and chain_name in ("polygon", "matic", "bsc", "bnb", "binance"):
             def _norm_list(x):
                 if isinstance(x, (list, tuple)):
@@ -1656,10 +1457,8 @@ def _onchain_inspect(addr: str):
                             _clear_chain_rpc_override()
                     except Exception:
                         pass
-
         if not info.get("is_contract"):
             return "\n".join(out), info
-
         name  = _call_str(addr, SEL_NAME)
         symbol= _call_str(addr, SEL_SYMBOL)
         dec   = _call_u8(addr, SEL_DECIMALS)
@@ -1673,7 +1472,6 @@ def _onchain_inspect(addr: str):
             fmt = _format_supply(ts, dec)
             if fmt is not None:
                 out.append(f"Total supply: ~{fmt}")
-
         owner = _call_owner(addr)
         if owner:
             info["owner"] = owner
@@ -1683,7 +1481,6 @@ def _onchain_inspect(addr: str):
             out.append("Paused: ✅"); info["paused"] = True
         elif paused is False:
             out.append("Paused: ❌"); info["paused"] = False
-
         impl = _eth_getStorageAt(addr, EIP1967_IMPL_SLOT)
         beacon = _eth_getStorageAt(addr, EIP1967_BEACON_SLOT)
         admin = _eth_getStorageAt(addr, EIP1967_ADMIN_SLOT)
@@ -1696,7 +1493,6 @@ def _onchain_inspect(addr: str):
             admin_addr = "0x" + admin[-40:]; out.append(f"EIP-1967 admin: {admin_addr}"); info["admin"] = admin_addr; proxy = True or proxy
         info["proxy"] = proxy
         if proxy: out.append("Proxy: ✅ (upgrade risk)")
-
         try:
             hp = _hp_ish(addr, chain_name=chain_name) if ADDR_RE.fullmatch(addr or "") else {}
             if hp:
@@ -1725,22 +1521,36 @@ def _onchain_inspect(addr: str):
                         info['holders'] = conc
         except Exception:
             pass
-
         return "\n".join(out), info
     except Exception as e:
         return f"On-chain: error: {e.__class__.__name__}", {}
-
 def _merge_onchain_into_risk(addr: str, info: dict):
+    """Merge on-chain info into risk cache (safe-patched)."""
     try:
         key = (addr or "").lower()
         if not key:
             return
         entry = RISK_CACHE.get(key) or {"score": 0, "label": "LOW RISK 🟢", "neg": [], "pos": [], "w_neg": [], "w_pos": []}
-        # Address-level whitelist: de-weight negatives
-        is_wl_addr = key in WL_ADDRESSES
+        # Example of merging logic (kept minimal to avoid regressions)
+        if isinstance(info, dict):
+            # merge positives/negatives if provided
+            for k in ("neg", "pos", "w_neg", "w_pos"):
+                if k in info and isinstance(info[k], list):
+                    entry[k].extend([x for x in info[k] if x not in entry[k]])
+            # adjust label/score if present
+            if "label" in info and isinstance(info["label"], str):
+                entry["label"] = info["label"]
+            if "score" in info:
+                try:
+                    entry["score"] = int(info["score"])
+                except Exception:
+                    pass
+        RISK_CACHE[key] = entry
+    except Exception:
+        pass
+
         def W(w):
             return 0 if is_wl_addr else w
-
         added = False
         def add_neg(reason, weight):
             nonlocal added
@@ -1751,7 +1561,6 @@ def _merge_onchain_into_risk(addr: str, info: dict):
                 entry["w_neg"].append(weight)
                 entry["score"] = int(min(100, entry.get("score", 0) + (weight or 0)))
                 added = True
-
         # Merge proxy/paused/owner (weights adapt to whitelist)
         if info.get("proxy"):
             add_neg("Upgradeable proxy (owner can change logic)", W(15))
@@ -1776,7 +1585,6 @@ def _merge_onchain_into_risk(addr: str, info: dict):
                         add_neg(f"{label}: {v}%", W(20))
         except Exception:
             pass
-
         # LP lock/burn inference
         try:
             lp = info.get("lp") or {}
@@ -1792,7 +1600,6 @@ def _merge_onchain_into_risk(addr: str, info: dict):
                 add_neg(f"LP concentrated in a single holder: {topH}%", W(30))
         except Exception:
             pass
-
         # Holder concentration (token)
         try:
             hc = info.get("holders") or {}
@@ -1805,7 +1612,6 @@ def _merge_onchain_into_risk(addr: str, info: dict):
                 add_neg(f"Top holders (top {hc.get('topN')}) own {top_total}%", W(25))
         except Exception:
             pass
-
 # Recompute label
         if entry["score"] >= RISK_THRESH_HIGH:
             entry["label"] = "HIGH RISK 🔴"
@@ -1817,7 +1623,6 @@ def _merge_onchain_into_risk(addr: str, info: dict):
             RISK_CACHE[key] = entry
     except Exception:
         pass
-
 # ========================
 # Report (HTML)
 # ========================
@@ -1836,10 +1641,6 @@ def _tg_send_document(token: str, chat_id: int, filepath: str, caption: str = No
             return False, {"ok": False, "status": r.status_code}
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
-
-
-
-
 # === Idempotent wrapper for Telegram document send (30s window)
 try:
     _tg_send_document_orig = _tg_send_document
@@ -1898,11 +1699,9 @@ def _render_report(addr: str, text: str):
         return path, html
     except Exception:
         return None, html
-
 # ========================
 # HTTP routes
 # ========================
-
 @app.route("/version", methods=["GET"])
 def version():
     try:
@@ -1911,8 +1710,6 @@ def version():
     except Exception:
         h = ""
     return jsonify({"ok": True, "version": APP_VERSION, "code_hash": h})
-
-
 # ------------------------
 # Diagnostic: check free limits (optional)
 # ------------------------
@@ -1931,24 +1728,20 @@ def limits_preview():
 @app.route("/healthz")
 def healthz():
     return jsonify({"ok": True, "version": APP_VERSION})
-
 @app.route("/reload_meta", methods=["POST", "GET"])
 def reload_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True})
-
 @app.route("/admin/reload_meta", methods=["POST"])
 @require_admin_secret
 def admin_reload_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
-
 @app.route("/admin/clear_meta", methods=["POST"])
 @require_admin_secret
 def admin_clear_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
-
 @app.route("/admin/diag", methods=["GET"])
 @require_admin_secret
 def admin_diag():
@@ -1984,7 +1777,6 @@ def admin_diag():
         except Exception as e:
             rpc.append({"url": _mask_host(u), "error": str(e)})
     return jsonify({"ok": True, "version": APP_VERSION, "diag": lines, "rpc": rpc})
-
 # ========================
 # Telegram webhook & callbacks
 # ========================
@@ -2013,7 +1805,6 @@ def _answer_why_quickly(cq, addr_hint=None):
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
-
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
@@ -2024,18 +1815,6 @@ def webhook(secret):
         update = request.get_json(force=True, silent=False)
     except Exception:
         return ("ok", 200)
-
-    # /upgrade (English default; RU via '/upgrade ru')
-    if "message" in update:
-        _msg = update["message"]
-        _chat = (_msg.get("chat") or {}).get("id")
-        _txt = (_msg.get("text") or "").strip()
-        _user_lang = str((_msg.get("from") or {}).get("language_code") or "en")
-        if _txt.startswith("/upgrade"):
-            _lang = _ux_resolve_lang(_txt, _user_lang)
-            _kb = _compress_keyboard(_ux_upgrade_keyboard(_lang))
-            _send_text(_chat, _ux_upgrade_text(_lang), reply_markup=_kb, logger=app.logger)
-            return ("ok", 200)
     # Callback queries
     if "callback_query" in update:
         cq = update["callback_query"]
@@ -2044,7 +1823,6 @@ def webhook(secret):
         msg_obj = cq.get("message", {})
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
-
         # Inflate hashed payloads early
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
@@ -2083,8 +1861,6 @@ def webhook(secret):
                         pass
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
                 return ("ok", 200)
-
-
         # >>> TF_HANDLER_EARLY
         if isinstance(data, str) and re.match(r'^(tf:(5|1|6|24)|/24h|5|1|6|24)$', data):
             lab = data.replace("tf:","").replace("/","")
@@ -2119,15 +1895,12 @@ def webhook(secret):
             return ("ok", 200)
         # <<< TF_HANDLER_EARLY
             # <<< TF_HANDLER_EARLY
-
-
         
         
 # Δ timeframe buttons
         # Δ timeframe buttons
             
 # [removed duplicate TF handler]
-
 # Dedupe
         cqid = cq.get("id")
         if cqid and seen_callbacks.get(cqid):
@@ -2135,7 +1908,6 @@ def webhook(secret):
             return ("ok", 200)
         if cqid:
             seen_callbacks.set(cqid, True)
-
         try:
             if data.startswith("qs2:"):
                 addrs = _extract_addrs_from_pair_payload(data)
@@ -2148,7 +1920,6 @@ def webhook(secret):
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
                 return ("ok", 200)
-
             if data.startswith("qs:"):
                 payload = data.split(":", 1)[1]
                 base_addr = payload.split("?", 1)[0]
@@ -2186,7 +1957,6 @@ def webhook(secret):
                 except Exception:
                     pass
                 return ("ok", 200)
-
             if data.startswith("more:"):
                 addr = data.split(":", 1)[1].strip().lower()
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "loading…", logger=app.logger)
@@ -2199,7 +1969,6 @@ def webhook(secret):
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
                 return ("ok", 200)
-
             
             # Δ timeframe buttons
             if data in {"5","1","6","24","/24h"} or data.startswith("tf:"):
@@ -2231,19 +2000,16 @@ def webhook(secret):
                     ans = "Δ: n/a (no data from source)"
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
                 return ("ok", 200)
-
             if data.startswith("why2:"):
                 addr_hint = data.split(":",1)[1].strip().lower()
                 _answer_why_deep(cq, addr_hint=addr_hint)
                 return ("ok", 200)
-
             if data.startswith("why"):
                 addr_hint = None
                 if ":" in data:
                     addr_hint = data.split(":", 1)[1].strip().lower()
                 _answer_why_quickly(cq, addr_hint=addr_hint)
                 return ("ok", 200)
-
             if data.startswith("hp:"):
                 addr = data.split(":",1)[1].strip().lower()
                 # Override with the base address from this message if available
@@ -2271,7 +2037,6 @@ def webhook(secret):
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
                 return ("ok", 200)
-
             if data.startswith("rep:"):
                 addr = data.split(":", 1)[1].strip().lower()
                 # Ensure on-chain factors are present in cache (best-effort)
@@ -2298,14 +2063,12 @@ def webhook(secret):
                     teaser = "Report ready.\n" + (caption + "\n" if caption else "") + "⚠️/✅ details above."
                     _send_text(chat_id, teaser, logger=app.logger)
                 return ("ok", 200)
-
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "unknown", logger=app.logger)
             return ("ok", 200)
         except Exception as e:
             _admin_debug(chat_id, f"callback error: {type(e).__name__}: {e}")
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "error", logger=app.logger)
             return ("ok", 200)
-
     # Regular messages
     msg = update.get("message") or update.get("edited_message")
     if not msg or (msg.get("from") or {}).get("is_bot"):
@@ -2317,7 +2080,6 @@ def webhook(secret):
     if not text:
         _send_text(chat_id, "empty", logger=app.logger)
         return ("ok", 200)
-
     if text.startswith("/"):
         parts = text.split(maxsplit=1)
         cmd = parts[0]
@@ -2426,7 +2188,6 @@ def webhook(secret):
             return ("ok", 200)
         _send_text(chat_id, LOC("en","unknown"), logger=app.logger)
         return ("ok", 200)
-
     # ##LIMITS_BEGIN_NC — enforce free plan limits and slow lane for plain text scans
     try:
         uid = int((((update.get('message') or {}).get('from') or {}).get('id') or ((update.get('callback_query') or {}).get('from') or {}).get('id') or chat_id) or 0)
@@ -2466,8 +2227,6 @@ def webhook(secret):
         _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
         _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
     return ("ok", 200)
-
-
 def _enrich_full(addr: str, base_text: str) -> str:
     try:
         text = base_text or ""
@@ -2524,8 +2283,6 @@ def _enrich_full(addr: str, base_text: str) -> str:
         return text
     except Exception:
         return base_text or ""
-
-
 def _kb_dedupe_all(kb: dict) -> dict:
     try:
         ik = (kb or {}).get("inline_keyboard") or []
@@ -2545,8 +2302,6 @@ def _kb_dedupe_all(kb: dict) -> dict:
         return {"inline_keyboard": out}
     except Exception:
         return kb or {}
-
-
 def _kb_strip_tf_rows(kb: dict) -> dict:
     """Remove any Δ timeframe rows regardless of encoding."""
     try:
@@ -2572,7 +2327,6 @@ def _kb_strip_tf_rows(kb: dict) -> dict:
         return {"inline_keyboard": out}
     except Exception:
         return kb or {}
-
 def _normalize_hp_line(addr, text, block:str) -> str:
     """Post-process on-chain block: if token is whitelisted/centralized,
     replace 'Honeypot quick-test: ⚠️ static only...' with a neutral skip note."""
@@ -2584,8 +2338,6 @@ def _normalize_hp_line(addr, text, block:str) -> str:
         return _normalize_hp_line(addr, text, block)
     except Exception:
         return _normalize_hp_line(addr, text, block)
-
-
 def _html_sanitize_risk(risk):
     try:
         neg = list(risk.get("neg") or [])
@@ -2610,14 +2362,11 @@ def _html_sanitize_risk(risk):
     except Exception:
         pass
     return risk
-
-
 # ========================
 # Post-processing wrappers (safe, non-invasive)
 # ========================
 try:
     import re as _re_patch
-
     # Wrap _enrich_full to adjust Honeypot line for whitelisted tokens
     if '_enrich_full' in globals():
         _enrich_full__orig = _enrich_full
@@ -2633,7 +2382,6 @@ try:
             except Exception:
                 pass
             return s
-
     # Wrap _render_report HTML to sanitize Signals and Positives
     if '_render_report' in globals():
         _render_report__orig = _render_report
@@ -2658,9 +2406,6 @@ try:
             return html
 except Exception:
     pass
-
-
-
 # ========================
 # HTML post-processing: Links + Metrics + Signals cleanup (POLYFIX)
 # ========================
@@ -2676,7 +2421,6 @@ def _qs_metric_delta_for_pair(pair: dict, tf: str):
         return v
     except Exception:
         return None
-
 def _qs_resolve_pair_and_chain(addr: str):
     try:
         if '_ds_resolve_pair_and_chain' in globals():
@@ -2693,7 +2437,6 @@ def _qs_resolve_pair_and_chain(addr: str):
     except Exception:
         pass
     return None, None
-
 def _qs_metrics_block(addr: str, plain_text: str):
     try:
         pair, chain = _qs_resolve_pair_and_chain(addr)
@@ -2704,18 +2447,15 @@ def _qs_metrics_block(addr: str, plain_text: str):
             s = "n/a" if (v is None) else (f"{float(v):+.2f}%")
             parts.append((tf, s))
         deltas = " ".join([f"{tf[1:]}: {s}" if tf[0] in ("m","h") else f"{tf}: {s}" for tf, s in parts])
-
         pos = neg = 0
         for ln in (plain_text or "").splitlines():
             t = ln.strip()
             if t.startswith("+"): pos += 1
             elif t.startswith("-"): neg += 1
-
         hp = ""
         for ln in (plain_text or "").splitlines():
             if ln.lower().startswith("honeypot"):
                 hp = ln.strip(); break
-
         lines = []
         lines.append(f"Δ snapshot ({(chain or 'n/a')}): {deltas}")
         if hp:
@@ -2724,7 +2464,6 @@ def _qs_metrics_block(addr: str, plain_text: str):
         return "\\n".join(lines)
     except Exception:
         return None
-
 def _qs_wrap_render_report(fn):
     base = getattr(fn, "_qs_orig", fn)
     def wrapped(addr: str, text: str):
@@ -2773,31 +2512,22 @@ def _qs_wrap_render_report(fn):
         return html
     wrapped._qs_orig = base
     return wrapped
-
 try:
     if '_render_report' in globals():
         _render_report = _qs_wrap_render_report(_render_report)
 except Exception:
     pass
-
-
 # === BEGIN: CHAIN RPC OVERRIDE HELPERS ===
 __OVERRIDE_RPC_URLS = []
-
 def _set_chain_rpc_override(urls):
     global __OVERRIDE_RPC_URLS
     __OVERRIDE_RPC_URLS = [u.strip() for u in (urls or []) if isinstance(u, str) and u.strip()]
-
 def _clear_chain_rpc_override():
     global __OVERRIDE_RPC_URLS
     __OVERRIDE_RPC_URLS = []
 # === END: CHAIN RPC OVERRIDE HELPERS ===
-
-
-
 # === PATCH: 0.3.18-polyfix2+deltas ===
 # Robust Δ-candles fallback (supports DEX_CANDLES_BASE) and chain-override fallback for Polygon/BSC.
-
 # Re-define _ds_candle_delta to add multi-base fallback
 def _ds_candle_delta(pair: dict, tf: str) -> tuple:
     try:
@@ -2845,7 +2575,6 @@ def _ds_candle_delta(pair: dict, tf: str) -> tuple:
         return (None, None)
     except Exception:
         return (None, None)
-
 # Keep a reference to the original inspector and provide a chain-fallback wrapper
 try:
     _onchain_inspect_base  # type: ignore
@@ -2854,7 +2583,6 @@ except NameError:
         _onchain_inspect_base = _onchain_inspect  # save original
     except NameError:
         _onchain_inspect_base = None  # in case code moved
-
 def _collect_chain_rpc_candidates():
     """Collect chain-specific RPC URL lists from env to probe when chain autodetect fails."""
     out = []
@@ -2882,7 +2610,6 @@ def _collect_chain_rpc_candidates():
     if bsc:
         out.append(("bsc", bsc))
     return out
-
 def _try_with_urls(addr_l: str, urls: list):
     """Temporarily override RPC set and check for contract code presence."""
     if not urls:
@@ -2900,7 +2627,6 @@ def _try_with_urls(addr_l: str, urls: list):
         return False
     finally:
         _clear_chain_rpc_override()
-
 def _onchain_inspect(addr: str):
     """Wrapper that falls back to Polygon/BSC RPCs when chain autodetect fails (fixes 'Contract code: absent')."""
     # First, try original behavior
@@ -2918,7 +2644,6 @@ def _onchain_inspect(addr: str):
             return text, info
     except Exception:
         pass
-
     # Otherwise probe configured chains explicitly
     addr_l = (addr or "").lower()
     for chain, urls in _collect_chain_rpc_candidates():
@@ -2937,14 +2662,9 @@ def _onchain_inspect(addr: str):
                 return text2 or text, info2 or info
             finally:
                 _clear_chain_rpc_override()
-
     # Fallback: return whatever we had
     return text, info
 # === /PATCH: 0.3.18-polyfix2+deltas ===
-
-
-
-
 # === PATCH: uptime & polydebug guard ===
 try:
     from flask import request, Response
@@ -2958,7 +2678,6 @@ try:
 except Exception as _e:
     # If Flask app not yet defined here, ignore — main app likely declares routes elsewhere.
     pass
-
 # Optionally disable noisy polydebug via env (without failing init)
 try:
     if os.environ.get("POLYDEBUG","0") in ("0","false","False",""):
@@ -2967,8 +2686,6 @@ try:
 except Exception:
     pass
 # === /PATCH: uptime & polydebug guard ===
-
-
 # --- Health route for uptime monitors (GET/HEAD /) ---
 try:
     from flask import request, Response
