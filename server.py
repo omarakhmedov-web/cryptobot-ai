@@ -2024,6 +2024,25 @@ def _answer_why_quickly(cq, addr_hint=None):
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
+
+    # --- EARLY START HANDLER (runs before anything else) ---
+    try:
+        upd = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        upd = {}
+    # unify message-like payloads
+    msg_like = upd.get("message") or upd.get("edited_message") or upd.get("channel_post") or {}
+    _txt_raw = (msg_like.get("text") or "")
+    _txt = (_txt_raw or "").strip().lower()
+    _chat = ((msg_like.get("chat") or {}).get("id") if msg_like else None)
+    if isinstance(_txt, str) and (_txt == "start" or _txt.startswith("/start")) and _chat:
+        _kb = _compress_keyboard(_ux_welcome_keyboard())
+        try:
+            _send_text(_chat, _ux_welcome_text("en"), reply_markup=_kb, logger=app.logger)
+        except Exception:
+            pass
+        return ("ok", 200)
+    # --- END EARLY START HANDLER ---
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
         return ("forbidden", 403)
     _maybe_reload_known(force=False)
