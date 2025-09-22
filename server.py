@@ -2039,8 +2039,8 @@ def webhook(secret):
         _txt = (_m.get("text") or "").strip().lower()
         _ul  = str((_m.get("from") or {}).get("language_code") or "en")
         if _txt in ("/start", "start"):
-            _lang = "ru" if _ul.lower().startswith("ru") else "en"
-            _kb = _compress_keyboard(_ux_upgrade_keyboard(_lang))
+            _lang = "en"
+            _kb = _compress_keyboard(_ux_welcome_keyboard())
             _send_text(_chat, _ux_welcome_text(_lang), reply_markup=_kb, logger=app.logger)
             return ("ok", 200)
 
@@ -2052,7 +2052,7 @@ def webhook(secret):
         _ul  = str((_m.get("from") or {}).get("language_code") or "en")
         if isinstance(_txt, str) and _txt.startswith("/upgrade"):
             _lang = _ux_lang(_txt, _ul)
-            _kb = _compress_keyboard(_ux_upgrade_keyboard(_lang))
+            _kb = _compress_keyboard(_ux_welcome_keyboard())
             _send_text(_chat, _ux_upgrade_text(_lang), reply_markup=_kb, logger=app.logger)
             return ("ok", 200)
 
