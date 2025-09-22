@@ -51,7 +51,7 @@ except Exception:
     DOMAIN_META_TTL_NEG = 120
 
 LOC = locale_text
-app = Flask
+app = Flask(__name__)
 
 # ========================
 # UPGRADE (safe, URL-only buttons)
