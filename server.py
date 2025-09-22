@@ -56,6 +56,37 @@ app = Flask(__name__)
 
 
 
+
+# ===== Upsell/Payments helpers (feature-flagged) =====
+def _pay_links() -> dict:
+    return {
+        "pro": os.getenv("STRIPE_LINK_PRO", os.getenv("PRICING_URL", "https://metridex.com/#pricing")),
+        "daypass": os.getenv("STRIPE_LINK_DAYPASS", os.getenv("PRICING_URL", "https://metridex.com/#pricing")),
+        "deep": os.getenv("STRIPE_LINK_DEEP", os.getenv("PRICING_URL", "https://metridex.com/#pricing")),
+        "teams": os.getenv("STRIPE_LINK_TEAMS", os.getenv("PRICING_URL", "https://metridex.com/#pricing")),
+    }
+
+def _upsell_enabled() -> bool:
+    return str(os.getenv("UPSALE_CALLBACKS_ENABLED","")).lower() in ("1","true","yes","on")
+
+def _upsell_text(kind: str) -> str:
+    m = {
+        "pro":   "Upgrade to Pro — $29/mo",
+        "daypass":"Day‑Pass — $9 for 24h Pro",
+        "deep":  "Deep report — $3 one‑off",
+        "teams": "Teams — from $99/mo",
+    }
+    return m.get(kind, "Upgrade")
+
+def _send_upsell_link(chat_id, kind: str, logger=None):
+    links = _pay_links()
+    url = links.get(kind) or links.get("pro")
+    caption = _upsell_text(kind)
+    try:
+        _send_text(chat_id, caption + "\n" + url, logger=logger)
+    except Exception:
+        pass
+
 def _ux_welcome_keyboard() -> dict:
     """Pricing + CTA keyboard (URL-only). Always safe."""
     try:
@@ -2070,7 +2101,35 @@ def webhook(secret):
         except Exception:
             pass
         return ("ok", 200)
+
+    # /buy commands -> send payment links directly (no callbacks needed)
+    if "message" in update:
+        _m = update.get("message") or {}
+        _chat = (_m.get("chat") or {}).get("id")
+        _txt = (_m.get("text") or "").strip().lower()
+        if _txt in ("/buy", "/buy pro", "/buy_pro"):
+            _send_upsell_link(_chat, "pro", logger=app.logger); return ("ok", 200)
+        if _txt in ("/buy day", "/buy daypass", "/buy_day"):
+            _send_upsell_link(_chat, "daypass", logger=app.logger); return ("ok", 200)
+        if _txt in ("/buy deep", "/buy_deep"):
+            _send_upsell_link(_chat, "deep", logger=app.logger); return ("ok", 200)
+        if _txt in ("/buy teams", "/buy_teams"):
+            _send_upsell_link(_chat, "teams", logger=app.logger); return ("ok", 200)
     # --- END EARLY START HANDLER ---
+    # EARLY upsell callbacks (feature-flagged)
+    if "callback_query" in update and _upsell_enabled():
+        cq = update.get("callback_query") or {}
+        data = str(cq.get("data") or "")
+        chat_id = ((cq.get("message") or {}).get("chat") or {}).get("id")
+        if data.startswith("upsell:") and chat_id:
+            kind = data.split(":",1)[1]
+            try:
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), text=_upsell_text(kind), logger=app.logger)
+            except Exception:
+                pass
+            _send_upsell_link(chat_id, kind, logger=app.logger)
+            return ("ok", 200)
+
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
         return ("forbidden", 403)
     _maybe_reload_known(force=False)
