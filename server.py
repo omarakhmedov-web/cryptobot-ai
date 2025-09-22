@@ -128,6 +128,18 @@ UPSELL_TEXT_RU = {
 
 
 
+
+def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
+    """Send a short upsell message (EN/RU). Non‑blocking; safe to call anywhere."""
+    try:
+        txt = (UPSELL_TEXT_RU if (str(lang).lower().startswith("ru")) else UPSELL_TEXT_EN).get(key)
+    except Exception:
+        txt = None
+    if txt:
+        try:
+            _send_text(chat_id, txt, logger=app.logger)
+        except Exception:
+            pass
 # ========================
 # Caches
 # ========================
@@ -2070,12 +2082,39 @@ def webhook(secret):
             if data.startswith("qs:"):
                 payload = data.split(":", 1)[1]
                 base_addr = payload.split("?", 1)[0]
+                # ##LIMITS_BEGIN_CB — enforce limits on refresh
+                try:
+                    uid = int((((update.get('message') or {}).get('from') or {}).get('id') or ((update.get('callback_query') or {}).get('from') or {}).get('id') or chat_id) or 0)
+                except Exception:
+                    uid = chat_id
+                try:
+                    if plan_of(uid) == "free":
+                        left = free_left(uid)
+                        if left <= 0:
+                            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "Free checks are over — open pricing.", logger=app.logger)
+                            _send_upsell(chat_id, "exhausted")
+                            return ("ok", 200)
+                        maybe_slow_lane(uid)
+                except Exception:
+                    pass
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = _qs_call_safe(quickscan_entrypoint, base_addr)
                 keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
+                try:
+                    uid = int((((update.get('message') or {}).get('from') or {}).get('id') or ((update.get('callback_query') or {}).get('from') or {}).get('id') or chat_id) or 0)
+                except Exception:
+                    uid = chat_id
+                try:
+                    if plan_of(uid) == "free":
+                        used = inc_free(uid)
+                        left = max(0, FREE_LIFETIME - int(used))
+                        if left == 1 or used == 1:
+                            _send_upsell(chat_id, "after_first")
+                except Exception:
+                    pass
                 return ("ok", 200)
 
             if data.startswith("more:"):
@@ -2277,6 +2316,21 @@ def webhook(secret):
             if not arg:
                 _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
             else:
+                # ##LIMITS_BEGIN — enforce free plan limits and slow lane
+                try:
+                    uid = int((((update.get('message') or {}).get('from') or {}).get('id') or ((update.get('callback_query') or {}).get('from') or {}).get('id') or chat_id) or 0)
+                except Exception:
+                    uid = chat_id
+                try:
+                    if plan_of(uid) == "free":
+                        left = free_left(uid)
+                        if left <= 0:
+                            _send_upsell(chat_id, "exhausted")
+                            return ("ok", 200)
+                        maybe_slow_lane(uid)
+                except Exception:
+                    pass
+                # ##LIMITS_END
                 try:
                     text_out, keyboard = _qs_call_safe(quickscan_entrypoint, arg)
                     base_addr = _extract_addr_from_text(arg) or _extract_base_addr_from_keyboard(keyboard)
@@ -2284,6 +2338,18 @@ def webhook(secret):
                     keyboard = _compress_keyboard(keyboard)
                     st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                     _store_addr_for_message(body, base_addr)
+                    try:
+                        uid = int((((update.get('message') or {}).get('from') or {}).get('id') or ((update.get('callback_query') or {}).get('from') or {}).get('id') or chat_id) or 0)
+                    except Exception:
+                        uid = chat_id
+                    try:
+                        if plan_of(uid) == "free":
+                            used = inc_free(uid)
+                            left = max(0, FREE_LIFETIME - int(used))
+                            if left == 1 or used == 1:
+                                _send_upsell(chat_id, "after_first")
+                    except Exception:
+                        pass
                 except Exception as e:
                     _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
                     _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
@@ -2291,6 +2357,21 @@ def webhook(secret):
         _send_text(chat_id, LOC("en","unknown"), logger=app.logger)
         return ("ok", 200)
 
+    # ##LIMITS_BEGIN_NC — enforce free plan limits and slow lane for plain text scans
+    try:
+        uid = int((((update.get('message') or {}).get('from') or {}).get('id') or ((update.get('callback_query') or {}).get('from') or {}).get('id') or chat_id) or 0)
+    except Exception:
+        uid = chat_id
+    try:
+        if plan_of(uid) == "free":
+            left = free_left(uid)
+            if left <= 0:
+                _send_upsell(chat_id, "exhausted")
+                return ("ok", 200)
+            maybe_slow_lane(uid)
+    except Exception:
+        pass
+    # ##LIMITS_END_NC
     _send_text(chat_id, "Processing…", logger=app.logger)
     try:
         text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
@@ -2299,6 +2380,18 @@ def webhook(secret):
         keyboard = _compress_keyboard(keyboard)
         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
         _store_addr_for_message(body, base_addr)
+        try:
+            uid = int((((update.get('message') or {}).get('from') or {}).get('id') or ((update.get('callback_query') or {}).get('from') or {}).get('id') or chat_id) or 0)
+        except Exception:
+            uid = chat_id
+        try:
+            if plan_of(uid) == "free":
+                used = inc_free(uid)
+                left = max(0, FREE_LIFETIME - int(used))
+                if left == 1 or used == 1:
+                    _send_upsell(chat_id, "after_first")
+        except Exception:
+            pass
     except Exception as e:
         _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
         _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
