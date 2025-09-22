@@ -19,6 +19,9 @@ from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 from metri_domain_rdap import _rdap as __rdap_impl  # injected
 from flask import Flask
+import sqlite3
+import hmac
+from datetime import datetime, timedelta
 try:
     from polydebug_rpc import init_polydebug
     init_polydebug()  # запустится только при POLY_DEBUG=1
@@ -57,13 +60,79 @@ app = Flask(__name__)
 
 
 
+
+# ===== Entitlements (SQLite) =====
+DB_PATH = os.getenv("DB_PATH", "/tmp/metridex.db")
+
+def _db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""CREATE TABLE IF NOT EXISTS entitlements(
+        chat_id TEXT NOT NULL,
+        product TEXT NOT NULL,
+        expires_at INTEGER,
+        credits INTEGER DEFAULT 0,
+        created_at INTEGER NOT NULL
+    )""")
+    conn.commit()
+    return conn
+
+def grant_entitlement(chat_id: str, product: str, now_ts: int | None = None):
+    now_ts = now_ts or int(datetime.utcnow().timestamp())
+    conn = _db()
+    if product in ("pro", "teams"):
+        exp = now_ts + 30*24*3600
+        conn.execute("INSERT INTO entitlements(chat_id, product, expires_at, credits, created_at) VALUES (?,?,?,?,?)",
+                     (str(chat_id), product, exp, 0, now_ts))
+    elif product == "daypass":
+        exp = now_ts + 24*3600
+        conn.execute("INSERT INTO entitlements(chat_id, product, expires_at, credits, created_at) VALUES (?,?,?,?,?)",
+                     (str(chat_id), product, exp, 0, now_ts))
+    elif product == "deep":
+        conn.execute("INSERT INTO entitlements(chat_id, product, expires_at, credits, created_at) VALUES (?,?,?,?,?)",
+                     (str(chat_id), product, None, 1, now_ts))
+    conn.commit()
+
+def get_entitlements(chat_id: str):
+    conn = _db()
+    cur = conn.execute("SELECT product, expires_at, credits FROM entitlements WHERE chat_id=? ORDER BY created_at DESC", (str(chat_id),))
+    rows = cur.fetchall()
+    out = []
+    now_ts = int(datetime.utcnow().timestamp())
+    for p, exp, cr in rows:
+        if p in ("pro","daypass","teams"):
+            if exp is None or exp > now_ts:
+                out.append((p, exp, cr))
+        else:
+            out.append((p, exp, cr))
+    return out
+
+def has_active(chat_id: str, product: str) -> bool:
+    now_ts = int(datetime.utcnow().timestamp())
+    for p, exp, _ in get_entitlements(chat_id):
+        if p == product and (exp is None or exp > now_ts):
+            return True
+    return False
+
+def pop_deep_credit(chat_id: str) -> bool:
+    conn = _db()
+    cur = conn.execute("""SELECT rowid, credits FROM entitlements
+                          WHERE chat_id=? AND product='deep' AND credits>0
+                          ORDER BY created_at ASC LIMIT 1""", (str(chat_id),))
+    row = cur.fetchone()
+    if not row: return False
+    rid, cr = row
+    if cr <= 0: return False
+    conn.execute("UPDATE entitlements SET credits=credits-1 WHERE rowid=?", (rid,))
+    conn.commit()
+    return True
+
 # ===== Upsell/Payments helpers (feature-flagged) =====
 def _pay_links() -> dict:
     return {
-        "pro": os.getenv("STRIPE_LINK_PRO", os.getenv("PRICING_URL", "https://metridex.com/#pricing")),
-        "daypass": os.getenv("STRIPE_LINK_DAYPASS", os.getenv("PRICING_URL", "https://metridex.com/#pricing")),
-        "deep": os.getenv("STRIPE_LINK_DEEP", os.getenv("PRICING_URL", "https://metridex.com/#pricing")),
-        "teams": os.getenv("STRIPE_LINK_TEAMS", os.getenv("PRICING_URL", "https://metridex.com/#pricing")),
+        "pro": os.getenv("CRYPTO_LINK_PRO") or os.getenv("STRIPE_LINK_PRO") or os.getenv("PRICING_URL", "https://metridex.com/#pricing"),
+        "daypass": os.getenv("CRYPTO_LINK_DAYPASS") or os.getenv("STRIPE_LINK_DAYPASS") or os.getenv("PRICING_URL", "https://metridex.com/#pricing"),
+        "deep": os.getenv("CRYPTO_LINK_DEEP") or os.getenv("STRIPE_LINK_DEEP") or os.getenv("PRICING_URL", "https://metridex.com/#pricing"),
+        "teams": os.getenv("CRYPTO_LINK_TEAMS") or os.getenv("STRIPE_LINK_TEAMS") or os.getenv("PRICING_URL", "https://metridex.com/#pricing"),
     }
 
 def _upsell_enabled() -> bool:
@@ -1969,6 +2038,58 @@ def _render_report(addr: str, text: str):
 # HTTP routes
 # ========================
 
+
+@app.route("/crypto_webhook/<secret>", methods=["POST"])
+def crypto_webhook(secret):
+    if secret != os.getenv("CRYPTO_WEBHOOK_SECRET", ""):
+        return ("forbidden", 403)
+    try:
+        raw = request.get_data()
+        payload = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        return ("ok", 200)
+    sig = request.headers.get("X-Signature") or ""
+    hkey = os.getenv("CRYPTO_WEBHOOK_HMAC", "")
+    if hkey:
+        try:
+            mac = hmac.new(hkey.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(mac, sig):
+                return ("forbidden", 403)
+        except Exception:
+            return ("forbidden", 403)
+
+    kind = None
+    chat_id = None
+    try:
+        if isinstance(payload.get("event"), str):
+            if payload.get("event") in ("payment_succeeded","charge_confirmed","invoice_paid"):
+                kind = (payload.get("product") or "").strip().lower()
+                chat_id = str(payload.get("chat_id") or "").strip()
+        if not chat_id and isinstance(payload.get("event"), dict):
+            ev = payload.get("event") or {}
+            ev_type = (ev.get("type") or "").lower()
+            if "confirmed" in ev_type or "succeeded" in ev_type or "paid" in ev_type:
+                meta = ((payload.get("data") or {}).get("metadata") or {})
+                chat_id = str(meta.get("chat_id") or "").strip()
+                kind = str(meta.get("product") or "").strip().lower()
+    except Exception:
+        pass
+
+    if not chat_id or kind not in ("pro","daypass","deep","teams"):
+        return ("ok", 200)
+
+    try:
+        grant_entitlement(chat_id, kind)
+    except Exception:
+        pass
+
+    try:
+        _send_text(chat_id, f"Payment received: {kind}. Access granted ✅", logger=app.logger)
+    except Exception:
+        pass
+
+    return ("ok", 200)
+
 @app.route("/version", methods=["GET"])
 def version():
     try:
@@ -2129,6 +2250,22 @@ def webhook(secret):
                 pass
             _send_upsell_link(chat_id, kind, logger=app.logger)
             return ("ok", 200)
+        try:
+            ents = get_entitlements(chat_id)
+            if ents:
+                lines = ["", "Entitlements:"]
+                now_ts = int(datetime.utcnow().timestamp())
+                for p, exp, cr in ents:
+                    if exp:
+                        remain = max(0, exp - now_ts)
+                        hrs = int(remain/3600)
+                        lines.append(f"• {p} — {hrs}h left")
+                    elif p == "deep":
+                        lines.append(f"• deep — credits: {cr}")
+                _send_text(chat_id, "\n".join(lines), logger=app.logger)
+        except Exception:
+            pass
+        
 
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
         return ("forbidden", 403)
