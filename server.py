@@ -54,6 +54,34 @@ except Exception:
 LOC = locale_text
 app = Flask(__name__)
 
+
+
+def _ux_welcome_keyboard() -> dict:
+    """Pricing + CTA keyboard (URL-only). Always safe."""
+    try:
+        PRICING_URL = os.getenv("PRICING_URL", "https://metridex.com/#pricing")
+        HOWIT_URL   = os.getenv("HOWIT_URL",   "https://metridex.com/#how-it-works")
+        SAMPLE_URL  = os.getenv("SAMPLE_URL",  "https://metridex.com/sample-deep-report")
+        pro   = int(os.getenv("PRO_MONTHLY", "29") or "29")
+        teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
+        day   = int(os.getenv("DAY_PASS", "9") or "9")
+        deep  = int(os.getenv("DEEP_REPORT", "3") or "3")
+    except Exception:
+        PRICING_URL = "https://metridex.com/#pricing"
+        HOWIT_URL   = "https://metridex.com/#how-it-works"
+        SAMPLE_URL  = "https://metridex.com/sample-deep-report"
+        pro, teams, day, deep = 29, 99, 9, 3
+    return {"inline_keyboard": [
+        [{"text": f"Upgrade to Pro ${pro}", "url": PRICING_URL},
+         {"text": f"Day‑Pass ${day}", "url": PRICING_URL}],
+
+        [{"text": f"Deep ${deep}", "url": PRICING_URL},
+         {"text": f"Teams ${teams}", "url": PRICING_URL}],
+
+        [{"text": "How it works", "url": HOWIT_URL},
+         {"text": "Deep report sample", "url": SAMPLE_URL}]
+    ]}
+
 # ===== Upgrade helpers (URL-only; EN default) =====
 def _ux_lang(txt: str, user_lang: str) -> str:
     t = (txt or "").lower().strip()
