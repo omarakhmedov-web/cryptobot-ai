@@ -54,6 +54,58 @@ except Exception:
 LOC = locale_text
 app = Flask(__name__)
 
+
+# ===== Upgrade helpers (URL-only; EN default) =====
+def _ux_lang(txt: str, user_lang: str) -> str:
+    t = (txt or "").lower().strip()
+    if t.endswith(" ru") or t == "ru":
+        return "ru"
+    if t.endswith(" en") or t == "en":
+        return "en"
+    return "en"
+
+def _ux_upgrade_text(lang: str = "en") -> str:
+    pro = int(os.getenv("PRO_MONTHLY", "29") or "29")
+    teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
+    day = int(os.getenv("DAY_PASS", "9") or "9")
+    deep = int(os.getenv("DEEP_REPORT", "3") or "3")
+    if str(lang).lower().startswith("ru"):
+        return (
+            f"**Metridex Pro** — полный доступ к QuickScan\n"
+            f"• Pro ${pro}/мес — быстрый режим, Deep‑отчёты, экспорт\n"
+            f"• Teams ${teams}/мес — для команд/каналов\n"
+            f"• Day‑Pass ${day} — сутки Pro\n"
+            f"• Deep Report ${deep} — разовый подробный отчёт\n\n"
+            "Выбирай доступ ниже. Поддержка: @MetridexBot"
+        )
+    return (
+        f"**Metridex Pro** — full QuickScan access\n"
+        f"• Pro ${pro}/mo — fast lane, Deep reports, export\n"
+        f"• Teams ${teams}/mo — for teams/channels\n"
+        f"• Day‑Pass ${day} — 24h of Pro\n"
+        f"• Deep Report ${deep} — one detailed report\n\n"
+        "Choose your access below. Support: @MetridexBot"
+    )
+
+def _ux_upgrade_keyboard(lang: str = "en") -> dict:
+    PRICING_URL = os.getenv("PRICING_URL", "https://metridex.com/#pricing")
+    pro = int(os.getenv("PRO_MONTHLY", "29") or "29")
+    teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
+    day = int(os.getenv("DAY_PASS", "9") or "9")
+    deep = int(os.getenv("DEEP_REPORT", "3") or "3")
+    if str(lang).lower().startswith("ru"):
+        return {"inline_keyboard": [
+            [{"text": f"Оформить Pro ${pro}", "url": PRICING_URL},
+             {"text": f"Day‑Pass ${day}", "url": PRICING_URL}],
+            [{"text": f"Deep ${deep}", "url": PRICING_URL},
+             {"text": f"Teams ${teams}", "url": PRICING_URL}],
+        ]}
+    return {"inline_keyboard": [
+        [{"text": f"Upgrade to Pro ${pro}", "url": PRICING_URL},
+         {"text": f"Day‑Pass ${day}", "url": PRICING_URL}],
+        [{"text": f"Deep ${deep}", "url": PRICING_URL},
+         {"text": f"Teams ${teams}", "url": PRICING_URL}],
+    ]}
 # ========================
 # Pricing & Limits (non-invasive helpers)
 # ========================
@@ -1966,6 +2018,18 @@ def webhook(secret):
         update = request.get_json(force=True, silent=False)
     except Exception:
         return ("ok", 200)
+
+    # /upgrade command (EN default; RU via "/upgrade ru")
+    if "message" in update:
+        _m = update.get("message") or {}
+        _chat = (_m.get("chat") or {}).get("id")
+        _txt = (_m.get("text") or "").strip()
+        _ul  = str((_m.get("from") or {}).get("language_code") or "en")
+        if isinstance(_txt, str) and _txt.startswith("/upgrade"):
+            _lang = _ux_lang(_txt, _ul)
+            _kb = _compress_keyboard(_ux_upgrade_keyboard(_lang))
+            _send_text(_chat, _ux_upgrade_text(_lang), reply_markup=_kb, logger=app.logger)
+            return ("ok", 200)
 
     # Callback queries
     if "callback_query" in update:
