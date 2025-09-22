@@ -133,6 +133,16 @@ UPSELL_TEXT_RU = {
 # ========================
 # UPGRADE page copy (EN/RU) — used by /upgrade
 # ========================
+
+def _resolve_lang(requested: str, user_lang: str) -> str:
+    """Default EN. RU only if explicitly requested or '/upgrade ru' variant."""
+    req = (requested or "").lower().strip()
+    if req.endswith(" ru") or req == "ru":
+        return "ru"
+    if req.endswith(" en") or req == "en":
+        return "en"
+    # explicit toggle via callbacks handled elsewhere
+    return "en"
 def _upgrade_text(lang: str = "en") -> str:
     try:
         pro = int(os.getenv("PRO_MONTHLY", "29"))
@@ -165,18 +175,28 @@ def _upgrade_keyboard(lang: str = "en") -> dict:
         pro = int(os.getenv("PRO_MONTHLY", "29"))
         day = int(os.getenv("DAY_PASS", "9"))
         deep = int(os.getenv("DEEP_REPORT", "3"))
+        teams = int(os.getenv("TEAMS_MONTHLY", "99"))
     except Exception:
-        pro, day, deep = 29, 9, 3
+        pro, day, deep, teams = 29, 9, 3, 99
     if str(lang).lower().startswith("ru"):
         return {
             "inline_keyboard": [
                 [{"text": f"Оформить Pro ${pro}", "callback_data": "upsell:pro"},
                  {"text": f"Day‑Pass ${day}", "callback_data": "upsell:daypass"}],
                 [{"text": f"Deep ${deep}", "callback_data": "upsell:deep"},
-                 {"text": "Открыть @MetridexBot", "url": "https://t.me/MetridexBot"}],
+                 {"text": f"Teams ${teams}", "callback_data": "upsell:teams"}],
+                [{"text": "English version", "callback_data": "upsell:lang:en"}],
             ]
         }
     return {
+        "inline_keyboard": [
+            [{"text": f"Upgrade to Pro ${pro}", "callback_data": "upsell:pro"},
+             {"text": f"Day‑Pass ${day}", "callback_data": "upsell:daypass"}],
+            [{"text": f"Deep ${deep}", "callback_data": "upsell:deep"},
+             {"text": f"Teams ${teams}", "callback_data": "upsell:teams"}],
+            [{"text": "Русская версия", "callback_data": "upsell:lang:ru"}],
+        ]
+    }return {
         "inline_keyboard": [
             [{"text": f"Upgrade to Pro ${pro}", "callback_data": "upsell:pro"},
              {"text": f"Day‑Pass ${day}", "callback_data": "upsell:daypass"}],
@@ -2028,13 +2048,25 @@ def webhook(secret):
         txt = (msg.get("text") or "").strip()
         lang = str(((msg.get("from") or {}).get("language_code") or "en")).lower()
         if txt.startswith("/upgrade"):
-            kb = _compress_keyboard(_upgrade_keyboard(lang))
-            _send_text(chat_id, _upgrade_text(lang), reply_markup=kb, logger=app.logger)
+            # parse requested locale ("/upgrade ru" or "/upgrade en")
+            lang_req = "ru" if txt.lower().strip().endswith(" ru") else ("en" if txt.lower().strip().endswith(" en") else "")
+            lang_eff = _resolve_lang(lang_req, lang)
+            kb = _compress_keyboard(_upgrade_keyboard(lang_eff))
+            _send_text(chat_id, _upgrade_text(lang_eff), reply_markup=kb, logger=app.logger)
             return ("ok", 200)
     # Callback queries
     if "callback_query" in update:
         cq = update["callback_query"]
         data = cq.get("data","")
+        if str(data).startswith("upsell:lang:"):
+            lang_eff = "ru" if str(data).endswith(":ru") else "en"
+            try:
+                kb = _compress_keyboard(_upgrade_keyboard(lang_eff))
+                _send_text(cq["message"]["chat"]["id"], _upgrade_text(lang_eff), reply_markup=kb, logger=app.logger)
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), text="Language switched")
+            except Exception:
+                pass
+            return ("ok", 200)
         if str(data).startswith("upsell:") or data == "noop":
             try:
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), text="Handled — payments coming soon")
