@@ -1997,7 +1997,7 @@ def admin_diag():
 # ========================
 def _answer_why_quickly(cq, addr_hint=None):
     try:
-    msg_obj = cq.get("message", {}) or {}
+        msg_obj = cq.get("message", {}) or {}
         text = msg_obj.get("text") or ""
         addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
         info = RISK_CACHE.get(addr) if addr else None
