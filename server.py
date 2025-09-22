@@ -51,31 +51,25 @@ except Exception:
     DOMAIN_META_TTL_NEG = 120
 
 LOC = locale_text
-app = Flask(__name__)
+app = Flask
 
 # ========================
-# Pricing & Limits (non-invasive helpers)
-
+# UPGRADE (safe, URL-only buttons)
 # ========================
-# UPGRADE helpers (EN default; RU optionally)
-# ========================
-def _resolve_lang(requested: str, user_lang: str) -> str:
-    """Default EN unless explicitly requested RU. Accepts '/upgrade ru' or callback toggle."""
-    req = (requested or "").lower().strip()
-    if req.endswith(" ru") or req == "ru":
+def _ux_resolve_lang(txt: str, user_lang: str) -> str:
+    t = (txt or "").lower().strip()
+    if t.endswith(" ru") or t == "ru":
         return "ru"
-    if req.endswith(" en") or req == "en":
+    if t.endswith(" en") or t == "en":
         return "en"
     return "en"
 
-def _upgrade_text(lang: str = "en") -> str:
-    try:
-        pro = int(os.getenv("PRO_MONTHLY", "29"))
-        teams = int(os.getenv("TEAMS_MONTHLY", "99"))
-        day = int(os.getenv("DAY_PASS", "9"))
-        deep = int(os.getenv("DEEP_REPORT", "3"))
-    except Exception:
-        pro, teams, day, deep = 29, 99, 9, 3
+def _ux_upgrade_text(lang: str = "en") -> str:
+    import os
+    pro = int(os.getenv("PRO_MONTHLY", "29") or "29")
+    teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
+    day = int(os.getenv("DAY_PASS", "9") or "9")
+    deep = int(os.getenv("DEEP_REPORT", "3") or "3")
     if str(lang).lower().startswith("ru"):
         return (
             f"**Metridex Pro** — полный доступ к QuickScan\\n"
@@ -94,33 +88,32 @@ def _upgrade_text(lang: str = "en") -> str:
         "Choose your access below. Support: @MetridexBot"
     )
 
-def _upgrade_keyboard(lang: str = "en") -> dict:
-    try:
-        pro = int(os.getenv("PRO_MONTHLY", "29"))
-        day = int(os.getenv("DAY_PASS", "9"))
-        deep = int(os.getenv("DEEP_REPORT", "3"))
-        teams = int(os.getenv("TEAMS_MONTHLY", "99"))
-    except Exception:
-        pro, day, deep, teams = 29, 9, 3, 99
+def _ux_upgrade_keyboard(lang: str = "en") -> dict:
+    import os
+    pro = int(os.getenv("PRO_MONTHLY", "29") or "29")
+    teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
+    day = int(os.getenv("DAY_PASS", "9") or "9")
+    deep = int(os.getenv("DEEP_REPORT", "3") or "3")
+    # All buttons are URL-based to avoid touching callback handlers
     if str(lang).lower().startswith("ru"):
-        return {
-            "inline_keyboard": [
-                [{"text": f"Оформить Pro ${pro}", "callback_data": "upsell:pro"},
-                 {"text": f"Day‑Pass ${day}", "callback_data": "upsell:daypass"}],
-                [{"text": f"Deep ${deep}", "callback_data": "upsell:deep"},
-                 {"text": f"Teams ${teams}", "callback_data": "upsell:teams"}],
-                [{"text": "English version", "callback_data": "upsell:lang:en"}],
-            ]
-        }
-    return {
-        "inline_keyboard": [
-            [{"text": f"Upgrade to Pro ${pro}", "callback_data": "upsell:pro"},
-             {"text": f"Day‑Pass ${day}", "callback_data": "upsell:daypass"}],
-            [{"text": f"Deep ${deep}", "callback_data": "upsell:deep"},
-             {"text": f"Teams ${teams}", "callback_data": "upsell:teams"}],
-            [{"text": "Русская версия", "callback_data": "upsell:lang:ru"}],
-        ]
-    }
+        return {"inline_keyboard": [
+            [{"text": f"Оформить Pro ${pro}", "url": "https://metridex.com/#pricing"},
+             {"text": f"Day‑Pass ${day}", "url": "https://metridex.com/#pricing"}],
+            [{"text": f"Deep ${deep}", "url": "https://metridex.com/#pricing"},
+             {"text": f"Teams ${teams}", "url": "https://metridex.com/#pricing"}],
+            [{"text": "English version", "callback_data": "noop"}]
+        ]}
+    return {"inline_keyboard": [
+        [{"text": f"Upgrade to Pro ${pro}", "url": "https://metridex.com/#pricing"},
+         {"text": f"Day‑Pass ${day}", "url": "https://metridex.com/#pricing"}],
+        [{"text": f"Deep ${deep}", "url": "https://metridex.com/#pricing"},
+         {"text": f"Teams ${teams}", "url": "https://metridex.com/#pricing"}],
+        [{"text": "Русская версия", "callback_data": "noop"}]
+    ]}
+(__name__)
+
+# ========================
+# Pricing & Limits (non-invasive helpers)
 # ========================
 try:
     FREE_LIFETIME = int(os.getenv("FREE_LIFETIME", "2"))           # total free QuickScan per Telegram user
@@ -2032,43 +2025,25 @@ def webhook(secret):
     except Exception:
         return ("ok", 200)
 
-    # Command messages (/upgrade; EN by default, RU on explicit request or toggle)
+    # /upgrade (English default; RU via '/upgrade ru')
     if "message" in update:
-        msg = update["message"]
-        chat_id = (msg.get("chat") or {}).get("id")
-        txt = (msg.get("text") or "").strip()
-        user_lang = str(((msg.get("from") or {}).get("language_code") or "en"))
-        if txt.startswith("/upgrade"):
-            lang_req = "ru" if txt.lower().endswith(" ru") else ("en" if txt.lower().endswith(" en") else "")
-            lang_eff = _resolve_lang(lang_req, user_lang)
-            kb = _compress_keyboard(_upgrade_keyboard(lang_eff))
-            _send_text(chat_id, _upgrade_text(lang_eff), reply_markup=kb, logger=app.logger)
-        return ("ok", 200)
+        _msg = update["message"]
+        _chat = (_msg.get("chat") or {}).get("id")
+        _txt = (_msg.get("text") or "").strip()
+        _user_lang = str((_msg.get("from") or {}).get("language_code") or "en")
+        if _txt.startswith("/upgrade"):
+            _lang = _ux_resolve_lang(_txt, _user_lang)
+            _kb = _compress_keyboard(_ux_upgrade_keyboard(_lang))
+            _send_text(_chat, _ux_upgrade_text(_lang), reply_markup=_kb, logger=app.logger)
+            return ("ok", 200)
     # Callback queries
     if "callback_query" in update:
-        cq = update.get("callback_query") or {}
-        data = str(cq.get("data") or "")
-        if data.startswith("upsell:lang:"):
-            lang_eff = "ru" if data.endswith(":ru") else "en"
-            try:
-                kb = _compress_keyboard(_upgrade_keyboard(lang_eff))
-                _send_text((cq.get("message") or {}).get("chat", {}).get("id"), _upgrade_text(lang_eff), reply_markup=kb, logger=app.logger)
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), text="Language switched")
-            except Exception:
-                pass
-        return ("ok", 200)
-        if data.startswith("upsell:") or data == "noop":
-            try:
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), text="Handled — payments coming soon")
-            except Exception:
-                pass
-        return ("ok", 200)
-    cq = update["callback_query"]
-    chat_id = cq["message"]["chat"]["id"]
-    data = cq.get("data", "")
-    msg_obj = cq.get("message", {})
-    if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
-        return ("ok", 200)
+        cq = update["callback_query"]
+        chat_id = cq["message"]["chat"]["id"]
+        data = cq.get("data", "")
+        msg_obj = cq.get("message", {})
+        if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
+            return ("ok", 200)
 
         # Inflate hashed payloads early
         if data.startswith("cb:"):
@@ -2141,7 +2116,7 @@ def webhook(secret):
             else:
                 ans = "Δ: n/a (no data from source)"
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
-        return ("ok", 200)
+            return ("ok", 200)
         # <<< TF_HANDLER_EARLY
             # <<< TF_HANDLER_EARLY
 
@@ -2157,7 +2132,7 @@ def webhook(secret):
         cqid = cq.get("id")
         if cqid and seen_callbacks.get(cqid):
             tg_answer_callback(TELEGRAM_TOKEN, cq["id"], "updated", logger=app.logger)
-        return ("ok", 200)
+            return ("ok", 200)
         if cqid:
             seen_callbacks.set(cqid, True)
 
@@ -2325,11 +2300,11 @@ def webhook(secret):
                 return ("ok", 200)
 
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "unknown", logger=app.logger)
-        return ("ok", 200)
+            return ("ok", 200)
         except Exception as e:
             _admin_debug(chat_id, f"callback error: {type(e).__name__}: {e}")
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "error", logger=app.logger)
-        return ("ok", 200)
+            return ("ok", 200)
 
     # Regular messages
     msg = update.get("message") or update.get("edited_message")
@@ -2349,14 +2324,14 @@ def webhook(secret):
         arg = parts[1] if len(parts) > 1 else ""
         if cmd in ("/start", "/help"):
             _send_text(chat_id, LOC("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
-        return ("ok", 200)
+            return ("ok", 200)
         if cmd in ("/reload_meta", "/clear_meta"):
             if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
                 _send_text(chat_id, "403: forbidden", logger=app.logger)
                 return ("ok", 200)
             DOMAIN_META_CACHE.clear()
             _send_text(chat_id, "Meta cache cleared ✅", logger=app.logger)
-        return ("ok", 200)
+            return ("ok", 200)
         if cmd in ("/diag",):
             if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
                 _send_text(chat_id, "403: forbidden", logger=app.logger)
@@ -2397,7 +2372,7 @@ def webhook(secret):
             except Exception as e:
                 lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
             _send_text(chat_id, "Diag:\n" + "\n".join(lines), logger=app.logger)
-        return ("ok", 200)
+            return ("ok", 200)
         if cmd in ("/onchain",):
             if not arg:
                 _send_text(chat_id, "Usage: /onchain <contract_address>", logger=app.logger)
@@ -2406,7 +2381,7 @@ def webhook(secret):
                 details, meta = _onchain_inspect(base_addr)
                 _merge_onchain_into_risk(base_addr, meta)
                 _send_text(chat_id, "On-chain\n" + details, logger=app.logger)
-        return ("ok", 200)
+            return ("ok", 200)
         if cmd in ("/quickscan","/scan"):
             if not arg:
                 _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
@@ -2448,7 +2423,7 @@ def webhook(secret):
                 except Exception as e:
                     _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
                     _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
-        return ("ok", 200)
+            return ("ok", 200)
         _send_text(chat_id, LOC("en","unknown"), logger=app.logger)
         return ("ok", 200)
 
