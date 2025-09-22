@@ -129,6 +129,61 @@ UPSELL_TEXT_RU = {
 
 
 
+
+# ========================
+# UPGRADE page copy (EN/RU) — used by /upgrade
+# ========================
+def _upgrade_text(lang: str = "en") -> str:
+    try:
+        pro = int(os.getenv("PRO_MONTHLY", "29"))
+        teams = int(os.getenv("TEAMS_MONTHLY", "99"))
+        day = int(os.getenv("DAY_PASS", "9"))
+        deep = int(os.getenv("DEEP_REPORT", "3"))
+    except Exception:
+        pro, teams, day, deep = 29, 99, 9, 3
+
+    if str(lang).lower().startswith("ru"):
+        return (
+            f"**Metridex Pro** — полный доступ к QuickScan\\n"
+            f"• Pro ${pro}/мес — быстрый режим, Deep‑отчёты, экспорт\\n"
+            f"• Teams ${teams}/мес — для команд/каналов\\n"
+            f"• Day‑Pass ${day} — сутки Pro\\n"
+            f"• Deep Report ${deep} — разовый подробный отчёт\\n\\n"
+            "Выбирай доступ ниже. Поддержка: @MetridexBot"
+        )
+    return (
+        f"**Metridex Pro** — full QuickScan access\\n"
+        f"• Pro ${pro}/mo — fast lane, Deep reports, export\\n"
+        f"• Teams ${teams}/mo — for teams/channels\\n"
+        f"• Day‑Pass ${day} — 24h of Pro\\n"
+        f"• Deep Report ${deep} — one detailed report\\n\\n"
+        "Choose your access below. Support: @MetridexBot"
+    )
+
+def _upgrade_keyboard(lang: str = "en") -> dict:
+    try:
+        pro = int(os.getenv("PRO_MONTHLY", "29"))
+        day = int(os.getenv("DAY_PASS", "9"))
+        deep = int(os.getenv("DEEP_REPORT", "3"))
+    except Exception:
+        pro, day, deep = 29, 9, 3
+    if str(lang).lower().startswith("ru"):
+        return {
+            "inline_keyboard": [
+                [{"text": f"Оформить Pro ${pro}", "callback_data": "upsell:pro"},
+                 {"text": f"Day‑Pass ${day}", "callback_data": "upsell:daypass"}],
+                [{"text": f"Deep ${deep}", "callback_data": "upsell:deep"},
+                 {"text": "Открыть @MetridexBot", "url": "https://t.me/MetridexBot"}],
+            ]
+        }
+    return {
+        "inline_keyboard": [
+            [{"text": f"Upgrade to Pro ${pro}", "callback_data": "upsell:pro"},
+             {"text": f"Day‑Pass ${day}", "callback_data": "upsell:daypass"}],
+            [{"text": f"Deep ${deep}", "callback_data": "upsell:deep"},
+             {"text": "Open @MetridexBot", "url": "https://t.me/MetridexBot"}],
+        ]
+    }
 def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
     """Send a short upsell message (EN/RU). Non‑blocking; safe to call anywhere."""
     try:
@@ -1966,8 +2021,26 @@ def webhook(secret):
     except Exception:
         return ("ok", 200)
 
+    # Command messages (/upgrade)
+    if "message" in update:
+        msg = update["message"]
+        chat_id = ((msg.get("chat") or {}).get("id") or None)
+        txt = (msg.get("text") or "").strip()
+        lang = str(((msg.get("from") or {}).get("language_code") or "en")).lower()
+        if txt.startswith("/upgrade"):
+            kb = _compress_keyboard(_upgrade_keyboard(lang))
+            _send_text(chat_id, _upgrade_text(lang), reply_markup=kb, logger=app.logger)
+            return ("ok", 200)
     # Callback queries
     if "callback_query" in update:
+        cq = update["callback_query"]
+        data = cq.get("data","")
+        if str(data).startswith("upsell:") or data == "noop":
+            try:
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), text="Handled — payments coming soon")
+            except Exception:
+                pass
+            return ("ok", 200)
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
