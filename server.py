@@ -2038,10 +2038,13 @@ def webhook(secret):
         _chat = (_m.get("chat") or {}).get("id")
         _txt = (_m.get("text") or "").strip().lower()
         _ul  = str((_m.get("from") or {}).get("language_code") or "en")
-        if _txt in ("/start", "start"):
+        if _txt == "start" or _txt.startswith("/start"):
             _lang = "en"
             _kb = _compress_keyboard(_ux_welcome_keyboard())
-            _send_text(_chat, _ux_welcome_text(_lang), reply_markup=_kb, logger=app.logger)
+            try:
+                _send_text(_chat, _ux_welcome_text(_lang), reply_markup=_kb, logger=app.logger)
+            except Exception:
+                pass
             return ("ok", 200)
 
     # /upgrade (EN default; RU via "/upgrade ru")
@@ -2053,7 +2056,10 @@ def webhook(secret):
         if isinstance(_txt, str) and _txt.startswith("/upgrade"):
             _lang = _ux_lang(_txt, _ul)
             _kb = _compress_keyboard(_ux_welcome_keyboard())
-            _send_text(_chat, _ux_upgrade_text(_lang), reply_markup=_kb, logger=app.logger)
+            try:
+                _send_text(_chat, _ux_upgrade_text(_lang), reply_markup=_kb, logger=app.logger)
+            except Exception:
+                pass
             return ("ok", 200)
 
     # Callback queries
