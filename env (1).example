@@ -1,0 +1,53 @@
+# === Core ===
+APP_VERSION=0.3.18-polyfix2+deltas
+BOT_USERNAME=MetridexBot
+TELEGRAM_TOKEN=
+WEBHOOK_SECRET=
+WEBHOOK_HEADER_SECRET=
+ADMIN_CHAT_ID=
+ADMIN_SECRET=
+ALLOWED_CHAT_IDS=
+
+# === Ops ===
+USAGE_PATH=./usage.json
+CACHE_TTL_SECONDS=600
+HTTP_TIMEOUT=6.0
+KNOWN_AUTORELOAD_SEC=300
+USER_AGENT=MetridexBot/1.0
+
+# === Pricing & Limits ===
+FREE_LIFETIME=2
+SLOW_LANE_MS_FREE=3000
+PRO_MONTHLY=29
+TEAMS_MONTHLY=99
+DAY_PASS=9
+DEEP_REPORT=3
+PRO_OVERAGE_PER_100=5
+
+# === RPC ===
+# Preferred unified JSON:
+RPC_URLS={"eth":"https://eth.llamarpc.com","bsc":"https://bsc-dataseed.binance.org","polygon":"https://polygon-rpc.com"}
+# Legacy fallbacks (optional):
+ETH_RPC_URL=
+BSC_RPC_URL=
+BNB_RPC_URL=
+POLYGON_RPC_URL=
+ETH_RPC_URLS=
+
+# === Dex / Proxies (optional) ===
+DEX_BASE=
+DEX_CANDLES_BASE=
+
+# === Domain Meta (optional) ===
+DOMAIN_META_TTL=2592000
+DOMAIN_META_TTL_NEG=120
+KNOWN_DOMAINS_FILE_PATH=/opt/render/project/src/known_domains.json
+
+# === Risk knobs (optional) ===
+RISK_THRESH_HIGH=85
+RISK_THRESH_CAUTION=55
+RISK_VOL_LOW=50000
+RISK_POSITIVE_LIQ=1000000
+RISK_POSITIVE_AGE_Y=3
+TOPH_TTL=21600
+TEAMFINANCE_LOCKERS_JSON=
