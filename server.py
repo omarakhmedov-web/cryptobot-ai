@@ -54,7 +54,6 @@ except Exception:
 LOC = locale_text
 app = Flask(__name__)
 
-
 # ===== Upgrade helpers (URL-only; EN default) =====
 def _ux_lang(txt: str, user_lang: str) -> str:
     t = (txt or "").lower().strip()
@@ -71,18 +70,18 @@ def _ux_upgrade_text(lang: str = "en") -> str:
     deep = int(os.getenv("DEEP_REPORT", "3") or "3")
     if str(lang).lower().startswith("ru"):
         return (
-            f"**Metridex Pro** — полный доступ к QuickScan\n"
-            f"• Pro ${pro}/мес — быстрый режим, Deep‑отчёты, экспорт\n"
-            f"• Teams ${teams}/мес — для команд/каналов\n"
-            f"• Day‑Pass ${day} — сутки Pro\n"
-            f"• Deep Report ${deep} — разовый подробный отчёт\n\n"
-            "Выбирай доступ ниже. Поддержка: @MetridexBot"
+            "**Metridex Pro** — polnyi dostup k QuickScan\n"
+            f"• Pro ${pro}/mes — bystryi rezhim, Deep-otchety, eksport\n"
+            f"• Teams ${teams}/mes — dlya komand/kanalov\n"
+            f"• Day-Pass ${day} — sutki Pro\n"
+            f"• Deep Report ${deep} — razovyi podrobnyi otchet\n\n"
+            "Vybirai dostup nizhe. Podderzhka: @MetridexBot"
         )
     return (
-        f"**Metridex Pro** — full QuickScan access\n"
+        "**Metridex Pro** — full QuickScan access\n"
         f"• Pro ${pro}/mo — fast lane, Deep reports, export\n"
         f"• Teams ${teams}/mo — for teams/channels\n"
-        f"• Day‑Pass ${day} — 24h of Pro\n"
+        f"• Day-Pass ${day} — 24h of Pro\n"
         f"• Deep Report ${deep} — one detailed report\n\n"
         "Choose your access below. Support: @MetridexBot"
     )
@@ -95,17 +94,31 @@ def _ux_upgrade_keyboard(lang: str = "en") -> dict:
     deep = int(os.getenv("DEEP_REPORT", "3") or "3")
     if str(lang).lower().startswith("ru"):
         return {"inline_keyboard": [
-            [{"text": f"Оформить Pro ${pro}", "url": PRICING_URL},
-             {"text": f"Day‑Pass ${day}", "url": PRICING_URL}],
+            [{"text": f"Pro ${pro}", "url": PRICING_URL},
+             {"text": f"Day-Pass ${day}", "url": PRICING_URL}],
             [{"text": f"Deep ${deep}", "url": PRICING_URL},
              {"text": f"Teams ${teams}", "url": PRICING_URL}],
         ]}
     return {"inline_keyboard": [
         [{"text": f"Upgrade to Pro ${pro}", "url": PRICING_URL},
-         {"text": f"Day‑Pass ${day}", "url": PRICING_URL}],
+         {"text": f"Day-Pass ${day}", "url": PRICING_URL}],
         [{"text": f"Deep ${deep}", "url": PRICING_URL},
          {"text": f"Teams ${teams}", "url": PRICING_URL}],
     ]}
+
+def _ux_welcome_text(lang: str = "en") -> str:
+    if str(lang).lower().startswith("ru"):
+        return (
+            "Dobro pozhalovat v Metridex.\n"
+            "Otpravi adres kontrakta, TX hash ili ssylku — ya sdelayu QuickScan.\n"
+            "Komandy: /quickscan, /upgrade, /limits"
+        )
+    return (
+        "Welcome to Metridex.\n"
+        "Send a token address, TX hash, or a link — I'll run a QuickScan.\n"
+        "Commands: /quickscan, /upgrade, /limits"
+    )
+
 # ========================
 # Pricing & Limits (non-invasive helpers)
 # ========================
@@ -2019,9 +2032,21 @@ def webhook(secret):
     except Exception:
         return ("ok", 200)
 
-    # /upgrade command (EN default; RU via "/upgrade ru")
+    # /start or "start" -> welcome (do NOT trigger QuickScan)
     if "message" in update:
         _m = update.get("message") or {}
+        _chat = (_m.get("chat") or {}).get("id")
+        _txt = (_m.get("text") or "").strip().lower()
+        _ul  = str((_m.get("from") or {}).get("language_code") or "en")
+        if _txt in ("/start", "start"):
+            _lang = "ru" if _ul.lower().startswith("ru") else "en"
+            _kb = _compress_keyboard(_ux_upgrade_keyboard(_lang))
+            _send_text(_chat, _ux_welcome_text(_lang), reply_markup=_kb, logger=app.logger)
+            return ("ok", 200)
+
+    # /upgrade (EN default; RU via "/upgrade ru")
+    if "message" in update:
+        _m = update["message"]
         _chat = (_m.get("chat") or {}).get("id")
         _txt = (_m.get("text") or "").strip()
         _ul  = str((_m.get("from") or {}).get("language_code") or "en")
