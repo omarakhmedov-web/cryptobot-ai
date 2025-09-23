@@ -3259,3 +3259,12 @@ try:
         return jsonify(ok=True, version='0.3.44-callbacks-buy')
 except Exception:
     pass
+
+# ---- Version endpoint (forced) ----
+try:
+    from flask import jsonify
+    @app.get('/version')
+    def __version__():
+        return jsonify(ok=True, version='0.3.45-callbacks-buy-final')
+except Exception:
+    pass
