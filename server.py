@@ -3436,8 +3436,7 @@ def _handle_kbhtml(chat_id, bot=None):
 
 
 # ===== PATCH OVERRIDES (SAFE, APPENDED) =====
-# Version bump (takes precedence at import time)
-APP_VERSION = "0.3.64-anchor28-htmlbtn-final"
+APP_VERSION = "0.3.65-anchor28-htmlbtn-safe"
 
 def _build_buy_keyboard_priced(urls: dict) -> dict:
     def _btn(text, url):
@@ -3451,9 +3450,9 @@ def _build_buy_keyboard_priced(urls: dict) -> dict:
     rows = []
     row = []
     for key in ["deep","daypass","pro","teams"]:
-        url = (urls or {}).get(key) or ""
-        if isinstance(url, str) and url.startswith("http"):
-            row.append(_btn(labels[key], url))
+        u = (urls or {}).get(key) or ""
+        if isinstance(u, str) and u.startswith("http"):
+            row.append(_btn(labels[key], u))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -3465,31 +3464,31 @@ def _kb_compose_with_html(base_kb: dict) -> dict:
     import os as _os
     kb = {"inline_keyboard": list((base_kb or {}).get("inline_keyboard", []))}
     html_url = (_os.getenv("HTML_REPORT_URL") or _os.getenv("REPORT_HTML_URL") or _os.getenv("SITE_REPORT_URL") or "").strip()
-    if html_url.startswith("http"):
+    if isinstance(html_url, str) and html_url.startswith("http"):
         label = (_os.getenv("HTML_REPORT_LABEL") or "📄 HTML report").strip()
         kb["inline_keyboard"].append([{"text": label, "url": html_url}])
     return kb
 
 def _ux_welcome_keyboard() -> dict:
-    \"\"\"Payments keyboard (URL) + optional HTML report button (row below).\"\"\"
+    """Payments keyboard (URL) + optional HTML report button (row below)."""
     links = _pay_links()
-    base = _build_buy_keyboard_priced({
-        "deep": links.get("deep"),
-        "daypass": links.get("daypass"),
-        "pro": links.get("pro"),
-        "teams": links.get("teams"),
-    })
+    # Use temp map to avoid parser issues
+    _map = {}
+    _map["deep"] = links.get("deep")
+    _map["daypass"] = links.get("daypass")
+    _map["pro"] = links.get("pro")
+    _map["teams"] = links.get("teams")
+    base = _build_buy_keyboard_priced(_map)
     return _kb_compose_with_html(base)
 
 def _handle_kbforce(chat_id, bot=None):
     links = _pay_links()
-    base = _build_buy_keyboard_priced({
-        "deep": links.get("deep"),
-        "daypass": links.get("daypass"),
-        "pro": links.get("pro"),
-        "teams": links.get("teams"),
-    })
-    kb = _kb_compose_with_html(base)
+    _map = {}
+    _map["deep"] = links.get("deep")
+    _map["daypass"] = links.get("daypass")
+    _map["pro"] = links.get("pro")
+    _map["teams"] = links.get("teams")
+    kb = _kb_compose_with_html(_build_buy_keyboard_priced(_map))
     text = "Keyboard (payments + HTML report)"
     try:
         if bot is not None:
@@ -3502,13 +3501,12 @@ def _handle_kbforce(chat_id, bot=None):
 
 def _handle_kbhtml(chat_id, bot=None):
     links = _pay_links()
-    base = _build_buy_keyboard_priced({
-        "deep": links.get("deep"),
-        "daypass": links.get("daypass"),
-        "pro": links.get("pro"),
-        "teams": links.get("teams"),
-    })
-    kb = _kb_compose_with_html(base)
+    _map = {}
+    _map["deep"] = links.get("deep")
+    _map["daypass"] = links.get("daypass")
+    _map["pro"] = links.get("pro")
+    _map["teams"] = links.get("teams")
+    kb = _kb_compose_with_html(_build_buy_keyboard_priced(_map))
     text = "Keyboard with HTML report"
     try:
         if bot is not None:
