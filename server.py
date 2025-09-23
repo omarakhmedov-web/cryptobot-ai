@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.60-anchor28-htmlbtn")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.61-anchor28-site-report-addon")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -157,49 +157,11 @@ def _send_upsell_link(chat_id, kind: str, logger=None):
     except Exception:
         pass
 
-
-# --- injected: site/html helpers + keyboard wrapper ---
-def _site_url() -> str:
-    import os
-    url = (os.getenv("SITE_URL") or "https://metridex.com").strip()
-    return url
-
-def _html_report_url() -> str:
-    import os
-    u = (os.getenv("HTML_REPORT_URL") or "").strip()
-    if not u:
-        base = (os.getenv("SITE_URL") or "https://metridex.com").strip()
-        if base.endswith("/"):
-            base = base[:-1]
-        u = f"{base}/report"
-    return u
-
-def _keyboard_with_site_and_html(kb: dict) -> dict:
-    try:
-        if not isinstance(kb, dict):
-            return kb
-        ik = kb.get("inline_keyboard") or []
-        site = _site_url()
-        htmlu = _html_report_url()
-        extra_row = []
-        if isinstance(site, str) and site.startswith("http"):
-            extra_row.append({"text": "🌐 Website", "url": site})
-        if isinstance(htmlu, str) and htmlu.startswith("http"):
-            extra_row.append({"text": "📄 HTML report", "url": htmlu})
-        if extra_row:
-            ik.append(extra_row)
-            kb["inline_keyboard"] = ik
-        return kb
-    except Exception as _e:
-        print("KB_EXTEND_ERR", _e)
-        return kb
-
-
 def _ux_welcome_keyboard() -> dict:
     """Payments keyboard built from CRYPTO_LINK_* (URL-only).
        Buttons appear only for non-empty links. No site fallback."""
     links = _pay_links()
-    return _keyboard_with_site_and_html(build_buy_keyboard({
+    return build_buy_keyboard({
         "deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
@@ -268,7 +230,7 @@ def _ux_welcome_text(lang: str = "en") -> str:
     return (
         "Welcome to Metridex.\n"
         "Send a token address, TX hash, or a link — I'll run a QuickScan.\n"
-        "Commands: /quickscan, /upgrade, /limits" + "\nWebsite: " + _site_url()
+        "Commands: /quickscan, /upgrade, /limits"
     )
 
 # ========================
@@ -3404,4 +3366,39 @@ def build_buy_keyboard_priced():
     if row:
         rows.append(row)
     return {"inline_keyboard": rows}
+
+
+
+# --- injected: SITE/REPORT helpers & sender (safe additive) ---
+def _site_url() -> str:
+    import os
+    return (os.getenv("SITE_URL") or "https://metridex.com").strip()
+
+def _html_report_url() -> str:
+    import os
+    u = (os.getenv("HTML_REPORT_URL") or "").strip()
+    if u:
+        return u
+    base = (os.getenv("SITE_URL") or "https://metridex.com").strip()
+    if base.endswith("/"):
+        base = base[:-1]
+    return f"{base}/report"
+
+def _send_site_report_pack(chat_id, bot=None):
+    try:
+        site = _site_url()
+        rep  = _html_report_url()
+        # 1) send short line with website
+        text = f"Website: {site}"
+        if bot is not None:
+            bot.sendMessage(chat_id, text)
+        # 2) send two URL buttons
+        kb = {"inline_keyboard": [[
+            {"text": "🌐 Website", "url": site},
+            {"text": "📄 HTML report", "url": rep},
+        ]]}
+        if bot is not None:
+            bot.sendMessage(chat_id, "Links:", reply_markup=kb)
+    except Exception as e:
+        print("SITE_REPORT_SEND_ERR", e)
 
