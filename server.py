@@ -226,16 +226,13 @@ def _ux_welcome_text(lang: str = "en") -> str:
             "Dobro pozhalovat v Metridex.\n"
             "Otpravi adres kontrakta, TX hash ili ssylku — ya sdelayu QuickScan.\n"
             "Komandy: /quickscan, /upgrade, /limits"
-        
-        "\nhttps://metridex.com"
-)
+        )
     return (
         "Welcome to Metridex.\n"
         "Send a token address, TX hash, or a link — I'll run a QuickScan.\n"
         "Commands: /quickscan, /upgrade, /limits"
-    
-        "\nhttps://metridex.com"
-)
+    )
+
 
 def _ux_limits_text(lang: str = "en", user_id: int = 0) -> str:
     try:
@@ -259,8 +256,6 @@ def _ux_limits_text(lang: str = "en", user_id: int = 0) -> str:
         f"Pricing: Day Pass — ${DAY_PASS}; Pro — ${PRO_MONTHLY}/mo; Teams — from ${TEAMS_MONTHLY}/mo; Deep report — ${DEEP_REPORT}.\n"
         "Upgrade: /upgrade"
     )
-
-
 # ========================
 # Pricing & Limits (non-invasive helpers)
 # ========================
@@ -1496,7 +1491,7 @@ def _append_verdict_block(addr, text):
         }
     except Exception:
         pass
-    # Try to merge on-chain signals for a truthful overall score
+    # Try to merge on-chain signals for truthful overall score
     try:
         _details, _meta = _onchain_inspect(addr)
         _merge_onchain_into_risk(addr, _meta)
@@ -2325,25 +2320,6 @@ def webhook(secret):
             _kb = _compress_keyboard(_ux_welcome_keyboard())
             try:
                 _send_text(_chat, _ux_upgrade_text(_lang), reply_markup=_kb, logger=app.logger)
-            except Exception:
-                pass
-            return ("ok", 200)
-
-
-    # /limits (EN default; RU via "/limits ru")
-    if "message" in update:
-        _m = update["message"]
-        _chat = (_m.get("chat") or {}).get("id")
-        _txt = (_m.get("text") or "").strip()
-        _ul  = str((_m.get("from") or {}).get("language_code") or "en")
-        if isinstance(_txt, str) and _txt.startswith("/limits"):
-            _lang = _ux_lang(_txt, _ul)
-            try:
-                _uid = int(((_m.get("from") or {}).get("id")) or _chat or 0)
-            except Exception:
-                _uid = 0
-            try:
-                _send_text(_chat, _ux_limits_text(_lang, _uid), logger=app.logger)
             except Exception:
                 pass
             return ("ok", 200)
