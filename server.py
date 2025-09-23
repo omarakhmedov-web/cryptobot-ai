@@ -3339,14 +3339,6 @@ def _handle_kbforce(chat_id, bot=None):
     except Exception as e:
         print("KBFORCE_SEND_ERROR", e)
 
-
-# --- injected: label overrides via ENV ---
-import os as _os
-
-def _fmt_price(val: str):
-    s = (val or "").strip().replace(",", ".")
-    return f"${s}" if s and not s.startswith("$") else s
-
 def _btn_url(text, url):
     return {"text": text, "url": url}
 
@@ -3357,35 +3349,13 @@ def build_buy_keyboard_priced():
         "pro": _os.getenv("CRYPTO_LINK_PRO", "").strip(),
         "teams": _os.getenv("CRYPTO_LINK_TEAMS", "").strip(),
     }
-    prices = {
-        "deep": _fmt_price(_os.getenv("CRYPTO_PRICE_DEEP", "")),
-        "daypass": _fmt_price(_os.getenv("CRYPTO_PRICE_DAYPASS", "")),
-        "pro": _fmt_price(_os.getenv("CRYPTO_PRICE_PRO", "")),
-        "teams": _fmt_price(_os.getenv("CRYPTO_PRICE_TEAMS", "")),
+    # Hard labels:
+    labels = {
+        "deep":   "🔎 Deep report — $3",
+        "daypass":"⏱ Day Pass — $9",
+        "pro":    "⚙️ Pro — $29",
+        "teams":  "👥 Teams — from $99",
     }
-    # ENV label overrides; if empty — fallback to default + price
-    labels_env = {
-        "deep": _os.getenv("CRYPTO_LABEL_DEEP", "").strip(),
-        "daypass": _os.getenv("CRYPTO_LABEL_DAYPASS", "").strip(),
-        "pro": _os.getenv("CRYPTO_LABEL_PRO", "").strip(),
-        "teams": _os.getenv("CRYPTO_LABEL_TEAMS", "").strip(),
-    }
-    defaults = {
-        "deep": "🔎 Deep report",
-        "daypass": "⏱ Day Pass",
-        "pro": "⚙️ Pro",
-        "teams": "👥 Teams",
-    }
-    labels = {}
-    for k in ["deep","daypass","pro","teams"]:
-        if labels_env[k]:
-            labels[k] = labels_env[k]
-        else:
-            label = defaults[k]
-            if prices[k]:
-                label = f"{label} {prices[k]}"
-            labels[k] = label
-
     rows, row = [], []
     for key in ["deep","daypass","pro","teams"]:
         url = links.get(key)
