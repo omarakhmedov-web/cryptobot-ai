@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.18-polyfix2+deltas")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.46-anchor-28")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -2210,6 +2210,7 @@ def webhook(secret):
         upd = request.get_json(force=True, silent=True) or {}
     except Exception:
         upd = {}
+    update = upd  # alias for legacy code paths
     # unify message-like payloads
     msg_like = upd.get("message") or upd.get("edited_message") or upd.get("channel_post") or {}
     _txt_raw = (msg_like.get("text") or "")
