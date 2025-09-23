@@ -3520,3 +3520,76 @@ def _handle_kbhtml(chat_id, bot=None):
             print("KBHTML_SEND_ERROR", e)
         except Exception:
             pass
+
+
+# ===== OVERRIDES: force /start greeting + keyboard via handle_update wrapper =====
+def _welcome_text() -> str:
+    import os as _os
+    site = (_os.getenv("SITE_URL") or "https://metridex.com").strip()
+    return f"Choose your access below. Support: @MetridexBot • Site: {site}"
+
+def _build_buy_keyboard_priced(urls: dict) -> dict:
+    def _btn(text, url):
+        return {"text": text, "url": url}
+    labels = {
+        "deep":   "🔎 Deep report — $3",
+        "daypass":"⏱ Day Pass — $9",
+        "pro":    "⚙️ Pro — $29",
+        "teams":  "👥 Teams — from $99",
+    }
+    rows, row = [], []
+    for key in ["deep","daypass","pro","teams"]:
+        u = (urls or {}).get(key) or ""
+        if isinstance(u, str) and u.startswith("http"):
+            row.append(_btn(labels[key], u))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return {"inline_keyboard": rows}
+
+def _kb_compose_with_html(base_kb: dict) -> dict:
+    import os as _os
+    kb = {"inline_keyboard": list((base_kb or {}).get("inline_keyboard", []))}
+    html_url = (_os.getenv("HTML_REPORT_URL") or _os.getenv("REPORT_HTML_URL") or _os.getenv("SITE_REPORT_URL") or "").strip()
+    if isinstance(html_url, str) and html_url.startswith("http"):
+        label = (_os.getenv("HTML_REPORT_LABEL") or "📄 HTML report").strip()
+        kb["inline_keyboard"].append([{"text": label, "url": html_url}])
+    return kb
+
+def _send_priced_keyboard(chat_id, bot=None):
+    links = _pay_links()
+    mp = {"deep": links.get("deep"), "daypass": links.get("daypass"), "pro": links.get("pro"), "teams": links.get("teams")}
+    base = _build_buy_keyboard_priced(mp)
+    kb = _kb_compose_with_html(base)
+    if bot is not None:
+        bot.sendMessage(chat_id, _welcome_text(), reply_markup={"inline_keyboard": kb["inline_keyboard"]})
+
+# Wrap existing handle_update (if present) to intercept /start
+try:
+    _orig_handle_update = handle_update  # type: ignore
+except Exception:
+    _orig_handle_update = None
+
+def handle_update(update, bot=None):  # noqa: F811
+    try:
+        t = (update.get("message") or {}).get("text") or ""
+        if isinstance(t, str) and t.strip().lower().startswith("/start"):
+            chat_id = (update.get("message") or {}).get("chat", {}).get("id")
+            if chat_id:
+                try:
+                    _send_priced_keyboard(chat_id, bot=bot)
+                except Exception as e:
+                    try:
+                        print("START_WRAPPER_SEND_ERROR", e)
+                    except Exception:
+                        pass
+                return ("ok", 200)
+    except Exception as e:
+        try:
+            print("START_WRAPPER_ERROR", e)
+        except Exception:
+            pass
+    if _orig_handle_update is not None:
+        return _orig_handle_update(update, bot=bot)
+    return ("ok", 200)
