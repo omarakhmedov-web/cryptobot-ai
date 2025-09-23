@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.61-anchor28-site-report-addon")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.62-anchor28-site-report-safe")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -3369,7 +3369,7 @@ def build_buy_keyboard_priced():
 
 
 
-# --- injected: SITE/REPORT helpers & sender (safe additive) ---
+# --- injected (safe additive): website/report helpers + sender ---
 def _site_url() -> str:
     import os
     return (os.getenv("SITE_URL") or "https://metridex.com").strip()
@@ -3384,15 +3384,14 @@ def _html_report_url() -> str:
         base = base[:-1]
     return f"{base}/report"
 
-def _send_site_report_pack(chat_id, bot=None):
+def _send_site_and_report(chat_id, bot=None):
     try:
         site = _site_url()
         rep  = _html_report_url()
-        # 1) send short line with website
-        text = f"Website: {site}"
+        # Message 1: website line
         if bot is not None:
-            bot.sendMessage(chat_id, text)
-        # 2) send two URL buttons
+            bot.sendMessage(chat_id, f"Website: {site}")
+        # Message 2: two URL buttons
         kb = {"inline_keyboard": [[
             {"text": "🌐 Website", "url": site},
             {"text": "📄 HTML report", "url": rep},
