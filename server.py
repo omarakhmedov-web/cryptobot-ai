@@ -259,6 +259,23 @@ def _ux_limits_text(lang: str = "en", user_id: int = 0) -> str:
 # ========================
 # Pricing & Limits (non-invasive helpers)
 # ========================
+
+def _is_admin_or_whitelisted(user_id) -> bool:
+    try:
+        uid = str(int(user_id))
+    except Exception:
+        uid = str(user_id)
+    try:
+        if ADMIN_CHAT_ID and uid == str(ADMIN_CHAT_ID):
+            return True
+    except Exception:
+        pass
+    try:
+        if ALLOWED_CHAT_IDS and uid in set(ALLOWED_CHAT_IDS):
+            return True
+    except Exception:
+        pass
+    return False
 try:
     FREE_LIFETIME = int(os.getenv("FREE_LIFETIME", "2"))           # total free QuickScan per Telegram user
     PRO_MONTHLY = int(os.getenv("PRO_MONTHLY", "29"))
@@ -286,6 +303,12 @@ def _usage_save(data):
         app.logger.exception("save usage failed")
 
 def plan_of(user_id: int) -> str:
+    # Admin/whitelisted bypass
+    try:
+        if _is_admin_or_whitelisted(user_id) or os.getenv("DEV_FREE", "").lower() in ("1","true","yes"):
+            return "pro"
+    except Exception:
+        pass
     try:
         rec = _usage_load().get(str(user_id)) or {}
         return rec.get("plan","free")
@@ -294,6 +317,11 @@ def plan_of(user_id: int) -> str:
 
 def free_left(user_id: int) -> int:
     try:
+        if _is_admin_or_whitelisted(user_id) or os.getenv("DEV_FREE", "").lower() in ("1","true","yes"):
+            return 999999
+    except Exception:
+        pass
+    try:
         rec = _usage_load().get(str(user_id)) or {}
         used = int(rec.get("free_used", 0))
         return max(0, FREE_LIFETIME - used)
@@ -301,6 +329,11 @@ def free_left(user_id: int) -> int:
         return max(0, FREE_LIFETIME)
 
 def inc_free(user_id: int) -> int:
+    try:
+        if _is_admin_or_whitelisted(user_id) or os.getenv("DEV_FREE", "").lower() in ("1","true","yes"):
+            return 0
+    except Exception:
+        pass
     try:
         db = _usage_load()
         key = str(user_id)
