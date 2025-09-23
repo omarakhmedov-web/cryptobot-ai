@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.59-anchor28-labels-global")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.60-anchor28-htmlbtn")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -157,11 +157,47 @@ def _send_upsell_link(chat_id, kind: str, logger=None):
     except Exception:
         pass
 
+
+# --- injected: priced URL buttons (fixed labels with prices) ---
+def _build_buy_keyboard_priced(urls: dict) -> dict:
+    def _btn(text, url):
+        return {"text": text, "url": url}
+    labels = {
+        "deep":   "🔎 Deep report — $3",
+        "daypass":"⏱ Day Pass — $9",
+        "pro":    "⚙️ Pro — $29",
+        "teams":  "👥 Teams — from $99",
+    }
+    rows, row = [], []
+    for key in ["deep","daypass","pro","teams"]:
+        url = (urls or {}).get(key) or ""
+        if isinstance(url, str) and url.startswith("http"):
+            row.append(_btn(labels[key], url))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return {"inline_keyboard": rows}
+
+
+
 def _ux_welcome_keyboard() -> dict:
-    """Payments keyboard built from CRYPTO_LINK_* (URL-only).
-       Buttons appear only for non-empty links. No site fallback."""
+    """Payments keyboard (URL) + optional HTML report button."""
     links = _pay_links()
-    return build_buy_keyboard({
+    kb = _build_buy_keyboard_priced({
+        "deep": links.get("deep"),
+        "daypass": links.get("daypass"),
+        "pro": links.get("pro"),
+        "teams": links.get("teams"),
+    })
+    # Optional HTML report link from ENV
+    import os as _os
+    html_url = (_os.getenv("HTML_REPORT_URL") or _os.getenv("REPORT_HTML_URL") or _os.getenv("SITE_REPORT_URL") or "").strip()
+    if html_url.startswith("http"):
+        # append an extra row with single button
+        row = [{"text": "📄 HTML report", "url": html_url}]
+        kb["inline_keyboard"].append(row)
+    return kb
         "deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
