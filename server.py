@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.60-anchor28-htmlbtn")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.63-anchor28-htmlbtn-clean")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -3433,3 +3433,83 @@ def _handle_kbhtml(chat_id, bot=None):
     except Exception as e:
         print("KBHTML_SEND_ERROR", e)
 
+
+
+# ===== OVERRIDES (safe & minimal) =====
+def _build_buy_keyboard_priced(urls: dict) -> dict:
+    def _btn(text, url):
+        return {"text": text, "url": url}
+    labels = {
+        "deep":   "🔎 Deep report — $3",
+        "daypass":"⏱ Day Pass — $9",
+        "pro":    "⚙️ Pro — $29",
+        "teams":  "👥 Teams — from $99",
+    }
+    rows, row = [], []
+    for key in ["deep","daypass","pro","teams"]:
+        url = (urls or {}).get(key) or ""
+        if isinstance(url, str) and url.startswith("http"):
+            row.append(_btn(labels[key], url))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return {"inline_keyboard": rows}
+
+def _kb_compose_with_html(base_kb: dict) -> dict:
+    import os as _os
+    kb = {"inline_keyboard": list((base_kb or {}).get("inline_keyboard", []))}
+    html_url = (_os.getenv("HTML_REPORT_URL") or _os.getenv("REPORT_HTML_URL") or _os.getenv("SITE_REPORT_URL") or "").strip()
+    if html_url.startswith("http"):
+        label = (_os.getenv("HTML_REPORT_LABEL") or "📄 HTML report").strip()
+        kb["inline_keyboard"].append([{"text": label, "url": html_url}])
+    return kb
+
+def _ux_welcome_keyboard() -> dict:
+    \"\"\"Payments keyboard (URL) + optional HTML report button.\"\"\"
+    links = _pay_links()
+    base = _build_buy_keyboard_priced({
+        "deep": links.get("deep"),
+        "daypass": links.get("daypass"),
+        "pro": links.get("pro"),
+        "teams": links.get("teams"),
+    })
+    return _kb_compose_with_html(base)
+
+def _handle_kbforce(chat_id, bot=None):
+    links = _pay_links()
+    base = _build_buy_keyboard_priced({
+        "deep": links.get("deep"),
+        "daypass": links.get("daypass"),
+        "pro": links.get("pro"),
+        "teams": links.get("teams"),
+    })
+    kb = _kb_compose_with_html(base)
+    text = "Keyboard (payments + HTML report)"
+    try:
+        if bot is not None:
+            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
+    except Exception as e:
+        try:
+            print("KBFORCE_SEND_ERROR", e)
+        except Exception:
+            pass
+
+def _handle_kbhtml(chat_id, bot=None):
+    links = _pay_links()
+    base = _build_buy_keyboard_priced({
+        "deep": links.get("deep"),
+        "daypass": links.get("daypass"),
+        "pro": links.get("pro"),
+        "teams": links.get("teams"),
+    })
+    kb = _kb_compose_with_html(base)
+    text = "Keyboard with HTML report"
+    try:
+        if bot is not None:
+            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
+    except Exception as e:
+        try:
+            print("KBHTML_SEND_ERROR", e)
+        except Exception:
+            pass
