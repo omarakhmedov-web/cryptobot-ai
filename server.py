@@ -1496,6 +1496,15 @@ def _append_verdict_block(addr, text):
         }
     except Exception:
         pass
+    # Try to merge on-chain signals for a truthful overall score
+    try:
+        _details, _meta = _onchain_inspect(addr)
+        _merge_onchain_into_risk(addr, _meta)
+        _entry = RISK_CACHE.get((addr or "").lower()) or {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
+        score = _entry.get("score", score); label = _entry.get("label", label)
+        rs = {"neg": _entry.get("neg", rs.get("neg", [])), "pos": _entry.get("pos", rs.get("pos", [])), "w_neg": _entry.get("w_neg", rs.get("w_neg", [])), "w_pos": _entry.get("w_pos", rs.get("w_pos", []))}
+    except Exception:
+        pass
     lines = [f"Trust verdict: {label} (score {score}/100)"]
     if rs.get("neg"):
         lines.append(_wrap_kv_line("⚠️ Signals", rs.get("neg")))
