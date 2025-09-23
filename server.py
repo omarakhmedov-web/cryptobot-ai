@@ -184,21 +184,14 @@ def _build_buy_keyboard_priced(urls: dict) -> dict:
 def _ux_welcome_keyboard() -> dict:
     """Payments keyboard (URL) + optional HTML report button."""
     links = _pay_links()
-    kb = _build_buy_keyboard_priced({
+    base = _build_buy_keyboard_priced({
         "deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
         "teams": links.get("teams"),
     })
-    # Optional HTML report link from ENV
-    import os as _os
-    html_url = (_os.getenv("HTML_REPORT_URL") or _os.getenv("REPORT_HTML_URL") or _os.getenv("SITE_REPORT_URL") or "").strip()
-    if html_url.startswith("http"):
-        # append an extra row with single button
-        row = [{"text": "📄 HTML report", "url": html_url}]
-        kb["inline_keyboard"].append(row)
-    return kb
-        "deep": links.get("deep"),
+    return _kb_compose_with_html(base)
+"deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
         "teams": links.get("teams"),
@@ -3367,8 +3360,15 @@ def _dbg_buy_links():
 
 
 def _handle_kbforce(chat_id, bot=None):
-    kb = build_buy_keyboard_priced()
-    text = "KB Force — priced URL buttons:"
+    links = _pay_links()
+    base = _build_buy_keyboard_priced({
+        "deep": links.get("deep"),
+        "daypass": links.get("daypass"),
+        "pro": links.get("pro"),
+        "teams": links.get("teams"),
+    })
+    kb = _kb_compose_with_html(base)
+    text = "Keyboard (payments + HTML report) ready:"
     try:
         if bot is not None:
             bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
@@ -3402,4 +3402,34 @@ def build_buy_keyboard_priced():
     if row:
         rows.append(row)
     return {"inline_keyboard": rows}
+
+
+
+# --- injected: keyboard composer with HTML report append ---
+def _kb_compose_with_html(base_kb: dict) -> dict:
+    import os as _os
+    kb = {"inline_keyboard": list(base_kb.get("inline_keyboard", []))}
+    html_url = (_os.getenv("HTML_REPORT_URL") or _os.getenv("REPORT_HTML_URL") or _os.getenv("SITE_REPORT_URL") or "").strip()
+    if html_url.startswith("http"):
+        label = (_os.getenv("HTML_REPORT_LABEL") or "📄 HTML report").strip()
+        kb["inline_keyboard"].append([{"text": label, "url": html_url}])
+    return kb
+
+
+
+def _handle_kbhtml(chat_id, bot=None):
+    links = _pay_links()
+    base = _build_buy_keyboard_priced({
+        "deep": links.get("deep"),
+        "daypass": links.get("daypass"),
+        "pro": links.get("pro"),
+        "teams": links.get("teams"),
+    })
+    kb = _kb_compose_with_html(base)
+    text = "Keyboard with HTML report:"
+    try:
+        if bot is not None:
+            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
+    except Exception as e:
+        print("KBHTML_SEND_ERROR", e)
 
