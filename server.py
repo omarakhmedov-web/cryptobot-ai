@@ -2214,8 +2214,6 @@ def webhook(secret):
     msg_like = upd.get("message") or upd.get("edited_message") or upd.get("channel_post") or {}
     _txt_raw = (msg_like.get("text") or "")
     _txt = (_txt_raw or "").strip().lower()
-    # ensure 'update' is available for early callback checks
-    update = upd
     _chat = ((msg_like.get("chat") or {}).get("id") if msg_like else None)
     if isinstance(_txt, str) and (_txt == "start" or _txt.startswith("/start")) and _chat:
         _kb = _compress_keyboard(_ux_welcome_keyboard())
@@ -3252,3 +3250,12 @@ try:
 except Exception:
     pass
 # --- /Health route ---
+
+# ---- Version endpoint (forced) ----
+try:
+    from flask import jsonify
+    @app.get('/version')
+    def __version__():
+        return jsonify(ok=True, version='0.3.43-crypto-callbacks')
+except Exception:
+    pass
