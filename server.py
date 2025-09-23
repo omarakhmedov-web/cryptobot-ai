@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.46-anchor-28")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.48-anchor28-forceurl")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -128,11 +128,12 @@ def pop_deep_credit(chat_id: str) -> bool:
 
 # ===== Upsell/Payments helpers (feature-flagged) =====
 def _pay_links() -> dict:
+    # Only use CRYPTO_LINK_*; if empty, keep empty (no fallback to site)
     return {
-        "pro": os.getenv("CRYPTO_LINK_PRO") or os.getenv("STRIPE_LINK_PRO") or os.getenv("PRICING_URL", "https://metridex.com/#pricing"),
-        "daypass": os.getenv("CRYPTO_LINK_DAYPASS") or os.getenv("STRIPE_LINK_DAYPASS") or os.getenv("PRICING_URL", "https://metridex.com/#pricing"),
-        "deep": os.getenv("CRYPTO_LINK_DEEP") or os.getenv("STRIPE_LINK_DEEP") or os.getenv("PRICING_URL", "https://metridex.com/#pricing"),
-        "teams": os.getenv("CRYPTO_LINK_TEAMS") or os.getenv("STRIPE_LINK_TEAMS") or os.getenv("PRICING_URL", "https://metridex.com/#pricing"),
+        "pro": os.getenv("CRYPTO_LINK_PRO") or "",
+        "daypass": os.getenv("CRYPTO_LINK_DAYPASS") or "",
+        "deep": os.getenv("CRYPTO_LINK_DEEP") or "",
+        "teams": os.getenv("CRYPTO_LINK_TEAMS") or "",
     }
 
 def _upsell_enabled() -> bool:
@@ -157,30 +158,15 @@ def _send_upsell_link(chat_id, kind: str, logger=None):
         pass
 
 def _ux_welcome_keyboard() -> dict:
-    """Pricing + CTA keyboard (URL-only). Always safe."""
-    try:
-        PRICING_URL = os.getenv("PRICING_URL", "https://metridex.com/#pricing")
-        HOWIT_URL   = os.getenv("HOWIT_URL",   "https://metridex.com/#how-it-works")
-        SAMPLE_URL  = os.getenv("SAMPLE_URL",  "https://metridex.com/sample-deep-report")
-        pro   = int(os.getenv("PRO_MONTHLY", "29") or "29")
-        teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
-        day   = int(os.getenv("DAY_PASS", "9") or "9")
-        deep  = int(os.getenv("DEEP_REPORT", "3") or "3")
-    except Exception:
-        PRICING_URL = "https://metridex.com/#pricing"
-        HOWIT_URL   = "https://metridex.com/#how-it-works"
-        SAMPLE_URL  = "https://metridex.com/sample-deep-report"
-        pro, teams, day, deep = 29, 99, 9, 3
-    return {"inline_keyboard": [
-        [{"text": f"Upgrade to Pro ${pro}", "url": PRICING_URL},
-         {"text": f"Day‑Pass ${day}", "url": PRICING_URL}],
-
-        [{"text": f"Deep ${deep}", "url": PRICING_URL},
-         {"text": f"Teams ${teams}", "url": PRICING_URL}],
-
-        [{"text": "How it works", "url": HOWIT_URL},
-         {"text": "Deep report sample", "url": SAMPLE_URL}]
-    ]}
+    """Payments keyboard built from CRYPTO_LINK_* (URL-only).
+       Buttons appear only for non-empty links. No site fallback."""
+    links = _pay_links()
+    return build_buy_keyboard({
+        "deep": links.get("deep"),
+        "daypass": links.get("daypass"),
+        "pro": links.get("pro"),
+        "teams": links.get("teams"),
+    })
 
 # ===== Upgrade helpers (URL-only; EN default) =====
 def _ux_lang(txt: str, user_lang: str) -> str:
