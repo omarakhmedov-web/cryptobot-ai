@@ -3269,3 +3269,28 @@ try:
         return jsonify(ok=True, version='0.3.45-callbacks-buy-final')
 except Exception:
     pass
+
+# --- injected buttonsfix: build URL inline keyboard for /buy ---
+def _btn_url(text, url):
+    return {"text": text, "url": url}
+
+def build_buy_keyboard(links: dict):
+    # links keys: deep, daypass, pro, teams (values must be full https URLs)
+    rows = []
+    mapping = [
+        ("🔎 Deep report", links.get("deep")),
+        ("⏱ Day Pass", links.get("daypass")),
+        ("⚙️ Pro", links.get("pro")),
+        ("👥 Teams", links.get("teams")),
+    ]
+    row = []
+    for label, url in mapping:
+        if url and isinstance(url, str) and url.startswith("http"):
+            row.append(_btn_url(label, url))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return {"inline_keyboard": rows}
+
+
