@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.63-anchor28-htmlbtn-clean")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.60-anchor28-htmlbtn")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -3435,7 +3435,10 @@ def _handle_kbhtml(chat_id, bot=None):
 
 
 
-# ===== OVERRIDES (safe & minimal) =====
+# ===== PATCH OVERRIDES (SAFE, APPENDED) =====
+# Version bump (takes precedence at import time)
+APP_VERSION = "0.3.64-anchor28-htmlbtn-final"
+
 def _build_buy_keyboard_priced(urls: dict) -> dict:
     def _btn(text, url):
         return {"text": text, "url": url}
@@ -3445,13 +3448,15 @@ def _build_buy_keyboard_priced(urls: dict) -> dict:
         "pro":    "⚙️ Pro — $29",
         "teams":  "👥 Teams — from $99",
     }
-    rows, row = [], []
+    rows = []
+    row = []
     for key in ["deep","daypass","pro","teams"]:
         url = (urls or {}).get(key) or ""
         if isinstance(url, str) and url.startswith("http"):
             row.append(_btn(labels[key], url))
         if len(row) == 2:
-            rows.append(row); row = []
+            rows.append(row)
+            row = []
     if row:
         rows.append(row)
     return {"inline_keyboard": rows}
@@ -3466,7 +3471,7 @@ def _kb_compose_with_html(base_kb: dict) -> dict:
     return kb
 
 def _ux_welcome_keyboard() -> dict:
-    \"\"\"Payments keyboard (URL) + optional HTML report button.\"\"\"
+    \"\"\"Payments keyboard (URL) + optional HTML report button (row below).\"\"\"
     links = _pay_links()
     base = _build_buy_keyboard_priced({
         "deep": links.get("deep"),
