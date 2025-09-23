@@ -227,14 +227,14 @@ def _ux_welcome_text(lang: str = "en") -> str:
             "Otpravi adres kontrakta, TX hash ili ssylku — ya sdelayu QuickScan.\n"
             "Komandy: /quickscan, /upgrade, /limits"
         
-        "https://metridex.com"
+        "\nhttps://metridex.com"
 )
     return (
         "Welcome to Metridex.\n"
         "Send a token address, TX hash, or a link — I'll run a QuickScan.\n"
         "Commands: /quickscan, /upgrade, /limits"
     
-        "https://metridex.com"
+        "\nhttps://metridex.com"
 )
 
 # ========================
