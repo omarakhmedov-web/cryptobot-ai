@@ -237,6 +237,30 @@ def _ux_welcome_text(lang: str = "en") -> str:
         "\nhttps://metridex.com"
 )
 
+def _ux_limits_text(lang: str = "en", user_id: int = 0) -> str:
+    try:
+        p = plan_of(int(user_id) if user_id else 0)
+    except Exception:
+        p = "free"
+    try:
+        left = free_left(int(user_id) if user_id else 0)
+    except Exception:
+        left = FREE_LIFETIME
+    if str(lang).lower().startswith("ru"):
+        return (
+            f"Тариф: {p}\n"
+            f"Бесплатных QuickScan осталось: {left}/{FREE_LIFETIME}\n"
+            f"Цены: Day Pass — ${DAY_PASS}; Pro — ${PRO_MONTHLY}/мес; Teams — от ${TEAMS_MONTHLY}/мес; Deep report — ${DEEP_REPORT}.\n"
+            "Апгрейд: /upgrade"
+        )
+    return (
+        f"Plan: {p}\n"
+        f"Free QuickScans left: {left}/{FREE_LIFETIME}\n"
+        f"Pricing: Day Pass — ${DAY_PASS}; Pro — ${PRO_MONTHLY}/mo; Teams — from ${TEAMS_MONTHLY}/mo; Deep report — ${DEEP_REPORT}.\n"
+        "Upgrade: /upgrade"
+    )
+
+
 # ========================
 # Pricing & Limits (non-invasive helpers)
 # ========================
@@ -2292,6 +2316,25 @@ def webhook(secret):
             _kb = _compress_keyboard(_ux_welcome_keyboard())
             try:
                 _send_text(_chat, _ux_upgrade_text(_lang), reply_markup=_kb, logger=app.logger)
+            except Exception:
+                pass
+            return ("ok", 200)
+
+
+    # /limits (EN default; RU via "/limits ru")
+    if "message" in update:
+        _m = update["message"]
+        _chat = (_m.get("chat") or {}).get("id")
+        _txt = (_m.get("text") or "").strip()
+        _ul  = str((_m.get("from") or {}).get("language_code") or "en")
+        if isinstance(_txt, str) and _txt.startswith("/limits"):
+            _lang = _ux_lang(_txt, _ul)
+            try:
+                _uid = int(((_m.get("from") or {}).get("id")) or _chat or 0)
+            except Exception:
+                _uid = 0
+            try:
+                _send_text(_chat, _ux_limits_text(_lang, _uid), logger=app.logger)
             except Exception:
                 pass
             return ("ok", 200)
