@@ -3303,7 +3303,6 @@ def _send_start(chat_id, bot=None):
     except Exception as e:
         print("START_SEND_ERROR", e)
 
-# Expose a /kbtest bot command for re-sending the keyboard
 def _handle_kbtest(chat_id, bot=None):
     kb = build_buy_keyboard_priced()
     text = "Keyboard test — priced URL buttons:"
@@ -3330,20 +3329,12 @@ def _dbg_buy_links():
     kb = build_buy_keyboard_priced()
     return {"links": kb["links"], "labels": kb["labels"]}, 200
 
-def _safe_add_debug_routes():
+
+def _handle_kbforce(chat_id, bot=None):
+    kb = build_buy_keyboard_priced()
+    text = "KB Force — priced URL buttons:"
     try:
-        existing = set()
-        try:
-            existing = {r.rule for r in app.url_map.iter_rules()}
-        except Exception:
-            pass
-        if "/debug/env" not in existing:
-            app.add_url_rule("/debug/env", endpoint="debug_env_hard", view_func=_dbg_env, methods=["GET"])
-        if "/debug/buy_links" not in existing:
-            app.add_url_rule("/debug/buy_links", endpoint="debug_buy_links_hard", view_func=_dbg_buy_links, methods=["GET"])
-    except Exception as _e:
-        print("DEBUG_ROUTES_REG_ERROR", _e)
-
-# Ensure routes are added at import time
-_safe_add_debug_routes()
-
+        if bot is not None:
+            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
+    except Exception as e:
+        print("KBFORCE_SEND_ERROR", e)
