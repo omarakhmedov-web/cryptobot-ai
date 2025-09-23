@@ -3280,3 +3280,106 @@ def build_buy_keyboard(links: dict):
     return {"inline_keyboard": rows}
 
 
+
+
+import os
+def _get_pay_links():
+    return {
+        "deep": os.getenv("CRYPTO_LINK_DEEP", "").strip(),
+        "daypass": os.getenv("CRYPTO_LINK_DAYPASS", "").strip(),
+        "pro": os.getenv("CRYPTO_LINK_PRO", "").strip(),
+        "teams": os.getenv("CRYPTO_LINK_TEAMS", "").strip(),
+    }
+
+
+
+# --- injected start override ---
+def _send_start(chat_id, bot=None):
+    kb = build_buy_keyboard_priced()
+    text = "Metridex — choose your plan:"
+    try:
+        if bot is not None:
+            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
+    except Exception as e:
+        print("START_SEND_ERROR", e)
+
+# Expose a /kbtest bot command for re-sending the keyboard
+def _handle_kbtest(chat_id, bot=None):
+    kb = build_buy_keyboard_priced()
+    text = "Keyboard test — priced URL buttons:"
+    try:
+        if bot is not None:
+            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
+    except Exception as e:
+        print("KBTEST_SEND_ERROR", e)
+
+@app.route("/debug/env")
+def debug_env():
+    import os, json
+    keys = ["CRYPTO_LINK_DEEP","CRYPTO_LINK_DAYPASS","CRYPTO_LINK_PRO","CRYPTO_LINK_TEAMS","UPSALE_CALLBACKS_ENABLED"]
+    data = {k: os.getenv(k, "") for k in keys}
+    return data, 200
+
+@app.route("/debug/buy_links")
+def debug_buy_links():
+    return _get_pay_links(), 200
+
+# Generic injection: if your webhook dispatcher uses 'update' dict, call kbtest on '/kbtest'
+def _maybe_kbtest(update, bot=None):
+    try:
+        t = (update.get("message") or {}).get("text")
+        if t and t.strip().lower() == "/kbtest":
+            chat_id = (update.get("message") or {}).get("chat", {}).get("id")
+            if chat_id:
+                _handle_kbtest(chat_id, bot=bot)
+                return True
+    except Exception as _e:
+        print("KBTEST_GENERIC_ERROR", _e)
+    return False
+
+
+# --- injected: priced URL buttons (no site fallback) ---
+import os as _os
+
+def _fmt_price(val: str):
+    kb = build_buy_keyboard_priced()
+    text = "Keyboard test — priced URL buttons:"
+    try:
+        if bot is not None:
+            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
+    except Exception as e:
+        print("KBTEST_SEND_ERROR", e)
+def _btn_url(text, url):
+    return {"text": text, "url": url}
+
+def build_buy_keyboard_priced():
+    links = {
+        "deep": _os.getenv("CRYPTO_LINK_DEEP", "").strip(),
+        "daypass": _os.getenv("CRYPTO_LINK_DAYPASS", "").strip(),
+        "pro": _os.getenv("CRYPTO_LINK_PRO", "").strip(),
+        "teams": _os.getenv("CRYPTO_LINK_TEAMS", "").strip(),
+    }
+    prices = {
+        "deep": _fmt_price(_os.getenv("CRYPTO_PRICE_DEEP", "")),
+        "daypass": _fmt_price(_os.getenv("CRYPTO_PRICE_DAYPASS", "")),
+        "pro": _fmt_price(_os.getenv("CRYPTO_PRICE_PRO", "")),
+        "teams": _fmt_price(_os.getenv("CRYPTO_PRICE_TEAMS", "")),
+    }
+    labels = {
+        "deep":  f"🔎 Deep report {prices['deep']}".strip(),
+        "daypass": f"⏱ Day Pass {prices['daypass']}".strip(),
+        "pro":   f"⚙️ Pro {prices['pro']}".strip(),
+        "teams": f"👥 Teams {prices['teams']}".strip(),
+    }
+    rows, row = [], []
+    order = ["deep","daypass","pro","teams"]
+    for key in order:
+        url = links.get(key)
+        if url and url.startswith("http"):
+            row.append(_btn_url(labels[key], url))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return {"inline_keyboard": rows}
+
