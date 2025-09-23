@@ -3256,6 +3256,6 @@ try:
     from flask import jsonify
     @app.get('/version')
     def __version__():
-        return jsonify(ok=True, version='0.3.43-crypto-callbacks')
+        return jsonify(ok=True, version='0.3.44-callbacks-buy')
 except Exception:
     pass
