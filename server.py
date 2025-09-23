@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.58-anchor28-pricedlabels")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.59-anchor28-labels-global")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -157,39 +157,17 @@ def _send_upsell_link(chat_id, kind: str, logger=None):
     except Exception:
         pass
 
-
-# --- injected: priced URL buttons (fixed labels with prices) ---
-def _build_buy_keyboard_priced(urls: dict) -> dict:
-    # urls is a dict like {"deep": "...", "daypass": "...", "pro": "...", "teams": "..."}
-    def _btn(text, url):
-        return {"text": text, "url": url}
-    labels = {
-        "deep":   "🔎 Deep report — $3",
-        "daypass":"⏱ Day Pass — $9",
-        "pro":    "⚙️ Pro — $29",
-        "teams":  "👥 Teams — from $99",
-    }
-    rows, row = [], []
-    for key in ["deep","daypass","pro","teams"]:
-        url = (urls or {}).get(key) or ""
-        if isinstance(url, str) and url.startswith("http"):
-            row.append(_btn(labels[key], url))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-    return {"inline_keyboard": rows}
-
-
 def _ux_welcome_keyboard() -> dict:
-    """Payments keyboard built from CRYPTO_LINK_* (URL-only) with fixed price labels."""
+    """Payments keyboard built from CRYPTO_LINK_* (URL-only).
+       Buttons appear only for non-empty links. No site fallback."""
     links = _pay_links()
-    return _build_buy_keyboard_priced({
+    return build_buy_keyboard({
         "deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
         "teams": links.get("teams"),
     })
+
 # ===== Upgrade helpers (URL-only; EN default) =====
 def _ux_lang(txt: str, user_lang: str) -> str:
     t = (txt or "").lower().strip()
@@ -3286,10 +3264,10 @@ def build_buy_keyboard(links: dict):
     # links keys: deep, daypass, pro, teams (values must be full https URLs)
     rows = []
     mapping = [
-        ("🔎 Deep report", links.get("deep")),
-        ("⏱ Day Pass", links.get("daypass")),
-        ("⚙️ Pro", links.get("pro")),
-        ("👥 Teams", links.get("teams")),
+        ("🔎 Deep report — $3", links.get("deep")),
+        ("⏱ Day Pass — $9", links.get("daypass")),
+        ("⚙️ Pro — $29", links.get("pro")),
+        ("👥 Teams — from $99", links.get("teams")),
     ]
     row = []
     for label, url in mapping:
