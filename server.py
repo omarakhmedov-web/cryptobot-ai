@@ -226,12 +226,16 @@ def _ux_welcome_text(lang: str = "en") -> str:
             "Dobro pozhalovat v Metridex.\n"
             "Otpravi adres kontrakta, TX hash ili ssylku — ya sdelayu QuickScan.\n"
             "Komandy: /quickscan, /upgrade, /limits"
-        )
+        
+        "https://metridex.com"
+)
     return (
         "Welcome to Metridex.\n"
         "Send a token address, TX hash, or a link — I'll run a QuickScan.\n"
         "Commands: /quickscan, /upgrade, /limits"
-    )
+    
+        "https://metridex.com"
+)
 
 # ========================
 # Pricing & Limits (non-invasive helpers)
