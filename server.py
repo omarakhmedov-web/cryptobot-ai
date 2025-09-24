@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.87-custodians-json")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.90-lp-dualprovider-cache")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -381,7 +381,12 @@ def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
 # ========================
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)          # general cache if needed
 seen_callbacks = SafeCache(ttl=300)               # dedupe callback ids
-cb_cache = SafeCache(ttl=600)                     # long callback payloads by hash
+cb_cache = SafeCache(ttl=600)
+
+# HTML fallback cache & throttle
+_SCAN_CACHE = {}
+_SCAN_TTL = int(os.environ.get('SCAN_TTL', '900'))
+_SCAN_LAST = {}  # domain -> ts                     # long callback payloads by hash
 
 # ===== Δ timeframe (DexScreener) helpers =====
 
@@ -549,6 +554,53 @@ def _hp_top_holders(token_or_lp_addr: str, chain_name: str) -> dict:
     except Exception:
         return {}
 
+
+
+def _scan_top_holder_html(lp_addr: str, chain_name: str) -> dict:
+    """
+    Fallback provider: parse *scan.com LP holders to find top holder/percent.
+    With simple cache (SCAN_TTL) and per-domain throttle (≥2s).
+    """
+    try:
+        ch = (chain_name or "").lower()
+        domain = "etherscan.io"
+        if ch in ("bsc","bscscan","bnb","binance"):
+            domain = "bscscan.com"
+        elif ch in ("polygon","matic"):
+            domain = "polygonscan.com"
+        key = f"SCAN:{lp_addr.lower()}:{ch}"
+        now = time.time()
+        ent = _SCAN_CACHE.get(key)
+        if ent and now - ent.get("ts", 0) < _SCAN_TTL:
+            return ent.get("body") or {}
+        # throttle
+        last = _SCAN_LAST.get(domain, 0)
+        if now - last < 2:
+            # too soon; return cached if any, else empty
+            return ent.get("body") if ent else {}
+        _SCAN_LAST[domain] = now
+        url_ps = f"https://{domain}/token/{lp_addr}#balances?ps=100"
+        headers = {"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
+        r = requests.get(url_ps, timeout=8, headers=headers)
+        html = r.text or ""
+        m = re.search(r'/address/([0-9a-fA-F]{40}).{0,300}?([0-9]+(?:\.[0-9]+)?)\s*%', html, flags=re.S)
+        if not m:
+            body = {}
+        else:
+            addr = "0x" + m.group(1).lower()
+            pct = float(m.group(2))
+            rows = re.findall(r'/address/[0-9a-fA-F]{40}', html)
+            body = {"holders":[{"address": addr, "balance": None, "percent": pct}], "totalSupply": None, "holders_count": len(rows)}
+        _SCAN_CACHE[key] = {"ts": now, "body": body}
+        return body or {}
+    except Exception:
+        return {}
+        addr = "0x" + m.group(1).lower()
+        pct = float(m.group(2))
+        rows = re.findall(r'/address/[0-9a-fA-F]{40}', html)
+        return {"holders":[{"address": addr, "balance": None, "percent": pct}], "totalSupply": None, "holders_count": len(rows)}
+    except Exception:
+        return {}
 def _percent(n, d, decimals=2):
     try:
         if d and d != 0:
@@ -561,6 +613,11 @@ def _infer_lp_status(pair_addr: str, chain_name: str) -> dict:
     try:
         data = _hp_top_holders(pair_addr, chain_name) or {}
         holders = data.get("holders") or []
+        if not holders:
+            data2 = _scan_top_holder_html(pair_addr, chain_name) or {}
+            if data2:
+                data = data2
+                holders = data2.get("holders") or []
         ts = int(data.get("totalSupply") or 0)
         dead_pct = 0.0
         uncx_pct = 0.0
@@ -2732,9 +2789,15 @@ def webhook(secret):
                     pass
                 holders = int(stats.get("holders_count", 0) or 0)
 
+                # If LP holders data missing, degrade to unknown verdict
+                data_insufficient = (holders == 0 and not th and (uncx + tfp + dead) == 0.0)
+
+
                 # verdict (very-lite heuristics)
                 verdict = "⚪ n/a"
-                if dead >= 95 or (uncx + tfp) >= 50:
+                if data_insufficient:
+                    verdict = "⚪ unknown (no LP data)"
+                elif dead >= 95 or (uncx + tfp) >= 50:
                     verdict = "🟢 likely locked"
                 elif thp >= 50 and (uncx + tfp) < 10 and dead < 50:
                     if th_contract or th_label:
@@ -2759,6 +2822,7 @@ def webhook(secret):
                 uncx_site = "https://app.unicrypt.network/"
 
                 lines = [
+                    ("ℹ️ data source: LP holders API/rate-limit" if data_insufficient else None),
                     f"🔒 LP lock (lite) — chain: {chain or 'n/a'}",
                     f"Verdict: {verdict}",
                     f"• Dead/renounced: {dead}%",
@@ -2779,7 +2843,7 @@ def webhook(secret):
                     tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "LP info", logger=app.logger)
                 except Exception:
                     pass
-                _send_text(chat_id, "\n".join(lines + link_lines), logger=app.logger)
+                _send_text(chat_id, "\n".join([x for x in (lines + link_lines) if x]), logger=app.logger)
                 return ("ok", 200)
 
 
