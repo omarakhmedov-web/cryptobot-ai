@@ -3853,6 +3853,19 @@ def _mx_api_put_report():
 
 @app.route("/api/make_share_link")
 def _mx_api_make_share_link():
+@app.route("/api/share_link_put", methods=["POST"])
+def _mx_api_share_link_put():
+    data = _mx_request.get_json(silent=True) or {}
+    addr = (data.get('addr') or '').strip()
+    html = data.get('html') or ''
+    if not addr or not html:
+        return _mx_jsonify(ok=False, error="addr and html required"), 400
+    _mx_put_report(addr, html)
+    token = _mx_make_token(addr)
+    site = _mx_site()
+    link = f"{site}/r/{token}" if site else f"/r/{token}"
+    return _mx_jsonify(ok=True, share_url=link)
+
     addr = (_mx_request.args.get('addr') or '').strip()
     if not addr:
         return _mx_jsonify(ok=False, error="addr required"), 400
@@ -3876,16 +3889,62 @@ def _mx_render_report(token):
 
 @app.route("/export/pdf/<addr>")
 def _mx_export_pdf(addr):
+
     html = _mx_get_report_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
-    pdf = _mx_export_pdf_bytes(html)
-    if pdf:
+    # 1) Try WeasyPrint (system deps)
+    try:
+        from weasyprint import HTML as _MX_HTML
+        pdf = _MX_HTML(string=html).write_pdf()
         resp = _mx_make_response(pdf, 200)
         resp.headers['Content-Type'] = 'application/pdf'
-        resp.headers['Content-Disposition'] = f'attachment; filename=\"{addr}.pdf\"'
+        resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
+        resp.headers['X-MX-PDF-Engine'] = 'weasyprint'
         return resp
-    # Fallback: HTML (never 404)
+    except Exception:
+        pass
+    # 2) Try xhtml2pdf (pure Python)
+    try:
+        from xhtml2pdf import pisa as _MX_PISA
+        from io import BytesIO as _MX_BytesIO
+        out = _MX_BytesIO()
+        result = _MX_PISA.CreatePDF(src=html, dest=out, encoding='utf-8')
+        if not result.err:
+            resp = _mx_make_response(out.getvalue(), 200)
+            resp.headers['Content-Type'] = 'application/pdf'
+            resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
+            resp.headers['X-MX-PDF-Engine'] = 'xhtml2pdf'
+            return resp
+    except Exception:
+        pass
+    # 3) Final fallback: minimal PDF via reportlab (always works with reportlab)
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+        from io import BytesIO as _MX_BytesIO
+        buf = _MX_BytesIO()
+        c = canvas.Canvas(buf, pagesize=letter)
+        c.setTitle(f"Metridex Report {addr}")
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(72, 720, "Metridex — Report")
+        c.setFont("Helvetica", 11)
+        c.drawString(72, 700, f"Address: {addr}")
+        import time as _mx_time
+        c.drawString(72, 684, f"Generated: {_mx_time.ctime()}")
+        c.setFont("Helvetica", 10)
+        c.drawString(72, 660, "Note: This is a minimal PDF fallback. Open HTML share link for full visuals.")
+        c.showPage()
+        c.save()
+        resp = _mx_make_response(buf.getvalue(), 200)
+        resp.headers['Content-Type'] = 'application/pdf'
+        resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
+        resp.headers['X-MX-PDF-Engine'] = 'reportlab-fallback'
+        return resp
+    except Exception:
+        pass
+    # 4) If everything fails, return HTML (should not happen if reportlab present)
     resp = _mx_make_response(html, 200)
     resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+    resp.headers['X-MX-PDF-Engine'] = 'html-fallback'
     return resp
 
 @app.route("/debug/selfshare_html")
