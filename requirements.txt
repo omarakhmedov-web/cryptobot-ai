@@ -1,3 +1,5 @@
 Flask==3.0.3
 gunicorn==22.0.0
 requests==2.32.3
+xhtml2pdf>=0.2.13
+reportlab>=3.6
