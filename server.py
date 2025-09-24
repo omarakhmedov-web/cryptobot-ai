@@ -3885,9 +3885,12 @@ def _mx_export_pdf(addr):
 def _mx_selfshare_html():
     # Create sample report and redirect immediately to /r/<token>
     addr = _mx_request.args.get('addr', '0x831753DD7087CaC61aB5644b308642cc1c33Dc13')
-    html = f\"\"\"<html><body style='font-family:Arial,sans-serif'>
-    <h2>Metridex — sample report</h2>
-    <p>Address: {addr}</p><p>Generated: {time.ctime()}</p></body></html>\"\"\"
+    html = (
+    "<html><body style='font-family:Arial,sans-serif'>"
+    "<h2>Metridex — sample report</h2>"
+    f"<p>Address: {addr}</p><p>Generated: {time.ctime()}</p>"
+    "</body></html>"
+)
     _mx_put_report(addr, html)
     token = _mx_make_token(addr)
     site = _mx_site()
