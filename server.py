@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.80-anchor32-sharelink")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.81-anchor33-sharelink+pdf")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -92,6 +92,16 @@ def _verify_share_token(token: str):
     except Exception:
         return None
 # === /Share link helpers ===
+
+# === Export PDF helpers (WeasyPrint if available) ===
+def _export_pdf_bytes_from_html(html: str):
+    try:
+        from weasyprint import HTML
+        pdf = HTML(string=html).write_pdf()
+        return pdf
+    except Exception:
+        return None
+# === /Export PDF helpers ===
 app = Flask(__name__)
 
 
@@ -1051,6 +1061,9 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
     if row:
         ik.append(row)
+        # PDF export row
+        if addr:
+            ik.append([{"text": "📥 Export PDF", "callback_data": f"pdf:{addr}"}])
     # Share link row
     try:
         if addr:
@@ -2755,6 +2768,17 @@ def webhook(secret):
                     link = "/r/invalid"
                 _send_text(chat_id, link, logger=app.logger)
                 return ("ok", 200)
+
+            if data.startswith("pdf:"):
+                addr = data.split(":",1)[1].strip().lower()
+                try:
+                    base = os.environ.get("SITE_URL") or os.environ.get("PRIMARY_URL") or ""
+                    link = (base.rstrip("/") + f"/export/pdf/{addr}") if base else (f"/export/pdf/{addr}")
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "exporting…", logger=app.logger)
+                except Exception:
+                    link = f"/export/pdf/{addr}"
+                _send_text(chat_id, link, logger=app.logger)
+                return ("ok", 200)
 if data.startswith("copyca:"):
                 addr = data.split(":",2)[2].strip().lower() if data.count(":")>=2 else data.split(":",1)[1].strip().lower()
                 try:
@@ -3704,4 +3728,43 @@ def serve_shared_report(token):
         except Exception:
             pass
     return ("report is not available", 503)
+
+
+
+
+@app.route("/export/pdf/<addr>", methods=["GET"])
+def export_pdf_addr(addr):
+    try:
+        if not ADDR_RE.fullmatch((addr or "").lower()):
+            return ("bad address", 400)
+        base_text = f"PDF export for {addr}"
+        path, html = _render_report(addr, base_text)
+        html_doc = html
+        if not html_doc and path:
+            with open(path, "r", encoding="utf-8") as f:
+                html_doc = f.read()
+        if not html_doc:
+            # fallback to sample
+            sample = os.environ.get("SAMPLE_REPORT_PATH") or ""
+            if sample:
+                try:
+                    with open(sample, "r", encoding="utf-8") as f:
+                        html_doc = f.read()
+                except Exception:
+                    pass
+        if not html_doc:
+            return ("report not available", 503)
+        pdf_bytes = _export_pdf_bytes_from_html(html_doc)
+        if pdf_bytes:
+            fname = f"metridex_report_{addr[:6]}.pdf"
+            headers = {"Content-Type": "application/pdf",
+                       "Content-Disposition": f"attachment; filename={fname}"}
+            return pdf_bytes, 200, headers
+        # Fallback: return HTML as attachment (so user can Save-as-PDF)
+        fname = f"metridex_report_{addr[:6]}.html"
+        headers = {"Content-Type": "text/html; charset=utf-8",
+                   "Content-Disposition": f"attachment; filename={fname}"}
+        return html_doc, 200, headers
+    except Exception as e:
+        return (f"export failed: {e}", 500)
 
