@@ -1,10 +1,18 @@
 {
   "bsc": {
-    "0xa5f8c5dbd5f286960b9d90548680ae5ebff07652": "PancakeSwap MasterChef/Pool"
+    "0xa5f8c5dbd5f286960b9d90548680ae5ebff07652": "PancakeSwap MasterChef/Pool",
+    "0xca143ce32fe78f1f7019d7d551a6402fc5350c73": "PancakeSwap V2 Factory",
+    "0x10ed43c718714eb63d5aa57b78b54704e256024e": "PancakeSwap V2 Router",
+    "0x0ed7e52944161450477ee417de9cd3a859b14fd0": "PancakeSwap V2 Pair"
   },
   "eth": {
     "0xc2edad668740f1aa35e4d8f227fb8e17dca888cd": "SushiSwap MasterChef V1",
-    "0xef0881ec094552b2e128cf945ef17a6752b4ec5d": "SushiSwap MasterChef V2"
+    "0xef0881ec094552b2e128cf945ef17a6752b4ec5d": "SushiSwap MasterChef V2",
+    "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f": "Uniswap V2 Factory",
+    "0x7a250d5630b4cf539739df2c5dacb4c659f2488d": "Uniswap V2 Router",
+    "0x1f98431c8ad98523631ae4a59f267346ea31f984": "Uniswap V3 Factory",
+    "0xe592427a0aece92de3edee1f18e0157c05861564": "Uniswap V3 Router",
+    "0xc36442b4a4522e871399cd717abdd847ab11fe88": "Uniswap V3 NF Position Manager"
   },
   "polygon": {
     "0x0769fd68dfb93167989c6f7254cd0d766fb2841f": "SushiSwap MiniChef (Polygon)",
