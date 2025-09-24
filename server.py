@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.77-anchor29-smartlp")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.87-custodians-json")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -418,6 +418,30 @@ KNOWN_CUSTODIANS = {
     "eth": {},
     "polygon": {},
 }
+
+# Optional external override/extend for KNOWN_CUSTODIANS
+KNOWN_CUSTODIANS_FILE_PATH = os.environ.get("KNOWN_CUSTODIANS_FILE_PATH", "/opt/render/project/src/known_custodians.json")
+try:
+    if os.path.exists(KNOWN_CUSTODIANS_FILE_PATH):
+        with open(KNOWN_CUSTODIANS_FILE_PATH, "r", encoding="utf-8") as fh:
+            _kc = json.load(fh) or {}
+        # Merge per-chain (lowercase keys)
+        for chain_k, mapping in (_kc or {}).items():
+            ck = str(chain_k or "").lower()
+            if not ck:
+                continue
+            KNOWN_CUSTODIANS.setdefault(ck, {})
+            for addr_k, label_v in (mapping or {}).items():
+                if not addr_k:
+                    continue
+                KNOWN_CUSTODIANS[ck][str(addr_k).lower()] = str(label_v)
+        try:
+            app.logger.info({"custodians_loaded": sum(len(v or {}) for v in KNOWN_CUSTODIANS.values()), "file": KNOWN_CUSTODIANS_FILE_PATH})
+        except Exception:
+            pass
+except Exception:
+    # Safe fallback: ignore errors
+    pass
 try:
     _extra_tf = os.environ.get("TEAMFINANCE_LOCKERS_JSON","").strip()
     if _extra_tf:
