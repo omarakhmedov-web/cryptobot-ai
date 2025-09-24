@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.59-anchor28-labels-global")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.77-anchor29-smartlp")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -423,6 +423,22 @@ CHAIN_NAME_TO_ID = {
     "arbitrum": 42161, "arb":42161,
     "base": 8453,
 }
+
+
+def _explorer_base_for(chain: str) -> str:
+    c = (chain or "").lower()
+    return {
+        "ethereum": "https://etherscan.io",
+        "eth": "https://etherscan.io",
+        "bsc": "https://bscscan.com",
+        "bnb": "https://bscscan.com",
+        "polygon": "https://polygonscan.com",
+        "matic": "https://polygonscan.com",
+        "arbitrum": "https://arbiscan.io",
+        "arb": "https://arbiscan.io",
+        "base": "https://basescan.org",
+    }.get(c, "https://etherscan.io")
+
 
 
 
@@ -962,6 +978,17 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
     if 'utm_' not in sample_url:
         sample_url = sample_url + ('&' if '?' in sample_url else '?') + 'utm_source=bot&utm_medium=quickscan&utm_campaign=sample_report'
     ik.append([{ 'text': '📄 HTML report (sample)', 'url': sample_url }])
+    
+    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
+    if addr:
+        # Safer cross-chain links via DexScreener search; exact chain link is resolved in callback.
+        ik.append([
+            {"text": "🔗 Open in DEX",  "callback_data": f"open:dex:{addr}"},
+            {"text": "🔍 Open in Scan", "callback_data": f"open:scan:{addr}"},
+        ])
+        ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
+        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
+
     # Δ timeframe row (single)
     ik.append([
         {"text": "Δ 5m",  "callback_data": "tf:5"},
@@ -2603,6 +2630,70 @@ def webhook(secret):
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=False)
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
+                return ("ok", 200)
+
+            if data.startswith("copyca:"):
+                addr = data.split(":",2)[2].strip().lower() if data.count(":")>=2 else data.split(":",1)[1].strip().lower()
+                try:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "address sent", logger=app.logger)
+                except Exception:
+                    pass
+                _send_text(chat_id, f"`{addr}`", parse_mode="Markdown", logger=app.logger)
+                return ("ok", 200)
+
+            if data.startswith("open:"):
+                # open:<kind>:<addr>
+                try:
+                    _, kind, addr = data.split(":", 2)
+                except ValueError:
+                    kind = "dex"; addr = data.split(":",1)[1]
+                addr = (addr or "").strip().lower()
+                pair, chain = _ds_resolve_pair_and_chain(addr)
+                chain = (chain or "ethereum").lower()
+                if kind == "scan":
+                    base = _explorer_base_for(chain)
+                    url = f"{base}/address/{addr}"
+                else:
+                    # DEX link: prefer exact pair if available, else search
+                    if pair and (pair.get("pairAddress") or pair.get("pair")) and chain:
+                        paddr = pair.get("pairAddress") or pair.get("pair")
+                        url = f"https://dexscreener.com/{chain}/{paddr}"
+                    elif chain:
+                        url = f"https://dexscreener.com/{chain}/{addr}"
+                    else:
+                        url = f"https://dexscreener.com/search?q={addr}"
+                try:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "opening…", logger=app.logger)
+                except Exception:
+                    pass
+                _send_text(chat_id, url, logger=app.logger)
+                return ("ok", 200)
+
+            if data.startswith("lp:"):
+                addr = data.split(":",1)[1].strip().lower()
+                # Try to resolve pair & chain via DexScreener
+                pair, chain = _ds_resolve_pair_and_chain(addr)
+                chain = (chain or "").lower()
+                paddr = None
+                if isinstance(pair, dict):
+                    paddr = pair.get("pairAddress") or pair.get("pair")
+                stats = {}
+                if paddr and chain:
+                    stats = _infer_lp_status(paddr, chain) or {}
+                dead = stats.get("dead_pct", 0.0)
+                uncx = stats.get("uncx_pct", 0.0)
+                tfp  = stats.get("team_finance_pct", 0.0)
+                th   = stats.get("top_holder", "")
+                thp  = stats.get("top_holder_pct", 0.0)
+                holders = stats.get("holders_count", 0)
+                lines = [f"LP lock (lite) — chain: {chain or 'n/a'}",
+                         f"• Dead/renounced: {dead}%",
+                         f"• UNCX lockers: {uncx}%",
+                         f"• TeamFinance: {tfp}%",
+                         f"• Top holder: {th[:10]}… {thp}% of LP",
+                         f"• Holders (LP token): {holders}"]
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "LP stats", logger=app.logger)
+                _send_text(chat_id, "\n".join(lines), logger=app.logger)
                 return ("ok", 200)
 
             if data.startswith("rep:"):
