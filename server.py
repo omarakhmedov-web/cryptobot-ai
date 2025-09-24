@@ -2703,7 +2703,19 @@ def webhook(secret):
                 _merge_onchain_into_risk(base_addr, meta)
                 _send_text(chat_id, "On-chain\n" + details, logger=app.logger)
             return ("ok", 200)
-        if cmd in ("/quickscan","/scan"):
+                if cmd in ("/limits",):
+            try:
+                _ul = str((msg.get("from") or {}).get("language_code") or "en")
+            except Exception:
+                _ul = "en"
+            _lang = _ux_lang(text, _ul)
+            try:
+                _uid = int(((msg.get("from") or {}).get("id")) or chat_id or 0)
+            except Exception:
+                _uid = 0
+            _send_text(chat_id, _ux_limits_text(_lang, _uid), logger=app.logger)
+            return ("ok", 200)
+if cmd in ("/quickscan","/scan"):
             if not arg:
                 _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
             else:
