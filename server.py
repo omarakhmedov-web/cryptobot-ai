@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.78-anchor30-overallbadge")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.80-anchor32-sharelink")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -55,6 +55,43 @@ except Exception:
     DOMAIN_META_TTL_NEG = 120
 
 LOC = locale_text
+
+# === Share link (token+TTL) helpers ===
+SHARE_SECRET = os.environ.get("SHARE_SECRET") or (os.environ.setdefault("SHARE_SECRET", secrets.token_hex(16)) or os.environ.get("SHARE_SECRET"))
+try:
+    SHARE_TTL_MIN = int(os.environ.get("SHARE_TTL_MIN") or 60)
+except Exception:
+    SHARE_TTL_MIN = 60
+
+def _b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode('ascii').rstrip('=')
+
+def _b64u_dec(s: str) -> bytes:
+    pad = '=' * ((4 - len(s) % 4) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+def _make_share_token(addr: str, ttl_min: int = None) -> str:
+    ttl = int(ttl_min or SHARE_TTL_MIN or 60)
+    exp = int(time.time()) + ttl * 60
+    nonce = secrets.token_hex(4)
+    payload = f"{addr}|{exp}|{nonce}".encode('utf-8')
+    mac = hmac.new((SHARE_SECRET or '').encode('utf-8'), payload, hashlib.sha256).digest()
+    return _b64u(payload) + "." + _b64u(mac)
+
+def _verify_share_token(token: str):
+    try:
+        p, m = token.split('.', 1)
+        payload = _b64u_dec(p)
+        mac = _b64u_dec(m)
+        if not hmac.compare_digest(mac, hmac.new((SHARE_SECRET or '').encode('utf-8'), payload, hashlib.sha256).digest()):
+            return None
+        addr, exp, nonce = payload.decode('utf-8').split('|')
+        if int(exp) < int(time.time()):
+            return None
+        return addr
+    except Exception:
+        return None
+# === /Share link helpers ===
 app = Flask(__name__)
 
 
@@ -1014,6 +1051,12 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
     if row:
         ik.append(row)
+    # Share link row
+    try:
+        if addr:
+            ik.append([{"text": "🔗 Share link", "callback_data": f"share:{addr}"}])
+    except Exception:
+        pass
     # Separate row for On-chain, only if RPCs configured
     if want_hp and addr:
         try:
@@ -2700,7 +2743,19 @@ def webhook(secret):
                     pass
                 return ("ok", 200)
 
-            if data.startswith("copyca:"):
+            
+            if data.startswith("share:"):
+                addr = data.split(":",1)[1].strip().lower()
+                try:
+                    base = os.environ.get("SITE_URL") or os.environ.get("PRIMARY_URL") or ""
+                    token = _make_share_token(addr)
+                    link = (base.rstrip("/") + "/r/" + token) if base else ("/r/" + token)
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "link ready", logger=app.logger)
+                except Exception:
+                    link = "/r/invalid"
+                _send_text(chat_id, link, logger=app.logger)
+                return ("ok", 200)
+if data.startswith("copyca:"):
                 addr = data.split(":",2)[2].strip().lower() if data.count(":")>=2 else data.split(":",1)[1].strip().lower()
                 try:
                     tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "address sent", logger=app.logger)
@@ -3620,4 +3675,33 @@ def build_buy_keyboard_priced():
     if row:
         rows.append(row)
     return {"inline_keyboard": rows}
+
+
+
+
+@app.route("/r/<token>", methods=["GET"])
+def serve_shared_report(token):
+    addr = _verify_share_token(token)
+    if not addr or not ADDR_RE.fullmatch(addr or ""):
+        return ("link expired or invalid", 403)
+    # Try render current report (best-effort)
+    try:
+        base_text = f"Shared report for {addr}"
+        path, html = _render_report(addr, base_text)
+        if html:
+            return html, 200, {"Content-Type":"text/html; charset=utf-8"}
+        if path:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read(), 200, {"Content-Type":"text/html; charset=utf-8"}
+    except Exception:
+        pass
+    # Fallback to sample if configured
+    sample = os.environ.get("SAMPLE_REPORT_PATH") or ""
+    if sample:
+        try:
+            with open(sample, "r", encoding="utf-8") as f:
+                return f.read(), 200, {"Content-Type":"text/html; charset=utf-8"}
+        except Exception:
+            pass
+    return ("report is not available", 503)
 
