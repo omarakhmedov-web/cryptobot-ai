@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.92-chain-code")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.93-lp-owner-proxy")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1816,6 +1816,67 @@ def _get_code_chain(addr: str, chain_name: str) -> str:
 def _eth_getCode(addr):
     return _rpc_call("eth_getCode", [addr, "latest"])
 
+def _get_owner(addr: str, chain_name: str) -> str:
+    """
+    Try to call owner() [0x8da5cb5b]. Returns lowercase address or "".
+    """
+    try:
+        ch = (chain_name or "").lower()
+        urls = _parse_chain_rpc_urls(ch)
+        if not urls:
+            return ""
+        data = "0x8da5cb5b"  # owner()
+        payload_tmpl = lambda: {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to": addr, "data": data}, "latest"]}
+        headers = {"Content-Type":"application/json"}
+        for url in urls:
+            try:
+                r = requests.post(url, json=payload_tmpl(), headers=headers, timeout=6)
+                if r.status_code == 200:
+                    res = (r.json() or {}).get("result") or ""
+                    if isinstance(res, str) and len(res) >= 66:
+                        # last 32 bytes -> address
+                        ahex = res[-40:]
+                        out = "0x" + ahex.lower()
+                        if out != "0x0000000000000000000000000000000000000000":
+                            return out
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""
+
+# EIP-1967 implementation slot = keccak256("eip1967.proxy.implementation") - 1
+_EIP1967_IMPL_SLOT = "0x360894A13BA1A3210667C828492DB98DCA3E2076CC3735A920A3CA505D382BBC"
+
+def _get_proxy_impl(addr: str, chain_name: str) -> str:
+    """
+    Read EIP-1967 implementation slot; return implementation address or "".
+    """
+    try:
+        ch = (chain_name or "").lower()
+        urls = _parse_chain_rpc_urls(ch)
+        if not urls:
+            return ""
+        # Some clients require hex without 0x prefix; but eth_getStorageAt accepts slot as hex.
+        payload_tmpl = lambda: {"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[addr, _EIP1967_IMPL_SLOT, "latest"]}
+        headers = {"Content-Type":"application/json"}
+        for url in urls:
+            try:
+                r = requests.post(url, json=payload_tmpl(), headers=headers, timeout=6)
+                if r.status_code == 200:
+                    res = (r.json() or {}).get("result") or ""
+                    if isinstance(res, str) and len(res) >= 66:
+                        ahex = res[-40:]
+                        if ahex.strip("0") != "":
+                            return "0x" + ahex.lower()
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""
+
+
+
 def _eth_getStorageAt(addr, slot):
     return _rpc_call("eth_getStorageAt", [addr, slot, "latest"])
 
@@ -2862,6 +2923,24 @@ def webhook(secret):
                 except Exception:
                     pass
                 holders = int(stats.get("holders_count", 0) or 0)
+                # Owner/renounce/proxy (lite) using chain-aware RPC
+                owner_addr = _get_owner(paddr, chain) if (paddr and chain) else ""
+                renounced = (owner_addr.lower() in DEAD_ADDRS) if owner_addr else False
+                impl_addr = _get_proxy_impl(paddr, chain) if (paddr and chain) else ""
+                is_proxy = bool(impl_addr)
+                # Multi-locker detection among top holders (if we have a list from provider)
+                locker_hits = []
+                try:
+                    hp_data = stats.get("_raw_holders") or {}
+                    holders_list = hp_data.get("holders") or []
+                    for h in holders_list[:10]:
+                        a = (h.get("address") or "").lower()
+                        if a in (UNCX_LOCKERS.get(chain) or {}) or a in (TEAMFINANCE_LOCKERS.get(chain) or {}):
+                            locker_hits.append(a)
+                except Exception:
+                    pass
+                multi_lockers = len(set(locker_hits)) >= 2
+
 
                 # If LP holders data missing, degrade to unknown verdict
                 data_insufficient = (holders == 0 and not th and (uncx + tfp + dead) == 0.0)
@@ -2905,6 +2984,10 @@ def webhook(secret):
                     f"• Top holder: {th or 'n/a'} — {thp}% of LP",
                     f"• Top holder type: {'contract' if (th_contract or th_label) else 'EOA' if th else 'n/a'}{(' (' + th_label + ')') if th_label else ''}",
                     f"• Holders (LP token): {holders}",
+                    (f"• Owner: {owner_addr}" if owner_addr else "• Owner: n/a"),
+                    f"• Renounced: {'yes' if renounced else 'no'}",
+                    f"• Proxy: {'yes, impl: ' + impl_addr if is_proxy else 'no'}",
+                    ("• Multiple lockers detected" if multi_lockers else None),
                 ]
                 link_lines = []
                 if ds_link: link_lines.append(f"DEX pair: {ds_link}")
