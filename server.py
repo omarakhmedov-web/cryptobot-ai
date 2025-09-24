@@ -950,14 +950,18 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             has_rpc = False
         if has_rpc:
             ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
-        # Add a static sample HTML report URL (site-hosted), safe for all users
-    try:
-        _row = _qs_sample_button_row()
-        if _row:
-            ik.append(_row)
-    except Exception:
-        pass
-
+    # Sample HTML report URL (site-hosted)
+    sample_url = (os.getenv('SAMPLE_URL') or '').strip()
+    if not sample_url:
+        site_url = (os.getenv('SITE_URL') or os.getenv('SITE_BASE') or 'https://metridex.com').strip()
+        site_url = site_url[:-1] if site_url.endswith('/') else site_url
+        sample_path = os.getenv('SAMPLE_REPORT_PATH', '/metridex_deep_report_sample.html')
+        if not sample_path.startswith('/'):
+            sample_path = '/' + sample_path
+        sample_url = f"{site_url}{sample_path}"
+    if 'utm_' not in sample_url:
+        sample_url = sample_url + ('&' if '?' in sample_url else '?') + 'utm_source=bot&utm_medium=quickscan&utm_campaign=sample_report'
+    ik.append([{ 'text': '📄 HTML report (sample)', 'url': sample_url }])
     # Δ timeframe row (single)
     ik.append([
         {"text": "Δ 5m",  "callback_data": "tf:5"},
