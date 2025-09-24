@@ -2669,9 +2669,10 @@ def webhook(secret):
                 _send_text(chat_id, url, logger=app.logger)
                 return ("ok", 200)
 
+            
             if data.startswith("lp:"):
                 addr = data.split(":",1)[1].strip().lower()
-                # Try to resolve pair & chain via DexScreener
+                # Resolve pair & chain
                 pair, chain = _ds_resolve_pair_and_chain(addr)
                 chain = (chain or "").lower()
                 paddr = None
@@ -2680,21 +2681,60 @@ def webhook(secret):
                 stats = {}
                 if paddr and chain:
                     stats = _infer_lp_status(paddr, chain) or {}
-                dead = stats.get("dead_pct", 0.0)
-                uncx = stats.get("uncx_pct", 0.0)
-                tfp  = stats.get("team_finance_pct", 0.0)
-                th   = stats.get("top_holder", "")
-                thp  = stats.get("top_holder_pct", 0.0)
-                holders = stats.get("holders_count", 0)
-                lines = [f"LP lock (lite) — chain: {chain or 'n/a'}",
-                         f"• Dead/renounced: {dead}%",
-                         f"• UNCX lockers: {uncx}%",
-                         f"• TeamFinance: {tfp}%",
-                         f"• Top holder: {th[:10]}… {thp}% of LP",
-                         f"• Holders (LP token): {holders}"]
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "LP stats", logger=app.logger)
-                _send_text(chat_id, "\n".join(lines), logger=app.logger)
+                # unpack stats
+                dead = float(stats.get("dead_pct", 0.0) or 0.0)
+                uncx = float(stats.get("uncx_pct", 0.0) or 0.0)
+                tfp  = float(stats.get("team_finance_pct", 0.0) or 0.0)
+                th   = (stats.get("top_holder") or "")[:42]
+                thp  = float(stats.get("top_holder_pct", 0.0) or 0.0)
+                holders = int(stats.get("holders_count", 0) or 0)
+
+                # verdict (very-lite heuristics)
+                verdict = "⚪ n/a"
+                if dead >= 95 or (uncx + tfp) >= 50:
+                    verdict = "🟢 likely locked"
+                elif thp >= 50 and (uncx + tfp) < 10 and dead < 50:
+                    verdict = "🔴 high risk (EOA holds LP)"
+                else:
+                    verdict = "🟡 mixed"
+
+                # links
+                ds_link = None
+                if paddr and chain:
+                    ds_link = f"https://dexscreener.com/{chain}/{paddr}"
+                scan_domain = "etherscan.io"
+                if chain in ("bsc","bscscan","bnb","binance"):
+                    scan_domain = "bscscan.com"
+                elif chain in ("polygon","matic"):
+                    scan_domain = "polygonscan.com"
+                scan_lp = f"https://{scan_domain}/token/{paddr}#balances" if paddr else None
+                scan_token = f"https://{scan_domain}/token/{addr}"
+                tf_site = "https://app.team.finance/"
+                uncx_site = "https://app.unicrypt.network/"
+
+                lines = [
+                    f"🔒 LP lock (lite) — chain: {chain or 'n/a'}",
+                    f"Verdict: {verdict}",
+                    f"• Dead/renounced: {dead}%",
+                    f"• UNCX lockers: {uncx}%",
+                    f"• TeamFinance: {tfp}%",
+                    f"• Top holder: {th or 'n/a'} — {thp}% of LP",
+                    f"• Holders (LP token): {holders}",
+                ]
+                link_lines = []
+                if ds_link: link_lines.append(f"DEX pair: {ds_link}")
+                if scan_lp: link_lines.append(f"Scan LP holders: {scan_lp}")
+                link_lines.append(f"Scan token: {scan_token}")
+                link_lines.append(f"UNCX: {uncx_site}")
+                link_lines.append(f"TeamFinance: {tf_site}")
+
+                try:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "LP info", logger=app.logger)
+                except Exception:
+                    pass
+                _send_text(chat_id, "\n".join(lines + link_lines), logger=app.logger)
                 return ("ok", 200)
+
 
             if data.startswith("rep:"):
                 addr = data.split(":", 1)[1].strip().lower()
