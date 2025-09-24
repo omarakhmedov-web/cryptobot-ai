@@ -3853,6 +3853,17 @@ def _mx_api_put_report():
 
 @app.route("/api/make_share_link")
 def _mx_api_make_share_link():
+    addr = (_mx_request.args.get('addr') or '').strip()
+    if not addr:
+        return _mx_jsonify(ok=False, error="addr required"), 400
+    if not _mx_get_report_html(addr):
+        return _mx_jsonify(ok=False, error="report not found for addr"), 404
+    token = _mx_make_token(addr)
+    site = _mx_site()
+    link = f"{site}/r/{token}" if site else f"/r/{token}"
+    return _mx_jsonify(ok=True, share_url=link)
+
+
 @app.route("/api/share_link_put", methods=["POST"])
 def _mx_api_share_link_put():
     data = _mx_request.get_json(silent=True) or {}
@@ -3861,16 +3872,6 @@ def _mx_api_share_link_put():
     if not addr or not html:
         return _mx_jsonify(ok=False, error="addr and html required"), 400
     _mx_put_report(addr, html)
-    token = _mx_make_token(addr)
-    site = _mx_site()
-    link = f"{site}/r/{token}" if site else f"/r/{token}"
-    return _mx_jsonify(ok=True, share_url=link)
-
-    addr = (_mx_request.args.get('addr') or '').strip()
-    if not addr:
-        return _mx_jsonify(ok=False, error="addr required"), 400
-    if not _mx_get_report_html(addr):
-        return _mx_jsonify(ok=False, error="report not found for addr"), 404
     token = _mx_make_token(addr)
     site = _mx_site()
     link = f"{site}/r/{token}" if site else f"/r/{token}"
@@ -3891,7 +3892,7 @@ def _mx_render_report(token):
 def _mx_export_pdf(addr):
 
     html = _mx_get_report_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
-    # 1) Try WeasyPrint (system deps)
+    # 1) Try WeasyPrint (if present)
     try:
         from weasyprint import HTML as _MX_HTML
         pdf = _MX_HTML(string=html).write_pdf()
@@ -3916,7 +3917,7 @@ def _mx_export_pdf(addr):
             return resp
     except Exception:
         pass
-    # 3) Final fallback: minimal PDF via reportlab (always works with reportlab)
+    # 3) Final fallback via reportlab (always works if reportlab installed)
     try:
         from reportlab.lib.pagesizes import letter
         from reportlab.pdfgen import canvas
@@ -3924,16 +3925,12 @@ def _mx_export_pdf(addr):
         buf = _MX_BytesIO()
         c = canvas.Canvas(buf, pagesize=letter)
         c.setTitle(f"Metridex Report {addr}")
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(72, 720, "Metridex — Report")
-        c.setFont("Helvetica", 11)
-        c.drawString(72, 700, f"Address: {addr}")
+        c.setFont("Helvetica-Bold", 16); c.drawString(72, 720, "Metridex — Report")
+        c.setFont("Helvetica", 11); c.drawString(72, 700, f"Address: {addr}")
         import time as _mx_time
         c.drawString(72, 684, f"Generated: {_mx_time.ctime()}")
-        c.setFont("Helvetica", 10)
-        c.drawString(72, 660, "Note: This is a minimal PDF fallback. Open HTML share link for full visuals.")
-        c.showPage()
-        c.save()
+        c.setFont("Helvetica", 10); c.drawString(72, 660, "Note: Minimal PDF fallback. Open share link for full HTML.")
+        c.showPage(); c.save()
         resp = _mx_make_response(buf.getvalue(), 200)
         resp.headers['Content-Type'] = 'application/pdf'
         resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
@@ -3941,7 +3938,7 @@ def _mx_export_pdf(addr):
         return resp
     except Exception:
         pass
-    # 4) If everything fails, return HTML (should not happen if reportlab present)
+    # 4) Last resort: HTML
     resp = _mx_make_response(html, 200)
     resp.headers['Content-Type'] = 'text/html; charset=utf-8'
     resp.headers['X-MX-PDF-Engine'] = 'html-fallback'
