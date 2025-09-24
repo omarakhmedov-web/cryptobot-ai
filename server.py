@@ -2839,13 +2839,9 @@ def webhook(secret):
                     _answer_callback((update.get("callback_query") or {}).get("id"), text="Opening Scan…")
                     _send_text(chat_id, f"🔍 Scan: {url}")
                 else:
-                    _send_text(chat_id, "🔍 Scan: не удалось определить сеть.
-"
-                                        f"• Etherscan: https://etherscan.io/token/{base_addr}
-"
-                                        f"• BscScan:  https://bscscan.com/token/{base_addr}
-"
-                                        f"• Polygon:  https://polygonscan.com/token/{base_addr}")
+                    _answer_callback((update.get("callback_query") or {}).get("id"), text="Scan links shown")
+                    text__ = (f"🔍 Scan: не удалось определить сеть.\n"                              f"• Etherscan: https://etherscan.io/token/{base_addr}\n"                              f"• BscScan:  https://bscscan.com/token/{base_addr}\n"                              f"• Polygon:  https://polygonscan.com/token/{base_addr}")
+                    _send_text(chat_id, text__)
                 return ("ok", 200)
 
             if data.startswith("open:dex:"):
