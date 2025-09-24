@@ -3768,3 +3768,143 @@ def export_pdf_addr(addr):
     except Exception as e:
         return (f"export failed: {e}", 500)
 
+
+
+# === [Metridex Inline Addon v0.3.86] ShareLink + ExportPDF + Helpers ==================
+# Safe inline blueprint: no external deps (PDF uses HTML fallback if WeasyPrint missing).
+try:
+    from flask import Blueprint, request, jsonify, make_response, abort
+    import os, time, hmac, hashlib, base64, json
+    _mx_bp = Blueprint('mx_share_pdf', __name__)
+    _MX_VERSION = "0.3.86-inline"
+    _MX_STATE = {}   # addr(lower) -> {'html': str}
+
+    def _mx_b64(x: bytes) -> str:
+        return base64.urlsafe_b64encode(x).decode('ascii').rstrip('=')
+
+    def _mx_ub64(s: str) -> bytes:
+        pad = '=' * (-len(s) % 4)
+        return base64.urlsafe_b64decode(s + pad)
+
+    def _mx_sign(secret: str, msg: bytes) -> str:
+        return _mx_b64(hmac.new(secret.encode('utf-8'), msg, hashlib.sha256).digest())
+
+    def _mx_token_for(addr: str, ttl_min: int, secret: str) -> str:
+        exp = int(time.time()) + ttl_min * 60
+        payload = json.dumps({'a': addr, 'e': exp, 'n': int(time.time()*1000)}).encode('utf-8')
+        sig = _mx_sign(secret, payload)
+        return f"{_mx_b64(payload)}.{sig}"
+
+    def _mx_put_report(addr: str, html: str):
+        if addr and html:
+            _mx_state_key = str(addr).lower()
+            _mx_STATE[_mx_state_key] = {'html': html}
+            return True
+        return False
+
+    @_mx_bp.route('/r/<token>')
+    def _mx_share_render(token):
+        secret = os.getenv('SHARE_SECRET', 'dev-secret-change-me')
+        try:
+            p64, sig = token.split('.', 1)
+            payload = _mx_ub64(p64)
+        except Exception:
+            abort(404)
+        if _mx_sign(secret, payload) != sig:
+            abort(404)
+        try:
+            data = json.loads(payload.decode('utf-8'))
+        except Exception:
+            abort(404)
+        if int(data.get('e', 0)) < int(time.time()):
+            abort(404)
+        addr = str(data.get('a', '')).lower()
+        blob = _MX_STATE.get(addr)
+        if not blob:
+            abort(404)
+        html = blob.get('html') or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
+        resp = make_response(html, 200)
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+
+    @_mx_bp.route('/export/pdf/<addr>')
+    def _mx_export_pdf(addr):
+        blob = _MX_STATE.get(addr.lower()) or {}
+        html = blob.get('html') or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
+        # Try WeasyPrint if present; fallback to HTML
+        try:
+            if os.getenv('FORCE_HTML_PDF','0') == '1':
+                raise RuntimeError('forced html')
+            from weasyprint import HTML
+            pdf = HTML(string=html).write_pdf()
+            resp = make_response(pdf, 200)
+            resp.headers['Content-Type'] = 'application/pdf'
+            resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
+            return resp
+        except Exception:
+            resp = make_response(html, 200)
+            resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+            return resp
+
+    @_mx_bp.route('/api/put_report', methods=['POST'])
+    def _mx_api_put_report():
+        data = request.get_json(silent=True) or {}
+        addr = (data.get('addr') or '').strip()
+        html = data.get('html') or ''
+        if not addr or not html:
+            return jsonify(ok=False, error='addr and html required'), 400
+        _mx_put_report(addr, html)
+        return jsonify(ok=True)
+
+    @_mx_bp.route('/api/make_share_link')
+    def _mx_api_make_share_link():
+        addr = (request.args.get('addr') or '').strip()
+        if not addr:
+            return jsonify(ok=False, error='addr required'), 400
+        if addr.lower() not in _MX_STATE:
+            return jsonify(ok=False, error='report not found for addr'), 404
+        ttl = int(os.getenv('SHARE_TTL_MIN', '60'))
+        secret = os.getenv('SHARE_SECRET', 'dev-secret-change-me')
+        tok = _mx_token_for(addr, ttl, secret)
+        site = os.getenv('SITE_URL','').rstrip('/')
+        link = f"{site}/r/{tok}" if site else f"/r/{tok}"
+        return jsonify(ok=True, share_url=link)
+
+    @_mx_bp.route('/debug/selfshare')
+    def _mx_debug_selfshare():
+        addr = request.args.get('addr', '0x831753DD7087CaC61aB5644b308642cc1c33Dc13')
+        html = f"<html><body style='font-family:Arial,sans-serif'><h2>Metridex — sample report</h2><p>Address: {addr}</p><p>Generated: {time.ctime()}</p></body></html>"
+        _mx_put_report(addr, html)
+        ttl = int(os.getenv('SHARE_TTL_MIN', '60'))
+        secret = os.getenv('SHARE_SECRET', 'dev-secret-change-me')
+        tok = _mx_token_for(addr, ttl, secret)
+        site = os.getenv('SITE_URL','').rstrip('/')
+        share_url = f"{site}/r/{tok}" if site else f"/r/{tok}"
+        pdf_url = f"{site}/export/pdf/{addr}" if site else f"/export/pdf/{addr}"
+        return jsonify(ok=True, version=_MX_VERSION, share_url=share_url, pdf_url=pdf_url)
+
+    def register(app):
+        # attach blueprint and helpers
+        app.register_blueprint(_mx_bp)
+        app.extensions['mx'] = {
+            'put_report': _mx_put_report,
+            'state': _MX_STATE,
+        }
+        return app
+
+    # Auto-register if global 'app' exists (common in monoliths)
+    try:
+        # 'app' from outer module namespace
+        if 'app' in globals():
+            register(globals()['app'])
+    except Exception as _mx_e:
+        # Do not break server if auto-register fails
+        pass
+
+except Exception as _mx_init_err:
+    # Fails closed: addon won't load, core server unaffected
+    pass
+
+# === [End of Inline Addon] =====================================================
+
