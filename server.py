@@ -2643,6 +2643,19 @@ def webhook(secret):
         parts = text.split(maxsplit=1)
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ""
+        if cmd in ("/limits",):
+            try:
+                _ul = str((msg.get("from") or {}).get("language_code") or "en")
+            except Exception:
+                _ul = "en"
+            _lang = _ux_lang(text, _ul)
+            try:
+                _uid = int(((msg.get("from") or {}).get("id")) or chat_id or 0)
+            except Exception:
+                _uid = 0
+            _send_text(chat_id, _ux_limits_text(_lang, _uid), logger=app.logger)
+            return ("ok", 200)
+
         if cmd in ("/start", "/help"):
             _send_text(chat_id, LOC("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
             return ("ok", 200)
@@ -2703,19 +2716,7 @@ def webhook(secret):
                 _merge_onchain_into_risk(base_addr, meta)
                 _send_text(chat_id, "On-chain\n" + details, logger=app.logger)
             return ("ok", 200)
-                if cmd in ("/limits",):
-            try:
-                _ul = str((msg.get("from") or {}).get("language_code") or "en")
-            except Exception:
-                _ul = "en"
-            _lang = _ux_lang(text, _ul)
-            try:
-                _uid = int(((msg.get("from") or {}).get("id")) or chat_id or 0)
-            except Exception:
-                _uid = 0
-            _send_text(chat_id, _ux_limits_text(_lang, _uid), logger=app.logger)
-            return ("ok", 200)
-if cmd in ("/quickscan","/scan"):
+        if cmd in ("/quickscan","/scan"):
             if not arg:
                 _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
             else:
