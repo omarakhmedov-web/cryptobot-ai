@@ -2410,7 +2410,6 @@ def webhook(secret):
     # --- SAFE DEFAULTS (auto-patched) ---
     lab = None
     addr_l = None
-
     # --- EARLY START HANDLER (runs before anything else) ---
     try:
         upd = request.get_json(force=True, silent=True) or {}
@@ -3060,11 +3059,11 @@ def webhook(secret):
         _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
     return ("ok", 200)
 
-    # auto-default return to avoid fall-through errors
+
+def _enrich_full(
+    # auto-default return (avoid 500 on unknown updates)
     return ('OK', 200)
-
-
-def _enrich_full(addr: str, base_text: str) -> str:
+addr: str, base_text: str) -> str:
     try:
         text = base_text or ""
         addr_l = (addr or "").lower()
@@ -3778,9 +3777,9 @@ def export_pdf_addr(addr):
 
 
 
-# ===== Metridex Addon v0.3.88 (share/pdf/helpers) =====
-# Non-invasive: appended at EOF. Uses existing `app` and SHARE_* env.
-import base64 as _mx_b64, hmac as _mx_hmac, hashlib as _mx_hashlib, secrets as _mx_secrets
+# ===== Metridex Addon v0.3.94 (appended 2025-09-24 19:33:12) =====
+# Adds share links, PDF export with fallbacks, simple APIs, and helpers for bot integration.
+import base64 as _mx_b64, hmac as _mx_hmac, hashlib as _mx_hashlib
 from flask import make_response as _mx_make_response, abort as _mx_abort, jsonify as _mx_jsonify, redirect as _mx_redirect, request as _mx_request
 
 try:
@@ -3798,24 +3797,21 @@ def _mx_b64u_dec(s: str) -> bytes:
 def _mx_sign(secret: str, payload: bytes) -> str:
     return _mx_b64u(_mx_hmac.new((secret or '').encode('utf-8'), payload, _mx_hashlib.sha256).digest())
 
-def _mx_make_token(addr: str, ttl_min: int = None) -> str:
+def _mx_token_for(addr: str, ttl_min: int = None) -> str:
     ttl = int(ttl_min or int(os.getenv('SHARE_TTL_MIN', '60')))
-    exp = int(time.time()) + ttl * 60
-    nonce = _mx_secrets.token_hex(4)
-    payload = json.dumps({'a': addr, 'e': exp, 'n': nonce}).encode('utf-8')
-    sig = _mx_sign(os.getenv('SHARE_SECRET', ''), payload)
-    return f"{_mx_b64u(payload)}.{sig}"
+    payload = json.dumps({'a': addr, 'e': int(time.time()) + ttl*60, 'n': int(time.time()*1000)}).encode('utf-8')
+    return f"{_mx_b64u(payload)}.{_mx_sign(os.getenv('SHARE_SECRET',''), payload)}"
 
 def _mx_verify_token(token: str):
     try:
         p64, sig = token.split('.', 1)
         payload = _mx_b64u_dec(p64)
-        if _mx_sign(os.getenv('SHARE_SECRET', ''), payload) != sig:
+        if _mx_sign(os.getenv('SHARE_SECRET',''), payload) != sig:
             return None
         data = json.loads(payload.decode('utf-8'))
         if int(data.get('e', 0)) < int(time.time()):
             return None
-        return str(data.get('a', '')).lower()
+        return str(data.get('a','')).lower()
     except Exception:
         return None
 
@@ -3825,21 +3821,44 @@ def _mx_put_report(addr: str, html: str):
     MX_STATE[str(addr).lower()] = {'html': html}
     return True
 
-def _mx_get_report_html(addr: str):
-    blob = MX_STATE.get(str(addr).lower()) or {}
-    return blob.get('html')
+def _mx_get_html(addr: str):
+    return (MX_STATE.get(str(addr).lower()) or {}).get('html')
 
 def _mx_site() -> str:
     return (os.getenv('SITE_URL') or '').rstrip('/')
 
-def _mx_export_pdf_bytes(html: str):
-    # Try reuse project helper if exists
+def _mx_pdf_from_html(html: str):
+    # 1) WeasyPrint
     try:
-        return _export_pdf_bytes_from_html(html)  # provided by your server
+        from weasyprint import HTML as _MX_HTML
+        return _MX_HTML(string=html).write_pdf(), 'weasyprint'
     except Exception:
         pass
-    # Fallback: return None to use HTML
-    return None
+    # 2) xhtml2pdf
+    try:
+        from xhtml2pdf import pisa as _MX_PISA
+        from io import BytesIO as _MX_BytesIO
+        out = _MX_BytesIO()
+        res = _MX_PISA.CreatePDF(src=html, dest=out, encoding='utf-8')
+        if not res.err:
+            return out.getvalue(), 'xhtml2pdf'
+    except Exception:
+        pass
+    # 3) reportlab fallback
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+        from io import BytesIO as _MX_BytesIO
+        buf = _MX_BytesIO()
+        c = canvas.Canvas(buf, pagesize=letter)
+        c.setTitle('Metridex Report')
+        c.setFont('Helvetica-Bold', 16); c.drawString(72, 720, 'Metridex — Report')
+        c.setFont('Helvetica', 11); c.drawString(72, 700, 'Open share link for full HTML visuals.')
+        c.showPage(); c.save()
+        return buf.getvalue(), 'reportlab-fallback'
+    except Exception:
+        pass
+    return None, 'html-fallback'
 
 @app.route("/api/put_report", methods=["POST"])
 def _mx_api_put_report():
@@ -3847,7 +3866,7 @@ def _mx_api_put_report():
     addr = (data.get('addr') or '').strip()
     html = data.get('html') or ''
     if not addr or not html:
-        return _mx_jsonify(ok=False, error="addr and html required"), 400
+        return _mx_jsonify(ok=False, error='addr and html required'), 400
     _mx_put_report(addr, html)
     return _mx_jsonify(ok=True)
 
@@ -3855,14 +3874,12 @@ def _mx_api_put_report():
 def _mx_api_make_share_link():
     addr = (_mx_request.args.get('addr') or '').strip()
     if not addr:
-        return _mx_jsonify(ok=False, error="addr required"), 400
-    if not _mx_get_report_html(addr):
-        return _mx_jsonify(ok=False, error="report not found for addr"), 404
-    token = _mx_make_token(addr)
+        return _mx_jsonify(ok=False, error='addr required'), 400
+    if not _mx_get_html(addr):
+        return _mx_jsonify(ok=False, error='report not found for addr'), 404
+    tok = _mx_token_for(addr)
     site = _mx_site()
-    link = f"{site}/r/{token}" if site else f"/r/{token}"
-    return _mx_jsonify(ok=True, share_url=link)
-
+    return _mx_jsonify(ok=True, share_url=(f"{site}/r/{tok}" if site else f"/r/{tok}"))
 
 @app.route("/api/share_link_put", methods=["POST"])
 def _mx_api_share_link_put():
@@ -3870,19 +3887,32 @@ def _mx_api_share_link_put():
     addr = (data.get('addr') or '').strip()
     html = data.get('html') or ''
     if not addr or not html:
-        return _mx_jsonify(ok=False, error="addr and html required"), 400
+        return _mx_jsonify(ok=False, error='addr and html required'), 400
     _mx_put_report(addr, html)
-    token = _mx_make_token(addr)
+    tok = _mx_token_for(addr)
     site = _mx_site()
-    link = f"{site}/r/{token}" if site else f"/r/{token}"
-    return _mx_jsonify(ok=True, share_url=link)
+    return _mx_jsonify(ok=True, share_url=(f"{site}/r/{tok}" if site else f"/r/{tok}"))
+
+@app.route("/api/ready_links", methods=["POST"])
+def _mx_api_ready_links():
+    data = _mx_request.get_json(silent=True) or {}
+    addr = (data.get('addr') or '').strip()
+    html = data.get('html') or ''
+    if not addr or not html:
+        return _mx_jsonify(ok=False, error='addr and html required'), 400
+    _mx_put_report(addr, html)
+    tok = _mx_token_for(addr)
+    site = _mx_site()
+    pdf_url = (f"{site}/export/pdf/{addr}" if site else f"/export/pdf/{addr}")
+    return _mx_jsonify(ok=True, share_url=(f"{site}/r/{tok}" if site else f"/r/{tok}"),
+                       pdf_url=pdf_url, sample_url=os.getenv('SAMPLE_URL') or '')
 
 @app.route("/r/<token>")
-def _mx_render_report(token):
+def _mx_render_shared(token):
     addr = _mx_verify_token(token)
     if not addr:
         _mx_abort(404)
-    html = _mx_get_report_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
+    html = _mx_get_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
     resp = _mx_make_response(html, 200)
     resp.headers['Content-Type'] = 'text/html; charset=utf-8'
     resp.headers['Cache-Control'] = 'no-store'
@@ -3890,55 +3920,14 @@ def _mx_render_report(token):
 
 @app.route("/export/pdf/<addr>")
 def _mx_export_pdf(addr):
-
-    html = _mx_get_report_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
-    # 1) Try WeasyPrint (if present)
-    try:
-        from weasyprint import HTML as _MX_HTML
-        pdf = _MX_HTML(string=html).write_pdf()
+    html = _mx_get_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
+    pdf, engine = _mx_pdf_from_html(html)
+    if pdf:
         resp = _mx_make_response(pdf, 200)
         resp.headers['Content-Type'] = 'application/pdf'
         resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
-        resp.headers['X-MX-PDF-Engine'] = 'weasyprint'
+        resp.headers['X-MX-PDF-Engine'] = engine
         return resp
-    except Exception:
-        pass
-    # 2) Try xhtml2pdf (pure Python)
-    try:
-        from xhtml2pdf import pisa as _MX_PISA
-        from io import BytesIO as _MX_BytesIO
-        out = _MX_BytesIO()
-        result = _MX_PISA.CreatePDF(src=html, dest=out, encoding='utf-8')
-        if not result.err:
-            resp = _mx_make_response(out.getvalue(), 200)
-            resp.headers['Content-Type'] = 'application/pdf'
-            resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
-            resp.headers['X-MX-PDF-Engine'] = 'xhtml2pdf'
-            return resp
-    except Exception:
-        pass
-    # 3) Final fallback via reportlab (always works if reportlab installed)
-    try:
-        from reportlab.lib.pagesizes import letter
-        from reportlab.pdfgen import canvas
-        from io import BytesIO as _MX_BytesIO
-        buf = _MX_BytesIO()
-        c = canvas.Canvas(buf, pagesize=letter)
-        c.setTitle(f"Metridex Report {addr}")
-        c.setFont("Helvetica-Bold", 16); c.drawString(72, 720, "Metridex — Report")
-        c.setFont("Helvetica", 11); c.drawString(72, 700, f"Address: {addr}")
-        import time as _mx_time
-        c.drawString(72, 684, f"Generated: {_mx_time.ctime()}")
-        c.setFont("Helvetica", 10); c.drawString(72, 660, "Note: Minimal PDF fallback. Open share link for full HTML.")
-        c.showPage(); c.save()
-        resp = _mx_make_response(buf.getvalue(), 200)
-        resp.headers['Content-Type'] = 'application/pdf'
-        resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
-        resp.headers['X-MX-PDF-Engine'] = 'reportlab-fallback'
-        return resp
-    except Exception:
-        pass
-    # 4) Last resort: HTML
     resp = _mx_make_response(html, 200)
     resp.headers['Content-Type'] = 'text/html; charset=utf-8'
     resp.headers['X-MX-PDF-Engine'] = 'html-fallback'
@@ -3946,24 +3935,18 @@ def _mx_export_pdf(addr):
 
 @app.route("/debug/selfshare_html")
 def _mx_selfshare_html():
-    # Create sample report and redirect immediately to /r/<token>
     addr = _mx_request.args.get('addr', '0x831753DD7087CaC61aB5644b308642cc1c33Dc13')
-    html = (
-    "<html><body style='font-family:Arial,sans-serif'>"
-    "<h2>Metridex — sample report</h2>"
-    f"<p>Address: {addr}</p><p>Generated: {time.ctime()}</p>"
-    "</body></html>"
-)
+    html = "<html><body style='font-family:Arial,sans-serif'><h2>Metridex — sample report</h2><p>Address: {}</p><p>Generated: {}</p></body></html>".format(addr, time.ctime())
     _mx_put_report(addr, html)
-    token = _mx_make_token(addr)
+    tok = _mx_token_for(addr)
     site = _mx_site()
-    link = f"{site}/r/{token}" if site else f"/r/{token}"
+    link = f"{site}/r/{tok}" if site else f"/r/{tok}"
     return _mx_redirect(link, code=302)
 
-# Expose helpers for bot glue
-app.extensions = getattr(app, "extensions", {})
+# Expose helpers for in-process usage
+app.extensions = getattr(app, 'extensions', {})
 app.extensions.setdefault('mx', {})
 app.extensions['mx']['put_report'] = _mx_put_report
-app.extensions['mx']['make_share_link'] = lambda addr: ((_mx_site() + "/r/" + _mx_make_token(addr)) if _mx_site() else ("/r/" + _mx_make_token(addr)))
-app.extensions['mx']['export_pdf_url'] = lambda addr: (_mx_site() + f"/export/pdf/{addr}") if _mx_site() else (f"/export/pdf/{addr}")
-# ===== /Addon v0.3.88 =====
+app.extensions['mx']['make_share_link'] = lambda addr: ((_mx_site() + "/r/" + _mx_token_for(addr)) if _mx_site() else ("/r/" + _mx_token_for(addr)))
+app.extensions['mx']['export_pdf_url'] = lambda addr: ((_mx_site() + f"/export/pdf/{addr}") if _mx_site() else (f"/export/pdf/{addr}"))
+# ===== /Addon v0.3.94 =====
