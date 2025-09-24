@@ -409,6 +409,15 @@ UNCX_LOCKERS = {
 TEAMFINANCE_LOCKERS = {
     "ethereum": ["0xe2fe530c047f2d85298b07d9333c05737f1435fb"],
 }
+
+# Known custodial/staking contracts that may legitimately hold LP
+KNOWN_CUSTODIANS = {
+    "bsc": {
+        "0xa5f8c5dbd5f286960b9d90548680ae5ebff07652": "PancakeSwap MasterChef/Pool",
+    },
+    "eth": {},
+    "polygon": {},
+}
 try:
     _extra_tf = os.environ.get("TEAMFINANCE_LOCKERS_JSON","").strip()
     if _extra_tf:
@@ -2687,6 +2696,16 @@ def webhook(secret):
                 tfp  = float(stats.get("team_finance_pct", 0.0) or 0.0)
                 th   = (stats.get("top_holder") or "")[:42]
                 thp  = float(stats.get("top_holder_pct", 0.0) or 0.0)
+                # contract / custodian detection for top holder
+                th_contract = False
+                th_label = None
+                try:
+                    if th:
+                        code = _eth_getCode(th)
+                        th_contract = bool(code and code != "0x")
+                        th_label = (KNOWN_CUSTODIANS.get(chain) or {}).get(th)
+                except Exception:
+                    pass
                 holders = int(stats.get("holders_count", 0) or 0)
 
                 # verdict (very-lite heuristics)
@@ -2694,7 +2713,10 @@ def webhook(secret):
                 if dead >= 95 or (uncx + tfp) >= 50:
                     verdict = "🟢 likely locked"
                 elif thp >= 50 and (uncx + tfp) < 10 and dead < 50:
-                    verdict = "🔴 high risk (EOA holds LP)"
+                    if th_contract or th_label:
+                        verdict = "🟡 mixed (contract/custodian holds LP)"
+                    else:
+                        verdict = "🔴 high risk (EOA holds LP)"
                 else:
                     verdict = "🟡 mixed"
 
@@ -2719,6 +2741,7 @@ def webhook(secret):
                     f"• UNCX lockers: {uncx}%",
                     f"• TeamFinance: {tfp}%",
                     f"• Top holder: {th or 'n/a'} — {thp}% of LP",
+                    f"• Top holder type: {'contract' if th_contract else 'EOA' if th else 'n/a'}{(' (' + th_label + ')') if th_label else ''}",
                     f"• Holders (LP token): {holders}",
                 ]
                 link_lines = []
