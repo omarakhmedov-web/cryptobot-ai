@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.81-anchor33-sharelink+pdf")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.96-ready-links-fix-enrich")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1063,11 +1063,14 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         ik.append(row)
         # PDF export row
         if addr:
-            ik.append([{"text": "📥 Export PDF", "callback_data": f"pdf:{addr}"}])
+            pdf_url = (f"{_mx_site()}/export/pdf/{addr}" if _mx_site() else f"/export/pdf/{addr}")
+            ik.append([{"text": "📥 Export PDF", "url": pdf_url}])
     # Share link row
     try:
         if addr:
-            ik.append([{"text": "🔗 Share link", "callback_data": f"share:{addr}"}])
+            tok = _mx_token_for(addr)
+            share_url = (f"{_mx_site()}/r/{tok}" if _mx_site() else f"/r/{tok}")
+            ik.append([{"text": "🔗 Share link", "url": share_url}])
     except Exception:
         pass
     # Separate row for On-chain, only if RPCs configured
@@ -3060,7 +3063,7 @@ def webhook(secret):
     return ("ok", 200)
 
 
-def _enrich_full(base_text: str, addr: str) -> str:
+def _enrich_full(
     try:
         text = base_text or ""
         addr_l = (addr or "").lower()
