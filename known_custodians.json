@@ -2,6 +2,12 @@
   "bsc": {
     "0xa5f8c5dbd5f286960b9d90548680ae5ebff07652": "PancakeSwap MasterChef/Pool"
   },
-  "eth": {},
-  "polygon": {}
+  "eth": {
+    "0xc2edad668740f1aa35e4d8f227fb8e17dca888cd": "SushiSwap MasterChef V1",
+    "0xef0881ec094552b2e128cf945ef17a6752b4ec5d": "SushiSwap MasterChef V2"
+  },
+  "polygon": {
+    "0x0769fd68dfb93167989c6f7254cd0d766fb2841f": "SushiSwap MiniChef (Polygon)",
+    "0x0000000000000000000000000000000000000001": "QuickSwap Staking (placeholder; replace with real)"
+  }
 }
