@@ -2779,7 +2779,7 @@ def webhook(secret):
                     link = f"/export/pdf/{addr}"
                 _send_text(chat_id, link, logger=app.logger)
                 return ("ok", 200)
-if data.startswith("copyca:"):
+            if data.startswith("copyca:"):
                 addr = data.split(":",2)[2].strip().lower() if data.count(":")>=2 else data.split(":",1)[1].strip().lower()
                 try:
                     tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "address sent", logger=app.logger)
