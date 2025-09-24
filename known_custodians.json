@@ -8,6 +8,21 @@
   },
   "polygon": {
     "0x0769fd68dfb93167989c6f7254cd0d766fb2841f": "SushiSwap MiniChef (Polygon)",
-    "0x0000000000000000000000000000000000000001": "QuickSwap Staking (placeholder; replace with real)"
+    "0x0000000000000000000000000000000000000001": "QuickSwap Staking (placeholder; replace with real)",
+    "0xa5e0829caced8ffdd4de3c43696c57f7d7a678ff": "QuickSwap V2 Router",
+    "0x5757371414417b8c6caad45baef941abc7d3ab32": "QuickSwap V2 Factory",
+    "0x411b0facc3489691f28ad58c47006af5e3ab3a28": "QuickSwap V3 Core Factory",
+    "0x2d98e2fa9da15aa6dc9581ab097ced7af697cb92": "QuickSwap V3 Pool Deployer",
+    "0xa15f0d7377b2a0c0c10db057f641bed21028fc89": "QuickSwap V3 Quoter",
+    "0xf5b509bb0909a69b1c207e495f687a596c168e12": "QuickSwap V3 Swap Router",
+    "0x8ef88e4c7cfbbac1c163f7eddd4b578792201de6": "QuickSwap V3 NF Position Manager",
+    "0x6ccb9426cecee2903fbd97fd833fd1d31c100292": "QuickSwap V3 Multicall",
+    "0x157b9913e00204f8c980bb00aa62e22b0dab1a63": "QuickSwap V3 Migrator",
+    "0x32cff674763b06b983c0d55ef2e41b84d16855bb": "QuickSwap Real Staker",
+    "0x9923f42a02a82da63ee0dbbc5f8e311e3dd8a1f8": "QuickSwap Finite Farming",
+    "0x8a26436e41d0b5fc4c6ed36c1976fafbe173444e": "QuickSwap Infinite Farming",
+    "0x7f281a8cdf66ef5e9db8434ec6d97acc1bc01e78": "QuickSwap Farming Center",
+    "0x958d208cdf087843e9ad98d23823d32e17d723a1": "QuickSwap Dragons Lair (dQUICK)",
+    "0x8ff56b5325446aae6efbf006a4c1d88e4935a914": "QuickSwap Staking Rewards"
   }
 }
