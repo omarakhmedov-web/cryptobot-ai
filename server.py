@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.77-anchor29-smartlp")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.78-anchor30-overallbadge")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -56,6 +56,62 @@ except Exception:
 
 LOC = locale_text
 app = Flask(__name__)
+
+
+# === Overall badge helpers (anchor30) ===
+def _badge_overall_now(message_obj, addr_hint: str = None):
+    """
+    Edit SAME message to append 'Overall now: <LABEL> (<score>/100)'.
+    Falls back to sending a short line if editing fails.
+    Uses RISK_CACHE (filled by _append_verdict_block / _merge_onchain_into_risk).
+    """
+    try:
+        msg = message_obj or {}
+        chat_id = int((msg.get("chat") or {}).get("id") or 0) if isinstance(msg, dict) else getattr(getattr(message_obj, "chat", {}), "id", 0)
+        if chat_id == 0:
+            return
+        text = msg.get("text") if isinstance(msg, dict) else getattr(message_obj, "text", "") or ""
+        addr = (addr_hint or _extract_addr_from_text(text) or "").lower()
+        if not addr:
+            return
+        ent = RISK_CACHE.get(addr) or {}
+        score = int(ent.get("score") or 0)
+        label = str(ent.get("label") or "").strip()
+        if not label:
+            # Try recompute if text available
+            try:
+                s, l, _ = _risk_verdict(addr, text or "")
+                score, label = s, l
+            except Exception:
+                return
+        # normalize emoji separated label
+        label_clean = label
+        # Build new text with or without existing line
+        t = text or ""
+        lines = t.split("\\n")
+        # remove previous 'Overall now:' line if any
+        lines = [ln for ln in lines if not ln.strip().lower().startswith("overall now:")]
+        lines.append(f"")
+        lines.append(f"Overall now: {label_clean} (score {score}/100)")
+        new_text = "\\n".join(lines)
+        try:
+            # Try edit via our tg wrapper if available
+            try:
+                chat_id = int((msg.get("chat") or {}).get("id") or 0)
+                msg_id = int(msg.get("message_id") or 0)
+            except Exception:
+                chat_id = getattr(getattr(message_obj, "chat", {}), "id", 0)
+                msg_id = getattr(message_obj, "message_id", 0)
+            from tg_safe import tg_edit_message_text
+            tg_edit_message_text(TELEGRAM_TOKEN, chat_id, msg_id, new_text, disable_web_page_preview=True)
+        except Exception:
+            # Fallback: just send a badge line
+            _send_text(chat_id, f"Overall now: {label_clean} (score {score}/100)")
+    except Exception:
+        pass
+# === /Overall badge helpers ===
+
+
 
 
 
@@ -2595,6 +2651,10 @@ def webhook(secret):
             if data.startswith("why2:"):
                 addr_hint = data.split(":",1)[1].strip().lower()
                 _answer_why_deep(cq, addr_hint=addr_hint)
+                try:
+                    _badge_overall_now(msg_obj, addr_hint)
+                except Exception:
+                    pass
                 return ("ok", 200)
 
             if data.startswith("why"):
@@ -2602,6 +2662,10 @@ def webhook(secret):
                 if ":" in data:
                     addr_hint = data.split(":", 1)[1].strip().lower()
                 _answer_why_quickly(cq, addr_hint=addr_hint)
+                try:
+                    _badge_overall_now(msg_obj, addr_hint)
+                except Exception:
+                    pass
                 return ("ok", 200)
 
             if data.startswith("hp:"):
@@ -2630,6 +2694,10 @@ def webhook(secret):
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=False)
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
+                try:
+                    _badge_overall_now(msg_obj, addr)
+                except Exception:
+                    pass
                 return ("ok", 200)
 
             if data.startswith("copyca:"):
@@ -2694,6 +2762,10 @@ def webhook(secret):
                          f"• Holders (LP token): {holders}"]
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "LP stats", logger=app.logger)
                 _send_text(chat_id, "\n".join(lines), logger=app.logger)
+                try:
+                    _badge_overall_now(msg_obj, addr)
+                except Exception:
+                    pass
                 return ("ok", 200)
 
             if data.startswith("rep:"):
