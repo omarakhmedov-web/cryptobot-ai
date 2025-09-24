@@ -3869,14 +3869,33 @@ def _mx_render_report(token):
 
 @app.route("/export/pdf/<addr>")
 def _mx_export_pdf(addr):
+
     html = _mx_get_report_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
-    pdf = _mx_export_pdf_bytes(html)
-    if pdf:
+    # 1) Try WeasyPrint (if available)
+    try:
+        from weasyprint import HTML as _MX_HTML
+        pdf = _MX_HTML(string=html).write_pdf()
         resp = _mx_make_response(pdf, 200)
         resp.headers['Content-Type'] = 'application/pdf'
-        resp.headers['Content-Disposition'] = f'attachment; filename=\"{addr}.pdf\"'
+        resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
         return resp
-    # Fallback: HTML (never 404)
+    except Exception:
+        pass
+    # 2) Try xhtml2pdf (pure-Python fallback)
+    try:
+        from xhtml2pdf import pisa as _MX_PISA
+        from io import BytesIO as _MX_BytesIO
+        out = _MX_BytesIO()
+        # xhtml2pdf expects full HTML; simple styles supported
+        result = _MX_PISA.CreatePDF(src=html, dest=out, encoding='utf-8')
+        if not result.err:
+            resp = _mx_make_response(out.getvalue(), 200)
+            resp.headers['Content-Type'] = 'application/pdf'
+            resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
+            return resp
+    except Exception:
+        pass
+    # 3) Fallback: HTML (never 404)
     resp = _mx_make_response(html, 200)
     resp.headers['Content-Type'] = 'text/html; charset=utf-8'
     return resp
