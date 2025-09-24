@@ -2820,6 +2820,50 @@ def webhook(secret):
                 _merge_onchain_into_risk(base_addr, meta)
                 _send_text(chat_id, "On-chain\n" + details, logger=app.logger)
             return ("ok", 200)
+            # --- Smart open:* handlers (DEX / Scan) ---
+            if data.startswith("open:scan:"):
+                addr = data.split(":", 2)[2].strip()
+                base_addr = addr.split("?", 1)[0]
+                # Try resolve chain via DexScreener; fall back to common explorers
+                pair, chain = _ds_resolve_pair_and_chain(base_addr)
+                chain = (chain or "").lower()
+                if chain in ("eth", "ethereum"):
+                    url = f"https://etherscan.io/token/{base_addr}"
+                elif chain in ("bsc","bscscan","bnb","binance"):
+                    url = f"https://bscscan.com/token/{base_addr}"
+                elif chain in ("polygon","matic"):
+                    url = f"https://polygonscan.com/token/{base_addr}"
+                else:
+                    url = None
+                if url:
+                    _answer_callback((update.get("callback_query") or {}).get("id"), text="Opening Scan…")
+                    _send_text(chat_id, f"🔍 Scan: {url}")
+                else:
+                    _send_text(chat_id, "🔍 Scan: не удалось определить сеть.
+"
+                                        f"• Etherscan: https://etherscan.io/token/{base_addr}
+"
+                                        f"• BscScan:  https://bscscan.com/token/{base_addr}
+"
+                                        f"• Polygon:  https://polygonscan.com/token/{base_addr}")
+                return ("ok", 200)
+
+            if data.startswith("open:dex:"):
+                addr = data.split(":", 2)[2].strip()
+                base_addr = addr.split("?", 1)[0]
+                pair, chain = _ds_resolve_pair_and_chain(base_addr)
+                url = None
+                if isinstance(pair, dict):
+                    ch = (chain or "").lower()
+                    paddr = pair.get("pairAddress") or pair.get("pair")
+                    if paddr and ch:
+                        url = f"https://dexscreener.com/{ch}/{paddr}"
+                if not url:
+                    url = f"https://dexscreener.com/search?q={base_addr}"
+                _answer_callback((update.get("callback_query") or {}).get("id"), text="Opening DEX…")
+                _send_text(chat_id, f"🔗 DEX: {url}")
+                return ("ok", 200)
+
         if cmd in ("/quickscan","/scan"):
             if not arg:
                 _send_text(chat_id, LOC("en","scan_usage"), logger=app.logger)
