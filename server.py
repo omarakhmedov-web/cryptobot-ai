@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.96-ready-links-fix-enrich")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.59-anchor28-labels-global")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -55,110 +55,7 @@ except Exception:
     DOMAIN_META_TTL_NEG = 120
 
 LOC = locale_text
-
-# === Share link (token+TTL) helpers ===
-SHARE_SECRET = os.environ.get("SHARE_SECRET") or (os.environ.setdefault("SHARE_SECRET", secrets.token_hex(16)) or os.environ.get("SHARE_SECRET"))
-try:
-    SHARE_TTL_MIN = int(os.environ.get("SHARE_TTL_MIN") or 60)
-except Exception:
-    SHARE_TTL_MIN = 60
-
-def _b64u(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode('ascii').rstrip('=')
-
-def _b64u_dec(s: str) -> bytes:
-    pad = '=' * ((4 - len(s) % 4) % 4)
-    return base64.urlsafe_b64decode(s + pad)
-
-def _make_share_token(addr: str, ttl_min: int = None) -> str:
-    ttl = int(ttl_min or SHARE_TTL_MIN or 60)
-    exp = int(time.time()) + ttl * 60
-    nonce = secrets.token_hex(4)
-    payload = f"{addr}|{exp}|{nonce}".encode('utf-8')
-    mac = hmac.new((SHARE_SECRET or '').encode('utf-8'), payload, hashlib.sha256).digest()
-    return _b64u(payload) + "." + _b64u(mac)
-
-def _verify_share_token(token: str):
-    try:
-        p, m = token.split('.', 1)
-        payload = _b64u_dec(p)
-        mac = _b64u_dec(m)
-        if not hmac.compare_digest(mac, hmac.new((SHARE_SECRET or '').encode('utf-8'), payload, hashlib.sha256).digest()):
-            return None
-        addr, exp, nonce = payload.decode('utf-8').split('|')
-        if int(exp) < int(time.time()):
-            return None
-        return addr
-    except Exception:
-        return None
-# === /Share link helpers ===
-
-# === Export PDF helpers (WeasyPrint if available) ===
-def _export_pdf_bytes_from_html(html: str):
-    try:
-        from weasyprint import HTML
-        pdf = HTML(string=html).write_pdf()
-        return pdf
-    except Exception:
-        return None
-# === /Export PDF helpers ===
 app = Flask(__name__)
-
-
-# === Overall badge helpers (anchor30) ===
-def _badge_overall_now(message_obj, addr_hint: str = None):
-    """
-    Edit SAME message to append 'Overall now: <LABEL> (<score>/100)'.
-    Falls back to sending a short line if editing fails.
-    Uses RISK_CACHE (filled by _append_verdict_block / _merge_onchain_into_risk).
-    """
-    try:
-        msg = message_obj or {}
-        chat_id = int((msg.get("chat") or {}).get("id") or 0) if isinstance(msg, dict) else getattr(getattr(message_obj, "chat", {}), "id", 0)
-        if chat_id == 0:
-            return
-        text = msg.get("text") if isinstance(msg, dict) else getattr(message_obj, "text", "") or ""
-        addr = (addr_hint or _extract_addr_from_text(text) or "").lower()
-        if not addr:
-            return
-        ent = RISK_CACHE.get(addr) or {}
-        score = int(ent.get("score") or 0)
-        label = str(ent.get("label") or "").strip()
-        if not label:
-            # Try recompute if text available
-            try:
-                s, l, _ = _risk_verdict(addr, text or "")
-                score, label = s, l
-            except Exception:
-                return
-        # normalize emoji separated label
-        label_clean = label
-        # Build new text with or without existing line
-        t = text or ""
-        lines = t.split("\\n")
-        # remove previous 'Overall now:' line if any
-        lines = [ln for ln in lines if not ln.strip().lower().startswith("overall now:")]
-        lines.append(f"")
-        lines.append(f"Overall now: {label_clean} (score {score}/100)")
-        new_text = "\\n".join(lines)
-        try:
-            # Try edit via our tg wrapper if available
-            try:
-                chat_id = int((msg.get("chat") or {}).get("id") or 0)
-                msg_id = int(msg.get("message_id") or 0)
-            except Exception:
-                chat_id = getattr(getattr(message_obj, "chat", {}), "id", 0)
-                msg_id = getattr(message_obj, "message_id", 0)
-            from tg_safe import tg_edit_message_text
-            tg_edit_message_text(TELEGRAM_TOKEN, chat_id, msg_id, new_text, disable_web_page_preview=True)
-        except Exception:
-            # Fallback: just send a badge line
-            _send_text(chat_id, f"Overall now: {label_clean} (score {score}/100)")
-    except Exception:
-        pass
-# === /Overall badge helpers ===
-
-
 
 
 
@@ -526,22 +423,6 @@ CHAIN_NAME_TO_ID = {
     "arbitrum": 42161, "arb":42161,
     "base": 8453,
 }
-
-
-def _explorer_base_for(chain: str) -> str:
-    c = (chain or "").lower()
-    return {
-        "ethereum": "https://etherscan.io",
-        "eth": "https://etherscan.io",
-        "bsc": "https://bscscan.com",
-        "bnb": "https://bscscan.com",
-        "polygon": "https://polygonscan.com",
-        "matic": "https://polygonscan.com",
-        "arbitrum": "https://arbiscan.io",
-        "arb": "https://arbiscan.io",
-        "base": "https://basescan.org",
-    }.get(c, "https://etherscan.io")
-
 
 
 
@@ -1061,18 +942,6 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
     if row:
         ik.append(row)
-        # PDF export row
-        if addr:
-            pdf_url = (f"{_mx_site()}/export/pdf/{addr}" if _mx_site() else f"/export/pdf/{addr}")
-            ik.append([{"text": "📥 Export PDF", "url": pdf_url}])
-    # Share link row
-    try:
-        if addr:
-            tok = _mx_token_for(addr)
-            share_url = (f"{_mx_site()}/r/{tok}" if _mx_site() else f"/r/{tok}")
-            ik.append([{"text": "🔗 Share link", "url": share_url}])
-    except Exception:
-        pass
     # Separate row for On-chain, only if RPCs configured
     if want_hp and addr:
         try:
@@ -1093,17 +962,6 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
     if 'utm_' not in sample_url:
         sample_url = sample_url + ('&' if '?' in sample_url else '?') + 'utm_source=bot&utm_medium=quickscan&utm_campaign=sample_report'
     ik.append([{ 'text': '📄 HTML report (sample)', 'url': sample_url }])
-    
-    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
-    if addr:
-        # Safer cross-chain links via DexScreener search; exact chain link is resolved in callback.
-        ik.append([
-            {"text": "🔗 Open in DEX",  "callback_data": f"open:dex:{addr}"},
-            {"text": "🔍 Open in Scan", "callback_data": f"open:scan:{addr}"},
-        ])
-        ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
-        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
-
     # Δ timeframe row (single)
     ik.append([
         {"text": "Δ 5m",  "callback_data": "tf:5"},
@@ -2410,9 +2268,6 @@ def _answer_why_quickly(cq, addr_hint=None):
 @require_webhook_secret
 def webhook(secret):
 
-    # --- SAFE DEFAULTS (auto-patched) ---
-    lab = None
-    addr_l = None
     # --- EARLY START HANDLER (runs before anything else) ---
     try:
         upd = request.get_json(force=True, silent=True) or {}
@@ -2541,7 +2396,7 @@ def webhook(secret):
                 if not ans:
                     ans = "Δ: n/a (no data from source)"
                 
-                if (lab is not None) and (lab in {'24','24h','h24'}) and ADDR_RE.fullmatch((addr_l or '')):
+                if lab in {"24","24h","h24"} and ADDR_RE.fullmatch(addr_l or ""):
                     try:
                         url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
                         r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
@@ -2713,10 +2568,6 @@ def webhook(secret):
             if data.startswith("why2:"):
                 addr_hint = data.split(":",1)[1].strip().lower()
                 _answer_why_deep(cq, addr_hint=addr_hint)
-                try:
-                    _badge_overall_now(msg_obj, addr_hint)
-                except Exception:
-                    pass
                 return ("ok", 200)
 
             if data.startswith("why"):
@@ -2724,10 +2575,6 @@ def webhook(secret):
                 if ":" in data:
                     addr_hint = data.split(":", 1)[1].strip().lower()
                 _answer_why_quickly(cq, addr_hint=addr_hint)
-                try:
-                    _badge_overall_now(msg_obj, addr_hint)
-                except Exception:
-                    pass
                 return ("ok", 200)
 
             if data.startswith("hp:"):
@@ -2756,101 +2603,6 @@ def webhook(secret):
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=False)
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
-                try:
-                    _badge_overall_now(msg_obj, addr)
-                except Exception:
-                    pass
-                return ("ok", 200)
-
-            
-            if data.startswith("share:"):
-                addr = data.split(":",1)[1].strip().lower()
-                try:
-                    base = os.environ.get("SITE_URL") or os.environ.get("PRIMARY_URL") or ""
-                    token = _make_share_token(addr)
-                    link = (base.rstrip("/") + "/r/" + token) if base else ("/r/" + token)
-                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "link ready", logger=app.logger)
-                except Exception:
-                    link = "/r/invalid"
-                _send_text(chat_id, link, logger=app.logger)
-                return ("ok", 200)
-
-            if data.startswith("pdf:"):
-                addr = data.split(":",1)[1].strip().lower()
-                try:
-                    base = os.environ.get("SITE_URL") or os.environ.get("PRIMARY_URL") or ""
-                    link = (base.rstrip("/") + f"/export/pdf/{addr}") if base else (f"/export/pdf/{addr}")
-                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "exporting…", logger=app.logger)
-                except Exception:
-                    link = f"/export/pdf/{addr}"
-                _send_text(chat_id, link, logger=app.logger)
-                return ("ok", 200)
-            if data.startswith("copyca:"):
-                addr = data.split(":",2)[2].strip().lower() if data.count(":")>=2 else data.split(":",1)[1].strip().lower()
-                try:
-                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "address sent", logger=app.logger)
-                except Exception:
-                    pass
-                _send_text(chat_id, f"`{addr}`", parse_mode="Markdown", logger=app.logger)
-                return ("ok", 200)
-
-            if data.startswith("open:"):
-                # open:<kind>:<addr>
-                try:
-                    _, kind, addr = data.split(":", 2)
-                except ValueError:
-                    kind = "dex"; addr = data.split(":",1)[1]
-                addr = (addr or "").strip().lower()
-                pair, chain = _ds_resolve_pair_and_chain(addr)
-                chain = (chain or "ethereum").lower()
-                if kind == "scan":
-                    base = _explorer_base_for(chain)
-                    url = f"{base}/address/{addr}"
-                else:
-                    # DEX link: prefer exact pair if available, else search
-                    if pair and (pair.get("pairAddress") or pair.get("pair")) and chain:
-                        paddr = pair.get("pairAddress") or pair.get("pair")
-                        url = f"https://dexscreener.com/{chain}/{paddr}"
-                    elif chain:
-                        url = f"https://dexscreener.com/{chain}/{addr}"
-                    else:
-                        url = f"https://dexscreener.com/search?q={addr}"
-                try:
-                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "opening…", logger=app.logger)
-                except Exception:
-                    pass
-                _send_text(chat_id, url, logger=app.logger)
-                return ("ok", 200)
-
-            if data.startswith("lp:"):
-                addr = data.split(":",1)[1].strip().lower()
-                # Try to resolve pair & chain via DexScreener
-                pair, chain = _ds_resolve_pair_and_chain(addr)
-                chain = (chain or "").lower()
-                paddr = None
-                if isinstance(pair, dict):
-                    paddr = pair.get("pairAddress") or pair.get("pair")
-                stats = {}
-                if paddr and chain:
-                    stats = _infer_lp_status(paddr, chain) or {}
-                dead = stats.get("dead_pct", 0.0)
-                uncx = stats.get("uncx_pct", 0.0)
-                tfp  = stats.get("team_finance_pct", 0.0)
-                th   = stats.get("top_holder", "")
-                thp  = stats.get("top_holder_pct", 0.0)
-                holders = stats.get("holders_count", 0)
-                lines = [f"LP lock (lite) — chain: {chain or 'n/a'}",
-                         f"• Dead/renounced: {dead}%",
-                         f"• UNCX lockers: {uncx}%",
-                         f"• TeamFinance: {tfp}%",
-                         f"• Top holder: {th[:10]}… {thp}% of LP",
-                         f"• Holders (LP token): {holders}"]
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "LP stats", logger=app.logger)
-                _send_text(chat_id, "\n".join(lines), logger=app.logger)
-                try:
-                    _badge_overall_now(msg_obj, addr)
-                except Exception:
-                    pass
                 return ("ok", 200)
 
             if data.startswith("rep:"):
@@ -3063,7 +2815,7 @@ def webhook(secret):
     return ("ok", 200)
 
 
-def _enrich_full(
+def _enrich_full(addr: str, base_text: str) -> str:
     try:
         text = base_text or ""
         addr_l = (addr or "").lower()
@@ -3706,247 +3458,3 @@ def build_buy_keyboard_priced():
         rows.append(row)
     return {"inline_keyboard": rows}
 
-
-
-
-@app.route("/r/<token>", methods=["GET"])
-def serve_shared_report(token):
-    addr = _verify_share_token(token)
-    if not addr or not ADDR_RE.fullmatch(addr or ""):
-        return ("link expired or invalid", 403)
-    # Try render current report (best-effort)
-    try:
-        base_text = f"Shared report for {addr}"
-        path, html = _render_report(addr, base_text)
-        if html:
-            return html, 200, {"Content-Type":"text/html; charset=utf-8"}
-        if path:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read(), 200, {"Content-Type":"text/html; charset=utf-8"}
-    except Exception:
-        pass
-    # Fallback to sample if configured
-    sample = os.environ.get("SAMPLE_REPORT_PATH") or ""
-    if sample:
-        try:
-            with open(sample, "r", encoding="utf-8") as f:
-                return f.read(), 200, {"Content-Type":"text/html; charset=utf-8"}
-        except Exception:
-            pass
-    return ("report is not available", 503)
-
-
-
-
-@app.route("/export/pdf/<addr>", methods=["GET"])
-def export_pdf_addr(addr):
-    try:
-        if not ADDR_RE.fullmatch((addr or "").lower()):
-            return ("bad address", 400)
-        base_text = f"PDF export for {addr}"
-        path, html = _render_report(addr, base_text)
-        html_doc = html
-        if not html_doc and path:
-            with open(path, "r", encoding="utf-8") as f:
-                html_doc = f.read()
-        if not html_doc:
-            # fallback to sample
-            sample = os.environ.get("SAMPLE_REPORT_PATH") or ""
-            if sample:
-                try:
-                    with open(sample, "r", encoding="utf-8") as f:
-                        html_doc = f.read()
-                except Exception:
-                    pass
-        if not html_doc:
-            return ("report not available", 503)
-        pdf_bytes = _export_pdf_bytes_from_html(html_doc)
-        if pdf_bytes:
-            fname = f"metridex_report_{addr[:6]}.pdf"
-            headers = {"Content-Type": "application/pdf",
-                       "Content-Disposition": f"attachment; filename={fname}"}
-            return pdf_bytes, 200, headers
-        # Fallback: return HTML as attachment (so user can Save-as-PDF)
-        fname = f"metridex_report_{addr[:6]}.html"
-        headers = {"Content-Type": "text/html; charset=utf-8",
-                   "Content-Disposition": f"attachment; filename={fname}"}
-        return html_doc, 200, headers
-    except Exception as e:
-        return (f"export failed: {e}", 500)
-
-
-
-
-# ===== Metridex Addon v0.3.94 (appended 2025-09-24 19:33:12) =====
-# Adds share links, PDF export with fallbacks, simple APIs, and helpers for bot integration.
-import base64 as _mx_b64, hmac as _mx_hmac, hashlib as _mx_hashlib
-from flask import make_response as _mx_make_response, abort as _mx_abort, jsonify as _mx_jsonify, redirect as _mx_redirect, request as _mx_request
-
-try:
-    MX_STATE
-except NameError:
-    MX_STATE = {}  # addr(lower) -> {'html': str}
-
-def _mx_b64u(x: bytes) -> str:
-    return _mx_b64.urlsafe_b64encode(x).decode('ascii').rstrip('=')
-
-def _mx_b64u_dec(s: str) -> bytes:
-    pad = '=' * (-len(s) % 4)
-    return _mx_b64.urlsafe_b64decode(s + pad)
-
-def _mx_sign(secret: str, payload: bytes) -> str:
-    return _mx_b64u(_mx_hmac.new((secret or '').encode('utf-8'), payload, _mx_hashlib.sha256).digest())
-
-def _mx_token_for(addr: str, ttl_min: int = None) -> str:
-    ttl = int(ttl_min or int(os.getenv('SHARE_TTL_MIN', '60')))
-    payload = json.dumps({'a': addr, 'e': int(time.time()) + ttl*60, 'n': int(time.time()*1000)}).encode('utf-8')
-    return f"{_mx_b64u(payload)}.{_mx_sign(os.getenv('SHARE_SECRET',''), payload)}"
-
-def _mx_verify_token(token: str):
-    try:
-        p64, sig = token.split('.', 1)
-        payload = _mx_b64u_dec(p64)
-        if _mx_sign(os.getenv('SHARE_SECRET',''), payload) != sig:
-            return None
-        data = json.loads(payload.decode('utf-8'))
-        if int(data.get('e', 0)) < int(time.time()):
-            return None
-        return str(data.get('a','')).lower()
-    except Exception:
-        return None
-
-def _mx_put_report(addr: str, html: str):
-    if not addr or not html:
-        return False
-    MX_STATE[str(addr).lower()] = {'html': html}
-    return True
-
-def _mx_get_html(addr: str):
-    return (MX_STATE.get(str(addr).lower()) or {}).get('html')
-
-def _mx_site() -> str:
-    return (os.getenv('SITE_URL') or '').rstrip('/')
-
-def _mx_pdf_from_html(html: str):
-    # 1) WeasyPrint
-    try:
-        from weasyprint import HTML as _MX_HTML
-        return _MX_HTML(string=html).write_pdf(), 'weasyprint'
-    except Exception:
-        pass
-    # 2) xhtml2pdf
-    try:
-        from xhtml2pdf import pisa as _MX_PISA
-        from io import BytesIO as _MX_BytesIO
-        out = _MX_BytesIO()
-        res = _MX_PISA.CreatePDF(src=html, dest=out, encoding='utf-8')
-        if not res.err:
-            return out.getvalue(), 'xhtml2pdf'
-    except Exception:
-        pass
-    # 3) reportlab fallback
-    try:
-        from reportlab.lib.pagesizes import letter
-        from reportlab.pdfgen import canvas
-        from io import BytesIO as _MX_BytesIO
-        buf = _MX_BytesIO()
-        c = canvas.Canvas(buf, pagesize=letter)
-        c.setTitle('Metridex Report')
-        c.setFont('Helvetica-Bold', 16); c.drawString(72, 720, 'Metridex — Report')
-        c.setFont('Helvetica', 11); c.drawString(72, 700, 'Open share link for full HTML visuals.')
-        c.showPage(); c.save()
-        return buf.getvalue(), 'reportlab-fallback'
-    except Exception:
-        pass
-    return None, 'html-fallback'
-
-@app.route("/api/put_report", methods=["POST"])
-def _mx_api_put_report():
-    data = _mx_request.get_json(silent=True) or {}
-    addr = (data.get('addr') or '').strip()
-    html = data.get('html') or ''
-    if not addr or not html:
-        return _mx_jsonify(ok=False, error='addr and html required'), 400
-    _mx_put_report(addr, html)
-    return _mx_jsonify(ok=True)
-
-@app.route("/api/make_share_link")
-def _mx_api_make_share_link():
-    addr = (_mx_request.args.get('addr') or '').strip()
-    if not addr:
-        return _mx_jsonify(ok=False, error='addr required'), 400
-    if not _mx_get_html(addr):
-        return _mx_jsonify(ok=False, error='report not found for addr'), 404
-    tok = _mx_token_for(addr)
-    site = _mx_site()
-    return _mx_jsonify(ok=True, share_url=(f"{site}/r/{tok}" if site else f"/r/{tok}"))
-
-@app.route("/api/share_link_put", methods=["POST"])
-def _mx_api_share_link_put():
-    data = _mx_request.get_json(silent=True) or {}
-    addr = (data.get('addr') or '').strip()
-    html = data.get('html') or ''
-    if not addr or not html:
-        return _mx_jsonify(ok=False, error='addr and html required'), 400
-    _mx_put_report(addr, html)
-    tok = _mx_token_for(addr)
-    site = _mx_site()
-    return _mx_jsonify(ok=True, share_url=(f"{site}/r/{tok}" if site else f"/r/{tok}"))
-
-@app.route("/api/ready_links", methods=["POST"])
-def _mx_api_ready_links():
-    data = _mx_request.get_json(silent=True) or {}
-    addr = (data.get('addr') or '').strip()
-    html = data.get('html') or ''
-    if not addr or not html:
-        return _mx_jsonify(ok=False, error='addr and html required'), 400
-    _mx_put_report(addr, html)
-    tok = _mx_token_for(addr)
-    site = _mx_site()
-    pdf_url = (f"{site}/export/pdf/{addr}" if site else f"/export/pdf/{addr}")
-    return _mx_jsonify(ok=True, share_url=(f"{site}/r/{tok}" if site else f"/r/{tok}"),
-                       pdf_url=pdf_url, sample_url=os.getenv('SAMPLE_URL') or '')
-
-@app.route("/r/<token>")
-def _mx_render_shared(token):
-    addr = _mx_verify_token(token)
-    if not addr:
-        _mx_abort(404)
-    html = _mx_get_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
-    resp = _mx_make_response(html, 200)
-    resp.headers['Content-Type'] = 'text/html; charset=utf-8'
-    resp.headers['Cache-Control'] = 'no-store'
-    return resp
-
-@app.route("/export/pdf/<addr>")
-def _mx_export_pdf(addr):
-    html = _mx_get_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
-    pdf, engine = _mx_pdf_from_html(html)
-    if pdf:
-        resp = _mx_make_response(pdf, 200)
-        resp.headers['Content-Type'] = 'application/pdf'
-        resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
-        resp.headers['X-MX-PDF-Engine'] = engine
-        return resp
-    resp = _mx_make_response(html, 200)
-    resp.headers['Content-Type'] = 'text/html; charset=utf-8'
-    resp.headers['X-MX-PDF-Engine'] = 'html-fallback'
-    return resp
-
-@app.route("/debug/selfshare_html")
-def _mx_selfshare_html():
-    addr = _mx_request.args.get('addr', '0x831753DD7087CaC61aB5644b308642cc1c33Dc13')
-    html = "<html><body style='font-family:Arial,sans-serif'><h2>Metridex — sample report</h2><p>Address: {}</p><p>Generated: {}</p></body></html>".format(addr, time.ctime())
-    _mx_put_report(addr, html)
-    tok = _mx_token_for(addr)
-    site = _mx_site()
-    link = f"{site}/r/{tok}" if site else f"/r/{tok}"
-    return _mx_redirect(link, code=302)
-
-# Expose helpers for in-process usage
-app.extensions = getattr(app, 'extensions', {})
-app.extensions.setdefault('mx', {})
-app.extensions['mx']['put_report'] = _mx_put_report
-app.extensions['mx']['make_share_link'] = lambda addr: ((_mx_site() + "/r/" + _mx_token_for(addr)) if _mx_site() else ("/r/" + _mx_token_for(addr)))
-app.extensions['mx']['export_pdf_url'] = lambda addr: ((_mx_site() + f"/export/pdf/{addr}") if _mx_site() else (f"/export/pdf/{addr}"))
-# ===== /Addon v0.3.94 =====
