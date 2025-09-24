@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.93-lp-owner-proxy")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.94-lp-locktime")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -556,6 +556,72 @@ def _hp_top_holders(token_or_lp_addr: str, chain_name: str) -> dict:
 
 
 
+
+# Locker providers (no-API best effort)
+_LOCKER_CACHE = {}
+_LOCKER_TTL = int(os.environ.get("LOCKER_TTL", "900"))
+_CHAIN_ID = {"eth": 1, "ethereum": 1, "bsc": 56, "bnb": 56, "bscscan": 56, "polygon": 137, "matic": 137}
+
+def _locker_links(provider: str, pair_addr: str, chain_name: str) -> str:
+    ch = (chain_name or "").lower()
+    if provider == "uncx":
+        # Unicrypt: apps per AMM; for BSC assume Pancake V2, for ETH assume Uniswap V2, for Polygon assume QuickSwap V2
+        amm = "pancake-v2" if ch in ("bsc","bnb","bscscan") else ("uniswap-v2" if ch in ("eth","ethereum") else "quickswap-v2")
+        return f"https://app.unicrypt.network/amm/{amm}/pair/{pair_addr}"
+    if provider == "teamfinance":
+        cid = _CHAIN_ID.get(ch, 1)
+        return f"https://app.team.finance/view-coin/{pair_addr}?chainId={cid}"
+    return ""
+
+def _parse_unlock_text(html: str) -> str:
+    """
+    Try to find an unlock date/time string in HTML. Looks for patterns like:
+    'Unlock', 'Unlock date', timestamps, ISO dates.
+    Returns a short string or ''.
+    """
+    try:
+        # ISO-like date
+        m = re.search(r'(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})', html)
+        if m:
+            return m.group(1)
+        # D/M/Y or M/D/Y variants
+        m = re.search(r'(\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2})?)', html)
+        if m:
+            return m.group(1)
+        # "Unlock" context lines
+        m = re.search(r'Unlock[^<:\n]{0,32}[:\-]\s*([A-Za-z0-9,:\.\s\-]+)<', html, flags=re.I)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+def _locker_locktime(provider: str, pair_addr: str, chain_name: str) -> dict:
+    """
+    Best-effort fetch of unlock info from provider pages (no API keys).
+    Returns {"provider": "...", "link": "...", "unlock": "..."}; empty fields if not found.
+    Uses cache & throttle to avoid hammering providers.
+    """
+    try:
+        key = f"LOCKER:{provider}:{pair_addr.lower()}:{(chain_name or '').lower()}"
+        now = time.time()
+        ent = _LOCKER_CACHE.get(key)
+        if ent and now - ent.get("ts",0) < _LOCKER_TTL:
+            return ent.get("body") or {}
+        link = _locker_links(provider, pair_addr, chain_name)
+        if not link:
+            body = {"provider": provider, "link": "", "unlock": ""}
+            _LOCKER_CACHE[key] = {"ts": now, "body": body}
+            return body
+        headers = {"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
+        r = requests.get(link, timeout=8, headers=headers)
+        html = r.text or ""
+        unlock = _parse_unlock_text(html)
+        body = {"provider": provider, "link": link, "unlock": unlock}
+        _LOCKER_CACHE[key] = {"ts": now, "body": body}
+        return body
+    except Exception:
+        return {}
 def _scan_top_holder_html(lp_addr: str, chain_name: str) -> dict:
     """
     Fallback provider: parse *scan.com LP holders to find top holder/percent.
@@ -2940,6 +3006,32 @@ def webhook(secret):
                 except Exception:
                     pass
                 multi_lockers = len(set(locker_hits)) >= 2
+                # Locker providers in holders (map addresses -> provider)
+                locker_providers = []
+                try:
+                    ch = (chain or "").lower()
+                    for a in set(locker_hits):
+                        if a in (UNCX_LOCKERS.get(ch) or {}):
+                            locker_providers.append("uncx")
+                        if a in (TEAMFINANCE_LOCKERS.get(ch) or {}):
+                            locker_providers.append("teamfinance")
+                except Exception:
+                    pass
+                # Try to fetch unlock info (best-effort) for each detected provider
+                lock_lines = []
+                seen = set()
+                for prov in locker_providers[:2]:  # cap to 2 providers to keep response short
+                    if prov in seen:
+                        continue
+                    seen.add(prov)
+                    info = _locker_locktime(prov, paddr, chain) if (paddr and chain) else {}
+                    if info:
+                        if info.get("unlock"):
+                            lock_lines.append(f"• {prov}: unlock {info['unlock']}")
+                        link = info.get("link")
+                        if link:
+                            lock_lines.append(f"  ↪ {link}")
+
 
 
                 # If LP holders data missing, degrade to unknown verdict
@@ -2990,6 +3082,7 @@ def webhook(secret):
                     ("• Multiple lockers detected" if multi_lockers else None),
                 ]
                 link_lines = []
+                link_lines.extend(lock_lines)
                 if ds_link: link_lines.append(f"DEX pair: {ds_link}")
                 if scan_lp: link_lines.append(f"Scan LP holders: {scan_lp}")
                 link_lines.append(f"Scan token: {scan_token}")
