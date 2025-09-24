@@ -3061,9 +3061,6 @@ def webhook(secret):
 
 
 def _enrich_full(
-    # auto-default return (avoid 500 on unknown updates)
-    return ('OK', 200)
-addr: str, base_text: str) -> str:
     try:
         text = base_text or ""
         addr_l = (addr or "").lower()
