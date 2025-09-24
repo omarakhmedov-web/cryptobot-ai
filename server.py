@@ -2407,6 +2407,10 @@ def _answer_why_quickly(cq, addr_hint=None):
 @require_webhook_secret
 def webhook(secret):
 
+    # --- SAFE DEFAULTS (auto-patched) ---
+    lab = None
+    addr_l = None
+
     # --- EARLY START HANDLER (runs before anything else) ---
     try:
         upd = request.get_json(force=True, silent=True) or {}
@@ -2535,7 +2539,7 @@ def webhook(secret):
                 if not ans:
                     ans = "Δ: n/a (no data from source)"
                 
-                if lab in {"24","24h","h24"} and ADDR_RE.fullmatch(addr_l or ""):
+                if (lab is not None) and (lab in {'24','24h','h24'}) and ADDR_RE.fullmatch((addr_l or '')):
                     try:
                         url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
                         r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
@@ -3055,6 +3059,9 @@ def webhook(secret):
         _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
         _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
     return ("ok", 200)
+
+    # auto-default return to avoid fall-through errors
+    return ('OK', 200)
 
 
 def _enrich_full(addr: str, base_text: str) -> str:
@@ -3869,33 +3876,14 @@ def _mx_render_report(token):
 
 @app.route("/export/pdf/<addr>")
 def _mx_export_pdf(addr):
-
     html = _mx_get_report_html(addr) or f"<html><body><h2>Metridex — report</h2><p>{addr}</p></body></html>"
-    # 1) Try WeasyPrint (if available)
-    try:
-        from weasyprint import HTML as _MX_HTML
-        pdf = _MX_HTML(string=html).write_pdf()
+    pdf = _mx_export_pdf_bytes(html)
+    if pdf:
         resp = _mx_make_response(pdf, 200)
         resp.headers['Content-Type'] = 'application/pdf'
-        resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
+        resp.headers['Content-Disposition'] = f'attachment; filename=\"{addr}.pdf\"'
         return resp
-    except Exception:
-        pass
-    # 2) Try xhtml2pdf (pure-Python fallback)
-    try:
-        from xhtml2pdf import pisa as _MX_PISA
-        from io import BytesIO as _MX_BytesIO
-        out = _MX_BytesIO()
-        # xhtml2pdf expects full HTML; simple styles supported
-        result = _MX_PISA.CreatePDF(src=html, dest=out, encoding='utf-8')
-        if not result.err:
-            resp = _mx_make_response(out.getvalue(), 200)
-            resp.headers['Content-Type'] = 'application/pdf'
-            resp.headers['Content-Disposition'] = f'attachment; filename="{addr}.pdf"'
-            return resp
-    except Exception:
-        pass
-    # 3) Fallback: HTML (never 404)
+    # Fallback: HTML (never 404)
     resp = _mx_make_response(html, 200)
     resp.headers['Content-Type'] = 'text/html; charset=utf-8'
     return resp
