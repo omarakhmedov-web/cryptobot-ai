@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.90-lp-dualprovider-cache")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.92-chain-code")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1741,6 +1741,78 @@ def _rpc_call(method, params):
             continue
     raise RuntimeError(f"All RPC providers failed for {method}: {type(last_err).__name__}: {last_err}")
 
+
+def _parse_chain_rpc_urls(chain_name: str):
+    """Return list of RPC URLs for given chain name from env.
+    Priority: RPC_URLS (JSON with keys 'eth','bsc','polygon') → <CHAIN>_RPC_URLS (comma) → <CHAIN>_RPC_URL
+    """
+    try:
+        ch = (chain_name or "").lower()
+        urls = []
+        # RPC_URLS can be either JSON dict or comma-separated string (eth-first). Prefer dict.
+        envj = os.environ.get("RPC_URLS","").strip()
+        if envj:
+            try:
+                obj = json.loads(envj)
+                if isinstance(obj, dict) and ch in obj:
+                    val = obj.get(ch) or ""
+                    if isinstance(val, str):
+                        urls.extend([u.strip() for u in val.split(",") if u.strip()])
+                    elif isinstance(val, list):
+                        urls.extend([str(u).strip() for u in val if str(u).strip()])
+            except Exception:
+                # not a dict; if it's a string, keep for eth only (legacy)
+                pass
+        # chain-specific lists
+        key_list = None
+        if ch in ("eth","ethereum"):
+            key_list = "ETH_RPC_URLS"
+        elif ch in ("bsc","bscscan","bnb","binance"):
+            key_list = "BSC_RPC_URLS"
+        elif ch in ("polygon","matic"):
+            key_list = "POLYGON_RPC_URLS"
+        if key_list and os.environ.get(key_list):
+            urls.extend([u.strip() for u in os.environ.get(key_list,"").split(",") if u.strip()])
+        # single URL fallback
+        single_key = None
+        if ch in ("eth","ethereum"):
+            single_key = "ETH_RPC_URL"
+        elif ch in ("bsc","bscscan","bnb","binance"):
+            single_key = "BSC_RPC_URL"
+        elif ch in ("polygon","matic"):
+            single_key = "POLYGON_RPC_URL"
+        if single_key and os.environ.get(single_key):
+            urls.append(os.environ.get(single_key).strip())
+        # dedupe keep order
+        out = []
+        for u in urls:
+            if u and u not in out:
+                out.append(u)
+        return out
+    except Exception:
+        return []
+
+def _get_code_chain(addr: str, chain_name: str) -> str:
+    """Return eth_getCode for address on the specified chain ('' if unavailable)."""
+    try:
+        urls = _parse_chain_rpc_urls(chain_name)
+        if not urls:
+            return ""
+        payload = {"jsonrpc":"2.0","id":1,"method":"eth_getCode","params":[addr, "latest"]}
+        headers = {"Content-Type":"application/json"}
+        for url in urls:
+            try:
+                r = requests.post(url, json=payload, headers=headers, timeout=6)
+                if r.status_code == 200:
+                    j = r.json()
+                    code = (j or {}).get("result") or ""
+                    if isinstance(code, str):
+                        return code
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""
 def _eth_getCode(addr):
     return _rpc_call("eth_getCode", [addr, "latest"])
 
@@ -2782,9 +2854,11 @@ def webhook(secret):
                 th_label = None
                 try:
                     if th:
-                        code = _eth_getCode(th)
+                        code = _get_code_chain(th, chain)
                         th_contract = bool(code and code != "0x")
                         th_label = (KNOWN_CUSTODIANS.get(chain) or {}).get(th)
+                        if th_label:
+                            th_contract = True
                 except Exception:
                     pass
                 holders = int(stats.get("holders_count", 0) or 0)
@@ -2829,7 +2903,7 @@ def webhook(secret):
                     f"• UNCX lockers: {uncx}%",
                     f"• TeamFinance: {tfp}%",
                     f"• Top holder: {th or 'n/a'} — {thp}% of LP",
-                    f"• Top holder type: {'contract' if th_contract else 'EOA' if th else 'n/a'}{(' (' + th_label + ')') if th_label else ''}",
+                    f"• Top holder type: {'contract' if (th_contract or th_label) else 'EOA' if th else 'n/a'}{(' (' + th_label + ')') if th_label else ''}",
                     f"• Holders (LP token): {holders}",
                 ]
                 link_lines = []
