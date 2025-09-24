@@ -3060,7 +3060,7 @@ def webhook(secret):
     return ("ok", 200)
 
 
-def _enrich_full(
+def _enrich_full(base_text: str, addr: str) -> str:
     try:
         text = base_text or ""
         addr_l = (addr or "").lower()
