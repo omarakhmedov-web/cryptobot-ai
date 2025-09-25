@@ -4551,87 +4551,24 @@ def api_revoke(token):
         _METRICS["errors"]+=1
         return jsonify({"ok":False,"error":str(e)}),400
 
-@app.route(\"/r/<token>\")
+@app.route("/r/<token>")
 def resolve_report(token):
     try:
-        try:
-        row = con.execute("SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?", (token,)).fetchone()
-        if not row: 
-            return ("Not found",404)
-        _t,_chat,_ca,_ttl,_cts,_rev = row
-        if _rev is not None or _expired(_cts, _ttl):
-            return ("Gone",410)
-        _METRICS["share_opened"]+=1
+        # read link info
+        with _share_db() as con:
+            row = con.execute("SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?", (token,)).fetchone()
+        if not row:
+            return ("Not found", 404)
+        _tok, _chat, _ca, _ttl, _cts, _rev = row
+        # expiry check
+        if _rev is not None or int(time.time()) > int(_cts) + int(_ttl)*3600:
+            return ("Gone", 410)
+        _bump_metric("share_opened", 1)
+        # Render sample report (HTML); ensure bytes/str compatibility
         html = _load_sample_html_bytes()
         return Response(html, mimetype="text/html")
     except Exception as e:
-        _METRICS["errors"]+=1
-        return ("Internal error",500)
-
-# --- Alerts anti-spam (light) ---
-_ALERT_LAST = {}  # (chat_id, key) -> ts
-
-def _should_alert_block(chat_id, text:str) -> bool:
-    if not _ALERTS_GUARD: 
-        return False
-    try:
-        t = int(time.time())
-        key = (str(chat_id), (text or "")[:48])
-        last = _ALERT_LAST.get(key, 0)
-        if t - last < _ALERTS_COOLDOWN_MIN * 60:
-            return True
-        _ALERT_LAST[key] = t
-        return False
-    except Exception:
-        return False
-
-# override: route all plain text sends through throttle
-_old__send_text = _send_text
-def _send_text(chat_id, text, **kwargs):
-    try:
-        _t = str(text or "")
-        if _t.startswith("📈 PriceΔ") or "LP" in _t or "PriceΔ" in _t:
-            if _should_alert_block(chat_id, _t):
-                return None
-        return _old__send_text(chat_id, text, **kwargs)
-    except Exception:
-        try: return _old__send_text(chat_id, text, **kwargs)
-        except Exception: return None
-# ==== METRIX-ALPHA 0.3.101-multi ADDITIONS END ====
-
-
-def _ensure_action_buttons_with_share(chat_id: int, addr: str, kb: dict,
-                                      want_more=False, want_why=True, want_report=True, want_hp=True):
-    base = _ensure_action_buttons(addr=addr, kb=kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
-    try:
-        ik = base.get("inline_keyboard") or []
-        # find the row containing '📄 Report (HTML)'
-        for row in ik:
-            for btn in row:
-                if (btn.get("text") or "").startswith("📄") and "Report" in (btn.get("text") or ""):
-                    # append Share next to it
-                    ttl = 72
-                    try: ttl = int(os.getenv("SHARE_TTL_HOURS","72") or "72")
-                    except Exception: pass
-                    url = f"{_SITE_URL}/s?chat_id={chat_id}&ca={addr}&ttl={_get_share_ttl_hours()}" if _SITE_URL else None
-                    if (_SITE_URL and addr):
-                        if not url:
-                            url = f"{_SITE_URL}/s?chat_id={chat_id}&ca={addr}&ttl={_get_share_ttl_hours()}"
-                        row.append({"text":"🔗 Share", "url": url})
-                    return {"inline_keyboard": ik}
-        # if not found, add a dedicated row:
-        ttl = 72
-        try: ttl = int(os.getenv("SHARE_TTL_HOURS","72") or "72")
+        _bump_metric("errors", 1)
+        try: app.logger.error(f"RESOLVE_ERROR {type(e).__name__}: {e}")
         except Exception: pass
-        url = _share_ready_link(chat_id, addr, ttl_hours=ttl)
-        if url:
-            ik.insert(0, [{"text":"🔗 Share", "url": url}])
-        return {"inline_keyboard": ik}
-    except Exception:
-        return base
-
-def _get_share_ttl_hours() -> int:
-    try:
-        return int(os.getenv("SHARE_TTL_HOURS","72") or "72")
-    except Exception:
-        return 72
+        return jsonify({"ok": False, "error": str(e)}), 400
