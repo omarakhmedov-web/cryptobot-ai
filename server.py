@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.97-release")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.99-release")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -91,12 +91,20 @@ def _db_watch():
     return conn
 
 def watch_add(chat_id: str, ca: str, wtype: str, threshold: float|None=None, chain: str|None=None):
-    ca = (ca or "").lower()
-    wtype = (wtype or "price").lower()
-    now_ts = int(time.time())
-    conn = _db_watch()
-    conn.execute("INSERT INTO watchlist(chat_id, chain, ca, type, threshold, created_at, active) VALUES (?,?,?,?,?,?,1)",
-                 (str(chat_id), (chain or ""), ca, wtype, threshold, now_ts))
+    ca=(ca or "").lower(); wtype=(wtype or "price").lower(); now_ts=int(time.time())
+    conn=_db_watch(); _ensure_watch_index(conn)
+    try:
+        conn.execute("UPDATE watchlist SET threshold=?, active=1 WHERE chat_id=? AND ca=? AND type=? AND IFNULL(chain,'')=IFNULL(?, '')",
+                     (threshold, str(chat_id), ca, wtype, (chain or "")))
+        if conn.total_changes==0:
+            conn.execute("INSERT INTO watchlist(chat_id, chain, ca, type, threshold, created_at, active) VALUES (?,?,?,?,?,?,1)",
+                         (str(chat_id), (chain or ""), ca, wtype, threshold, now_ts))
+    except Exception:
+        try:
+            conn.execute("INSERT OR REPLACE INTO watchlist(chat_id, chain, ca, type, threshold, created_at, active) VALUES (?,?,?,?,?,?,1)",
+                         (str(chat_id), (chain or ""), ca, wtype, threshold, now_ts))
+        except Exception:
+            pass
     conn.commit()
 
 def watch_remove(chat_id: str, ca: str|None=None):
@@ -378,7 +386,7 @@ def _cmd_watch(chat_id: int, text: str):
                 ],
                 [
                     {"text": "Open in DEX", "url": f"https://dexscreener.com/search?q={ca}"},
-                    {"text": "Open in Scan", "url": f"https://{scan_domain}/token/{ca}"}
+                    {"text": "Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(ca))}/token/{ca}"}
                 ]
             ]
             _send_inline_kbd(chat_id, "Shortcuts:", kbd)
@@ -397,13 +405,14 @@ def _cmd_unwatch(chat_id: int, text: str):
 
 def _cmd_mywatch(chat_id: int):
     try:
-        rows = watch_list(chat_id)
+        rows=watch_list(chat_id)
         if not rows:
             _send_text(chat_id, "Watchlist is empty. Use /watch <CA>", logger=app.logger); return
-        lines = ["Your watchlist:"]
-        for chain, ca, wtype, thr, active, created in rows[:40]:
-            mark = "✅" if active else "—"
-            lines.append(f"{mark} {wtype} {thr} {ca} {('['+chain+']') if chain else ''}")
+        lines=["Your watchlist:"]
+        for chain, ca, wtype, thr, active, created in rows[:80]:
+            mark="✅" if active else "—"
+            human=_human_trigger(wtype, thr)
+            lines.append(f"{mark} {human} · {_short_addr(ca)} {('['+chain+']') if chain else ''}")
         _send_text(chat_id, "\n".join(lines), logger=app.logger)
     except Exception:
         pass
@@ -1220,7 +1229,7 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         text = msg.get("text") or ""
         addr = (addr_hint or _extract_addr_from_text(text) or "").lower()
         ent = RISK_CACHE.get(addr) or {}
-        neg = list(ent.get("neg") or [])
+        neg = _filter_owner_signal(list(ent.get("neg") or []), ent)
         pos = list(ent.get("pos") or [])
         wneg = list(ent.get("w_neg") or [])
         wpos = list(ent.get("w_pos") or [])
@@ -3260,7 +3269,7 @@ def webhook(secret):
                     f"• Dead/renounced: {dead}%",
                     f"• UNCX lockers: {uncx}%",
                     f"• TeamFinance: {tfp}%",
-                    f"• Top holder: {th or 'n/a'} — {thp}% of LP",
+                    f"• Top holder: {th or 'n/a'} — {thp}% of LP{(f' — scan: ' + _explorer_base_for(chain) + '/address/' + th) if th else ''}",
                     f"• Top holder type: {'contract' if (th_contract or th_label) else 'EOA' if th else 'n/a'}{(' (' + th_label + ')') if th_label else ''}",
                     f"• Holders (LP token): {holders}",
                     (f"• Owner: {owner_addr}" if owner_addr else "• Owner: n/a"),
@@ -4225,3 +4234,52 @@ def _send_inline_kbd(chat_id: int, text: str, keyboard: list[list[dict]]):
     except Exception:
         pass
 
+
+
+def _resolve_chain_for_scan(ca_l: str) -> str:
+    try:
+        url = f"{DEX_BASE}/latest/dex/tokens/{ca_l}"
+        r = requests.get(url, timeout=6, headers={"User-Agent":"metridex-bot"})
+        if r.status_code != 200: return "ethereum"
+        body = r.json() if hasattr(r,"json") else {}
+        pairs = body.get("pairs") or []
+        p = _ds_pick_best_pair(pairs)
+        ch = (p or {}).get("chainId") or (p or {}).get("chain") or ""
+        ch = (ch or "").lower()
+        if ch in ("eth","ethereum","eth-mainnet"): return "ethereum"
+        if ch in ("bsc","bnb","bsc-mainnet"): return "bsc"
+        if ch in ("polygon","matic"): return "polygon"
+        if ch in ("arbitrum","arb"): return "arbitrum"
+        if ch in ("base",): return "base"
+        return "ethereum"
+    except Exception:
+        return "ethereum"
+
+def _human_trigger(wtype: str, thr) -> str:
+    wtype=(wtype or "price").lower()
+    if wtype=="price":
+        try:
+            v=float(thr or 1.0); return f"PriceΔ 1h ≥ {v:.0f}%"
+        except Exception:
+            return "PriceΔ 1h"
+    if wtype=="lp_top": return "LP top-holder ≥50%"
+    if wtype=="new_lock": return "New/raised LP lock"
+    return wtype
+
+
+def _ensure_watch_index(conn):
+    try:
+        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_uniq ON watchlist(chat_id, ca, type, IFNULL(chain, ""))')
+    except Exception:
+        pass
+
+def _filter_owner_signal(neg_factors: list[str], context: dict) -> list[str]:
+    try:
+        owner=str((context or {}).get("owner") or "").lower()
+        proxy=bool((context or {}).get("proxy"))
+        roles=bool((context or {}).get("roles"))
+        if owner in ("0x0000000000000000000000000000000000000000","0x000000000000000000000000000000000000dead") and not proxy and not roles:
+            return [r for r in (neg_factors or []) if r != "Owner privileges present"]
+    except Exception:
+        pass
+    return list(neg_factors or [])
