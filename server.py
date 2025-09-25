@@ -1144,6 +1144,26 @@ WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADD
 # Helpers
 # ========================
 def _send_text(chat_id, text, **kwargs):
+
+def _share_ready_link(chat_id: int, ca: str, ttl_hours: int | None = None) -> str | None:
+    try:
+        site = (os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip().rstrip("/")
+        if not site:
+            return None
+        url = site + "/api/ready_link"
+        payload = {"chat_id": str(chat_id), "ca": str(ca)}
+        if ttl_hours:
+            try: payload["ttl_hours"] = int(ttl_hours)
+            except Exception: pass
+        r = requests.post(url, json=payload, timeout=6, headers={"User-Agent": "metridex-bot"})
+        if r.status_code != 200:
+            return None
+        js = r.json() if hasattr(r, "json") else {}
+        if not js.get("ok"):
+            return None
+        return js.get("url") or None
+    except Exception:
+        return None
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
@@ -1294,7 +1314,24 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         row.append({"text": "ℹ️ Why++", "callback_data": f"why2:{addr}"})
     if want_report and addr:
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
+    # try generating one-time Share link next to Report (HTML)
+    try:
+        ttl = int(os.getenv("SHARE_TTL_HOURS","72") or "72")
+    except Exception:
+        ttl = 72
+    try:
+        if want_report and addr:
+            chat_hint = None
+            # try to detect chat id from recent message context if available (best effort)
+            # For safety, do not rely on it; Share will be added only in webhook paths where chat_id is known.
+            # Here we try a neutral fallback: no share if we cannot resolve chat_id.
+            # The actual call sites (webhook handlers) can rebuild the keyboard with chat_id.
+    except Exception:
+        pass
     if row:
+        # NOTE: For robust behavior, call sites that build keyboards should replace this row
+        # with a variant that calls _share_ready_link(chat_id, addr) and appends the button.
+        # If chat_id is not available here, leave without Share.
         ik.append(row)
     # Separate row for On-chain, only if RPCs configured
     if want_hp and addr:
@@ -4486,3 +4523,32 @@ def _send_text(chat_id, text, **kwargs):
         try: return _old__send_text(chat_id, text, **kwargs)
         except Exception: return None
 # ==== METRIX-ALPHA 0.3.101-multi ADDITIONS END ====
+
+
+def _ensure_action_buttons_with_share(chat_id: int, addr: str, kb: dict,
+                                      want_more=False, want_why=True, want_report=True, want_hp=True):
+    base = _ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
+    try:
+        ik = base.get("inline_keyboard") or []
+        # find the row containing '📄 Report (HTML)'
+        for row in ik:
+            for btn in row:
+                if (btn.get("text") or "").startswith("📄") and "Report" in (btn.get("text") or ""):
+                    # append Share next to it
+                    ttl = 72
+                    try: ttl = int(os.getenv("SHARE_TTL_HOURS","72") or "72")
+                    except Exception: pass
+                    url = _share_ready_link(chat_id, addr, ttl_hours=ttl)
+                    if url:
+                        row.append({"text":"🔗 Share", "url": url})
+                    return {"inline_keyboard": ik}
+        # if not found, add a dedicated row:
+        ttl = 72
+        try: ttl = int(os.getenv("SHARE_TTL_HOURS","72") or "72")
+        except Exception: pass
+        url = _share_ready_link(chat_id, addr, ttl_hours=ttl)
+        if url:
+            ik.insert(0, [{"text":"🔗 Share", "url": url}])
+        return {"inline_keyboard": ik}
+    except Exception:
+        return base
