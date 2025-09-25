@@ -3311,6 +3311,29 @@ def webhook(secret):
                     _send_text(chat_id, teaser, logger=app.logger)
                 return ("ok", 200)
 
+            # Watch mini-keyboard callbacks (must be before 'unknown' fallback)
+            if data == "watch:my":
+                try:
+                    _cmd_mywatch(chat_id)
+                except Exception:
+                    pass
+                try:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "", logger=app.logger)
+                except Exception:
+                    pass
+                return ("ok", 200)
+            if isinstance(data, str) and data.startswith("watch:rm:"):
+                try:
+                    _ca = "0x" + data.split(":", 2)[2].lower().replace("0x","")
+                    watch_remove(chat_id, _ca)
+                    _send_text(chat_id, f"🗑 Removed from watchlist: {_ca}", logger=app.logger)
+                except Exception:
+                    pass
+                try:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "", logger=app.logger)
+                except Exception:
+                    pass
+                return ("ok", 200)
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "unknown", logger=app.logger)
             return ("ok", 200)
         except Exception as e:
