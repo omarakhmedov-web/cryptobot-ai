@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.109-mutex-lplinks")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.111-guarded-integrated")
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
@@ -208,6 +208,54 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     """
     return html
 # === /METRIDEX INTEGRATED PATCHES ===
+# === METRIDEX GUARDED ALERTS (centralized DB-based dedupe) ===
+def send_alert_guarded(chat_id: int, chain: str, ca: str, atype: str, send_callable, *args, **kwargs):
+    """
+    Guard any alert sender with should_send_alert(chat, chain, ca, type).
+    Returns send_callable(...) result if sent, else None (suppressed).
+    """
+    try:
+        allowed = should_send_alert(chat_id, chain, ca, atype)
+    except Exception:
+        allowed = True
+    if not allowed:
+        try:
+            lg = kwargs.get("logger") or (app.logger if "app" in globals() else None)
+            if lg: lg.info(f"[dedupe] suppressed {atype} for {chain}:{ca} chat={chat_id}")
+        except Exception:
+            pass
+        return None
+    return send_callable(*args, **kwargs)
+
+def _send_text_guarded(chat_id: int, chain: str, ca: str, atype: str, text: str, **kwargs):
+    """
+    Guarded convenience wrapper for plain text alerts built on _send_text(...).
+    """
+    try:
+        allowed = should_send_alert(chat_id, chain, ca, atype)
+    except Exception:
+        allowed = True
+    if not allowed:
+        try:
+            lg = kwargs.get("logger") or (app.logger if "app" in globals() else None)
+            if lg: lg.info(f"[dedupe] suppressed {atype} for {chain}:{ca} chat={chat_id}")
+        except Exception:
+            pass
+        return None
+    try:
+        sender = globals().get("_send_text", None)
+        if callable(sender):
+            return sender(chat_id, text, **kwargs)
+    except Exception:
+        pass
+    # Fallback (no-throw)
+    try:
+        print(f"[send_text_guarded fallback] chat={chat_id} type={atype} ca={ca} -> {text[:160]}")
+    except Exception:
+        pass
+    return None
+# === /METRIDEX GUARDED ALERTS ===
+
 
 # ===== Entitlements (SQLite) =====
 DB_PATH = os.getenv("DB_PATH", "/tmp/metridex.db")
@@ -345,28 +393,11 @@ def _watch_loop():
                 msg = _trigger_check((chain, ca, wtype, thr, active, created))
                 if not msg:
                     continue
-                skip=False
-                if ALERTS_SPAM_GUARD:
-                    try:
-                        c2 = _db_alerts()
-                        _ensure_alerts_index(c2)
-                        key = (str(chat_id), str(ca or "").lower(), str(wtype or ""), str(chain or ""))
-                        last = c2.execute("SELECT MAX(sent_at) FROM alert_sends WHERE chat_id=? AND ca=? AND type=? AND IFNULL(chain,'')=?", key).fetchone()[0]
-                        now = int(time.time())
-                        if last and now - int(last) < (ALERTS_COOLDOWN_MIN*60):
-                            skip=True
-                        if not skip:
-                            c2.execute("INSERT INTO alert_sends(chat_id, chain, ca, type, sent_at) VALUES(?,?,?,?,?)",
-                                       (str(chat_id), str(chain or ""), str(ca or "").lower(), str(wtype or ""), now))
-                            c2.commit()
-                    except Exception:
-                        pass
-                if skip:
-                    continue
-                try:
-                    _send_text(chat_id, msg, logger=app.logger)
-                except Exception:
-                    pass
+                            # centralized guarded send
+            try:
+                _send_text_guarded(chat_id, (chain or ''), (ca or ''), (wtype or 'price'), msg, logger=app.logger)
+            except Exception:
+                pass
 
             time.sleep(_WATCH_LOOP_EVERY)
         except Exception:
