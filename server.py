@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.95-watch-ux-upsell")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.96-watch-keys")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -363,6 +363,26 @@ def _cmd_watch(chat_id: int, text: str):
         watch_add(chat_id, ca, wtype, thr, chain)
         _ensure_watch_loop()
         _send_text(chat_id, f"👁️ Added to watchlist: {ca} ({wtype}{' thr='+str(thr) if thr is not None else ''}{' '+chain if chain else ''})", logger=app.logger)
+
+        # Optional mini-keyboard after /watch
+        if FEATURE_WATCH_KEYS:
+            ch = (chain or "").lower() if isinstance(chain, str) else ""
+            # Choose scan domain by chain
+            scan_domain = "etherscan.io"
+            if ch in ("bsc","bscscan","bnb","binance"): scan_domain = "bscscan.com"
+            elif ch in ("polygon","matic"): scan_domain = "polygonscan.com"
+            kbd = [
+                [
+                    {"text": "My watchlist", "callback_data": "watch:my"},
+                    {"text": "Unwatch", "callback_data": f"watch:rm:{ca}"}
+                ],
+                [
+                    {"text": "Open in DEX", "url": f"https://dexscreener.com/search?q={ca}"},
+                    {"text": "Open in Scan", "url": f"https://{scan_domain}/token/{ca}"}
+                ]
+            ]
+            _send_inline_kbd(chat_id, "Shortcuts:", kbd)
+    
     except Exception:
         pass
 
@@ -4163,3 +4183,22 @@ try:
     _ensure_watch_loop()
 except Exception:
     pass
+
+
+# ===== Feature flag for post-/watch mini keyboard =====
+FEATURE_WATCH_KEYS = os.getenv("FEATURE_WATCH_KEYS", "false").lower() in ("1","true","yes","on")
+
+def _send_inline_kbd(chat_id: int, text: str, keyboard: list[list[dict]]):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+            "reply_markup": {"inline_keyboard": keyboard}
+        }
+        requests.post(url, json=payload, timeout=6)
+    except Exception:
+        pass
+
