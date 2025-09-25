@@ -1,4 +1,10 @@
 import os
+
+def _get_share_ttl_hours() -> int:
+    try:
+        return int(os.getenv("SHARE_TTL_HOURS", "72") or "72")
+    except Exception:
+        return 72
 import re
 import ssl
 import json
@@ -4370,7 +4376,7 @@ try:
     _SAMPLE_REPORT_PATH = os.environ.get("SAMPLE_REPORT_PATH","/report-sample.html")
     _SAMPLE_URL = os.environ.get("SAMPLE_URL")
     _DB_PATH = os.environ.get("DB_PATH","/tmp/metridex_sharelinks.db")
-    _get_share_ttl_hours() = int(os.environ.get("SHARE_TTL_HOURS","72"))
+    pass  # removed bad assignment
     _ALERTS_GUARD = int(os.environ.get("ALERTS_SPAM_GUARD","1"))
     _ALERTS_COOLDOWN_MIN = int(os.environ.get("ALERTS_COOLDOWN_MIN","45"))
 except Exception:
@@ -4379,7 +4385,7 @@ except Exception:
     _SAMPLE_REPORT_PATH = "/report-sample.html"
     _SAMPLE_URL = None
     _DB_PATH = "/tmp/metridex_sharelinks.db"
-    _get_share_ttl_hours() = 72
+    pass  # removed bad assignment
     _ALERTS_GUARD = 1
     _ALERTS_COOLDOWN_MIN = 45
 
