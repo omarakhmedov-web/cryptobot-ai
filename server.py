@@ -3064,7 +3064,7 @@ def webhook(secret):
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = _qs_call_safe(quickscan_pair_entrypoint, data)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
-                keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, addr=base_addr, kb=keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -3090,7 +3090,7 @@ def webhook(secret):
                     pass
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = _qs_call_safe(quickscan_entrypoint, base_addr)
-                keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, addr=base_addr, kb=keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -3115,7 +3115,7 @@ def webhook(secret):
                 enriched = _enrich_full(addr, base_text)
                 enriched = _append_verdict_block(addr, enriched)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons_with_share(chat_id=chat_id, addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
+                kb1 = _ensure_action_buttons_with_share(chat_id=chat_id, addr=addr, kb={}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
@@ -3188,7 +3188,7 @@ def webhook(secret):
                 out, meta = _onchain_inspect(addr)
                 _merge_onchain_into_risk(addr, meta)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons_with_share(chat_id=chat_id, addr, {}, want_more=False, want_why=True, want_report=True, want_hp=False)
+                kb1 = _ensure_action_buttons_with_share(chat_id=chat_id, addr=addr, kb={}, want_more=False, want_why=True, want_report=True, want_hp=False)
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
                 return ("ok", 200)
@@ -3578,7 +3578,7 @@ def webhook(secret):
                 try:
                     text_out, keyboard = _qs_call_safe(quickscan_entrypoint, arg)
                     base_addr = _extract_addr_from_text(arg) or _extract_base_addr_from_keyboard(keyboard)
-                    keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                    keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, addr=base_addr, kb=keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
                     st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                     _store_addr_for_message(body, base_addr)
@@ -3620,7 +3620,7 @@ def webhook(secret):
     try:
         text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
         base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
-        keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+        keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, addr=base_addr, kb=keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
         _store_addr_for_message(body, base_addr)
@@ -4530,7 +4530,7 @@ def _send_text(chat_id, text, **kwargs):
 
 def _ensure_action_buttons_with_share(chat_id: int, addr: str, kb: dict,
                                       want_more=False, want_why=True, want_report=True, want_hp=True):
-    base = _ensure_action_buttons_with_share(chat_id=chat_id, addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
+    base = _ensure_action_buttons_with_share(chat_id=chat_id, addr=addr, kb=kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
     try:
         ik = base.get("inline_keyboard") or []
         # find the row containing '📄 Report (HTML)'
