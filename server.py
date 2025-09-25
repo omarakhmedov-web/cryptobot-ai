@@ -1168,7 +1168,9 @@ def _share_ready_link(chat_id: int, ca: str, ttl_hours: int | None = None) -> st
             return None
         return js.get("url") or None
     except Exception:
-        return Nonedef _admin_debug(chat_id, text):
+        return None
+
+def _admin_debug(chat_id, text):
     try:
         if ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID):
             _send_text(chat_id, f"DEBUG: {text}", logger=app.logger)
