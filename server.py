@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.94-lp-locktime")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.95-watch-ux-upsell")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -75,6 +75,114 @@ def _db():
     )""")
     conn.commit()
     return conn
+# ===== Watchlist (SQLite) =====
+def _db_watch():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""CREATE TABLE IF NOT EXISTS watchlist(
+        chat_id TEXT NOT NULL,
+        chain   TEXT,
+        ca      TEXT NOT NULL,
+        type    TEXT NOT NULL,
+        threshold REAL,
+        created_at INTEGER NOT NULL,
+        active  INTEGER DEFAULT 1
+    )""")
+    conn.commit()
+    return conn
+
+def watch_add(chat_id: str, ca: str, wtype: str, threshold: float|None=None, chain: str|None=None):
+    ca = (ca or "").lower()
+    wtype = (wtype or "price").lower()
+    now_ts = int(time.time())
+    conn = _db_watch()
+    conn.execute("INSERT INTO watchlist(chat_id, chain, ca, type, threshold, created_at, active) VALUES (?,?,?,?,?,?,1)",
+                 (str(chat_id), (chain or ""), ca, wtype, threshold, now_ts))
+    conn.commit()
+
+def watch_remove(chat_id: str, ca: str|None=None):
+    conn = _db_watch()
+    if ca:
+        conn.execute("UPDATE watchlist SET active=0 WHERE chat_id=? AND ca=? AND active=1", (str(chat_id), (ca or "").lower()))
+    else:
+        conn.execute("UPDATE watchlist SET active=0 WHERE chat_id=? AND active=1", (str(chat_id),))
+    conn.commit()
+
+def watch_list(chat_id: str):
+    conn = _db_watch()
+    cur = conn.execute("SELECT chain, ca, type, IFNULL(threshold,''), active, created_at FROM watchlist WHERE chat_id=? ORDER BY created_at DESC", (str(chat_id),))
+    return cur.fetchall()
+
+def _ds_price_change_1h(ca_l: str) -> float|None:
+    try:
+        changes = _ds_token_changes(ca_l) or {}
+        v = changes.get("h1")
+        if not v: return None
+        return float(str(v).replace("%","").replace("+",""))
+    except Exception:
+        return None
+
+def _ds_pair_for(ca_l: str):
+    try:
+        p, chain = _ds_resolve_pair_and_chain(ca_l)
+        pair_addr = None
+        if isinstance(p, dict):
+            pair_addr = p.get("pairAddress") or p.get("pair")
+        return pair_addr, chain
+    except Exception:
+        return None, None
+
+def _trigger_check(rec):
+    chain, ca, wtype, thr, active, created = rec
+    if not active: return None
+    ca_l = (ca or "").lower()
+    if wtype == "price":
+        pct = _ds_price_change_1h(ca_l)
+        if pct is None: return None
+        thr = float(thr or 5.0)
+        if abs(pct) >= thr:
+            sign = "↑" if pct > 0 else "↓"
+            return f"📈 PriceΔ 1h {sign}{abs(pct):.2f}% — {ca_l}"
+    elif wtype in ("lp_top","new_lock"):
+        pair, ch = _ds_pair_for(ca_l)
+        if not pair or not ch: return None
+        st = _infer_lp_status(pair, ch) or {}
+        th = (st.get("top_holder") or "").lower()
+        dead = float(st.get("dead_pct") or 0.0)
+        uncx = float(st.get("uncx_pct") or 0.0)
+        tf   = float(st.get("team_finance_pct") or 0.0)
+        if wtype == "lp_top":
+            if th and th not in (KNOWN_CUSTODIANS.get(ch, {}) or {}) and (float(st.get("top_holder_pct") or 0.0) >= 50.0):
+                return f"🔔 LP top-holder ≥50% EOA — {th}\nPair: {pair} on {ch}\nToken: {ca_l}"
+        else:
+            if (uncx + tf) >= 10.0:
+                return f"🔒 New/raised LP lock detected (UNCX+TF≈{uncx+tf:.1f}%) — {ca_l}\nPair: {pair} on {ch}"
+    return None
+
+_WATCH_LOOP_EVERY = int(os.getenv("WATCH_LOOP_EVERY","360"))
+_watch_thread_started = False
+
+def _watch_loop():
+    while True:
+        try:
+            conn = _db_watch()
+            rows = conn.execute("SELECT chain, ca, type, threshold, active, created_at, chat_id FROM watchlist WHERE active=1").fetchall()
+            for chain, ca, wtype, thr, active, created, chat_id in rows:
+                msg = _trigger_check((chain, ca, wtype, thr, active, created))
+                if msg:
+                    try: _send_text(chat_id, msg, logger=app.logger)
+                    except Exception: pass
+            time.sleep(_WATCH_LOOP_EVERY)
+        except Exception:
+            try: time.sleep(_WATCH_LOOP_EVERY)
+            except Exception: pass
+
+def _ensure_watch_loop():
+    global _watch_thread_started
+    if _watch_thread_started: return
+    t = threading.Thread(target=_watch_loop, daemon=True)
+    t.start()
+    _watch_thread_started = True
+
 
 def grant_entitlement(chat_id: str, product: str, now_ts: int | None = None):
     now_ts = now_ts or int(datetime.utcnow().timestamp())
@@ -202,22 +310,23 @@ def _ux_upgrade_text(lang: str = "en") -> str:
 
 def _ux_upgrade_keyboard(lang: str = "en") -> dict:
     PRICING_URL = os.getenv("PRICING_URL", "https://metridex.com/#pricing")
+    links = _pay_links()
     pro = int(os.getenv("PRO_MONTHLY", "29") or "29")
     teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
     day = int(os.getenv("DAY_PASS", "9") or "9")
     deep = int(os.getenv("DEEP_REPORT", "3") or "3")
     if str(lang).lower().startswith("ru"):
         return {"inline_keyboard": [
-            [{"text": f"Pro ${pro}", "url": PRICING_URL},
-             {"text": f"Day-Pass ${day}", "url": PRICING_URL}],
-            [{"text": f"Deep ${deep}", "url": PRICING_URL},
-             {"text": f"Teams ${teams}", "url": PRICING_URL}],
+            [{"text": f"Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
+             {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
+            [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
+             {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
         ]}
     return {"inline_keyboard": [
-        [{"text": f"Upgrade to Pro ${pro}", "url": PRICING_URL},
-         {"text": f"Day-Pass ${day}", "url": PRICING_URL}],
-        [{"text": f"Deep ${deep}", "url": PRICING_URL},
-         {"text": f"Teams ${teams}", "url": PRICING_URL}],
+        [{"text": f"Upgrade to Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
+         {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
+        [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
+         {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
     ]}
 
 def _ux_welcome_text(lang: str = "en") -> str:
@@ -234,6 +343,50 @@ def _ux_welcome_text(lang: str = "en") -> str:
     )
 
 
+
+# ===== Commands: /watch /unwatch /mywatch =====
+def _cmd_watch(chat_id: int, text: str):
+    try:
+        m = re.search(r'/watch\s+([0-9a-fA-Fx]{42})(?:\s+(.+))?$', text.strip())
+        if not m:
+            _send_text(chat_id, "Usage: /watch <CA> [type=price|lp_top|new_lock] [thr=10] [chain=bsc|eth|polygon]", logger=app.logger); return
+        ca = "0x" + m.group(1).lower().replace("0x","")
+        opts = m.group(2) or ""
+        wtype = "price"; thr = None; chain=None
+        for tok in re.split(r'\s+', opts.strip()):
+            if not tok: continue
+            if tok.startswith("type="): wtype = tok.split("=",1)[1].strip().lower()
+            elif tok.startswith("thr="): 
+                try: thr = float(tok.split("=",1)[1].strip())
+                except: thr=None
+            elif tok.startswith("chain="): chain = tok.split("=",1)[1].strip().lower()
+        watch_add(chat_id, ca, wtype, thr, chain)
+        _ensure_watch_loop()
+        _send_text(chat_id, f"👁️ Added to watchlist: {ca} ({wtype}{' thr='+str(thr) if thr is not None else ''}{' '+chain if chain else ''})", logger=app.logger)
+    except Exception:
+        pass
+
+def _cmd_unwatch(chat_id: int, text: str):
+    try:
+        m = re.search(r'/unwatch(?:\s+([0-9a-fA-Fx]{42}))?', text.strip())
+        ca = m.group(1) if m else None
+        watch_remove(chat_id, ("0x"+ca.lower().replace("0x","")) if ca else None)
+        _send_text(chat_id, "🧹 Watchlist updated", logger=app.logger)
+    except Exception:
+        pass
+
+def _cmd_mywatch(chat_id: int):
+    try:
+        rows = watch_list(chat_id)
+        if not rows:
+            _send_text(chat_id, "Watchlist is empty. Use /watch <CA>", logger=app.logger); return
+        lines = ["Your watchlist:"]
+        for chain, ca, wtype, thr, active, created in rows[:40]:
+            mark = "✅" if active else "—"
+            lines.append(f"{mark} {wtype} {thr} {ca} {('['+chain+']') if chain else ''}")
+        _send_text(chat_id, "\n".join(lines), logger=app.logger)
+    except Exception:
+        pass
 def _ux_limits_text(lang: str = "en", user_id: int = 0) -> str:
     try:
         p = plan_of(int(user_id) if user_id else 0)
@@ -2670,7 +2823,21 @@ def webhook(secret):
                 pass
             return ("ok", 200)
 
-    # /upgrade (EN default; RU via "/upgrade ru")
+    
+    # /watch, /unwatch, /mywatch
+    if "message" in update:
+        _m = update["message"]
+        _chat = (_m.get("chat") or {}).get("id")
+        _txt_full = (_m.get("text") or "")
+        if isinstance(_txt_full, str):
+            _txt = _txt_full.strip()
+            if _txt.startswith("/watch"):
+                _cmd_watch(_chat, _txt); return ("ok", 200)
+            if _txt.startswith("/unwatch"):
+                _cmd_unwatch(_chat, _txt); return ("ok", 200)
+            if _txt.startswith("/mywatch"):
+                _cmd_mywatch(_chat); return ("ok", 200)
+# /upgrade (EN default; RU via "/upgrade ru")
     if "message" in update:
         _m = update["message"]
         _chat = (_m.get("chat") or {}).get("id")
@@ -3990,3 +4157,9 @@ def build_buy_keyboard_priced():
         rows.append(row)
     return {"inline_keyboard": rows}
 
+
+
+try:
+    _ensure_watch_loop()
+except Exception:
+    pass
