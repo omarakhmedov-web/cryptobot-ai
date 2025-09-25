@@ -4319,3 +4319,170 @@ def _filter_owner_signal(neg_factors: list[str], context: dict) -> list[str]:
     except Exception:
         pass
     return list(neg_factors or [])
+
+
+# ==== METRIX-ALPHA 0.3.101-multi ADDITIONS START ====
+try:
+    import sqlite3, secrets
+    from flask import Response
+    _APP_VERSION = os.environ.get("APP_VERSION","0.3.101-multi")
+    _SITE_URL = os.environ.get("SITE_URL","")
+    _SAMPLE_REPORT_PATH = os.environ.get("SAMPLE_REPORT_PATH","/report-sample.html")
+    _SAMPLE_URL = os.environ.get("SAMPLE_URL")
+    _DB_PATH = os.environ.get("DB_PATH","/tmp/metridex_sharelinks.db")
+    _SHARE_TTL_HOURS = int(os.environ.get("SHARE_TTL_HOURS","72"))
+    _ALERTS_GUARD = int(os.environ.get("ALERTS_SPAM_GUARD","1"))
+    _ALERTS_COOLDOWN_MIN = int(os.environ.get("ALERTS_COOLDOWN_MIN","45"))
+except Exception:
+    _APP_VERSION = "0.3.101-multi"
+    _SITE_URL = ""
+    _SAMPLE_REPORT_PATH = "/report-sample.html"
+    _SAMPLE_URL = None
+    _DB_PATH = "/tmp/metridex_sharelinks.db"
+    _SHARE_TTL_HOURS = 72
+    _ALERTS_GUARD = 1
+    _ALERTS_COOLDOWN_MIN = 45
+
+_METRICS = {"start_ts": int(time.time()), "share_created":0, "share_opened":0, "share_revoked":0, "errors":0}
+
+def _share_db():
+    con = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    con.execute("""CREATE TABLE IF NOT EXISTS shared_links (
+        token TEXT PRIMARY KEY,
+        chat_id TEXT,
+        ca TEXT,
+        ttl_hours INTEGER,
+        created_ts INTEGER,
+        revoked_ts INTEGER DEFAULT NULL
+    )""")
+    con.commit()
+    return con
+
+try:
+    _SHARE_CON = _share_db()
+except Exception as _e:
+    try: app.logger.error(f"SHARE_DB_INIT_ERROR {type(_e).__name__}: {_e}")
+    except Exception: pass
+
+def _now(): 
+    try: return int(time.time())
+    except Exception: return int(time.time())
+
+def _expired(_created_ts:int, _ttl_h:int)->bool:
+    try: return _now() > (_created_ts + _ttl_h*3600)
+    except Exception: return True
+
+def _load_sample_html_bytes() -> bytes:
+    try:
+        if _SAMPLE_URL and (_SAMPLE_URL.startswith("http://") or _SAMPLE_URL.startswith("https://")):
+            html = f'<!doctype html><html><head><meta http-equiv="refresh" content="0;url={_SAMPLE_URL}"><meta charset="utf-8"><title>Metridex Report</title></head><body><p>Redirecting… <a href="{_SAMPLE_URL}">open</a></p></body></html>'
+            return html.encode("utf-8")
+        p = os.path.join(os.getcwd(), _SAMPLE_REPORT_PATH.lstrip("/"))
+        if os.path.exists(p):
+            with open(p,"rb") as f: return f.read()
+    except Exception: 
+        pass
+    return b'<!doctype html><html><head><meta charset="utf-8"><title>Metridex Report (Sample)</title></head><body><h1>Metridex Report (Sample)</h1><p>Configure SAMPLE_URL or add report-sample.html.</p></body></html>'
+
+# /metrics json (не конфликтует с /healthz)
+@app.route("/metrics")
+def metrics_json():
+    try:
+        up = int(time.time()) - int(_METRICS.get("start_ts", int(time.time())))
+        d = dict(_METRICS); d["uptime_sec"]=up; d["version"]=_APP_VERSION
+        return jsonify(d)
+    except Exception as e:
+        try: app.logger.error(f"METRICS_ERROR {type(e).__name__}: {e}")
+        except Exception: pass
+        return jsonify({"ok":False}), 500
+
+@app.route("/metrics/inc", methods=["POST"])
+def metrics_inc():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        for k,v in (data.items() if hasattr(data,"items") else []):
+            if isinstance(v,int) and k in _METRICS:
+                _METRICS[k]+=v
+        return jsonify({"ok":True,"metrics":_METRICS})
+    except Exception as e:
+        _METRICS["errors"]+=1
+        return jsonify({"ok":False,"error":str(e)}),400
+
+@app.route("/api/ready_link", methods=["POST"])
+def api_ready_link():
+    try:
+        data = request.get_json(force=True) or {}
+        chat_id = str(data.get("chat_id",""))[:64]
+        ca = str(data.get("ca",""))[:128]
+        ttl = int(data.get("ttl_hours") or _SHARE_TTL_HOURS)
+        token = secrets.token_urlsafe(24)
+        with _SHARE_CON:
+            _SHARE_CON.execute("INSERT INTO shared_links(token,chat_id,ca,ttl_hours,created_ts) VALUES(?,?,?,?,?)",
+                               (token, chat_id, ca, ttl, _now()))
+        _METRICS["share_created"]+=1
+        url = f"{_SITE_URL}/r/{token}" if _SITE_URL else f"/r/{token}"
+        exp = datetime.utcnow() + timedelta(hours=ttl)
+        return jsonify({"ok":True,"url":url,"token":token,"expires_at":exp.isoformat()+"Z"})
+    except Exception as e:
+        _METRICS["errors"]+=1
+        try: app.logger.error(f"READY_LINK_ERROR {type(e).__name__}: {e}")
+        except Exception: pass
+        return jsonify({"ok":False,"error":str(e)}),400
+
+@app.route("/api/revoke/<token>", methods=["POST"])
+def api_revoke(token):
+    try:
+        with _SHARE_CON:
+            cur = _SHARE_CON.execute("UPDATE shared_links SET revoked_ts=? WHERE token=? AND revoked_ts IS NULL", (_now(), token))
+        if getattr(cur,"rowcount",0): _METRICS["share_revoked"]+=1
+        return jsonify({"ok": getattr(cur,'rowcount',0)==1})
+    except Exception as e:
+        _METRICS["errors"]+=1
+        return jsonify({"ok":False,"error":str(e)}),400
+
+@app.route("/r/<token>")
+def api_resolve_report(token):
+    try:
+        row = _SHARE_CON.execute("SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?", (token,)).fetchone()
+        if not row: 
+            return ("Not found",404)
+        _t,_chat,_ca,_ttl,_cts,_rev = row
+        if _rev is not None or _expired(_cts, _ttl):
+            return ("Gone",410)
+        _METRICS["share_opened"]+=1
+        html = _load_sample_html_bytes()
+        return Response(html, mimetype="text/html")
+    except Exception as e:
+        _METRICS["errors"]+=1
+        return ("Internal error",500)
+
+# --- Alerts anti-spam (light) ---
+_ALERT_LAST = {}  # (chat_id, key) -> ts
+
+def _should_alert_block(chat_id, text:str) -> bool:
+    if not _ALERTS_GUARD: 
+        return False
+    try:
+        t = int(time.time())
+        key = (str(chat_id), (text or "")[:48])
+        last = _ALERT_LAST.get(key, 0)
+        if t - last < _ALERTS_COOLDOWN_MIN * 60:
+            return True
+        _ALERT_LAST[key] = t
+        return False
+    except Exception:
+        return False
+
+# override: route all plain text sends through throttle
+_old__send_text = _send_text
+def _send_text(chat_id, text, **kwargs):
+    try:
+        _t = str(text or "")
+        if _t.startswith("📈 PriceΔ") or "LP" in _t or "PriceΔ" in _t:
+            if _should_alert_block(chat_id, _t):
+                return None
+        return _old__send_text(chat_id, text, **kwargs)
+    except Exception:
+        try: return _old__send_text(chat_id, text, **kwargs)
+        except Exception: return None
+# ==== METRIX-ALPHA 0.3.101-multi ADDITIONS END ====
