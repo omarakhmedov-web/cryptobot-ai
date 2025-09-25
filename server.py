@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.100-rdapwhois")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.101-cooldown-lite")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -40,6 +40,9 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # numeric string
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
 
+
+ALERTS_SPAM_GUARD = int(os.getenv('ALERTS_SPAM_GUARD','1'))
+ALERTS_COOLDOWN_MIN = int(os.getenv('ALERTS_COOLDOWN_MIN','15'))
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
 KNOWN_AUTORELOAD_SEC = int(os.environ.get("KNOWN_AUTORELOAD_SEC", "300"))
@@ -169,16 +172,40 @@ def _trigger_check(rec):
 _WATCH_LOOP_EVERY = int(os.getenv("WATCH_LOOP_EVERY","360"))
 _watch_thread_started = False
 
+
 def _watch_loop():
+    # Lightweight anti-spam: cooldown per (chat_id, ca, type)
+    last_sent = {}
+    cd_seconds = max(0, int(ALERTS_COOLDOWN_MIN) * 60) if ALERTS_SPAM_GUARD else 0
     while True:
         try:
             conn = _db_watch()
-            rows = conn.execute("SELECT chain, ca, type, threshold, active, created_at, chat_id FROM watchlist WHERE active=1").fetchall()
+            rows = conn.execute("SELECT chain, ca, type, IFNULL(threshold,''), active, created_at, chat_id FROM watchlist WHERE active=1").fetchall()
             for chain, ca, wtype, thr, active, created, chat_id in rows:
-                msg = _trigger_check((chain, ca, wtype, thr, active, created))
-                if msg:
-                    try: _send_text(chat_id, msg, logger=app.logger)
-                    except Exception: pass
+                try:
+                    msg = _trigger_check((chain, ca, wtype, thr, active, created))
+                except Exception:
+                    msg = None
+                if not msg:
+                    continue
+                # Cooldown check
+                key = (str(chat_id), (ca or '').lower(), (wtype or '').lower(), (chain or '').lower())
+                now = time.time()
+                last = last_sent.get(key, 0)
+                if cd_seconds and (now - last) < cd_seconds:
+                    continue
+                try:
+                    _send_text(chat_id, msg, logger=app.logger)
+                    last_sent[key] = now
+                except Exception:
+                    pass
+            time.sleep(_WATCH_LOOP_EVERY)
+        except Exception:
+            try:
+                time.sleep(_WATCH_LOOP_EVERY)
+            except Exception:
+                pass
+
             time.sleep(_WATCH_LOOP_EVERY)
         except Exception:
             try: time.sleep(_WATCH_LOOP_EVERY)
