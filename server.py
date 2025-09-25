@@ -4624,3 +4624,81 @@ def _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=False, w
             return kb
 print("[ALFA-722] Full share wrapper loaded")
 # === /ALFA-722 full wrapper ===
+
+
+# === ALFA-722 context capture for chat_id ===
+_CTX_CHAT_ID = None
+from flask import request as _rq
+
+@app.before_request
+def _alfa722_capture_chat_id():
+    global _CTX_CHAT_ID
+    try:
+        if _rq.path.startswith(("/webhook", "/tg", "/telegram")) and _rq.method in ("POST","PUT"):
+            js = _rq.get_json(silent=True) or {}
+            chat_id = None
+            try:
+                chat_id = (((js.get("message") or {}).get("chat") or {}).get("id"))
+                if not chat_id:
+                    chat_id = ((((js.get("callback_query") or {}).get("message") or {}).get("chat") or {}).get("id"))
+            except Exception:
+                chat_id = None
+            if chat_id:
+                _CTX_CHAT_ID = int(chat_id)
+    except Exception:
+        pass
+# === /ALFA-722 context capture ===
+
+
+# === ALFA-722 wrapper that appends Share and aliases base calls ===
+try:
+    _orig_ensure_action_buttons = _ensure_action_buttons
+except NameError:
+    _orig_ensure_action_buttons = None
+
+def _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=False, want_why=True, want_report=True, want_hp=True):
+    """Add 🔗 Share next to '📄 Report (HTML)' when possible. Safe fallback."""
+    try:
+        base = _orig_ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp) if _orig_ensure_action_buttons else kb
+        if not addr or not isinstance(base, dict):
+            return base
+        # Prefer explicit chat_id, else captured from request context
+        cid = chat_id or globals().get("_CTX_CHAT_ID")
+        site_ok = bool((os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip())
+        if not cid or not site_ok:
+            return base
+        try:
+            ttl = _get_share_ttl_hours()
+        except Exception:
+            ttl = 72
+        try:
+            share_url = _share_ready_link(cid, addr, ttl_hours=ttl)
+        except Exception:
+            share_url = None
+        if not share_url:
+            return base
+        ik = base.get("inline_keyboard") or []
+        placed = False
+        for row in ik:
+            for btn in row:
+                if str(btn.get("text") or "").startswith("📄"):
+                    row.append({"text": "🔗 Share", "url": share_url})
+                    placed = True
+                    break
+            if placed:
+                break
+        if not placed:
+            ik.append([{"text": "🔗 Share", "url": share_url}])
+        return _kb_dedupe_all({"inline_keyboard": ik})
+    except Exception:
+        try:
+            return _orig_ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
+        except Exception:
+            return kb
+
+def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
+    # Alias: all existing call sites now get Share automatically (uses request-captured chat id)
+    return _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
+
+print("[ALFA-722] Share wrapper + alias active")
+# === /ALFA-722 wrapper ===
