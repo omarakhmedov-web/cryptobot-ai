@@ -4702,3 +4702,39 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
 
 print("[ALFA-722] Share wrapper + alias active")
 # === /ALFA-722 wrapper ===
+
+
+# === ALFA-722 FINAL MONKEYPATCH (must be last) ===
+try:
+    from flask import request as _rq2
+except Exception:
+    _rq2 = None
+
+def _alfa722_site_base():
+    # Prefer explicit SITE_URL; else try to infer from Host header of current request
+    base = (os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip()
+    if base:
+        return base.rstrip("/")
+    try:
+        if _rq2:
+            host = _rq2.host_url.rstrip("/")
+            if host:
+                return host
+    except Exception:
+        pass
+    return ""
+
+# Override share wrapper to use inferred site base if env missing
+_old_share = _ensure_action_buttons_with_share
+def _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=False, want_why=True, want_report=True, want_hp=True):
+    site_env = (os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip()
+    if not site_env:
+        inferred = _alfa722_site_base()
+        if inferred:
+            os.environ["SITE_URL"] = inferred
+    return _old_share(addr, kb, chat_id=chat_id, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
+
+# Ensure base alias is applied LAST so any later definitions are overridden
+_ensure_action_buttons = _ensure_action_buttons_with_share
+print("[ALFA-722] Final alias enforced; SITE_URL:", os.getenv("SITE_URL"))
+# === /ALFA-722 FINAL MONKEYPATCH ===
