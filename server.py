@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.99-release")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.100-rdapwhois")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1530,7 +1530,43 @@ def _normalize_registrar(reg: str, handle: str, domain: str):
     return reg
 
 def _rdap(domain: str):
-    return __rdap_impl(domain)
+    """
+    RDAP wrapper with .vip WHOIS fallback.
+    Returns: (handle, created, registrar)
+    """
+    try:
+        h, created, reg = __rdap_impl(domain)
+    except Exception:
+        h, created, reg = "—", "—", "—"
+    dom = (domain or "").strip().lower()
+    # If .vip and RDAP didn't give us useful fields, try WHOIS
+    try:
+        if dom.endswith(".vip") and (not created or created == "—" or not reg or reg == "—"):
+            # WHOIS at whois.nic.vip
+            with socket.create_connection(("whois.nic.vip", 43), timeout=5) as sock:
+                q = (domain + "\r\n").encode("utf-8", "ignore")
+                sock.sendall(q)
+                data = b""
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk: break
+                    data += chunk
+            txt = data.decode("utf-8", "ignore")
+            # Parse fields
+            m_created = re.search(r"Creation Date:\s*(.+)", txt, re.I)
+            m_reg = re.search(r"(Registrar|Sponsoring Registrar):\s*(.+)", txt, re.I)
+            if m_created and (not created or created == "—"):
+                created = m_created.group(1).strip()
+            if m_reg and (not reg or reg == "—"):
+                reg = m_reg.group(2).strip()
+            if not h or h == "—":
+                # RDAP handle isn't essential; try to take from WHOIS if present
+                m_h = re.search(r"Registry Domain ID:\s*(.+)", txt, re.I)
+                if m_h:
+                    h = m_h.group(1).strip()
+    except Exception:
+        pass
+    return h or "—", created or "—", reg or "—"
 
 def _ssl_info(domain: str):
     try:
