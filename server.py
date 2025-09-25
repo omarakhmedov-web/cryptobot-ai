@@ -1,3 +1,12 @@
+# === ALFA-722 guard to avoid NameError during early calls ===
+print("[ALFA-722] Booting: guard shim for _ensure_action_buttons_with_share is active")
+def _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=False, want_why=True, want_report=True, want_hp=True):
+    # Temporary no-op wrapper to prevent NameError before full wrapper is defined later.
+    try:
+        return _ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
+    except Exception:
+        return kb
+# === /ALFA-722 guard ===
 import secrets
 # -*- coding: utf-8 -*-
 
@@ -4572,3 +4581,46 @@ def resolve_report(token):
         try: app.logger.error(f"RESOLVE_ERROR {type(e).__name__}: {e}")
         except Exception: pass
         return jsonify({"ok": False, "error": str(e)}), 400
+
+# === ALFA-722 full wrapper (overrides guard after base is defined) ===
+def _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=False, want_why=True, want_report=True, want_hp=True):
+    """Wrapper over _ensure_action_buttons that appends a 🔗 Share button when possible.
+    Fallback-safe: if share cannot be formed, returns base keyboard.
+    """
+    try:
+        base = _ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
+        if not addr or not isinstance(base, dict):
+            return base
+        site_ok = bool((os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip())
+        if not chat_id or not site_ok:
+            return base
+        try:
+            ttl = _get_share_ttl_hours()
+        except Exception:
+            ttl = 72
+        try:
+            share_url = _share_ready_link(chat_id, addr, ttl_hours=ttl)
+        except Exception:
+            share_url = None
+        if not share_url:
+            return base
+        ik = base.get("inline_keyboard") or []
+        placed = False
+        for row in ik:
+            for btn in row:
+                if str(btn.get("text") or "").startswith("📄"):
+                    row.append({"text": "🔗 Share", "url": share_url})
+                    placed = True
+                    break
+            if placed:
+                break
+        if not placed:
+            ik.append([{"text": "🔗 Share", "url": share_url}])
+        return _kb_dedupe_all({"inline_keyboard": ik})
+    except Exception:
+        try:
+            return _ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
+        except Exception:
+            return kb
+print("[ALFA-722] Full share wrapper loaded")
+# === /ALFA-722 full wrapper ===
