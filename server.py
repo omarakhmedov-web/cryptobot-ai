@@ -4530,7 +4530,7 @@ def _send_text(chat_id, text, **kwargs):
 
 def _ensure_action_buttons_with_share(chat_id: int, addr: str, kb: dict,
                                       want_more=False, want_why=True, want_report=True, want_hp=True):
-    base = _ensure_action_buttons_with_share(chat_id=chat_id, addr=addr, kb=kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
+    base = _ensure_action_buttons(addr=addr, kb=kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
     try:
         ik = base.get("inline_keyboard") or []
         # find the row containing '📄 Report (HTML)'
