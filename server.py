@@ -12,7 +12,7 @@ import sqlite3
 import tempfile
 import hashlib
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timedelta
 from urllib.parse import urlparse
 
 # === Helpers ===
@@ -24,17 +24,16 @@ def _get_share_ttl_hours() -> int:
         return 72
 
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, Response, jsonify, redirect, request
 
 # Project-local utilities (must exist in your project)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 from metri_domain_rdap import _rdap as __rdap_impl  # injected
-from flask import Flask
 import sqlite3
 import hmac
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timedelta
 try:
     from polydebug_rpc import init_polydebug
     init_polydebug()  # запустится только при POLY_DEBUG=1
@@ -4492,7 +4491,7 @@ def shortcut_share():
                 with _share_db() as con:
                     con.execute(
                         "INSERT INTO shared_links(token, chat_id, ca, ttl_hours, created_ts) VALUES (?,?,?,?,?)",
-                        (token, chat_id, ca, ttl, _utcnow())
+                        (token, chat_id, ca, ttl, int(time.time()))
                     )
                     con.commit()
                 _METRICS["share_created"] += 1
