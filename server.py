@@ -15,6 +15,15 @@ import threading
 from datetime import datetime, timedelta, timedelta
 from urllib.parse import urlparse
 
+def _bump_metric(key: str, inc: int = 1):
+    try:
+        m = globals().get('_METRICS') or globals().get('METRICS')
+        if isinstance(m, dict):
+            m[key] = (m.get(key, 0) or 0) + inc
+    except Exception:
+        pass
+
+
 # === Helpers ===
 def _get_share_ttl_hours() -> int:
     """TTL (hours) for Share-links from env, default 72."""
@@ -4494,7 +4503,7 @@ def shortcut_share():
                         (token, chat_id, ca, ttl, int(time.time()))
                     )
                     con.commit()
-                _METRICS["share_created"] += 1
+                _bump_metric('share_created', 1)
                 break
             except Exception as _e:
                 try: app.logger.error("READY_LINK_ERROR lazy try=%s: %s", _try+1, str(_e))
@@ -4506,7 +4515,7 @@ def shortcut_share():
         # 302 redirect to final report
         return redirect(f"/r/{token}", code=302)
     except Exception as e:
-        _METRICS["errors"] += 1
+        _bump_metric('errors', 1)
         try: app.logger.error(f"READY_LINK_ERROR lazy {type(e).__name__}: {e}")
         except Exception: pass
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -4542,9 +4551,10 @@ def api_revoke(token):
         _METRICS["errors"]+=1
         return jsonify({"ok":False,"error":str(e)}),400
 
-@app.route("/r/<token>")
-def api_resolve_report(token):
+@app.route(\"/r/<token>\")
+def resolve_report(token):
     try:
+        try:
         row = con.execute("SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?", (token,)).fetchone()
         if not row: 
             return ("Not found",404)
