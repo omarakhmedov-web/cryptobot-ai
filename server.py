@@ -247,4 +247,4 @@ def pop_deep_credit(chat_id: str) -> bool:
     cur = conn.execute("""SELECT rowid, credits FROM entitlements
                           WHERE chat_id=? AND product='deep' AND credits>0
                           ORDER BY created_at ASC LIMIT 1""", (str(chat_id),))
-    row = _share_db().execute(\"SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?\", (token,)).fetchone()
+    row = _share_db().execute("SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?", (token,)).fetchone()
