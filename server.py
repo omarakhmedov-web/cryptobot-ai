@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.100-rdapwhois")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.102-sharefix")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1144,6 +1144,11 @@ WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADD
 # Helpers
 # ========================
 def _send_text(chat_id, text, **kwargs):
+    try:
+        text = NEWLINE_ESC_RE.sub("\n", text or "")
+        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+    except Exception:
+        return None
 
 def _share_ready_link(chat_id: int, ca: str, ttl_hours: int | None = None) -> str | None:
     try:
@@ -1163,11 +1168,7 @@ def _share_ready_link(chat_id: int, ca: str, ttl_hours: int | None = None) -> st
             return None
         return js.get("url") or None
     except Exception:
-        return None
-    text = NEWLINE_ESC_RE.sub("\n", text or "")
-    return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
-
-def _admin_debug(chat_id, text):
+        return Nonedef _admin_debug(chat_id, text):
     try:
         if ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID):
             _send_text(chat_id, f"DEBUG: {text}", logger=app.logger)
