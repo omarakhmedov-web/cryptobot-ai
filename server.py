@@ -4411,11 +4411,6 @@ def _share_db():
     con.commit()
     return con
 
-try:
-# removed invalid assignment to _share_db()
-except Exception as _e:
-    try: app.logger.error(f"SHARE_DB_INIT_ERROR {type(_e).__name__}: {_e}")
-    except Exception: pass
 
 def _now(): 
     try: return int(time.time())
