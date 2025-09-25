@@ -4370,7 +4370,7 @@ try:
     _SAMPLE_REPORT_PATH = os.environ.get("SAMPLE_REPORT_PATH","/report-sample.html")
     _SAMPLE_URL = os.environ.get("SAMPLE_URL")
     _DB_PATH = os.environ.get("DB_PATH","/tmp/metridex_sharelinks.db")
-    _SHARE_TTL_HOURS = int(os.environ.get("SHARE_TTL_HOURS","72"))
+    _get_share_ttl_hours() = int(os.environ.get("SHARE_TTL_HOURS","72"))
     _ALERTS_GUARD = int(os.environ.get("ALERTS_SPAM_GUARD","1"))
     _ALERTS_COOLDOWN_MIN = int(os.environ.get("ALERTS_COOLDOWN_MIN","45"))
 except Exception:
@@ -4379,7 +4379,7 @@ except Exception:
     _SAMPLE_REPORT_PATH = "/report-sample.html"
     _SAMPLE_URL = None
     _DB_PATH = "/tmp/metridex_sharelinks.db"
-    _SHARE_TTL_HOURS = 72
+    _get_share_ttl_hours() = 72
     _ALERTS_GUARD = 1
     _ALERTS_COOLDOWN_MIN = 45
 
@@ -4454,9 +4454,9 @@ def api_ready_link():
         data = request.get_json(force=True) or {}
         chat_id = str(data.get("chat_id",""))[:64]
         ca = str(data.get("ca",""))[:128]
-        ttl = int(data.get("ttl_hours") or _SHARE_TTL_HOURS)
+        ttl = int(data.get("ttl_hours") or _get_share_ttl_hours())
         token = secrets.token_urlsafe(24)
-        with _SHARE_CON:
+        with _share_db() as con:
             con.execute("INSERT INTO shared_links(token,chat_id,ca,ttl_hours,created_ts) VALUES(?,?,?,?,?)",
                                (token, chat_id, ca, ttl, _now()))
         _METRICS["share_created"]+=1
@@ -4472,7 +4472,7 @@ def api_ready_link():
 @app.route("/api/revoke/<token>", methods=["POST"])
 def api_revoke(token):
     try:
-        with _SHARE_CON:
+        with _share_db() as con:
             cur = con.execute("UPDATE shared_links SET revoked_ts=? WHERE token=? AND revoked_ts IS NULL", (_now(), token))
         if getattr(cur,"rowcount",0): _METRICS["share_revoked"]+=1
         return jsonify({"ok": getattr(cur,'rowcount',0)==1})
@@ -4555,3 +4555,9 @@ def _ensure_action_buttons_with_share(chat_id: int, addr: str, kb: dict,
         return {"inline_keyboard": ik}
     except Exception:
         return base
+
+def _get_share_ttl_hours() -> int:
+    try:
+        return int(os.getenv("SHARE_TTL_HOURS","72") or "72")
+    except Exception:
+        return 72
