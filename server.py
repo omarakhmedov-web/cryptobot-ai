@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.101-rdapwhois-apex")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.102-rdap-cache")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1536,6 +1536,12 @@ def _rdap(domain: str):
     """
     dom = (domain or "").strip().lower()
     apex = _registrable_domain(dom)
+    # Cache lookup (by apex)
+    cached = _rdap_cache_get(apex)
+    if cached:
+        return cached[0] or "—", cached[1] or "—", cached[2] or "—"
+    dom = (domain or "").strip().lower()
+    apex = _registrable_domain(dom)
     h = created = reg = "—"
     # 1) Try RDAP on APEX first
     try:
@@ -1574,6 +1580,11 @@ def _rdap(domain: str):
                 m_h = re.search(r"Registry Domain ID:\s*(.+)", txt, re.I)
                 if m_h:
                     h = m_h.group(1).strip()
+    except Exception:
+        pass
+    # Save to cache
+    try:
+        _rdap_cache_put(apex, h, created, reg)
     except Exception:
         pass
     return h or "—", created or "—", reg or "—"
@@ -4329,3 +4340,46 @@ def _filter_owner_signal(neg_factors: list[str], context: dict) -> list[str]:
     except Exception:
         pass
     return list(neg_factors or [])
+
+
+# ===== RDAP/WHOIS cache (SQLite) =====
+RDAP_TTL_SECONDS = int(os.getenv("RDAP_TTL_SECONDS", "10800"))  # 3 hours by default
+
+def _db_rdap():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""CREATE TABLE IF NOT EXISTS rdap_cache(
+        domain TEXT PRIMARY KEY,
+        handle TEXT,
+        created TEXT,
+        registrar TEXT,
+        updated_at INTEGER NOT NULL
+    )""")
+    conn.commit()
+    return conn
+
+def _rdap_cache_get(domain: str):
+    try:
+        d = (domain or "").strip().lower()
+        if not d: return None
+        conn = _db_rdap()
+        cur = conn.execute("SELECT handle, created, registrar, updated_at FROM rdap_cache WHERE domain=?", (d,))
+        row = cur.fetchone()
+        if not row: return None
+        h, c, r, ts = row
+        if int(time.time()) - int(ts or 0) > RDAP_TTL_SECONDS:
+            return None
+        return (h or "—", c or "—", r or "—")
+    except Exception:
+        return None
+
+def _rdap_cache_put(domain: str, handle: str, created: str, registrar: str):
+    try:
+        d = (domain or "").strip().lower()
+        if not d: return
+        conn = _db_rdap()
+        conn.execute("INSERT OR REPLACE INTO rdap_cache(domain, handle, created, registrar, updated_at) VALUES (?,?,?,?,?)",
+                     (d, handle or "—", created or "—", registrar or "—", int(time.time())))
+        conn.commit()
+    except Exception:
+        pass
+
