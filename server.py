@@ -4457,7 +4457,7 @@ def api_ready_link():
         ttl = int(data.get("ttl_hours") or _SHARE_TTL_HOURS)
         token = secrets.token_urlsafe(24)
         with _SHARE_CON:
-            _SHARE_con.execute("INSERT INTO shared_links(token,chat_id,ca,ttl_hours,created_ts) VALUES(?,?,?,?,?)",
+            con.execute("INSERT INTO shared_links(token,chat_id,ca,ttl_hours,created_ts) VALUES(?,?,?,?,?)",
                                (token, chat_id, ca, ttl, _now()))
         _METRICS["share_created"]+=1
         url = f"{_SITE_URL}/r/{token}" if _SITE_URL else f"/r/{token}"
@@ -4473,7 +4473,7 @@ def api_ready_link():
 def api_revoke(token):
     try:
         with _SHARE_CON:
-            cur = _SHARE_con.execute("UPDATE shared_links SET revoked_ts=? WHERE token=? AND revoked_ts IS NULL", (_now(), token))
+            cur = con.execute("UPDATE shared_links SET revoked_ts=? WHERE token=? AND revoked_ts IS NULL", (_now(), token))
         if getattr(cur,"rowcount",0): _METRICS["share_revoked"]+=1
         return jsonify({"ok": getattr(cur,'rowcount',0)==1})
     except Exception as e:
@@ -4483,7 +4483,7 @@ def api_revoke(token):
 @app.route("/r/<token>")
 def api_resolve_report(token):
     try:
-        row = _SHARE_con.execute("SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?", (token,)).fetchone()
+        row = con.execute("SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?", (token,)).fetchone()
         if not row: 
             return ("Not found",404)
         _t,_chat,_ca,_ttl,_cts,_rev = row
