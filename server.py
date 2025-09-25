@@ -4412,7 +4412,7 @@ def _share_db():
     return con
 
 try:
-    _share_db() = _share_db()
+# removed invalid assignment to _share_db()
 except Exception as _e:
     try: app.logger.error(f"SHARE_DB_INIT_ERROR {type(_e).__name__}: {_e}")
     except Exception: pass
