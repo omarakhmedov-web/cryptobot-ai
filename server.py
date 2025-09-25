@@ -1,3 +1,4 @@
+import secrets
 # -*- coding: utf-8 -*-
 
 # === Standard library imports ===
@@ -23,7 +24,7 @@ def _get_share_ttl_hours() -> int:
         return 72
 
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 
 # Project-local utilities (must exist in your project)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
@@ -4460,6 +4461,41 @@ def metrics_inc():
         _METRICS["errors"]+=1
         return jsonify({"ok":False,"error":str(e)}),400
 
+
+
+@app.route("/s")
+def shortcut_share():
+    try:
+        chat_id = request.args.get("chat_id", "")[:64]
+        ca = request.args.get("ca", "")[:128]
+        ttl = request.args.get("ttl")
+        ttl = int(ttl) if ttl and ttl.isdigit() else _get_share_ttl_hours()
+        token = secrets.token_urlsafe(24)
+        for _try in range(3):
+            try:
+                with _share_db() as con:
+                    con.execute(
+                        "INSERT INTO shared_links(token, chat_id, ca, ttl_hours, created_ts) VALUES (?,?,?,?,?)",
+                        (token, chat_id, ca, ttl, _utcnow())
+                    )
+                    con.commit()
+                _METRICS["share_created"] += 1
+                break
+            except Exception as _e:
+                import sqlite3, time
+                if isinstance(_e, sqlite3.OperationalError) and 'locked' in str(_e).lower():
+                    time.sleep(0.2 * (_try+1))
+                    continue
+                try: app.logger.error("READY_LINK_ERROR lazy: %s", str(_e))
+                except Exception: pass
+                return jsonify({"ok": False, "error": "db_error"}), 503
+        # 302 redirect to final report
+        return redirect(f"/r/{token}", code=302)
+    except Exception as e:
+        _METRICS["errors"] += 1
+        try: app.logger.error(f"READY_LINK_ERROR lazy {type(e).__name__}: {e}")
+        except Exception: pass
+        return jsonify({"ok": False, "error": str(e)}), 400
 @app.route("/api/ready_link", methods=["POST"])
 def api_ready_link():
     try:
@@ -4553,8 +4589,10 @@ def _ensure_action_buttons_with_share(chat_id: int, addr: str, kb: dict,
                     ttl = 72
                     try: ttl = int(os.getenv("SHARE_TTL_HOURS","72") or "72")
                     except Exception: pass
-                    url = _share_ready_link(chat_id, addr, ttl_hours=ttl)
-                    if url:
+                    url = f"{_SITE_URL}/s?chat_id={chat_id}&ca={addr}&ttl={_get_share_ttl_hours()}" if _SITE_URL else None
+                    if (_SITE_URL and addr):
+                        if not url:
+                            url = f"{_SITE_URL}/s?chat_id={chat_id}&ca={addr}&ttl={_get_share_ttl_hours()}"
                         row.append({"text":"🔗 Share", "url": url})
                     return {"inline_keyboard": ik}
         # if not found, add a dedicated row:
