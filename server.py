@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.97-logs-alerts-ux")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.97-release")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -76,11 +76,6 @@ def _db():
     conn.commit()
     return conn
 # ===== Watchlist (SQLite) =====
-
-# ===== Alerts tuning =====
-WATCH_PRICE_THR_DEFAULT = float(os.environ.get("WATCH_PRICE_THR_DEFAULT", "10"))
-_alert_last = {}  # key: (chat, ca, type) -> ts bucket
-
 def _db_watch():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("""CREATE TABLE IF NOT EXISTS watchlist(
@@ -143,7 +138,7 @@ def _trigger_check(rec):
     if wtype == "price":
         pct = _ds_price_change_1h(ca_l)
         if pct is None: return None
-        thr = float(thr if thr is not None else WATCH_PRICE_THR_DEFAULT)
+        thr = float(thr or 5.0)
         if abs(pct) >= thr:
             sign = "↑" if pct > 0 else "↓"
             return f"📈 PriceΔ 1h {sign}{abs(pct):.2f}% — {ca_l}"
@@ -171,28 +166,11 @@ def _watch_loop():
         try:
             conn = _db_watch()
             rows = conn.execute("SELECT chain, ca, type, threshold, active, created_at, chat_id FROM watchlist WHERE active=1").fetchall()
-            digest = {}
-            now=int(time.time())
             for chain, ca, wtype, thr, active, created, chat_id in rows:
                 msg = _trigger_check((chain, ca, wtype, thr, active, created))
-                if not msg:
-                    continue
-                key=(chat_id, (ca or "").lower(), wtype)
-                # debounce: send once per 1h bucket
-                bucket = now // 3600
-                last = _alert_last.get(key)
-                if last == bucket:
-                    continue
-                _alert_last[key]=bucket
-                digest.setdefault(chat_id, []).append(msg)
-            for chat_id, msgs in digest.items():
-                try:
-                    if len(msgs)==1:
-                        _send_text(chat_id, msgs[0], logger=app.logger)
-                    else:
-                        _send_text(chat_id, "📬 Alerts:\n- " + "\n- ".join(msgs[:10]), logger=app.logger)
-                except Exception:
-                    pass
+                if msg:
+                    try: _send_text(chat_id, msg, logger=app.logger)
+                    except Exception: pass
             time.sleep(_WATCH_LOOP_EVERY)
         except Exception:
             try: time.sleep(_WATCH_LOOP_EVERY)
@@ -384,24 +362,11 @@ def _cmd_watch(chat_id: int, text: str):
             elif tok.startswith("chain="): chain = tok.split("=",1)[1].strip().lower()
         watch_add(chat_id, ca, wtype, thr, chain)
         _ensure_watch_loop()
-
-        if not FEATURE_WATCH_KEYS:
-            try:
-                _send_text(chat_id, "ℹ️ Команды: /mywatch · /unwatch <CA> · type=price|lp_top|new_lock\nℹ️ Commands: /mywatch · /unwatch <CA> · type=price|lp_top|new_lock", logger=app.logger)
-            except Exception:
-                pass
         _send_text(chat_id, f"👁️ Added to watchlist: {ca} ({wtype}{' thr='+str(thr) if thr is not None else ''}{' '+chain if chain else ''})", logger=app.logger)
 
         # Optional mini-keyboard after /watch
         if FEATURE_WATCH_KEYS:
             ch = (chain or "").lower() if isinstance(chain, str) else ""
-            # If chain not provided, try resolve via DexScreener
-            if not ch:
-                try:
-                    _p,_ch = _ds_pair_for(ca)
-                    ch = (_ch or "").lower()
-                except Exception:
-                    ch = ""
             # Choose scan domain by chain
             scan_domain = "etherscan.io"
             if ch in ("bsc","bscscan","bnb","binance"): scan_domain = "bscscan.com"
@@ -3182,18 +3147,6 @@ def webhook(secret):
 
             
             if data.startswith("lp:"):
-                # Rate limit per chat
-                try:
-                    now=int(time.time());
-                    w=LP_RATE_WINDOW; m=LP_RATE_MAX
-                    ent=_lp_rate.get(chat_id) or []
-                    ent=[t for t in ent if now-t < w]
-                    if len(ent) >= m:
-                        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "Too many LP checks, try later", logger=app.logger)
-                        return ("ok", 200)
-                    ent.append(now); _lp_rate[chat_id]=ent
-                except Exception:
-                    pass
                 addr = data.split(":",1)[1].strip().lower()
                 # Resolve pair & chain
                 pair, chain = _ds_resolve_pair_and_chain(addr)
@@ -3327,10 +3280,6 @@ def webhook(secret):
                     tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "LP info", logger=app.logger)
                 except Exception:
                     pass
-                try:
-                    _log_lp_event({"chat_id": chat_id, "chain": chain, "pair": paddr, "token": addr, "stats": stats, "verdict": verdict})
-                except Exception:
-                    pass
                 _send_text(chat_id, "\n".join([x for x in (lines + link_lines) if x]), logger=app.logger)
                 return ("ok", 200)
 
@@ -3369,7 +3318,7 @@ def webhook(secret):
                 except Exception:
                     pass
                 try:
-                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "Done", logger=app.logger)
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "", logger=app.logger)
                 except Exception:
                     pass
                 return ("ok", 200)
@@ -3381,7 +3330,7 @@ def webhook(secret):
                 except Exception:
                     pass
                 try:
-                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "Done", logger=app.logger)
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "", logger=app.logger)
                 except Exception:
                     pass
                 return ("ok", 200)
@@ -4273,29 +4222,6 @@ def _send_inline_kbd(chat_id: int, text: str, keyboard: list[list[dict]]):
             "reply_markup": {"inline_keyboard": keyboard}
         }
         requests.post(url, json=payload, timeout=6)
-    except Exception:
-        pass
-
-# ===== LP rate limiting & error hook =====
-LP_RATE_WINDOW = int(os.environ.get("LP_RATE_WINDOW", "60"))  # seconds
-LP_RATE_MAX = int(os.environ.get("LP_RATE_MAX", "3"))         # requests per window per chat
-_lp_rate = {}
-
-ERRORS_WEBHOOK_URL = os.environ.get("ERRORS_WEBHOOK_URL", "").strip()
-
-def _log_lp_event(payload: dict):
-    try:
-        if hasattr(app, "logger"):
-            app.logger.info({"lp_event": payload})
-    except Exception:
-        pass
-
-def _notify_error(evt: dict):
-    try:
-        if not ERRORS_WEBHOOK_URL:
-            return
-        headers = {"Content-Type": "application/json"}
-        requests.post(ERRORS_WEBHOOK_URL, headers=headers, data=json.dumps(evt), timeout=4)
     except Exception:
         pass
 
