@@ -4399,16 +4399,36 @@ except Exception:
 _METRICS = {"start_ts": int(time.time()), "share_created":0, "share_opened":0, "share_revoked":0, "errors":0}
 
 def _share_db():
-    con = sqlite3.connect(_DB_PATH, check_same_thread=False)
-    con.execute("""CREATE TABLE IF NOT EXISTS shared_links (
-        token TEXT PRIMARY KEY,
-        chat_id TEXT,
-        ca TEXT,
-        ttl_hours INTEGER,
-        created_ts INTEGER,
-        revoked_ts INTEGER DEFAULT NULL
-    )""")
-    con.commit()
+    import sqlite3, os
+    db_path = os.environ.get("DB_PATH", "/tmp/metridex_sharelinks.db")
+    # Ensure directory exists
+    try:
+        d = os.path.dirname(db_path) or "/tmp"
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    con = sqlite3.connect(db_path, timeout=10.0, check_same_thread=False)
+    # Pragmas: try WAL, fallback to DELETE if driver/fs doesn't support WAL
+    try:
+        con.execute("PRAGMA busy_timeout=10000;")
+        try:
+            con.execute("PRAGMA journal_mode=WAL;")
+        except Exception:
+            con.execute("PRAGMA journal_mode=DELETE;")
+        con.execute("PRAGMA synchronous=NORMAL;")
+        con.execute("PRAGMA temp_store=MEMORY;")
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS shared_links (
+                token TEXT PRIMARY KEY,
+                chat_id TEXT,
+                ca TEXT,
+                ttl_hours INTEGER,
+                created_ts INTEGER,
+                revoked_ts INTEGER DEFAULT NULL
+            )""")
+        con.commit()
+    except Exception:
+        pass
     return con
 
 
@@ -4466,7 +4486,8 @@ def shortcut_share():
         ttl = request.args.get("ttl")
         ttl = int(ttl) if ttl and ttl.isdigit() else _get_share_ttl_hours()
         token = secrets.token_urlsafe(24)
-        for _try in range(3):
+        import time as _t, sqlite3 as _sq
+        for _try in range(5):
             try:
                 with _share_db() as con:
                     con.execute(
@@ -4477,13 +4498,12 @@ def shortcut_share():
                 _METRICS["share_created"] += 1
                 break
             except Exception as _e:
-                import sqlite3, time
-                if isinstance(_e, sqlite3.OperationalError) and 'locked' in str(_e).lower():
-                    time.sleep(0.2 * (_try+1))
-                    continue
-                try: app.logger.error("READY_LINK_ERROR lazy: %s", str(_e))
+                try: app.logger.error("READY_LINK_ERROR lazy try=%s: %s", _try+1, str(_e))
                 except Exception: pass
-                return jsonify({"ok": False, "error": "db_error"}), 503
+                if isinstance(_e, _sq.OperationalError) and 'locked' in str(_e).lower():
+                    _t.sleep(0.25 * (_try+1))
+                    continue
+                return jsonify({"ok": False, "error": str(_e)}), 503
         # 302 redirect to final report
         return redirect(f"/r/{token}", code=302)
     except Exception as e:
