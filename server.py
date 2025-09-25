@@ -1,57 +1,27 @@
-# === ALFA-722 guard to avoid NameError during early calls ===
-print("[ALFA-722] Booting: guard shim for _ensure_action_buttons_with_share is active")
-def _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=False, want_why=True, want_report=True, want_hp=True):
-    # Temporary no-op wrapper to prevent NameError before full wrapper is defined later.
-    try:
-        return _ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
-    except Exception:
-        return kb
-# === /ALFA-722 guard ===
-import secrets
-# -*- coding: utf-8 -*-
-
-# === Standard library imports ===
 import os
 import re
 import ssl
 import json
 import time
 import socket
-import sqlite3
 import tempfile
 import hashlib
 import threading
-from datetime import datetime, timedelta, timedelta
+from datetime import datetime
 from urllib.parse import urlparse
 
-def _bump_metric(key: str, inc: int = 1):
-    try:
-        m = globals().get('_METRICS') or globals().get('METRICS')
-        if isinstance(m, dict):
-            m[key] = (m.get(key, 0) or 0) + inc
-    except Exception:
-        pass
-
-
-# === Helpers ===
-def _get_share_ttl_hours() -> int:
-    """TTL (hours) for Share-links from env, default 72."""
-    try:
-        return int(os.getenv("SHARE_TTL_HOURS", "72") or "72")
-    except Exception:
-        return 72
-
-
-from flask import Flask, Response, jsonify, redirect, request
+import requests
+from flask import Flask, request, jsonify
 
 # Project-local utilities (must exist in your project)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
 from tg_safe import tg_send_message, tg_answer_callback
 from metri_domain_rdap import _rdap as __rdap_impl  # injected
+from flask import Flask
 import sqlite3
 import hmac
-from datetime import datetime, timedelta, timedelta
+from datetime import datetime, timedelta
 try:
     from polydebug_rpc import init_polydebug
     init_polydebug()  # запустится только при POLY_DEBUG=1
@@ -61,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.102-sharefix")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.100-rdapwhois")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1174,31 +1144,8 @@ WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADD
 # Helpers
 # ========================
 def _send_text(chat_id, text, **kwargs):
-    try:
-        text = NEWLINE_ESC_RE.sub("\n", text or "")
-        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
-    except Exception:
-        return None
-
-def _share_ready_link(chat_id: int, ca: str, ttl_hours: int | None = None) -> str | None:
-    try:
-        site = (os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip().rstrip("/")
-        if not site:
-            return None
-        url = site + "/api/ready_link"
-        payload = {"chat_id": str(chat_id), "ca": str(ca)}
-        if ttl_hours:
-            try: payload["ttl_hours"] = int(ttl_hours)
-            except Exception: pass
-        r = requests.post(url, json=payload, timeout=6, headers={"User-Agent": "metridex-bot"})
-        if r.status_code != 200:
-            return None
-        js = r.json() if hasattr(r, "json") else {}
-        if not js.get("ok"):
-            return None
-        return js.get("url") or None
-    except Exception:
-        return None
+    text = NEWLINE_ESC_RE.sub("\n", text or "")
+    return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
 def _admin_debug(chat_id, text):
     try:
@@ -1347,24 +1294,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         row.append({"text": "ℹ️ Why++", "callback_data": f"why2:{addr}"})
     if want_report and addr:
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
-    # try generating one-time Share link next to Report (HTML)
-    try:
-        ttl = int(os.getenv("SHARE_TTL_HOURS","72") or "72")
-    except Exception:
-        ttl = 72
-    try:
-        if want_report and addr:
-            chat_hint = None
-            # try to detect chat id from recent message context if available (best effort)
-            # For safety, do not rely on it; Share will be added only in webhook paths where chat_id is known.
-            # Here we try a neutral fallback: no share if we cannot resolve chat_id.
-            # The actual call sites (webhook handlers) can rebuild the keyboard with chat_id.
-    except Exception:
-        pass
     if row:
-        # NOTE: For robust behavior, call sites that build keyboards should replace this row
-        # with a variant that calls _share_ready_link(chat_id, addr) and appends the button.
-        # If chat_id is not available here, leave without Share.
         ik.append(row)
     # Separate row for On-chain, only if RPCs configured
     if want_hp and addr:
@@ -3094,7 +3024,7 @@ def webhook(secret):
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = _qs_call_safe(quickscan_pair_entrypoint, data)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
-                keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, addr=base_addr, kb=keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -3120,7 +3050,7 @@ def webhook(secret):
                     pass
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = _qs_call_safe(quickscan_entrypoint, base_addr)
-                keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, addr=base_addr, kb=keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -3145,7 +3075,7 @@ def webhook(secret):
                 enriched = _enrich_full(addr, base_text)
                 enriched = _append_verdict_block(addr, enriched)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons_with_share(chat_id=chat_id, addr=addr, kb={}, want_more=False, want_why=True, want_report=True, want_hp=True)
+                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
                 _store_addr_for_message(body, addr)
@@ -3218,7 +3148,7 @@ def webhook(secret):
                 out, meta = _onchain_inspect(addr)
                 _merge_onchain_into_risk(addr, meta)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons_with_share(chat_id=chat_id, addr=addr, kb={}, want_more=False, want_why=True, want_report=True, want_hp=False)
+                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=False)
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
                 return ("ok", 200)
@@ -3608,7 +3538,7 @@ def webhook(secret):
                 try:
                     text_out, keyboard = _qs_call_safe(quickscan_entrypoint, arg)
                     base_addr = _extract_addr_from_text(arg) or _extract_base_addr_from_keyboard(keyboard)
-                    keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, addr=base_addr, kb=keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
                     st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                     _store_addr_for_message(body, base_addr)
@@ -3650,7 +3580,7 @@ def webhook(secret):
     try:
         text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
         base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
-        keyboard = _ensure_action_buttons_with_share(chat_id=chat_id, addr=base_addr, kb=keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
         _store_addr_for_message(body, base_addr)
@@ -4389,352 +4319,3 @@ def _filter_owner_signal(neg_factors: list[str], context: dict) -> list[str]:
     except Exception:
         pass
     return list(neg_factors or [])
-
-
-# ==== METRIX-ALPHA 0.3.101-multi ADDITIONS START ====
-try:
-    import sqlite3, secrets
-    from flask import Response
-    _APP_VERSION = os.environ.get("APP_VERSION","0.3.101-multi")
-    _SITE_URL = os.environ.get("SITE_URL","")
-    _SAMPLE_REPORT_PATH = os.environ.get("SAMPLE_REPORT_PATH","/report-sample.html")
-    _SAMPLE_URL = os.environ.get("SAMPLE_URL")
-    _DB_PATH = os.environ.get("DB_PATH","/tmp/metridex_sharelinks.db")
-    pass  # removed bad assignment
-    _ALERTS_GUARD = int(os.environ.get("ALERTS_SPAM_GUARD","1"))
-    _ALERTS_COOLDOWN_MIN = int(os.environ.get("ALERTS_COOLDOWN_MIN","45"))
-except Exception:
-    _APP_VERSION = "0.3.101-multi"
-    _SITE_URL = ""
-    _SAMPLE_REPORT_PATH = "/report-sample.html"
-    _SAMPLE_URL = None
-    _DB_PATH = "/tmp/metridex_sharelinks.db"
-    pass  # removed bad assignment
-    _ALERTS_GUARD = 1
-    _ALERTS_COOLDOWN_MIN = 45
-
-_METRICS = {"start_ts": int(time.time()), "share_created":0, "share_opened":0, "share_revoked":0, "errors":0}
-
-def _share_db():
-    import sqlite3, os
-    db_path = os.environ.get("DB_PATH", "/tmp/metridex_sharelinks.db")
-    # Ensure directory exists
-    try:
-        d = os.path.dirname(db_path) or "/tmp"
-        os.makedirs(d, exist_ok=True)
-    except Exception:
-        pass
-    con = sqlite3.connect(db_path, timeout=10.0, check_same_thread=False)
-    # Pragmas: try WAL, fallback to DELETE if driver/fs doesn't support WAL
-    try:
-        con.execute("PRAGMA busy_timeout=10000;")
-        try:
-            con.execute("PRAGMA journal_mode=WAL;")
-        except Exception:
-            con.execute("PRAGMA journal_mode=DELETE;")
-        con.execute("PRAGMA synchronous=NORMAL;")
-        con.execute("PRAGMA temp_store=MEMORY;")
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS shared_links (
-                token TEXT PRIMARY KEY,
-                chat_id TEXT,
-                ca TEXT,
-                ttl_hours INTEGER,
-                created_ts INTEGER,
-                revoked_ts INTEGER DEFAULT NULL
-            )""")
-        con.commit()
-    except Exception:
-        pass
-    return con
-
-
-def _now(): 
-    try: return int(time.time())
-    except Exception: return int(time.time())
-
-def _expired(_created_ts:int, _ttl_h:int)->bool:
-    try: return _now() > (_created_ts + _ttl_h*3600)
-    except Exception: return True
-
-def _load_sample_html_bytes() -> bytes:
-    try:
-        if _SAMPLE_URL and (_SAMPLE_URL.startswith("http://") or _SAMPLE_URL.startswith("https://")):
-            html = f'<!doctype html><html><head><meta http-equiv="refresh" content="0;url={_SAMPLE_URL}"><meta charset="utf-8"><title>Metridex Report</title></head><body><p>Redirecting… <a href="{_SAMPLE_URL}">open</a></p></body></html>'
-            return html.encode("utf-8")
-        p = os.path.join(os.getcwd(), _SAMPLE_REPORT_PATH.lstrip("/"))
-        if os.path.exists(p):
-            with open(p,"rb") as f: return f.read()
-    except Exception: 
-        pass
-    return b'<!doctype html><html><head><meta charset="utf-8"><title>Metridex Report (Sample)</title></head><body><h1>Metridex Report (Sample)</h1><p>Configure SAMPLE_URL or add report-sample.html.</p></body></html>'
-
-# /metrics json (не конфликтует с /healthz)
-@app.route("/metrics")
-def metrics_json():
-    try:
-        up = int(time.time()) - int(_METRICS.get("start_ts", int(time.time())))
-        d = dict(_METRICS); d["uptime_sec"]=up; d["version"]=_APP_VERSION
-        return jsonify(d)
-    except Exception as e:
-        try: app.logger.error(f"METRICS_ERROR {type(e).__name__}: {e}")
-        except Exception: pass
-        return jsonify({"ok":False}), 500
-
-@app.route("/metrics/inc", methods=["POST"])
-def metrics_inc():
-    try:
-        data = request.get_json(force=True, silent=True) or {}
-        for k,v in (data.items() if hasattr(data,"items") else []):
-            if isinstance(v,int) and k in _METRICS:
-                _METRICS[k]+=v
-        return jsonify({"ok":True,"metrics":_METRICS})
-    except Exception as e:
-        _METRICS["errors"]+=1
-        return jsonify({"ok":False,"error":str(e)}),400
-
-
-
-@app.route("/s")
-def shortcut_share():
-    try:
-        chat_id = request.args.get("chat_id", "")[:64]
-        ca = request.args.get("ca", "")[:128]
-        ttl = request.args.get("ttl")
-        ttl = int(ttl) if ttl and ttl.isdigit() else _get_share_ttl_hours()
-        token = secrets.token_urlsafe(24)
-        import time as _t, sqlite3 as _sq
-        for _try in range(5):
-            try:
-                with _share_db() as con:
-                    con.execute(
-                        "INSERT INTO shared_links(token, chat_id, ca, ttl_hours, created_ts) VALUES (?,?,?,?,?)",
-                        (token, chat_id, ca, ttl, int(time.time()))
-                    )
-                    con.commit()
-                _bump_metric('share_created', 1)
-                break
-            except Exception as _e:
-                try: app.logger.error("READY_LINK_ERROR lazy try=%s: %s", _try+1, str(_e))
-                except Exception: pass
-                if isinstance(_e, _sq.OperationalError) and 'locked' in str(_e).lower():
-                    _t.sleep(0.25 * (_try+1))
-                    continue
-                return jsonify({"ok": False, "error": str(_e)}), 503
-        # 302 redirect to final report
-        return redirect(f"/r/{token}", code=302)
-    except Exception as e:
-        _bump_metric('errors', 1)
-        try: app.logger.error(f"READY_LINK_ERROR lazy {type(e).__name__}: {e}")
-        except Exception: pass
-        return jsonify({"ok": False, "error": str(e)}), 400
-@app.route("/api/ready_link", methods=["POST"])
-def api_ready_link():
-    try:
-        data = request.get_json(force=True) or {}
-        chat_id = str(data.get("chat_id",""))[:64]
-        ca = str(data.get("ca",""))[:128]
-        ttl = int(data.get("ttl_hours") or _get_share_ttl_hours())
-        token = secrets.token_urlsafe(24)
-        with _share_db() as con:
-            con.execute("INSERT INTO shared_links(token,chat_id,ca,ttl_hours,created_ts) VALUES(?,?,?,?,?)",
-                               (token, chat_id, ca, ttl, _now()))
-        _METRICS["share_created"]+=1
-        url = f"{_SITE_URL}/r/{token}" if _SITE_URL else f"/r/{token}"
-        exp = datetime.utcnow() + timedelta(hours=ttl)
-        return jsonify({"ok":True,"url":url,"token":token,"expires_at":exp.isoformat()+"Z"})
-    except Exception as e:
-        _METRICS["errors"]+=1
-        try: app.logger.error(f"READY_LINK_ERROR {type(e).__name__}: {e}")
-        except Exception: pass
-        return jsonify({"ok":False,"error":str(e)}),400
-
-@app.route("/api/revoke/<token>", methods=["POST"])
-def api_revoke(token):
-    try:
-        with _share_db() as con:
-            cur = con.execute("UPDATE shared_links SET revoked_ts=? WHERE token=? AND revoked_ts IS NULL", (_now(), token))
-        if getattr(cur,"rowcount",0): _METRICS["share_revoked"]+=1
-        return jsonify({"ok": getattr(cur,'rowcount',0)==1})
-    except Exception as e:
-        _METRICS["errors"]+=1
-        return jsonify({"ok":False,"error":str(e)}),400
-
-@app.route("/r/<token>")
-def resolve_report(token):
-    try:
-        # read link info
-        with _share_db() as con:
-            row = con.execute("SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?", (token,)).fetchone()
-        if not row:
-            return ("Not found", 404)
-        _tok, _chat, _ca, _ttl, _cts, _rev = row
-        # expiry check
-        if _rev is not None or int(time.time()) > int(_cts) + int(_ttl)*3600:
-            return ("Gone", 410)
-        _bump_metric("share_opened", 1)
-        # Render sample report (HTML); ensure bytes/str compatibility
-        html = _load_sample_html_bytes()
-        return Response(html, mimetype="text/html")
-    except Exception as e:
-        _bump_metric("errors", 1)
-        try: app.logger.error(f"RESOLVE_ERROR {type(e).__name__}: {e}")
-        except Exception: pass
-        return jsonify({"ok": False, "error": str(e)}), 400
-
-# === ALFA-722 full wrapper (overrides guard after base is defined) ===
-def _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=False, want_why=True, want_report=True, want_hp=True):
-    """Wrapper over _ensure_action_buttons that appends a 🔗 Share button when possible.
-    Fallback-safe: if share cannot be formed, returns base keyboard.
-    """
-    try:
-        base = _ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
-        if not addr or not isinstance(base, dict):
-            return base
-        site_ok = bool((os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip())
-        if not chat_id or not site_ok:
-            return base
-        try:
-            ttl = _get_share_ttl_hours()
-        except Exception:
-            ttl = 72
-        try:
-            share_url = _share_ready_link(chat_id, addr, ttl_hours=ttl)
-        except Exception:
-            share_url = None
-        if not share_url:
-            return base
-        ik = base.get("inline_keyboard") or []
-        placed = False
-        for row in ik:
-            for btn in row:
-                if str(btn.get("text") or "").startswith("📄"):
-                    row.append({"text": "🔗 Share", "url": share_url})
-                    placed = True
-                    break
-            if placed:
-                break
-        if not placed:
-            ik.append([{"text": "🔗 Share", "url": share_url}])
-        return _kb_dedupe_all({"inline_keyboard": ik})
-    except Exception:
-        try:
-            return _ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
-        except Exception:
-            return kb
-print("[ALFA-722] Full share wrapper loaded")
-# === /ALFA-722 full wrapper ===
-
-
-# === ALFA-722 context capture for chat_id ===
-_CTX_CHAT_ID = None
-from flask import request as _rq
-
-@app.before_request
-def _alfa722_capture_chat_id():
-    global _CTX_CHAT_ID
-    try:
-        if _rq.path.startswith(("/webhook", "/tg", "/telegram")) and _rq.method in ("POST","PUT"):
-            js = _rq.get_json(silent=True) or {}
-            chat_id = None
-            try:
-                chat_id = (((js.get("message") or {}).get("chat") or {}).get("id"))
-                if not chat_id:
-                    chat_id = ((((js.get("callback_query") or {}).get("message") or {}).get("chat") or {}).get("id"))
-            except Exception:
-                chat_id = None
-            if chat_id:
-                _CTX_CHAT_ID = int(chat_id)
-    except Exception:
-        pass
-# === /ALFA-722 context capture ===
-
-
-# === ALFA-722 wrapper that appends Share and aliases base calls ===
-try:
-    _orig_ensure_action_buttons = _ensure_action_buttons
-except NameError:
-    _orig_ensure_action_buttons = None
-
-def _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=False, want_why=True, want_report=True, want_hp=True):
-    """Add 🔗 Share next to '📄 Report (HTML)' when possible. Safe fallback."""
-    try:
-        base = _orig_ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp) if _orig_ensure_action_buttons else kb
-        if not addr or not isinstance(base, dict):
-            return base
-        # Prefer explicit chat_id, else captured from request context
-        cid = chat_id or globals().get("_CTX_CHAT_ID")
-        site_ok = bool((os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip())
-        if not cid or not site_ok:
-            return base
-        try:
-            ttl = _get_share_ttl_hours()
-        except Exception:
-            ttl = 72
-        try:
-            share_url = _share_ready_link(cid, addr, ttl_hours=ttl)
-        except Exception:
-            share_url = None
-        if not share_url:
-            return base
-        ik = base.get("inline_keyboard") or []
-        placed = False
-        for row in ik:
-            for btn in row:
-                if str(btn.get("text") or "").startswith("📄"):
-                    row.append({"text": "🔗 Share", "url": share_url})
-                    placed = True
-                    break
-            if placed:
-                break
-        if not placed:
-            ik.append([{"text": "🔗 Share", "url": share_url}])
-        return _kb_dedupe_all({"inline_keyboard": ik})
-    except Exception:
-        try:
-            return _orig_ensure_action_buttons(addr, kb, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
-        except Exception:
-            return kb
-
-def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
-    # Alias: all existing call sites now get Share automatically (uses request-captured chat id)
-    return _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
-
-print("[ALFA-722] Share wrapper + alias active")
-# === /ALFA-722 wrapper ===
-
-
-# === ALFA-722 FINAL MONKEYPATCH (must be last) ===
-try:
-    from flask import request as _rq2
-except Exception:
-    _rq2 = None
-
-def _alfa722_site_base():
-    # Prefer explicit SITE_URL; else try to infer from Host header of current request
-    base = (os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip()
-    if base:
-        return base.rstrip("/")
-    try:
-        if _rq2:
-            host = _rq2.host_url.rstrip("/")
-            if host:
-                return host
-    except Exception:
-        pass
-    return ""
-
-# Override share wrapper to use inferred site base if env missing
-_old_share = _ensure_action_buttons_with_share
-def _ensure_action_buttons_with_share(addr, kb, chat_id=None, want_more=False, want_why=True, want_report=True, want_hp=True):
-    site_env = (os.getenv("SITE_URL") or os.getenv("SITE_BASE") or "").strip()
-    if not site_env:
-        inferred = _alfa722_site_base()
-        if inferred:
-            os.environ["SITE_URL"] = inferred
-    return _old_share(addr, kb, chat_id=chat_id, want_more=want_more, want_why=want_why, want_report=want_report, want_hp=want_hp)
-
-# Ensure base alias is applied LAST so any later definitions are overridden
-_ensure_action_buttons = _ensure_action_buttons_with_share
-print("[ALFA-722] Final alias enforced; SITE_URL:", os.getenv("SITE_URL"))
-# === /ALFA-722 FINAL MONKEYPATCH ===
