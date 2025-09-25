@@ -1,22 +1,28 @@
-import os
+# -*- coding: utf-8 -*-
 
-def _get_share_ttl_hours() -> int:
-    try:
-        return int(os.getenv("SHARE_TTL_HOURS", "72") or "72")
-    except Exception:
-        return 72
+# === Standard library imports ===
+import os
 import re
 import ssl
 import json
 import time
 import socket
+import sqlite3
 import tempfile
 import hashlib
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
-import requests
+# === Helpers ===
+def _get_share_ttl_hours() -> int:
+    """TTL (hours) for Share-links from env, default 72."""
+    try:
+        return int(os.getenv("SHARE_TTL_HOURS", "72") or "72")
+    except Exception:
+        return 72
+
+
 from flask import Flask, request, jsonify
 
 # Project-local utilities (must exist in your project)
@@ -4405,7 +4411,7 @@ def _share_db():
     return con
 
 try:
-    _SHARE_CON = _share_db()
+    _share_db() = _share_db()
 except Exception as _e:
     try: app.logger.error(f"SHARE_DB_INIT_ERROR {type(_e).__name__}: {_e}")
     except Exception: pass
