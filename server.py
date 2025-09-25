@@ -12,8 +12,14 @@ import sqlite3
 import tempfile
 import hashlib
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timedelta
 from urllib.parse import urlparse
+
+
+def _utcnow() -> int:
+    import time
+    return int(time.time())
+
 
 # === Helpers ===
 def _get_share_ttl_hours() -> int:
@@ -34,7 +40,7 @@ from metri_domain_rdap import _rdap as __rdap_impl  # injected
 from flask import Flask
 import sqlite3
 import hmac
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timedelta
 try:
     from polydebug_rpc import init_polydebug
     init_polydebug()  # запустится только при POLY_DEBUG=1
@@ -76,6 +82,39 @@ app = Flask(__name__)
 
 # ===== Entitlements (SQLite) =====
 DB_PATH = os.getenv("DB_PATH", "/tmp/metridex.db")
+
+def _share_db():
+    import sqlite3, os
+    db_path = os.environ.get("DB_PATH", "/tmp/metridex_sharelinks.db")
+    # Ensure directory exists
+    try:
+        d = os.path.dirname(db_path) or "/tmp"
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    con = sqlite3.connect(db_path, timeout=10.0, check_same_thread=False)
+    try:
+        con.execute("PRAGMA busy_timeout=10000;")
+        try:
+            con.execute("PRAGMA journal_mode=WAL;")
+        except Exception:
+            con.execute("PRAGMA journal_mode=DELETE;")
+        con.execute("PRAGMA synchronous=NORMAL;")
+        con.execute("PRAGMA temp_store=MEMORY;")
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS shared_links (
+                token TEXT PRIMARY KEY,
+                chat_id TEXT,
+                ca TEXT,
+                ttl_hours INTEGER,
+                created_ts INTEGER,
+                revoked_ts INTEGER DEFAULT NULL
+            )"""
+        )
+        con.commit()
+    except Exception:
+        pass
+    return con
 
 def _db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -247,4 +286,34 @@ def pop_deep_credit(chat_id: str) -> bool:
     cur = conn.execute("""SELECT rowid, credits FROM entitlements
                           WHERE chat_id=? AND product='deep' AND credits>0
                           ORDER BY created_at ASC LIMIT 1""", (str(chat_id),))
-    row = _share_db().execute("SELECT token, chat_id, ca, ttl_hours, created_ts, revoked_ts FROM shared_links WHERE token=?", (token,)).fetchone()
+
+
+
+@app.route("/s")
+def shortcut_share():
+    try:
+        chat_id = request.args.get("chat_id", "")[:64]
+        ca = request.args.get("ca", "")[:128]
+        ttl = request.args.get("ttl")
+        ttl = int(ttl) if ttl and ttl.isdigit() else int(os.getenv("SHARE_TTL_HOURS","72") or "72")
+        token = secrets.token_urlsafe(24)
+        import time as _t, sqlite3 as _sq
+        for _try in range(5):
+            try:
+                with _share_db() as con:
+                    con.execute(
+                        "INSERT INTO shared_links(token, chat_id, ca, ttl_hours, created_ts) VALUES (?,?,?,?,?)",
+                        (token, chat_id, ca, ttl, int(time.time()))
+                    )
+                    con.commit()
+                break
+            except Exception as _e:
+                if isinstance(_e, _sq.OperationalError) and 'locked' in str(_e).lower():
+                    _t.sleep(0.25 * (_try+1))
+                    continue
+                return jsonify({"ok": False, "error": str(_e)}), 503
+        return redirect(f"/r/{token}", code=302)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
