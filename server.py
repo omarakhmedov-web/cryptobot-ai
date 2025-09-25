@@ -31,7 +31,11 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.101-cooldown-lite")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.104-lplock-antidup")
+
+ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
+ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
+LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -40,9 +44,6 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # numeric string
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
 
-
-ALERTS_SPAM_GUARD = int(os.getenv('ALERTS_SPAM_GUARD','1'))
-ALERTS_COOLDOWN_MIN = int(os.getenv('ALERTS_COOLDOWN_MIN','15'))
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
 KNOWN_AUTORELOAD_SEC = int(os.environ.get("KNOWN_AUTORELOAD_SEC", "300"))
@@ -92,6 +93,24 @@ def _db_watch():
     )""")
     conn.commit()
     return conn
+
+def _db_alerts():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""CREATE TABLE IF NOT EXISTS alert_sends(
+        chat_id TEXT NOT NULL,
+        chain   TEXT,
+        ca      TEXT NOT NULL,
+        type    TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+    )""")
+    conn.commit()
+    return conn
+
+def _ensure_alerts_index(conn):
+    try:
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_alerts_ttl ON alert_sends(chat_id, ca, type, IFNULL(chain, ""), sent_at)')
+    except Exception:
+        pass
 
 def watch_add(chat_id: str, ca: str, wtype: str, threshold: float|None=None, chain: str|None=None):
     ca=(ca or "").lower(); wtype=(wtype or "price").lower(); now_ts=int(time.time())
@@ -172,39 +191,38 @@ def _trigger_check(rec):
 _WATCH_LOOP_EVERY = int(os.getenv("WATCH_LOOP_EVERY","360"))
 _watch_thread_started = False
 
-
 def _watch_loop():
-    # Lightweight anti-spam: cooldown per (chat_id, ca, type)
-    last_sent = {}
-    cd_seconds = max(0, int(ALERTS_COOLDOWN_MIN) * 60) if ALERTS_SPAM_GUARD else 0
     while True:
         try:
             conn = _db_watch()
-            rows = conn.execute("SELECT chain, ca, type, IFNULL(threshold,''), active, created_at, chat_id FROM watchlist WHERE active=1").fetchall()
+            rows = conn.execute("SELECT chain, ca, type, threshold, active, created_at, chat_id FROM watchlist WHERE active=1").fetchall()
             for chain, ca, wtype, thr, active, created, chat_id in rows:
-                try:
-                    msg = _trigger_check((chain, ca, wtype, thr, active, created))
-                except Exception:
-                    msg = None
+                
+                msg = _trigger_check((chain, ca, wtype, thr, active, created))
                 if not msg:
                     continue
-                # Cooldown check
-                key = (str(chat_id), (ca or '').lower(), (wtype or '').lower(), (chain or '').lower())
-                now = time.time()
-                last = last_sent.get(key, 0)
-                if cd_seconds and (now - last) < cd_seconds:
+                skip=False
+                if ALERTS_SPAM_GUARD:
+                    try:
+                        c2 = _db_alerts()
+                        _ensure_alerts_index(c2)
+                        key = (str(chat_id), str(ca or "").lower(), str(wtype or ""), str(chain or ""))
+                        last = c2.execute("SELECT MAX(sent_at) FROM alert_sends WHERE chat_id=? AND ca=? AND type=? AND IFNULL(chain,'')=?", key).fetchone()[0]
+                        now = int(time.time())
+                        if last and now - int(last) < (ALERTS_COOLDOWN_MIN*60):
+                            skip=True
+                        if not skip:
+                            c2.execute("INSERT INTO alert_sends(chat_id, chain, ca, type, sent_at) VALUES(?,?,?,?,?)",
+                                       (str(chat_id), str(chain or ""), str(ca or "").lower(), str(wtype or ""), now))
+                            c2.commit()
+                    except Exception:
+                        pass
+                if skip:
                     continue
                 try:
                     _send_text(chat_id, msg, logger=app.logger)
-                    last_sent[key] = now
                 except Exception:
                     pass
-            time.sleep(_WATCH_LOOP_EVERY)
-        except Exception:
-            try:
-                time.sleep(_WATCH_LOOP_EVERY)
-            except Exception:
-                pass
 
             time.sleep(_WATCH_LOOP_EVERY)
         except Exception:
@@ -3248,7 +3266,24 @@ def webhook(secret):
                 except Exception:
                     pass
                 holders = int(stats.get("holders_count", 0) or 0)
-                # Owner/renounce/proxy (lite) using chain-aware RPC
+                
+                # Build detail lines
+                lines = []
+                lines.append(f"🔒 LP lock (lite): dead={dead:.2f}%, UNCX={uncx:.2f}%, TeamFinance={tfp:.2f}%")
+                if th:
+                    lines.append(f"Top holder: {th} ({thp:.2f}%)" + (f" [{th_label}]" if th_label else ""))
+                lines.append(f"Holders: {holders}")
+                if LP_LOCK_HTML_ENABLED:
+                    try:
+                        _send_text(chat_id, "\n".join(lines), logger=app.logger)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        _send_text(chat_id, "\n".join(lines), logger=app.logger)
+                    except Exception:
+                        pass
+# Owner/renounce/proxy (lite) using chain-aware RPC
                 owner_addr = _get_owner(paddr, chain) if (paddr and chain) else ""
                 renounced = (owner_addr.lower() in DEAD_ADDRS) if owner_addr else False
                 impl_addr = _get_proxy_impl(paddr, chain) if (paddr and chain) else ""
