@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.104-lplock-antidup")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.109-mutex-lplinks")
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
@@ -64,6 +64,150 @@ app = Flask(__name__)
 
 
 
+
+
+
+# === METRIDEX INTEGRATED PATCHES ===
+# Mutex TTL & LP lock HTML block (Share/PDF untouched)
+
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from typing import Optional, Dict
+
+# --- Mutex table & helpers ---
+def _db_mutex():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""CREATE TABLE IF NOT EXISTS mutex_locks(
+        mkey TEXT PRIMARY KEY,
+        until_ts INTEGER NOT NULL,
+        note TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mutex_until ON mutex_locks(until_ts)")
+    conn.commit()
+    return conn
+
+def _now_ts() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+MUTEX_TTL_SECONDS = int(os.getenv("MUTEX_TTL_SECONDS", "90"))
+MUTEX_SWEEP_PERIOD = int(os.getenv("MUTEX_SWEEP_PERIOD", "300"))
+
+def _mutex_sweep(con=None):
+    own = con is None
+    con = con or _db_mutex()
+    try:
+        con.execute("DELETE FROM mutex_locks WHERE until_ts < ?", (_now_ts(),))
+        con.commit()
+    finally:
+        if own:
+            con.close()
+
+@contextmanager
+def with_mutex(key: str, ttl_seconds: Optional[int] = None, note: Optional[str] = None):
+    ttl = int(ttl_seconds or MUTEX_TTL_SECONDS)
+    now = _now_ts()
+    con = _db_mutex()
+    try:
+        if now % MUTEX_SWEEP_PERIOD < 2:
+            _mutex_sweep(con)
+        try:
+            con.execute("INSERT INTO mutex_locks(mkey, until_ts, note) VALUES (?,?,?)", (key, now + ttl, note))
+            con.commit()
+            acquired = True
+        except Exception:
+            acquired = False
+        yield acquired
+    finally:
+        con.close()
+
+# --- DB anti-dup helper (optional to use inside loops) ---
+ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
+ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
+
+def should_send_alert(chat_id: int, chain: str, ca: str, atype: str) -> bool:
+    if not ALERTS_SPAM_GUARD:
+        return True
+    try:
+        con = sqlite3.connect(DB_PATH, check_same_thread=False)
+        con.execute("""CREATE TABLE IF NOT EXISTS alert_sends(
+            chat_id TEXT NOT NULL,
+            chain   TEXT,
+            ca      TEXT NOT NULL,
+            type    TEXT NOT NULL,
+            sent_at INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, ca, type, chain)
+        )""")
+        now = _now_ts()
+        # try upsert
+        try:
+            con.execute("INSERT INTO alert_sends(chat_id, chain, ca, type, sent_at) VALUES (?,?,?,?,?)",
+                        (str(chat_id), str(chain or ""), str(ca or "").lower(), str(atype or ""), now))
+            con.commit()
+            return True
+        except Exception:
+            row = con.execute("SELECT sent_at FROM alert_sends WHERE chat_id=? AND ca=? AND type=? AND chain=?",
+                              (str(chat_id), str(ca or "").lower(), str(atype or ""), str(chain or ""))).fetchone()
+            last = int(row[0]) if row else 0
+            if now - last < (ALERTS_COOLDOWN_MIN * 60):
+                return False
+            con.execute("UPDATE alert_sends SET sent_at=? WHERE chat_id=? AND ca=? AND type=? AND chain=?",
+                        (now, str(chat_id), str(ca or "").lower(), str(atype or ""), str(chain or "")))
+            con.commit()
+            return True
+    except Exception:
+        return True
+
+# --- LP lock HTML block with provider links (UNCX/TeamFinance) ---
+LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "1") or "1")
+
+UNCX_LINKS = {
+    "ethereum": "https://app.uncx.network/lockers/uniswap-v2/pair/{pair}",
+    "bsc": "https://app.uncx.network/lockers/pancakeswap-v2/pair/{pair}",
+    "polygon": "https://app.uncx.network/lockers/quickswap-v2/pair/{pair}",
+}
+TEAMFINANCE_LINKS = {
+    "ethereum": "https://app.team.finance/uniswap/{pair}",
+    "bsc": "https://app.team.finance/pancakeswap/{pair}",
+    "polygon": "https://app.team.finance/quickswap/{pair}",
+}
+
+def _fmt_pct(v):
+    try:
+        return f"{float(v):.2f}%"
+    except Exception:
+        return "—"
+
+def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
+    if not LP_LOCK_HTML_ENABLED:
+        return ""
+    chain_lc = (chain or "").lower()
+    dead_pct = _fmt_pct(stats.get("dead_pct"))
+    uncx_pct = _fmt_pct(stats.get("uncx_pct") or stats.get("uncx") or stats.get("UNCX"))
+    team_pct = _fmt_pct(stats.get("team_finance_pct") or stats.get("team_pct") or stats.get("TF"))
+    top_holder = stats.get("top_holder") or "—"
+    holders_total = stats.get("holders_count") or stats.get("holders_total") or "—"
+
+    pair = (pair_address or "").strip()
+    uncx_url = UNCX_LINKS.get(chain_lc, "").format(pair=pair) if pair else ""
+    team_url = TEAMFINANCE_LINKS.get(chain_lc, "").format(pair=pair) if pair else ""
+
+    rows = []
+    rows.append(f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>")
+    rows.append(f"<tr><td>UNCX</td><td><b>{uncx_pct}</b>{' — <a href="'+uncx_url+'" target="_blank" rel="noopener">open</a>' if uncx_url else ''}</td></tr>")
+    rows.append(f"<tr><td>TeamFinance</td><td><b>{team_pct}</b>{' — <a href="'+team_url+'" target="_blank" rel="noopener">open</a>' if team_url else ''}</td></tr>")
+    rows.append(f"<tr><td>Top holder</td><td>{top_holder}</td></tr>")
+    rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
+
+    html = f"""
+    <div class="lp-lock-mini">
+      <h4 style="margin:8px 0;">LP lock details</h4>
+      <table style="font-size:14px;line-height:1.3;border-collapse:collapse">
+        {''.join(rows)}
+      </table>
+    </div>
+    """
+    return html
+# === /METRIDEX INTEGRATED PATCHES ===
 
 # ===== Entitlements (SQLite) =====
 DB_PATH = os.getenv("DB_PATH", "/tmp/metridex.db")
