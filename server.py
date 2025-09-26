@@ -2783,11 +2783,11 @@ def _onchain_inspect(addr: str):
                 if pair_addr and chain_name:
                     lp = _infer_lp_status(pair_addr, chain_name)
                     if lp:
-                        out.append(f"LP: burned={lp.get('dead_pct',0)}% | UNCX={lp.get('uncx_pct',0)}% | TeamFinance={lp.get('team_finance_pct',0)}% | topHolder={lp.get('top_holder_pct',0)}%")
+                        out.append(f"LP: burned={lp.get('dead_pct',0)}% | UNCX={lp.get('uncx_pct',0)}% | TeamFinance={lp.get('team_finance_pct',0)}% | LP top holder={lp.get('top_holder_pct',0)}%")
                         info['lp'] = lp
                     conc = _holder_concentration(addr, chain_name)
                     if conc:
-                        out.append(f"Holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
+                        out.append(f"Token holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
                         info['holders'] = conc
         except Exception:
             pass
@@ -3561,7 +3561,7 @@ def webhook(secret):
                 lines.append(f"🔒 LP lock (lite): dead={dead:.2f}%, UNCX={uncx:.2f}%, TeamFinance={tfp:.2f}%")
                 if th:
                     lines.append(f"Top holder: {th} ({thp:.2f}%)" + (f" [{th_label}]" if th_label else ""))
-                lines.append(f"Holders: {holders}")
+                lines.append(f"Token holders: {holders}")
                 if LP_LOCK_HTML_ENABLED:
                     try:
                         _send_text(chat_id, "\n".join(lines), logger=app.logger)
@@ -3650,7 +3650,7 @@ def webhook(secret):
                 uncx_site = "https://app.unicrypt.network/"
 
                 lines = [
-                    ("ℹ️ data source: LP holders API/rate-limit" if data_insufficient else None),
+                    ("ℹ️ data Source: LP holders API/rate-limit" if data_insufficient else None),
                     f"🔒 LP lock (lite) — chain: {chain or 'n/a'}",
                     f"Verdict: {verdict}",
                     f"• Dead/renounced: {dead}%",
@@ -3990,14 +3990,6 @@ def _enrich_full(addr: str, base_text: str) -> str:
         except Exception:
             pass
         domain_line = f"Domain: {dom}"
-
-        # Normalize RDAP status to English if localized
-        try:
-            if isinstance(h, str):
-                import re as _re
-                h = _re.sub(r"RDAP\s*недоступен\s*для\s*реестра\s*([\.\w-]+)", r"RDAP unavailable for \1 registry", h, flags=_re.I)
-        except Exception:
-            pass
         whois_line  = f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}"
         ssl_prefix  = "SSL: OK" if exp and exp != "—" else "SSL: —"
         ssl_line    = f"{ssl_prefix} | Expires: {exp or '—'} | Issuer: {issuer or '—'}"
