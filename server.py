@@ -290,6 +290,18 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     html = f"""
     <div class="lp-lock-mini">
       <h4 style="margin:8px 0;">LP lock details</h4>
+    <div class="mdx-print-toolbar" style="position:sticky;top:6px;z-index:10;text-align:right;margin-bottom:6px;">
+      <button onclick="window.print()" class="mdx-print-btn" style="padding:6px 10px;border-radius:8px;border:1px solid #ccc;cursor:pointer;">
+        Export PDF
+      </button>
+    </div>
+    <style>
+      @media print {{
+        .mdx-print-btn, .mdx-print-toolbar {{ display: none !important; }}
+        .lp-lock-mini {{ page-break-inside: avoid; }}
+      }}
+    </style>
+
       <table style="font-size:14px;line-height:1.3;border-collapse:collapse">
         {''.join(rows)}
       </table>
@@ -315,6 +327,18 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     html = f"""
     <div class="lp-lock-mini">
       <h4 style="margin:8px 0;">LP lock details</h4>
+    <div class="mdx-print-toolbar" style="position:sticky;top:6px;z-index:10;text-align:right;margin-bottom:6px;">
+      <button onclick="window.print()" class="mdx-print-btn" style="padding:6px 10px;border-radius:8px;border:1px solid #ccc;cursor:pointer;">
+        Export PDF
+      </button>
+    </div>
+    <style>
+      @media print {{
+        .mdx-print-btn, .mdx-print-toolbar {{ display: none !important; }}
+        .lp-lock-mini {{ page-break-inside: avoid; }}
+      }}
+    </style>
+
       <table style="font-size:14px;line-height:1.3;border-collapse:collapse">
         {''.join(rows)}
       </table>
@@ -1613,55 +1637,42 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         pass
 
 
+
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
-    base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
+    base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:", "open:", "copyca:", "lp:"))
     ik = base.get("inline_keyboard") or []
     base = _kb_strip_tf_rows(base)
     ik = base.get("inline_keyboard") or []
-    # Add 'More details' only in the first message
+
     if want_more and addr:
         ik.append([{"text": "🔎 More details", "callback_data": f"more:{addr}"}])
-    # Row with Why/Report
+
     row = []
     if want_why and addr:
-        row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"});
+        row.append({"text": "❓ Why?", "callback_data": f"why:{addr}"})
         row.append({"text": "ℹ️ Why++", "callback_data": f"why2:{addr}"})
     if want_report and addr:
         row.append({"text": "📄 Report (HTML)", "callback_data": f"rep:{addr}"})
     if row:
         ik.append(row)
-    # Separate row for On-chain, only if RPCs configured
-    if want_hp and addr:
-        try:
-            has_rpc = bool(_parse_rpc_urls())
-        except Exception:
-            has_rpc = False
-        if has_rpc:
-            ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
-    # Sample HTML report URL (site-hosted)
-    sample_url = (os.getenv('SAMPLE_URL') or '').strip()
-    if not sample_url:
-        site_url = (os.getenv('SITE_URL') or os.getenv('SITE_BASE') or 'https://metridex.com').strip()
-        site_url = site_url[:-1] if site_url.endswith('/') else site_url
-        sample_path = os.getenv('SAMPLE_REPORT_PATH', '/metridex_deep_report_sample.html')
-        if not sample_path.startswith('/'):
-            sample_path = '/' + sample_path
-        sample_url = f"{site_url}{sample_path}"
-    if 'utm_' not in sample_url:
-        sample_url = sample_url + ('&' if '?' in sample_url else '?') + 'utm_source=bot&utm_medium=quickscan&utm_campaign=sample_report'
-    ik.append([{ 'text': '📄 HTML report (sample)', 'url': sample_url }])
-    
-    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
-    if addr:
-        # Safer cross-chain links via DexScreener search; exact chain link is resolved in callback.
-        ik.append([
-            {"text": "🔗 Open in DEX",  "callback_data": f"open:dex:{addr}"},
-            {"text": "🔍 Open in Scan", "callback_data": f"open:scan:{addr}"},
-        ])
-        ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
-        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
 
-    # Δ timeframe row (single)
+    try:
+        ca = _normalize_addr(addr)
+        ch = _resolve_chain_for_scan(ca)
+        ds = _dexscreener_link(ch, ca) or _token_scan_link(ch, ca)
+        dex = _dex_swap_link(ch, ca)
+        btns = []
+        if dex:
+            btns.append({"text": "🔗 Open in DEX", "url": dex})
+        if ds:
+            btns.append({"text": "🔍 Open in Scan", "url": ds})
+        if btns:
+            ik.append(btns)
+        ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{ca}"}])
+        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{ca}"}])
+    except Exception:
+        pass
+
     ik.append([
         {"text": "Δ 5m",  "callback_data": "tf:5"},
         {"text": "Δ 1h",  "callback_data": "tf:1"},
