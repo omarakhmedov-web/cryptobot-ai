@@ -611,12 +611,15 @@ def _ux_welcome_keyboard() -> dict:
     """Payments keyboard built from CRYPTO_LINK_* (URL-only).
        Buttons appear only for non-empty links. No site fallback."""
     links = _pay_links()
-    return build_buy_keyboard({
+    kb = build_buy_keyboard({
         "deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
         "teams": links.get("teams"),
     })
+    # Append help row
+    kb.setdefault('inline_keyboard', []).append([{'text': 'How it works', 'url': 'https://metridex.com/help'}])
+    return kb
 
 # ===== Upgrade helpers (URL-only; EN default) =====
 def _ux_lang(txt: str, user_lang: str) -> str:
@@ -647,7 +650,7 @@ def _ux_upgrade_text(lang: str = "en") -> str:
         f"• Teams ${teams}/mo — for teams/channels\n"
         f"• Day-Pass ${day} — 24h of Pro\n"
         f"• Deep Report ${deep} — one detailed report\n\n"
-        "Choose your access below. Support: @MetridexBot"
+        "Choose your access below. How it works: https://metridex.com/help"
     )
 
 def _ux_upgrade_keyboard(lang: str = "en") -> dict:
