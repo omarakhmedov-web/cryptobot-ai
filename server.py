@@ -3358,7 +3358,7 @@ def webhook(secret):
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = _qs_call_safe(quickscan_pair_entrypoint, data)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
-                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -3384,7 +3384,7 @@ def webhook(secret):
                     pass
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = _qs_call_safe(quickscan_entrypoint, base_addr)
-                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -3855,15 +3855,14 @@ def webhook(secret):
                 addr = data.split(":", 2)[2].strip()
                 base_addr = addr.split("?", 1)[0]
                 pair, chain = _ds_resolve_pair_and_chain(base_addr)
-                ch = (chain or "").lower()
-                # Use real DEX swap link (Uniswap/Pancake/QuickSwap etc.)
                 url = None
-                try:
-                    url = _build_swap_url(ch or "ethereum", base_addr)
-                except Exception:
-                    url = None
+                if isinstance(pair, dict):
+                    ch = (chain or "").lower()
+                    paddr = pair.get("pairAddress") or pair.get("pair")
+                    if paddr and ch:
+                        url = f"https://dexscreener.com/{ch}/{paddr}"
                 if not url:
-                    url = f"https://app.uniswap.org/swap?chain=ethereum&outputCurrency={base_addr}"
+                    url = f"https://dexscreener.com/search?q={base_addr}"
                 _answer_callback((update.get("callback_query") or {}).get("id"), text="Opening DEX…")
                 _send_text(chat_id, f"🔗 DEX: {url}")
                 return ("ok", 200)
@@ -3890,7 +3889,7 @@ def webhook(secret):
                 try:
                     text_out, keyboard = _qs_call_safe(quickscan_entrypoint, arg)
                     base_addr = _extract_addr_from_text(arg) or _extract_base_addr_from_keyboard(keyboard)
-                    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
                     st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                     _store_addr_for_message(body, base_addr)
@@ -3932,7 +3931,7 @@ def webhook(secret):
     try:
         text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
         base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
-        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
         _store_addr_for_message(body, base_addr)
@@ -4671,28 +4670,3 @@ def _filter_owner_signal(neg_factors: list[str], context: dict) -> list[str]:
     except Exception:
         pass
     return list(neg_factors or [])
-
-
-def _build_swap_url(chain: str, token: str) -> str:
-    """Return a direct swap URL for the given chain/token (best-known DEX)."""
-    ch = (chain or "").lower()
-    tk = (token or "").strip()
-    if not tk:
-        return ""
-    if ch in ("bsc", "bnb", "binance-smart-chain", "binancesmartchain"):
-        return f"https://pancakeswap.finance/swap?outputCurrency={tk}"
-    if ch in ("polygon", "matic"):
-        return f"https://quickswap.exchange/#/swap?outputCurrency={tk}"
-    if ch in ("avalanche", "avax"):
-        return f"https://traderjoexyz.com/trade?outputCurrency={tk}&chain=avalanche"
-    if ch in ("fantom", "ftm"):
-        return f"https://spooky.fi/#/swap?outputCurrency={tk}"
-    m = {
-        "ethereum": "ethereum", "eth": "ethereum",
-        "base": "base",
-        "arbitrum": "arbitrum", "arb": "arbitrum",
-        "optimism": "optimism", "op": "optimism",
-        "polygon": "polygon", "matic": "polygon",
-    }
-    chain_param = m.get(ch, "ethereum")
-    return f"https://app.uniswap.org/swap?chain={chain_param}&outputCurrency={tk}"
