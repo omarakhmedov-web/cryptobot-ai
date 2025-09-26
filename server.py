@@ -736,12 +736,13 @@ def _cmd_watch(chat_id: int, text: str):
     except Exception:
         pass
 
+
 def _cmd_unwatch(chat_id: int, text: str):
     try:
         t = re.sub(r'[\u200b-\u200f\uFEFF]', '', str(text or ""))
         m = re.search(r'(?i)/unwatch(?:\s+(0x[0-9a-f]{40}))?', t.strip())
-        ca = (m.group(1).lower() if (m and m.group(1)) else None)
-        watch_remove(chat_id, ca)
+        ca = m.group(1).lower() if (m and m.group(1)) else None
+        watch_remove(chat_id, ca if ca else None)
         _send_text(chat_id, "🧹 Watchlist updated", logger=app.logger)
     except Exception:
         pass
