@@ -1926,13 +1926,21 @@ def _ssl_info(domain: str):
                 cert = ssock.getpeercert()
         exp = cert.get("notAfter", "—")
         issuer = cert.get("issuer", [])
-        cn = "—"
+        name = "—"
         for tup in issuer:
-            for k, v in tup:
-                if k.lower() == "commonName".lower():
-                    cn = v
-                    break
-        return (_normalize_date_iso(exp), cn)
+            # tup is a sequence of (key, value) in one RDN
+            try:
+                d = {str(k).lower(): v for k, v in tup}
+            except Exception:
+                d = {}
+            # prefer Organization (O), then Common Name (CN)
+            if d.get("organizationname"):
+                name = d.get("organizationname")
+                break
+            if d.get("commonname"):
+                name = d.get("commonname")
+                break
+        return (_normalize_date_iso(exp), name)
     except Exception:
         return ("—", "—")
 
@@ -2296,7 +2304,7 @@ def _append_verdict_block(addr, text):
         rs = {"neg": _entry.get("neg", rs.get("neg", [])), "pos": _entry.get("pos", rs.get("pos", [])), "w_neg": _entry.get("w_neg", rs.get("w_neg", [])), "w_pos": _entry.get("w_pos", rs.get("w_pos", []))}
     except Exception:
         pass
-    lines = [f"Trust verdict: {label} (score {score}/100)"]
+    lines = [f"Trust verdict: {label} • Risk score: {score}/100 (lower = safer)"]
     if rs.get("neg"):
         lines.append(_wrap_kv_line("⚠️ Signals", rs.get("neg")))
     if rs.get("pos"):
