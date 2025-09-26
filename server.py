@@ -738,12 +738,14 @@ def _cmd_watch(chat_id: int, text: str):
 
 def _cmd_unwatch(chat_id: int, text: str):
     try:
-        m = re.search(r'/unwatch(?:\s+([0-9a-fA-Fx]{42}))?', text.strip())
-        ca = m.group(1) if m else None
-        watch_remove(chat_id, ("0x"+ca.lower().replace("0x","")) if ca else None)
+        t = re.sub(r'[\u200b-\u200f\uFEFF]', '', str(text or ""))
+        m = re.search(r'(?i)/unwatch(?:\s+(0x[0-9a-f]{40}))?', t.strip())
+        ca = (m.group(1).lower() if (m and m.group(1)) else None)
+        watch_remove(chat_id, ca)
         _send_text(chat_id, "🧹 Watchlist updated", logger=app.logger)
     except Exception:
         pass
+
 
 def _cmd_mywatch(chat_id: int):
     try:
@@ -3235,11 +3237,11 @@ def webhook(secret):
         _txt_full = (_m.get("text") or "")
         if isinstance(_txt_full, str):
             _txt = _txt_full.strip()
-            if _txt.startswith("/watch"):
+            if _txt.lower().startswith("/watch"):
                 _cmd_watch(_chat, _txt); return ("ok", 200)
-            if _txt.startswith("/unwatch"):
+            if _txt.lower().startswith("/unwatch"):
                 _cmd_unwatch(_chat, _txt); return ("ok", 200)
-            if _txt.startswith("/mywatch"):
+            if _txt.lower().startswith("/mywatch"):
                 _cmd_mywatch(_chat); return ("ok", 200)
 # /upgrade (EN default; RU via "/upgrade ru")
     if "message" in update:
