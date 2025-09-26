@@ -2783,11 +2783,11 @@ def _onchain_inspect(addr: str):
                 if pair_addr and chain_name:
                     lp = _infer_lp_status(pair_addr, chain_name)
                     if lp:
-                        out.append(f"LP: burned={lp.get('dead_pct',0)}% | UNCX={lp.get('uncx_pct',0)}% | TeamFinance={lp.get('team_finance_pct',0)}% | LP top holder={lp.get('top_holder_pct',0)}%")
+                        out.append(f"LP: burned={lp.get('dead_pct',0)}% | UNCX={lp.get('uncx_pct',0)}% | TeamFinance={lp.get('team_finance_pct',0)}% | topHolder={lp.get('top_holder_pct',0)}%")
                         info['lp'] = lp
                     conc = _holder_concentration(addr, chain_name)
                     if conc:
-                        out.append(f"Token holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
+                        out.append(f"Holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
                         info['holders'] = conc
         except Exception:
             pass
@@ -3358,7 +3358,7 @@ def webhook(secret):
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = _qs_call_safe(quickscan_pair_entrypoint, data)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
-                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -3384,7 +3384,7 @@ def webhook(secret):
                     pass
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
                 text_out, keyboard = _qs_call_safe(quickscan_entrypoint, base_addr)
-                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                 _store_addr_for_message(body, base_addr)
@@ -3561,7 +3561,7 @@ def webhook(secret):
                 lines.append(f"🔒 LP lock (lite): dead={dead:.2f}%, UNCX={uncx:.2f}%, TeamFinance={tfp:.2f}%")
                 if th:
                     lines.append(f"Top holder: {th} ({thp:.2f}%)" + (f" [{th_label}]" if th_label else ""))
-                lines.append(f"Token holders: {holders}")
+                lines.append(f"Holders: {holders}")
                 if LP_LOCK_HTML_ENABLED:
                     try:
                         _send_text(chat_id, "\n".join(lines), logger=app.logger)
@@ -3889,7 +3889,7 @@ def webhook(secret):
                 try:
                     text_out, keyboard = _qs_call_safe(quickscan_entrypoint, arg)
                     base_addr = _extract_addr_from_text(arg) or _extract_base_addr_from_keyboard(keyboard)
-                    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+                    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
                     st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
                     _store_addr_for_message(body, base_addr)
@@ -3931,7 +3931,7 @@ def webhook(secret):
     try:
         text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
         base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
-        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=True, want_hp=True)
+        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
         st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
         _store_addr_for_message(body, base_addr)
