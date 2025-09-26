@@ -611,12 +611,20 @@ def _ux_welcome_keyboard() -> dict:
     """Payments keyboard built from CRYPTO_LINK_* (URL-only).
        Buttons appear only for non-empty links. No site fallback."""
     links = _pay_links()
-    return build_buy_keyboard({
+    kb = build_buy_keyboard({
         "deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
         "teams": links.get("teams"),
     })
+    # append How it works? button
+    try:
+        help_url = (os.getenv('HELP_URL', '').strip() or 'https://metridex.com/help')
+        rows = list(kb.get('inline_keyboard') or [])
+        rows.append([_btn_url('ℹ️ How it works?', help_url)])
+        return {'inline_keyboard': rows}
+    except Exception:
+        return kb
 
 # ===== Upgrade helpers (URL-only; EN default) =====
 def _ux_lang(txt: str, user_lang: str) -> str:
