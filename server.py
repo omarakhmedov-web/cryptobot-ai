@@ -3855,14 +3855,15 @@ def webhook(secret):
                 addr = data.split(":", 2)[2].strip()
                 base_addr = addr.split("?", 1)[0]
                 pair, chain = _ds_resolve_pair_and_chain(base_addr)
+                ch = (chain or "").lower()
+                # Use real DEX swap link (Uniswap/Pancake/QuickSwap etc.)
                 url = None
-                if isinstance(pair, dict):
-                    ch = (chain or "").lower()
-                    paddr = pair.get("pairAddress") or pair.get("pair")
-                    if paddr and ch:
-                        url = f"https://dexscreener.com/{ch}/{paddr}"
+                try:
+                    url = _build_swap_url(ch or "ethereum", base_addr)
+                except Exception:
+                    url = None
                 if not url:
-                    url = f"https://dexscreener.com/search?q={base_addr}"
+                    url = f"https://app.uniswap.org/swap?chain=ethereum&outputCurrency={base_addr}"
                 _answer_callback((update.get("callback_query") or {}).get("id"), text="Opening DEX…")
                 _send_text(chat_id, f"🔗 DEX: {url}")
                 return ("ok", 200)
@@ -4695,4 +4696,3 @@ def _build_swap_url(chain: str, token: str) -> str:
     }
     chain_param = m.get(ch, "ethereum")
     return f"https://app.uniswap.org/swap?chain={chain_param}&outputCurrency={tk}"
-
