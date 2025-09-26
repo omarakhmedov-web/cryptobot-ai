@@ -718,7 +718,10 @@ def _cmd_watch(chat_id: int, text: str):
                     {"text": "My watchlist", "callback_data": "watch:my"},
                     {"text": "Unwatch", "callback_data": f"watch:rm:{ca}"}
                 ],
-                [{"text": "Open in Explorer", "url": f"{_explorer_base_for(_resolve_chain_for_scan(ca))}/token/{ca}"}]
+                [
+                    {"text": "Open in DEX", "url": f"https://dexscreener.com/search?q={ca}"},
+                    {"text": "Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(ca))}/token/{ca}"}
+                ]
             ]
             _send_inline_kbd(chat_id, "Shortcuts:", kbd)
     
@@ -1651,7 +1654,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
     # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
     if addr:
         # Safer cross-chain links via DexScreener search; exact chain link is resolved in callback.
-        ik.append([{"text": "🔍 Open in Explorer", "callback_data": f"open:scan:{addr}"}])
+        ik.append([{"text": "🔍 Open in Scan", "callback_data": f"open:scan:{addr}"}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
 
