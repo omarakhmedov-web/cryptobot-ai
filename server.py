@@ -611,15 +611,12 @@ def _ux_welcome_keyboard() -> dict:
     """Payments keyboard built from CRYPTO_LINK_* (URL-only).
        Buttons appear only for non-empty links. No site fallback."""
     links = _pay_links()
-    kb = build_buy_keyboard({
+    return build_buy_keyboard({
         "deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
         "teams": links.get("teams"),
     })
-    # Append help row
-    kb.setdefault('inline_keyboard', []).append([{'text': 'How it works', 'url': 'https://metridex.com/help'}])
-    return kb
 
 # ===== Upgrade helpers (URL-only; EN default) =====
 def _ux_lang(txt: str, user_lang: str) -> str:
@@ -650,7 +647,7 @@ def _ux_upgrade_text(lang: str = "en") -> str:
         f"• Teams ${teams}/mo — for teams/channels\n"
         f"• Day-Pass ${day} — 24h of Pro\n"
         f"• Deep Report ${deep} — one detailed report\n\n"
-        "Choose your access below. How it works: https://metridex.com/help"
+        "Choose your access below. Support: @MetridexBot"
     )
 
 def _ux_upgrade_keyboard(lang: str = "en") -> dict:
@@ -3993,6 +3990,14 @@ def _enrich_full(addr: str, base_text: str) -> str:
         except Exception:
             pass
         domain_line = f"Domain: {dom}"
+
+        # Normalize RDAP status to English if localized
+        try:
+            if isinstance(h, str):
+                import re as _re
+                h = _re.sub(r"RDAP\s*недоступен\s*для\s*реестра\s*([\.\w-]+)", r"RDAP unavailable for \1 registry", h, flags=_re.I)
+        except Exception:
+            pass
         whois_line  = f"WHOIS/RDAP: {h} | Created: {created} | Registrar: {reg}"
         ssl_prefix  = "SSL: OK" if exp and exp != "—" else "SSL: —"
         ssl_line    = f"{ssl_prefix} | Expires: {exp or '—'} | Issuer: {issuer or '—'}"
