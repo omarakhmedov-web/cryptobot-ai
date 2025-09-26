@@ -3768,6 +3768,14 @@ def webhook(secret):
     if text.startswith("/"):
         parts = text.split(maxsplit=1)
         cmd = parts[0]
+        # fallback routing for watch commands (robust)
+        cl = cmd.lower()
+        if cl == '/watch':
+            _cmd_watch(chat_id, text); return ('ok', 200)
+        if cl == '/unwatch':
+            _cmd_unwatch(chat_id, text); return ('ok', 200)
+        if cl == '/mywatch':
+            _cmd_mywatch(chat_id); return ('ok', 200)
         arg = parts[1] if len(parts) > 1 else ""
 
         if cmd in ("/start", "/help"):
