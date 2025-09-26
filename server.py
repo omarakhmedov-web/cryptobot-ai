@@ -1451,16 +1451,6 @@ RISK_CACHE = {}                                   # addr -> {score,label,neg,pos
 ADDR_RE = re.compile(r'0x[a-fA-F0-9]{40}')
 NEWLINE_ESC_RE = re.compile(r'\\n')
 
-
-# === Metridex UX patch: strip zero-weight tails "(+0)" from rendered text ===
-ZERO_WEIGHT_RE = re.compile(r"\(\+?0\)")
-def _clean_zero_weights(text: str):
-    try:
-        return ZERO_WEIGHT_RE.sub("", text or "")
-    except Exception:
-        return text
-# === /Metridex UX patch ===
-
 # ========================
 # Known homepages (seed)
 # ========================
@@ -1506,9 +1496,8 @@ WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADD
 # ========================
 # Helpers
 # ========================
-def _send_text(chat_id, text,  **kwargs):
+def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
-    text = _clean_zero_weights(text)
     return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
 def _admin_debug(chat_id, text):
