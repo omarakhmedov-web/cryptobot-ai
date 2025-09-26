@@ -647,7 +647,7 @@ def _ux_upgrade_text(lang: str = "en") -> str:
             f"• Teams ${teams}/mes — dlya komand/kanalov\n"
             f"• Day-Pass ${day} — sutki Pro\n"
             f"• Deep Report ${deep} — razovyi podrobnyi otchet\n\n"
-            "Vybirai dostup nizhe. Podderzhka: @MetridexBot"
+            "Vybirai dostup nizhe. How it works: https://metridex.com/help"
         )
     return (
         "**Metridex Pro** — full QuickScan access\n"
@@ -655,7 +655,7 @@ def _ux_upgrade_text(lang: str = "en") -> str:
         f"• Teams ${teams}/mo — for teams/channels\n"
         f"• Day-Pass ${day} — 24h of Pro\n"
         f"• Deep Report ${deep} — one detailed report\n\n"
-        "Choose your access below. Support: @MetridexBot"
+        "Choose your access below. How it works: https://metridex.com/help"
     )
 
 def _ux_upgrade_keyboard(lang: str = "en") -> dict:
