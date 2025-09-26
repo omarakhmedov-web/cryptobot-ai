@@ -3171,6 +3171,15 @@ def webhook(secret):
             pass
         return ("ok", 200)
 
+    # Early /watch routing (robust, minimal)
+    if isinstance(_txt, str) and _chat and _txt.startswith('/watch'):
+        _cmd_watch(_chat, _txt_raw); return ('ok', 200)
+    if isinstance(_txt, str) and _chat and _txt.startswith('/unwatch'):
+        _cmd_unwatch(_chat, _txt_raw); return ('ok', 200)
+    if isinstance(_txt, str) and _chat and _txt.startswith('/mywatch'):
+        _cmd_mywatch(_chat); return ('ok', 200)
+
+
     # /buy commands -> send payment links directly (no callbacks needed)
     if "message" in update:
         _m = update.get("message") or {}
