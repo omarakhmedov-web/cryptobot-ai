@@ -193,9 +193,10 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
 
     rows = []
     rows.append(f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>")
-    rows.append(f"<tr><td>UNCX</td><td><b>{uncx_pct}</b>{' — <a href="'+uncx_url+'" target="_blank" rel="noopener">open</a>' if uncx_url else ''}</td></tr>")
-    rows.append(f"<tr><td>TeamFinance</td><td><b>{team_pct}</b>{' — <a href="'+team_url+'" target="_blank" rel="noopener">open</a>' if team_url else ''}</td></tr>")
-    rows.append(f"<tr><td>Top holder</td><td>{top_holder}</td></tr>")
+    link_uncx = (f' — <a href="{uncx_url}" target="_blank" rel="noopener">open</a>') if uncx_url else ''
+    rows.append(f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{link_uncx}</td></tr>')
+    link_team = (f' — <a href="{team_url}" target="_blank" rel="noopener">open</a>') if team_url else ''
+    rows.append(f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{link_team}</td></tr>')
     rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
 
     html = f"""
