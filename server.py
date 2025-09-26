@@ -4670,3 +4670,29 @@ def _filter_owner_signal(neg_factors: list[str], context: dict) -> list[str]:
     except Exception:
         pass
     return list(neg_factors or [])
+
+
+def _build_swap_url(chain: str, token: str) -> str:
+    """Return a direct swap URL for the given chain/token (best-known DEX)."""
+    ch = (chain or "").lower()
+    tk = (token or "").strip()
+    if not tk:
+        return ""
+    if ch in ("bsc", "bnb", "binance-smart-chain", "binancesmartchain"):
+        return f"https://pancakeswap.finance/swap?outputCurrency={tk}"
+    if ch in ("polygon", "matic"):
+        return f"https://quickswap.exchange/#/swap?outputCurrency={tk}"
+    if ch in ("avalanche", "avax"):
+        return f"https://traderjoexyz.com/trade?outputCurrency={tk}&chain=avalanche"
+    if ch in ("fantom", "ftm"):
+        return f"https://spooky.fi/#/swap?outputCurrency={tk}"
+    m = {
+        "ethereum": "ethereum", "eth": "ethereum",
+        "base": "base",
+        "arbitrum": "arbitrum", "arb": "arbitrum",
+        "optimism": "optimism", "op": "optimism",
+        "polygon": "polygon", "matic": "polygon",
+    }
+    chain_param = m.get(ch, "ethereum")
+    return f"https://app.uniswap.org/swap?chain={chain_param}&outputCurrency={tk}"
+
