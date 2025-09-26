@@ -4099,6 +4099,27 @@ def _html_sanitize_risk(risk):
 
 # ========================
 # Post-processing wrappers (safe, non-invasive)
+
+# === PATCH: enforce EN wording for RDAP line (.vip) ===
+try:
+    import re as _re_lang
+    if '_enrich_full' in globals():
+        _enrich_full__orig_lang = _enrich_full
+        def _enrich_full(addr: str, base_text: str) -> str:  # type: ignore[override]
+            s = _enrich_full__orig_lang(addr, base_text)
+            try:
+                # Replace RU wording like "RDAP недоступен для реестра .vip"
+                s = s.replace("RDAP недоступен для реестра .vip", "RDAP unavailable for .vip registry")
+                s = s.replace("RDAP недоступен для реестра .VIP", "RDAP unavailable for .vip registry")
+                # Generic safety net:
+                s = _re_lang.sub(r"RDAP недоступен для реестра\s*\.vip", "RDAP unavailable for .vip registry", s, flags=_re_lang.IGNORECASE)
+                s = _re_lang.sub(r"WHOIS/RDAP:\s*RDAP недоступен[^\n]*", "WHOIS/RDAP: RDAP unavailable for registry", s)
+            except Exception:
+                pass
+            return s
+except Exception:
+    pass
+# === /PATCH: enforce EN wording for RDAP line (.vip) ===
 # ========================
 try:
     import re as _re_patch
