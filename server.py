@@ -177,6 +177,7 @@ def _fmt_pct(v):
     except Exception:
         return "—"
 
+
 def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     if not LP_LOCK_HTML_ENABLED:
         return ""
@@ -184,19 +185,131 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     dead_pct = _fmt_pct(stats.get("dead_pct"))
     uncx_pct = _fmt_pct(stats.get("uncx_pct") or stats.get("uncx") or stats.get("UNCX"))
     team_pct = _fmt_pct(stats.get("team_finance_pct") or stats.get("team_pct") or stats.get("TF"))
-    top_holder = stats.get("top_holder") or "—"
     holders_total = stats.get("holders_count") or stats.get("holders_total") or "—"
 
     pair = (pair_address or "").strip()
     uncx_url = UNCX_LINKS.get(chain_lc, "").format(pair=pair) if pair else ""
     team_url = TEAMFINANCE_LINKS.get(chain_lc, "").format(pair=pair) if pair else ""
 
+    # --- helpers: date parsing & badges ---
+    import re, datetime as _dt
+
+    def _parse_unlock_date(text: str):
+        """Best-effort parse textual date to date(). Handles many formats & relative forms."""
+        if not text:
+            return None
+        t = str(text).strip()
+        # Try many explicit formats
+        fmts = (
+            "%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y",
+            "%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y",
+            "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+            "%d %b %Y %H:%M", "%d %B %Y %H:%M",
+        )
+        for fmt in fmts:
+            try:
+                return _dt.datetime.strptime(t, fmt).date()
+            except Exception:
+                pass
+        # ISO datetime embedded
+        m = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?", t)
+        if m:
+            y, mo, d = map(int, m.group(1,2,3))
+            try:
+                return _dt.date(y, mo, d)
+            except Exception:
+                return None
+        # English relative: "in N days/hours"
+        m = re.search(r"in\s+(\d+)\s*(day|days)", t, re.I)
+        if m:
+            try:
+                return _dt.date.today() + _dt.timedelta(days=int(m.group(1)))
+            except Exception:
+                return None
+        # English month name inside
+        m = re.search(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+20\d{2}", t, re.I)
+        if m:
+            try:
+                return _dt.datetime.strptime(m.group(0).replace(',', ''), "%b %d %Y").date()
+            except Exception:
+                pass
+        # RU-style: "12 октября 2025"
+        m = re.search(r"(\d{1,2})\s*(янв|фев|мар|апр|мая|июн|июл|авг|сен|окт|ноя|дек)\w*\s*(20\d{2})", t, re.I)
+        if m:
+            dd = int(m.group(1)); yy = int(m.group(3))
+            months = ["янв","фев","мар","апр","мая","июн","июл","авг","сен","окт","ноя","дек"]
+            try:
+                mm = months.index(m.group(2).lower()[:3]) + 1
+                return _dt.date(yy, mm, dd)
+            except Exception:
+                return None
+        return None
+
+    def _unlock_badge(txt: str) -> str:
+        if not txt:
+            return ""
+        s = txt
+        if len(s) > 40:
+            s = s[:40] + "…"
+        return f' <span style="opacity:.7">(~{s})</span>'
+
+    # Pull unlock info via lightweight scrapers (cached elsewhere)
+    uncx_unlock = ""
+    team_unlock = ""
+    try:
+        if pair and chain_lc:
+            info_u = _locker_locktime("uncx", pair, chain_lc) or {}
+            info_t = _locker_locktime("teamfinance", pair, chain_lc) or {}
+            uncx_unlock = (info_u.get("unlock") or "").strip()
+            team_unlock = (info_t.get("unlock") or "").strip()
+    except Exception:
+        pass
+
+    # Compute "Next unlock ≈" (earliest of parsed dates)
+    dates = list(filter(None, [_parse_unlock_date(uncx_unlock), _parse_unlock_date(team_unlock)]))
+    next_unlock_txt = ""
+    if dates:
+        nxt = min(dates)
+        try:
+            days_left = (nxt - _dt.date.today()).days
+            eta = f"{days_left}d"
+            next_unlock_txt = f"{nxt.isoformat()} (~{eta})"
+        except Exception:
+            next_unlock_txt = nxt.isoformat()
+
     rows = []
     rows.append(f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>")
     link_uncx = (f' — <a href="{uncx_url}" target="_blank" rel="noopener">open</a>') if uncx_url else ''
-    rows.append(f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{link_uncx}</td></tr>')
+    rows.append(f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{_unlock_badge(uncx_unlock)}{link_uncx}</td></tr>')
     link_team = (f' — <a href="{team_url}" target="_blank" rel="noopener">open</a>') if team_url else ''
-    rows.append(f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{link_team}</td></tr>')
+    rows.append(f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{_unlock_badge(team_unlock)}{link_team}</td></tr>')
+    if next_unlock_txt:
+        rows.append(f'<tr><td>Next unlock ≈</td><td>{next_unlock_txt}</td></tr>')
+    rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
+
+    html = f"""
+    <div class="lp-lock-mini">
+      <h4 style="margin:8px 0;">LP lock details</h4>
+      <table style="font-size:14px;line-height:1.3;border-collapse:collapse">
+        {''.join(rows)}
+      </table>
+    </div>
+    """
+    return html
+    def _unlock_badge(txt: str) -> str:
+        if not txt:
+            return ""
+        short = txt
+        if len(short) > 32:
+            short = short[:32] + "…"
+        return f' <span style="opacity:.7">(~{short})</span>'
+
+    rows = []
+    rows.append(f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>")
+    link_uncx = (f' — <a href="{uncx_url}" target="_blank" rel="noopener">open</a>') if uncx_url else ''
+    rows.append(f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{_unlock_badge(uncx_unlock)}{link_uncx}</td></tr>')
+    link_team = (f' — <a href="{team_url}" target="_blank" rel="noopener">open</a>') if team_url else ''
+    rows.append(f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{_unlock_badge(team_unlock)}{link_team}</td></tr>')
     rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
 
     html = f"""
