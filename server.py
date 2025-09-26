@@ -171,16 +171,6 @@ TEAMFINANCE_LINKS = {
     "polygon": "https://app.team.finance/quickswap/{pair}",
 }
 
-
-def _fmt_owner(addr: str) -> str:
-    try:
-        a = (addr or "").strip()
-        if a.lower().startswith("0x") and all(ch == '0' for ch in a[2:]):
-            return f"renounced ({a[:6]}…{a[-4:]})"
-        return a
-    except Exception:
-        return addr or ""
-
 def _fmt_pct(v):
     try:
         return f"{float(v):.2f}%"
@@ -2793,11 +2783,11 @@ def _onchain_inspect(addr: str):
                 if pair_addr and chain_name:
                     lp = _infer_lp_status(pair_addr, chain_name)
                     if lp:
-                        out.append(f"LP: burned={lp.get('dead_pct',0)}% | UNCX={lp.get('uncx_pct',0)}% | TeamFinance={lp.get('team_finance_pct',0)}% | topHolder={lp.get('top_holder_pct',0)}%")
+                        out.append(f"LP: burned={lp.get('dead_pct',0)}% | UNCX={lp.get('uncx_pct',0)}% | TeamFinance={lp.get('team_finance_pct',0)}% | LP top holder={lp.get('top_holder_pct',0)}%")
                         info['lp'] = lp
                     conc = _holder_concentration(addr, chain_name)
                     if conc:
-                        out.append(f"Holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
+                        out.append(f"Token holders: top{conc.get('topN',0)} own {conc.get('topTotalPct',0)}% | >10% addrs: {conc.get('gt10',0)} | >5% addrs: {conc.get('gt5',0)}")
                         info['holders'] = conc
         except Exception:
             pass
@@ -3571,7 +3561,7 @@ def webhook(secret):
                 lines.append(f"🔒 LP lock (lite): dead={dead:.2f}%, UNCX={uncx:.2f}%, TeamFinance={tfp:.2f}%")
                 if th:
                     lines.append(f"Top holder: {th} ({thp:.2f}%)" + (f" [{th_label}]" if th_label else ""))
-                lines.append(f"Holders: {holders}")
+                lines.append(f"Token holders: {holders}")
                 if LP_LOCK_HTML_ENABLED:
                     try:
                         _send_text(chat_id, "\n".join(lines), logger=app.logger)
@@ -3669,7 +3659,7 @@ def webhook(secret):
                     f"• Top holder: {th or 'n/a'} — {thp}% of LP{(f' — scan: ' + _explorer_base_for(chain) + '/address/' + th) if th else ''}",
                     f"• Top holder type: {'contract' if (th_contract or th_label) else 'EOA' if th else 'n/a'}{(' (' + th_label + ')') if th_label else ''}",
                     f"• Holders (LP token): {holders}",
-                    (f"• Owner: {_fmt_owner(owner)}" if owner_addr else "• Owner: n/a"),
+                    (f"• Owner: {owner_addr}" if owner_addr else "• Owner: n/a"),
                     f"• Renounced: {'yes' if renounced else 'no'}",
                     f"• Proxy: {'yes, impl: ' + impl_addr if is_proxy else 'no'}",
                     ("• Multiple lockers detected" if multi_lockers else None),
