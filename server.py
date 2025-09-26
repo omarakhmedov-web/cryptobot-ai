@@ -687,32 +687,41 @@ def _ux_welcome_text(lang: str = "en") -> str:
 
 
 # ===== Commands: /watch /unwatch /mywatch =====
+
 def _cmd_watch(chat_id: int, text: str):
     try:
-        m = re.search(r'/watch\s+([0-9a-fA-Fx]{42})(?:\s+(.+))?$', text.strip())
+        # Normalize zero-width & spaces
+        t = re.sub(r'[\u200b-\u200f\uFEFF]', '', str(text or ""))
+        # Accept any case; accept address anywhere
+        m = re.search(r'(?i)/watch\s+(0x[0-9a-f]{40})(?:\s+(.*))?$', t.strip())
+        if not m:
+            g = re.search(r'(?i)(0x[0-9a-f]{40})', t)
+            if g:
+                ca_guess = g.group(1)
+                # Recreate groups: 1=CA, 2=opts (if any)
+                after = t.split(ca_guess, 1)[1].strip()
+                m = re.match(r'(?si)(0x[0-9a-f]{40})(?:\s+(.*))?$', ca_guess + (" " + after if after else ""))
         if not m:
             _send_text(chat_id, "Usage: /watch <CA> [type=price|lp_top|new_lock] [thr=10] [chain=bsc|eth|polygon]", logger=app.logger); return
-        ca = "0x" + m.group(1).lower().replace("0x","")
-        opts = m.group(2) or ""
+        ca = m.group(1).lower()
+        if not ca.startswith("0x") or len(ca) != 42:
+            _send_text(chat_id, "Address must be 0x + 40 hex chars", logger=app.logger); return
+        opts = (m.group(2) or "").strip()
         wtype = "price"; thr = None; chain=None
-        for tok in re.split(r'\s+', opts.strip()):
+        for tok in re.split(r'\s+', opts):
             if not tok: continue
             if tok.startswith("type="): wtype = tok.split("=",1)[1].strip().lower()
-            elif tok.startswith("thr="): 
+            elif tok.startswith("thr="):
                 try: thr = float(tok.split("=",1)[1].strip())
-                except: thr=None
+                except Exception: thr = None
             elif tok.startswith("chain="): chain = tok.split("=",1)[1].strip().lower()
         watch_add(chat_id, ca, wtype, thr, chain)
         _ensure_watch_loop()
         _send_text(chat_id, f"👁️ Added to watchlist: {ca} ({wtype}{' thr='+str(thr) if thr is not None else ''}{' '+chain if chain else ''})", logger=app.logger)
 
-        # Optional mini-keyboard after /watch
+        # Mini-keyboard (unchanged)
         if FEATURE_WATCH_KEYS:
             ch = (chain or "").lower() if isinstance(chain, str) else ""
-            # Choose scan domain by chain
-            scan_domain = "etherscan.io"
-            if ch in ("bsc","bscscan","bnb","binance"): scan_domain = "bscscan.com"
-            elif ch in ("polygon","matic"): scan_domain = "polygonscan.com"
             kbd = [
                 [
                     {"text": "My watchlist", "callback_data": "watch:my"},
@@ -724,7 +733,6 @@ def _cmd_watch(chat_id: int, text: str):
                 ]
             ]
             _send_inline_kbd(chat_id, "Shortcuts:", kbd)
-    
     except Exception:
         pass
 
