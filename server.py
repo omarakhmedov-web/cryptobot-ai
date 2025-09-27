@@ -504,22 +504,23 @@ def _watch_loop():
             conn = _db_watch()
             rows = conn.execute("SELECT chain, ca, type, threshold, active, created_at, chat_id FROM watchlist WHERE active=1").fetchall()
             for chain, ca, wtype, thr, active, created, chat_id in rows:
-                
-                msg = _trigger_check((chain, ca, wtype, thr, active, created))
-                if not msg:
-                    continue
-                            # centralized guarded send
+                try:
+                    msg = _trigger_check((chain, ca, wtype, thr, active, created))
+                    if not msg:
+                        continue
+                    # centralized guarded send (dedup + cooldown)
+                    _send_text_guarded(chat_id, (chain or ''), (ca or ''), (wtype or 'price'), msg, logger=app.logger)
+                except Exception:
+                    pass
+            time.sleep(_WATCH_LOOP_EVERY)
+        except Exception:
             try:
-                _send_text_guarded(chat_id, (chain or ''), (ca or ''), (wtype or 'price'), msg, logger=app.logger)
+                time.sleep(_WATCH_LOOP_EVERY)
             except Exception:
                 pass
 
-            time.sleep(_WATCH_LOOP_EVERY)
-        except Exception:
-            try: time.sleep(_WATCH_LOOP_EVERY)
-            except Exception: pass
-
 def _ensure_watch_loop():
+
     global _watch_thread_started
     if _watch_thread_started: return
     t = threading.Thread(target=_watch_loop, daemon=True)
