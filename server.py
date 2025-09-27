@@ -1534,19 +1534,20 @@ WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADD
 # ========================
 # Helpers
 # ========================
-# === QS text post-processors (safe, centralized at _send_text) ===
+# === QS text post-processors (safe, centralized) ===
 def _qs_dedupe_header(text: str) -> str:
     try:
         if not isinstance(text, str):
             return text
         hdr = "Metridex QuickScan (MVP+)"
-        idx1 = text.find(hdr)
-        if idx1 == -1:
+        first = text.find(hdr)
+        if first == -1:
             return text
-        idx2 = text.find(hdr, idx1 + len(hdr))
-        if idx2 == -1:
+        second = text.find(hdr, first + len(hdr))
+        if second == -1:
             return text
-        return text[:idx1] + text[idx2:]
+        # remove the earlier header block (keep prefix, keep later header and everything after it)
+        return text[:first] + text[second:]
     except Exception:
         return text
 
@@ -1554,11 +1555,14 @@ def _qs_normalize_ssl_wayback(text: str) -> str:
     try:
         if not isinstance(text, str):
             return text
-        text = re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
-        dates = re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
+        # Shorten verbose SSL issuer
+        import re as _re
+        text = _re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
+        # If multiple Wayback lines present, keep the earliest YYYY-MM-DD
+        dates = _re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
         if dates:
             earliest = sorted(dates)[0]
-            text = re.sub(r"Wayback:\s*first\s*[^\n]+", f"Wayback: first {earliest}", text)
+            text = _re.sub(r"Wayback:\s*first\s*[^\n]+", "Wayback: first " + earliest, text)
         return text
     except Exception:
         return text
