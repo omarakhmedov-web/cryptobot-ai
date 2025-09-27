@@ -36,6 +36,24 @@ APP_VERSION = os.environ.get("APP_VERSION", "0.3.112-polished")
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
 LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
+
+# === LP/lock verdict post-processor (safe, feature-flagged) ===
+LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "0") or "0")
+
+def _soften_lp_verdict_html(html: str) -> str:
+    # If lockers are 'unknown' but holders/topHolder signals exist, replace wording.
+    try:
+        if not LPLOCK_VERDICT_SOFTEN or not isinstance(html, str):
+            return html
+        has_holders = re.search(r"Holders:\s*(\d+)", html)
+        has_top_holder = re.search(r"topHolder\s*=\s*([0-9]+\.[0-9]+|[0-9]+)%", html)
+        if (has_holders and int(has_holders.group(1)) > 0) or has_top_holder:
+            html = re.sub(r"Verdict:\s*[^<\n]*unknown[^<\n]*", "Verdict: ⚠️ concentrated LP (holders-source); lockers: n/a (API limit)", html, flags=re.I)
+        return html
+    except Exception:
+        return html
+# === /LP/lock post-processor ===
+
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
