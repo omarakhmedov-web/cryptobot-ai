@@ -1546,7 +1546,6 @@ def _qs_dedupe_header(text: str) -> str:
         second = text.find(hdr, first + len(hdr))
         if second == -1:
             return text
-        # remove the earlier header block (keep prefix, keep later header and everything after it)
         return text[:first] + text[second:]
     except Exception:
         return text
@@ -1555,10 +1554,8 @@ def _qs_normalize_ssl_wayback(text: str) -> str:
     try:
         if not isinstance(text, str):
             return text
-        # Shorten verbose SSL issuer
         import re as _re
         text = _re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
-        # If multiple Wayback lines present, keep the earliest YYYY-MM-DD
         dates = _re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
         if dates:
             earliest = sorted(dates)[0]
@@ -1569,13 +1566,12 @@ def _qs_normalize_ssl_wayback(text: str) -> str:
 # === /QS text post-processors ===
 
 def _send_text(chat_id, text, **kwargs):
-    text = NEWLINE_ESC_RE.sub("
-", text or "")
+    text = NEWLINE_ESC_RE.sub("\n", text or "")
     try:
         text = _qs_normalize_ssl_wayback(_qs_dedupe_header(text))
     except Exception:
         pass
-    return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+    return tg_send_message(chat_id, text, **kwargs)
 
 def _admin_debug(chat_id, text):
     try:
