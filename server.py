@@ -36,6 +36,7 @@ APP_VERSION = os.environ.get("APP_VERSION", "0.3.112-polished")
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
 LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
+DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -68,6 +69,22 @@ app = Flask(__name__)
 
 
 
+
+
+# === DS URL helper (safe) ===
+def _dexscreener_pair_url(chain: str, pair_addr: str) -> str:
+    # Build a DexScreener pair URL if pair_addr looks like 0x + 40 hex chars.
+    # Otherwise fall back to DexScreener search page so the link is not dead.
+    try:
+        ch = (chain or "").split(":")[0].lower()
+        addr = (pair_addr or "").strip().lower()
+        if addr.startswith("0x") and len(addr) == 42 and re.fullmatch(r"0x[0-9a-f]{40}", addr):
+            return f"https://dexscreener.com/{ch}/{addr}"
+        q = addr or (pair_addr or "").strip()
+        return f"https://dexscreener.com/search?q={q}"
+    except Exception:
+        return "https://dexscreener.com"
+# === /DS URL helper ===
 # === METRIDEX INTEGRATED PATCHES ===
 # Mutex TTL & LP lock HTML block (Share/PDF untouched)
 
@@ -286,6 +303,7 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     if next_unlock_txt:
         rows.append(f'<tr><td>Next unlock ≈</td><td>{next_unlock_txt}</td></tr>')
     rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
+    # holders-source present; lockers may be n/a
 
     html = f"""
     <div class="lp-lock-mini">
@@ -311,6 +329,7 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     link_team = (f' — <a href="{team_url}" target="_blank" rel="noopener">open</a>') if team_url else ''
     rows.append(f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{_unlock_badge(team_unlock)}{link_team}</td></tr>')
     rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
+    # holders-source present; lockers may be n/a
 
     html = f"""
     <div class="lp-lock-mini">
@@ -3556,9 +3575,9 @@ def webhook(secret):
                     # DEX link: prefer exact pair if available, else search
                     if pair and (pair.get("pairAddress") or pair.get("pair")) and chain:
                         paddr = pair.get("pairAddress") or pair.get("pair")
-                        url = f"https://dexscreener.com/{chain}/{paddr}"
+                        url = _dexscreener_pair_url(chain, paddr)
                     elif chain:
-                        url = f"https://dexscreener.com/{chain}/{addr}"
+                        url = _dexscreener_pair_url(chain, addr)
                     else:
                         url = f"https://dexscreener.com/search?q={addr}"
                 try:
@@ -3682,7 +3701,7 @@ def webhook(secret):
                 # links
                 ds_link = None
                 if paddr and chain:
-                    ds_link = f"https://dexscreener.com/{chain}/{paddr}"
+                    ds_link = _dexscreener_pair_url(chain, paddr)
                 scan_domain = "etherscan.io"
                 if chain in ("bsc","bscscan","bnb","binance"):
                     scan_domain = "bscscan.com"
