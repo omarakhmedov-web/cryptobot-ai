@@ -35,7 +35,7 @@ APP_VERSION = os.environ.get("APP_VERSION", "0.3.112-polished")
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
-LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
+LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "1") or "1")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -4593,6 +4593,46 @@ def build_buy_keyboard(links: dict):
 
 
 import os
+
+
+# === HTTP WRAPPER (feature-flagged) =========================================
+# Adds retries/backoff and default timeouts to requests.get/post without changing call sites.
+try:
+    import os as _os, time as _t, random as _rand, requests as _rq
+
+    _HTTP_WRAP_ON = str(_os.getenv("FEATURE_HTTP_WRAPPER","0")).lower() in ("1","true","yes","on")
+
+    def _safe_req(_method, _url, **kw):
+        to = kw.pop("timeout", None) or float(_os.getenv("HTTP_TIMEOUT","6.0") or 6.0)
+        headers = kw.pop("headers", None) or {}
+        headers.setdefault("User-Agent", _os.getenv("USER_AGENT","MetridexBot/1.0"))
+        max_try = int(_os.getenv("HTTP_RETRIES","2") or 2)
+        for i in range(max_try+1):
+            try:
+                fn = getattr(_rq, _method)
+                return fn(_url, timeout=to, headers=headers, **kw)
+            except Exception as e:
+                if i >= max_try:
+                    raise
+                _t.sleep((0.3 + 0.2*i) * (1.0 + 0.2*_rand.random()))
+        # no return (raise above)
+    if _HTTP_WRAP_ON:
+        _rq_get, _rq_post = _rq.get, _rq.post
+        def _wrap_get(url, **kw):  return _safe_req("get", url, **kw)
+        def _wrap_post(url, **kw): return _safe_req("post", url, **kw)
+        _rq.get, _rq.post = _wrap_get, _wrap_post
+        try:
+            print("[httpwrap] requests.get/post monkey‑patched")
+        except Exception:
+            pass
+except Exception as _e:
+    try:
+        print("[httpwrap] init skipped:", _e)
+    except Exception:
+        pass
+# === /HTTP WRAPPER ==========================================================
+
+
 def _get_pay_links():
     return {
         "deep": os.getenv("CRYPTO_LINK_DEEP", "").strip(),
