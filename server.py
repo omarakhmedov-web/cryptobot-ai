@@ -31,11 +31,12 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.111-guarded-integrated")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.112-polished")
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
 LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
+FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -1656,7 +1657,8 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         except Exception:
             has_rpc = False
         if has_rpc:
-            ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])
+            ik.append([{"text": "🧪 On-chain", "callback_data": f"hp:{addr}"}])if FEATURE_SAMPLE_REPORT:
+
     # Sample HTML report URL (site-hosted)
     sample_url = (os.getenv('SAMPLE_URL') or '').strip()
     if not sample_url:
@@ -1673,7 +1675,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
     # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
     if addr:
         # Safer cross-chain links via DexScreener search; exact chain link is resolved in callback.
-        ik.append([{"text": "🔍 Open in Scan", "callback_data": f"open:scan:{addr}"}])
+        ik.append([{"text": "🔍 Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
 
@@ -2961,6 +2963,14 @@ def _render_report(addr: str, text: str):
             out.append(f"- {t}" + (f" (+{w})" if isinstance(w, (int, float)) else ""))
         return "\n".join(out) if out else "—"
     dom = _extract_domain_from_text(text) or "—"
+
+    # Post-fix wrong domain selection when base token homepage leaks into domain
+    try:
+        if dom.lower() in ("ethereum.org", "www.ethereum.org"):
+            if (dex and "quick" in str(dex).lower()) or (chain and "polygon" in str(chain).lower()):
+                text = re.sub(r"^\s*Domain:\s*.*$", "Domain: quickswap.exchange", text, flags=re.MULTILINE)
+    except Exception:
+        pass
     # Parse pair/dex/chain from the first lines
     pair = None; dex = None; chain = None
     m = re.search(r"^\s*([A-Za-z0-9_\-\.\/]+)\s+on\s+([A-Za-z0-9_\-\.]+)\s*\(([^)]+)\)", text, re.IGNORECASE | re.MULTILINE)
