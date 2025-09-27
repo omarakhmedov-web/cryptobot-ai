@@ -1534,8 +1534,29 @@ WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADD
 # ========================
 # Helpers
 # ========================
+# === Send-time LP filter ===
+def _is_lp_mini_only(text: str) -> bool:
+    try:
+        if not isinstance(text, str): return False
+        t = (text or "").strip()
+        if "🔒 LP lock (lite) — chain:" in t:
+            return False
+        if "🔒 LP lock (lite):" in t:
+            return True
+        if t.startswith("Holders: ") and len(t.splitlines()) <= 2:
+            return True
+        return False
+    except Exception:
+        return False
+# === /Send-time LP filter ===
+
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
+    try:
+        if _is_lp_mini_only(text):
+            return {"ok": True, "skipped": "lp_mini"}
+    except Exception:
+        pass
     return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
 def _admin_debug(chat_id, text):
@@ -4117,6 +4138,10 @@ def _qs_finalize_details(text: str) -> str:
 def _enrich_full(addr: str, base_text: str) -> str:
     try:
         text = base_text or ""
+        try:
+            text = _qs_finalize_details(text)
+        except Exception:
+            pass
         # Final formatting (safe)
         try:
             text = _qs_finalize_details(text)
