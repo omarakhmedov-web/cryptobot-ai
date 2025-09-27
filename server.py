@@ -3980,35 +3980,37 @@ def webhook(secret):
         pass
     # ##LIMITS_END_NC
     st0, proc_body = _send_text(chat_id, "Processing…", logger=app.logger)
-proc_mid = None
-try:
-    proc_mid = ((proc_body or {}).get('result') or {}).get('message_id') or (proc_body or {}).get('message_id')
-except Exception:
+    st0, proc_body = _send_text(chat_id, "Processing…", logger=app.logger)
     proc_mid = None
-try:
-    text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
-    base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
-    keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
-    keyboard = _compress_keyboard(keyboard)
-    # Try to edit the 'Processing…' message in place; fallback to send new
-    edited = False
     try:
-        if TELEGRAM_TOKEN and proc_mid:
-            _tg_edit_message(chat_id, proc_mid, text_out, reply_markup=keyboard)
-            edited = True
+        proc_mid = ((proc_body or {}).get('result') or {}).get('message_id') or (proc_body or {}).get('message_id')
     except Exception:
+        proc_mid = None
+    try:
+        text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
+        base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
+        keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
+        keyboard = _compress_keyboard(keyboard)
+        # Try to edit the 'Processing…' message in place; fallback to send new
         edited = False
-    if not edited:
-        st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
-        _store_addr_for_message(body, base_addr)
-    else:
-        # store mapping using the edited message id as body-like object
         try:
-            _store_addr_for_message({'message_id': proc_mid, 'chat': {'id': chat_id}}, base_addr)
+            if TELEGRAM_TOKEN and proc_mid:
+                _tg_edit_message(chat_id, proc_mid, text_out, reply_markup=keyboard)
+                edited = True
         except Exception:
-            pass
-        try:
-            uid = int((((update.get('message') or {}).get('from') or {}).get('id') or ((update.get('callback_query') or {}).get('from') or {}).get('id') or chat_id) or 0)
+            edited = False
+        if not edited:
+            st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
+            _store_addr_for_message(body, base_addr)
+        else:
+            # store mapping using the edited message id as body-like object
+            try:
+                _store_addr_for_message({'message_id': proc_mid, 'chat': {'id': chat_id}}, base_addr)
+            except Exception:
+                pass
+    except Exception as e:
+        _admin_debug(chat_id, f"scan failed: {type(e).__name__}: {e}")
+        _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
         except Exception:
             uid = chat_id
         try:
@@ -4049,14 +4051,15 @@ def _enrich_full(addr: str, base_text: str) -> str:
         try:
             if not dom and ADDR_RE.fullmatch(addr_l or ""):
                 dom = _cg_homepage(addr_l)
-        except Exception:
-            pass
-                # Fallback: fix domain for base-token pairs (e.g., QUICK/WETH on QuickSwap)
+        # Fallback: fix domain for base-token pairs (e.g., QUICK/WETH on QuickSwap)
         try:
             if not dom or dom.lower() in ("ethereum.org",):
                 p, ch = _ds_resolve_pair_and_chain(addr_l)
-                if p and str((p.get('dexId') or '')).lower() == 'quickswap' and (not dom or dom.lower()=="ethereum.org"):
+                dexid = str((p.get('dexId') or '')).lower() if p else ''
+                if p and dexid == 'quickswap' and (not dom or dom.lower()=="ethereum.org"):
                     dom = 'quickswap.exchange'
+        except Exception:
+            pass
         except Exception:
             pass
 if not dom:
