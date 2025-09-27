@@ -1534,8 +1534,43 @@ WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADD
 # ========================
 # Helpers
 # ========================
+# === QS text post-processors (safe, centralized at _send_text) ===
+def _qs_dedupe_header(text: str) -> str:
+    try:
+        if not isinstance(text, str):
+            return text
+        hdr = "Metridex QuickScan (MVP+)"
+        idx1 = text.find(hdr)
+        if idx1 == -1:
+            return text
+        idx2 = text.find(hdr, idx1 + len(hdr))
+        if idx2 == -1:
+            return text
+        return text[:idx1] + text[idx2:]
+    except Exception:
+        return text
+
+def _qs_normalize_ssl_wayback(text: str) -> str:
+    try:
+        if not isinstance(text, str):
+            return text
+        text = re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
+        dates = re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
+        if dates:
+            earliest = sorted(dates)[0]
+            text = re.sub(r"Wayback:\s*first\s*[^\n]+", f"Wayback: first {earliest}", text)
+        return text
+    except Exception:
+        return text
+# === /QS text post-processors ===
+
 def _send_text(chat_id, text, **kwargs):
-    text = NEWLINE_ESC_RE.sub("\n", text or "")
+    text = NEWLINE_ESC_RE.sub("
+", text or "")
+    try:
+        text = _qs_normalize_ssl_wayback(_qs_dedupe_header(text))
+    except Exception:
+        pass
     return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
 def _admin_debug(chat_id, text):
