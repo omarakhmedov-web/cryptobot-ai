@@ -40,6 +40,36 @@ LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
 # === LP/lock verdict post-processor (safe, feature-flagged) ===
 LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "0") or "0")
 
+# === Helper: strip compact header from base_text in details mode ===
+def _strip_compact_header_block(text: str) -> str:
+    try:
+        if not isinstance(text, str) or not text:
+            return text
+        # Look for the first 'Metridex QuickScan (MVP+)' and cut until the next logical section
+        hdr = 'Metridex QuickScan (MVP+)'
+        i = text.find(hdr)
+        if i < 0:
+            return text
+        # Find a safe boundary: WHOIS/RDAP or On-chain or Trust verdict lines
+        j = len(text)
+        for marker in ['\nWHOIS', '\nOn-chain', '\nTrust verdict']:
+            k = text.find(marker, i)
+            if k != -1:
+                j = min(j, k)
+        # If boundary didn't change, fall back to end of first empty line after SSL/Wayback
+        if j == len(text):
+            m = re.search(r'(Wayback:.*?)(\n\s*\n)', text[i:], flags=re.S)
+            if m:
+                j = i + m.end(2)
+        # Remove [i:j]
+        if j > i:
+            return text[:i] + text[j:]
+        return text
+    except Exception:
+        return text
+# === /Helper ===
+
+
 def _soften_lp_verdict_html(html: str) -> str:
     # If lockers are 'unknown' but holders/topHolder signals exist, replace wording.
     try:
@@ -4052,6 +4082,11 @@ def webhook(secret):
 def _enrich_full(addr: str, base_text: str) -> str:
     try:
         text = base_text or ""
+        try:
+            if DETAILS_MODE_SUPPRESS_COMPACT:
+                text = _strip_compact_header_block(text)
+        except Exception:
+            pass
         addr_l = (addr or "").lower()
         dom = None
         try:
