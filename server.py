@@ -45,6 +45,56 @@ LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "0") or "
 # === QS header post-processor (format-only) ===
 
 # === LP mini-vs-detailed harmonizer (format-only) ===
+
+# === Final message post-processor (format-only) ===
+def _finalize_qs_text(text: str) -> str:
+    try:
+        if not isinstance(text, str) or not text:
+            return text
+        import re as _re
+
+        # 1) Single QuickScan header
+        hdr = "Metridex QuickScan (MVP+)"
+        idx1 = text.find(hdr)
+        if idx1 != -1:
+            idx2 = text.find(hdr, idx1 + len(hdr))
+            if idx2 != -1:
+                # Drop everything from first header up to the second header
+                # keep prefix (chat preface) and keep from second header onward
+                text = text[:idx1] + text[idx2:]
+
+        # 2) Short SSL issuer
+        text = _re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
+
+        # 3) Wayback earliest date across the whole message
+        dates = _re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
+        if dates:
+            earliest = sorted(dates)[0]
+            text = _re.sub(r"Wayback:\s*first\s*[^\n]+", "Wayback: first " + earliest, text)
+
+        # 4) LP: remove mini-LP lines if detailed LP exists
+        det_idx = text.find("🔒 LP lock (lite) — chain:")
+        if det_idx != -1:
+            prefix, suffix = text[:det_idx], text[det_idx:]
+            prefix = _re.sub(r"(?:^|\n)🔒 LP lock \(lite\):[^\n]*", "", prefix)
+            prefix = _re.sub(r"(?:^|\n)Holders:\s*\d+\s*", "", prefix)
+            text = prefix + suffix
+
+        # 5) Remove bogus placeholder "Domain: None ... SSL: — ... Wayback: first —" blocks
+        #    (Sometimes appears when no domain scrape succeeded; we hide placeholders.)
+        text = _re.sub(
+            r"(?:^|\n)Domain:\s*None\s*\nWHOIS/RDAP:[^\n]*\nSSL:\s*—[^\n]*\nWayback:\s*first\s*—\s*",
+            "",
+            text
+        )
+
+        # 6) Collapse extra blank lines
+        text = _re.sub(r"\n{3,}", "\n\n", text).strip()
+
+        return text
+    except Exception:
+        return text
+# === /Final message post-processor ===
 def _strip_mini_lp_if_detailed(text: str) -> str:
     try:
         if not isinstance(text, str) or not text:
@@ -4187,6 +4237,7 @@ def _enrich_full(addr: str, base_text: str) -> str:
         text = _qs_postprocess_header(text)
     except Exception:
         return base_text or ""
+    text = _finalize_qs_text(text)
     return text
 
 
