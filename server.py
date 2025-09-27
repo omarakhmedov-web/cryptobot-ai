@@ -40,134 +40,6 @@ LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
 # === LP/lock verdict post-processor (safe, feature-flagged) ===
 LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "0") or "0")
 
-# === Helper: strip compact header from base_text in details mode ===
-
-# === QS header post-processor (format-only) ===
-
-# === LP mini-vs-detailed harmonizer (format-only) ===
-
-# === Final message post-processor (format-only) ===
-def _finalize_qs_text(text: str) -> str:
-    try:
-        if not isinstance(text, str) or not text:
-            return text
-        import re as _re
-
-        # 1) Single QuickScan header
-        hdr = "Metridex QuickScan (MVP+)"
-        idx1 = text.find(hdr)
-        if idx1 != -1:
-            idx2 = text.find(hdr, idx1 + len(hdr))
-            if idx2 != -1:
-                # Drop everything from first header up to the second header
-                # keep prefix (chat preface) and keep from second header onward
-                text = text[:idx1] + text[idx2:]
-
-        # 2) Short SSL issuer
-        text = _re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
-
-        # 3) Wayback earliest date across the whole message
-        dates = _re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
-        if dates:
-            earliest = sorted(dates)[0]
-            text = _re.sub(r"Wayback:\s*first\s*[^\n]+", "Wayback: first " + earliest, text)
-
-        # 4) LP: remove mini-LP lines if detailed LP exists
-        det_idx = text.find("🔒 LP lock (lite) — chain:")
-        if det_idx != -1:
-            prefix, suffix = text[:det_idx], text[det_idx:]
-            prefix = _re.sub(r"(?:^|\n)🔒 LP lock \(lite\):[^\n]*", "", prefix)
-            prefix = _re.sub(r"(?:^|\n)Holders:\s*\d+\s*", "", prefix)
-            text = prefix + suffix
-
-        # 5) Remove bogus placeholder "Domain: None ... SSL: — ... Wayback: first —" blocks
-        #    (Sometimes appears when no domain scrape succeeded; we hide placeholders.)
-        text = _re.sub(
-            r"(?:^|\n)Domain:\s*None\s*\nWHOIS/RDAP:[^\n]*\nSSL:\s*—[^\n]*\nWayback:\s*first\s*—\s*",
-            "",
-            text
-        )
-
-        # 6) Collapse extra blank lines
-        text = _re.sub(r"\n{3,}", "\n\n", text).strip()
-
-        return text
-    except Exception:
-        return text
-# === /Final message post-processor ===
-def _strip_mini_lp_if_detailed(text: str) -> str:
-    try:
-        if not isinstance(text, str) or not text:
-            return text
-        # Detailed section marker
-        det_idx = text.find("🔒 LP lock (lite) — chain:")
-        if det_idx == -1:
-            return text  # no detailed section → keep as-is
-        # Identify and remove mini-LP summary lines BEFORE the detailed section.
-        # Mini lines look like:
-        #   "🔒 LP lock (lite): dead=..., UNCX=..., TeamFinance=..."
-        #   "Holders: <number>"
-        # We only remove those occurring before the detailed section.
-        # Remove the mini header line
-        import re as _re
-        prefix = text[:det_idx]
-        suffix = text[det_idx:]
-        # Remove the mini LP line(s) and any immediate trailing "Holders: N" lines in the prefix region.
-        prefix = _re.sub(r"(?:^|\n)🔒 LP lock \(lite\):[^\n]*\n?", "\n", prefix)
-        prefix = _re.sub(r"(?:^|\n)Holders:\s*\d+\s*\n?", "\n", prefix)
-        # Collapse accidental multiple blank lines (limit to local area by only normalizing last ~1000 chars)
-        # For simplicity, do a gentle normalization across the full text:
-        merged = (prefix + suffix)
-        merged = _re.sub(r"\n{3,}", "\n\n", merged)
-        return merged
-    except Exception:
-        return text
-# === /LP mini-vs-detailed harmonizer ===
-def _qs_postprocess_header(text: str) -> str:
-    try:
-        if not isinstance(text, str) or not text:
-            return text
-        import re as _re
-        # 1) Short SSL issuer form
-        text = _re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
-        # 2) Wayback earliest date across the whole message
-        dates = _re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
-        if dates:
-            earliest = sorted(dates)[0]
-            text = _re.sub(r"Wayback:\s*first\s*[^\n]+", "Wayback: first " + earliest, text)
-        return text
-    except Exception:
-        return text
-# === /QS header post-processor ===
-def _strip_compact_header_block(text: str) -> str:
-    try:
-        if not isinstance(text, str) or not text:
-            return text
-        # Look for the first 'Metridex QuickScan (MVP+)' and cut until the next logical section
-        hdr = 'Metridex QuickScan (MVP+)'
-        i = text.find(hdr)
-        if i < 0:
-            return text
-        # Find a safe boundary: WHOIS/RDAP or On-chain or Trust verdict lines
-        j = len(text)
-        for marker in ['\nWHOIS', '\nOn-chain', '\nTrust verdict']:
-            k = text.find(marker, i)
-            if k != -1:
-                j = min(j, k)
-        # If boundary didn't change, fall back to end of first empty line after SSL/Wayback
-        if j == len(text):
-            m = re.search(r'(Wayback:.*?)(\n\s*\n)', text[i:], flags=re.S)
-            if m:
-                j = i + m.end(2)
-        # Remove [i:j]
-        if j > i:
-            return text[:i] + text[j:]
-        return text
-    except Exception:
-        return text
-# === /Helper ===
-
-
 def _soften_lp_verdict_html(html: str) -> str:
     # If lockers are 'unknown' but holders/topHolder signals exist, replace wording.
     try:
@@ -4177,12 +4049,77 @@ def webhook(secret):
     return ("ok", 200)
 
 
+
+# === QS Finalizer: single header, LP unify, Wayback/SSL/Risk fix (format-only) ===
+def _qs_finalize_details(text: str) -> str:
+    try:
+        if not isinstance(text, str) or not text:
+            return text
+        import re as _re
+
+        # 1) Single QuickScan header: drop any duplicate earlier block
+        hdr = "Metridex QuickScan (MVP+)"
+        i1 = text.find(hdr)
+        if i1 != -1:
+            i2 = text.find(hdr, i1 + len(hdr))
+            if i2 != -1:
+                text = text[:i1] + text[i2:]
+
+        # 2) Short SSL issuer
+        text = _re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
+
+        # 3) Wayback earliest date
+        dates = _re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
+        has_wayback = bool(dates)
+        if dates:
+            earliest = sorted(dates)[0]
+            text = _re.sub(r"Wayback:\s*first\s*[^\n]+", "Wayback: first " + earliest, text)
+
+        # 4) LP: remove mini-LP lines if detailed LP exists
+        det = text.find("🔒 LP lock (lite) — chain:")
+        if det != -1:
+            prefix, suffix = text[:det], text[det:]
+            prefix = _re.sub(r"(?:^|\n)🔒 LP lock \(lite\):[^\n]*", "", prefix)
+            prefix = _re.sub(r"(?:^|\n)Holders:\s*\d+\s*", "", prefix)
+            text = prefix + suffix
+
+        # 5) Remove placeholder domain block
+        text = _re.sub(
+            r"(?:^|\n)Domain:\s*None\s*\nWHOIS/RDAP:[^\n]*\nSSL:\s*—[^\n]*\nWayback:\s*first\s*—\s*",
+            "\n",
+            text
+        )
+
+        # 6) If Wayback exists, remove the factor "No Wayback snapshots" and adjust Risk score -5
+        if has_wayback:
+            # Remove factor line(s) (could have spaces)
+            text_before = text
+            text = _re.sub(r"(?:^|\n)[ \t]*[-–]?\s*5\s+No Wayback snapshots[ \t]*\n", "\n", text)
+            text = _re.sub(r"(?:^|\n)[ \t]*No Wayback snapshots[^\n]*\n", "\n", text)
+
+            # Adjust "Risk score: N/100"
+            m = _re.search(r"Risk score:\s*(\d+)\s*/\s*100", text)
+            if m:
+                try:
+                    n = int(m.group(1))
+                    n2 = max(0, n - 5)
+                    text = text[:m.start(1)] + str(n2) + text[m.end(1):]
+                except Exception:
+                    pass
+
+        # 7) Clean extra blank lines
+        text = _re.sub(r"\n{3,}", "\n\n", text).strip()
+
+        return text
+    except Exception:
+        return text
+# === /QS Finalizer ===
 def _enrich_full(addr: str, base_text: str) -> str:
     try:
         text = base_text or ""
+        # Final formatting (safe)
         try:
-            if DETAILS_MODE_SUPPRESS_COMPACT:
-                text = _strip_compact_header_block(text)
+            text = _qs_finalize_details(text)
         except Exception:
             pass
         addr_l = (addr or "").lower()
@@ -4208,6 +4145,8 @@ def _enrich_full(addr: str, base_text: str) -> str:
                 dom = _cg_homepage(addr_l)
         except Exception:
             pass
+        if not dom:
+            return text
         try:
             h, created, reg, exp, issuer, wb = _domain_meta(dom)
         except Exception:
@@ -4233,12 +4172,9 @@ def _enrich_full(addr: str, base_text: str) -> str:
         text = _replace_or_append(text, "WHOIS/RDAP:", whois_line)
         text = _replace_or_append(text, "SSL:",        ssl_line)
         text = _replace_or_append(text, "Wayback:",    wayback_line)
-        text = _strip_mini_lp_if_detailed(text)
-        text = _qs_postprocess_header(text)
+        return text
     except Exception:
         return base_text or ""
-    text = _finalize_qs_text(text)
-    return text
 
 
 def _kb_dedupe_all(kb: dict) -> dict:
