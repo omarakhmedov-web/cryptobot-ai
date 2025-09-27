@@ -41,6 +41,54 @@ LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
 LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "0") or "0")
 
 # === Helper: strip compact header from base_text in details mode ===
+
+# === QS header post-processor (format-only) ===
+
+# === LP mini-vs-detailed harmonizer (format-only) ===
+def _strip_mini_lp_if_detailed(text: str) -> str:
+    try:
+        if not isinstance(text, str) or not text:
+            return text
+        # Detailed section marker
+        det_idx = text.find("🔒 LP lock (lite) — chain:")
+        if det_idx == -1:
+            return text  # no detailed section → keep as-is
+        # Identify and remove mini-LP summary lines BEFORE the detailed section.
+        # Mini lines look like:
+        #   "🔒 LP lock (lite): dead=..., UNCX=..., TeamFinance=..."
+        #   "Holders: <number>"
+        # We only remove those occurring before the detailed section.
+        # Remove the mini header line
+        import re as _re
+        prefix = text[:det_idx]
+        suffix = text[det_idx:]
+        # Remove the mini LP line(s) and any immediate trailing "Holders: N" lines in the prefix region.
+        prefix = _re.sub(r"(?:^|\n)🔒 LP lock \(lite\):[^\n]*\n?", "\n", prefix)
+        prefix = _re.sub(r"(?:^|\n)Holders:\s*\d+\s*\n?", "\n", prefix)
+        # Collapse accidental multiple blank lines (limit to local area by only normalizing last ~1000 chars)
+        # For simplicity, do a gentle normalization across the full text:
+        merged = (prefix + suffix)
+        merged = _re.sub(r"\n{3,}", "\n\n", merged)
+        return merged
+    except Exception:
+        return text
+# === /LP mini-vs-detailed harmonizer ===
+def _qs_postprocess_header(text: str) -> str:
+    try:
+        if not isinstance(text, str) or not text:
+            return text
+        import re as _re
+        # 1) Short SSL issuer form
+        text = _re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
+        # 2) Wayback earliest date across the whole message
+        dates = _re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
+        if dates:
+            earliest = sorted(dates)[0]
+            text = _re.sub(r"Wayback:\s*first\s*[^\n]+", "Wayback: first " + earliest, text)
+        return text
+    except Exception:
+        return text
+# === /QS header post-processor ===
 def _strip_compact_header_block(text: str) -> str:
     try:
         if not isinstance(text, str) or not text:
@@ -4111,7 +4159,8 @@ def _enrich_full(addr: str, base_text: str) -> str:
         except Exception:
             pass
         if not dom:
-            return text
+            text = _qs_postprocess_header(text)
+    return text
         try:
             h, created, reg, exp, issuer, wb = _domain_meta(dom)
         except Exception:
@@ -4137,7 +4186,8 @@ def _enrich_full(addr: str, base_text: str) -> str:
         text = _replace_or_append(text, "WHOIS/RDAP:", whois_line)
         text = _replace_or_append(text, "SSL:",        ssl_line)
         text = _replace_or_append(text, "Wayback:",    wayback_line)
-        return text
+        text = _strip_mini_lp_if_detailed(text)
+    return text
     except Exception:
         return base_text or ""
 
