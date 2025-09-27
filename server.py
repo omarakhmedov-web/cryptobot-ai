@@ -89,62 +89,6 @@ app = Flask(__name__)
 
 
 
-
-
-# === QS text post-processors (safe) ===
-def _dedupe_qs_header(text: str) -> str:
-    try:
-        if not isinstance(text, str):
-            text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text
-        # If two consecutive 'Metridex QuickScan (MVP+)' blocks exist, remove the first one.
-        parts = text.split("Metridex QuickScan (MVP+)")
-        if len(parts) >= 3:
-            # Rebuild: keep the first empty/head part + one header + rest after the second header
-            rebuilt = parts[0] + "Metridex QuickScan (MVP+)" + parts[2]
-            return rebuilt
-        text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text
-    except Exception:
-        text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text
-
-def _normalize_ssl_wayback(text: str) -> str:
-    try:
-        if not isinstance(text, str):
-            text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text
-        # SSL issuer: compress verbose 'countryName=US organizationName=Let's Encrypt commonName=R13' -> "Let's Encrypt R13"
-        text = re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
-        # Wayback: ensure 'first YYYY-MM-DD' style; if two 'Wayback: first ...' present, keep the earliest date
-        # Extract dates
-        m = re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{4}[-/][A-Za-z]{3}[-/][0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2})", text)
-        if m and len(m) >= 1:
-            # keep the earliest-looking date (lexicographically min on YYYY-MM-DD is ok)
-            # normalize known formats to YYYY-MM-DD when possible
-            def norm(d):
-                d = d.replace('/', '-')
-                # if already YYYY-MM-DD, return
-                if re.match(r'^\d{4}-\d{2}-\d{2}$', d):
-                    return d
-                # simple month-name to number map
-                month = {
-                    'Jan':'01','Feb':'02','Mar':'03','Apr':'04','May':'05','Jun':'06',
-                    'Jul':'07','Aug':'08','Sep':'09','Oct':'10','Nov':'11','Dec':'12'
-                }
-                m2 = re.match(r'^(\d{4})-([A-Za-z]{3})-(\d{2})$', d)
-                if m2:
-                    return f"{m2.group(1)}-{month.get(m2.group(2), '01')}-{m2.group(3)}"
-                return d
-            dates = [norm(x) for x in m]
-            earliest = sorted(dates)[0]
-            text = re.sub(r"Wayback:\s*first\s*[^\n]+", f"Wayback: first {earliest}", text)
-        text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text
-    except Exception:
-        text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text
-# === /QS text post-processors ===
 # === DS URL helper (safe) ===
 def _dexscreener_pair_url(chain: str, pair_addr: str) -> str:
     # Build a DexScreener pair URL if pair_addr looks like 0x + 40 hex chars.
@@ -1158,8 +1102,7 @@ def _hp_ish(addr: str, chain_name: str = None) -> dict:
         if r.status_code != 200:
             body = {}
         _hp_cache_put(key, body)
-        body = _normalize_ssl_wayback(_dedupe_qs_header(body))
-    return body or {}
+        return body or {}
     except Exception:
         return {}
 
@@ -1180,8 +1123,7 @@ def _hp_top_holders(token_or_lp_addr: str, chain_name: str) -> dict:
         if r.status_code != 200:
             body = {}
         _hp_cache_put(key, body)
-        body = _normalize_ssl_wayback(_dedupe_qs_header(body))
-    return body or {}
+        return body or {}
     except Exception:
         return {}
 
@@ -1243,16 +1185,14 @@ def _locker_locktime(provider: str, pair_addr: str, chain_name: str) -> dict:
         if not link:
             body = {"provider": provider, "link": "", "unlock": ""}
             _LOCKER_CACHE[key] = {"ts": now, "body": body}
-            body = _normalize_ssl_wayback(_dedupe_qs_header(body))
-    return body
+            return body
         headers = {"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
         r = requests.get(link, timeout=8, headers=headers)
         html = r.text or ""
         unlock = _parse_unlock_text(html)
         body = {"provider": provider, "link": link, "unlock": unlock}
         _LOCKER_CACHE[key] = {"ts": now, "body": body}
-        body = _normalize_ssl_wayback(_dedupe_qs_header(body))
-    return body
+        return body
     except Exception:
         return {}
 def _scan_top_holder_html(lp_addr: str, chain_name: str) -> dict:
@@ -1291,8 +1231,7 @@ def _scan_top_holder_html(lp_addr: str, chain_name: str) -> dict:
             rows = re.findall(r'/address/[0-9a-fA-F]{40}', html)
             body = {"holders":[{"address": addr, "balance": None, "percent": pct}], "totalSupply": None, "holders_count": len(rows)}
         _SCAN_CACHE[key] = {"ts": now, "body": body}
-        body = _normalize_ssl_wayback(_dedupe_qs_header(body))
-    return body or {}
+        return body or {}
     except Exception:
         return {}
         addr = "0x" + m.group(1).lower()
@@ -1677,8 +1616,8 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         msg = cq.get("message") or {}
         chat_id = int((msg.get("chat") or {}).get("id") or 0)
         if chat_id == 0:
-            text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text = msg.get("text") or ""
+            return
+        text = msg.get("text") or ""
         addr = (addr_hint or _extract_addr_from_text(text) or "").lower()
         ent = RISK_CACHE.get(addr) or {}
         neg = _filter_owner_signal(list(ent.get("neg") or []), ent)
@@ -2410,7 +2349,6 @@ def _append_verdict_block(addr, text):
         lines.append(_wrap_kv_line("⚠️ Signals", rs.get("neg")))
     if rs.get("pos"):
         lines.append(_wrap_kv_line("✅ Positives", rs.get("pos")))
-    text = _normalize_ssl_wayback(_dedupe_qs_header(text))
     return text + "\n" + "\n".join(lines)
 
 # ========================
@@ -4138,8 +4076,7 @@ def _enrich_full(addr: str, base_text: str) -> str:
         except Exception:
             pass
         if not dom:
-            text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text
+            return text
         try:
             h, created, reg, exp, issuer, wb = _domain_meta(dom)
         except Exception:
@@ -4160,14 +4097,12 @@ def _enrich_full(addr: str, base_text: str) -> str:
                 return patt.sub(newline, body)
             if body and not body.endswith("\n"):
                 body += "\n"
-            body = _normalize_ssl_wayback(_dedupe_qs_header(body))
-    return body + newline
+            return body + newline
         text = _replace_or_append(text, "Domain:",     domain_line)
         text = _replace_or_append(text, "WHOIS/RDAP:", whois_line)
         text = _replace_or_append(text, "SSL:",        ssl_line)
         text = _replace_or_append(text, "Wayback:",    wayback_line)
-        text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text
+        return text
     except Exception:
         return base_text or ""
 
@@ -4582,8 +4517,7 @@ def _onchain_inspect(addr: str):
     try:
         # If contract detected already — done
         if "Contract code: present" in (text or "") or (info or {}).get("is_contract"):
-            text = _normalize_ssl_wayback(_dedupe_qs_header(text))
-    return text, info
+            return text, info
     except Exception:
         pass
 
@@ -4607,7 +4541,6 @@ def _onchain_inspect(addr: str):
                 _clear_chain_rpc_override()
 
     # Fallback: return whatever we had
-    text = _normalize_ssl_wayback(_dedupe_qs_header(text))
     return text, info
 # === /PATCH: 0.3.18-polyfix2+deltas ===
 
