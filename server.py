@@ -4158,9 +4158,6 @@ def _enrich_full(addr: str, base_text: str) -> str:
                 dom = _cg_homepage(addr_l)
         except Exception:
             pass
-        if not dom:
-            text = _qs_postprocess_header(text)
-    return text
         try:
             h, created, reg, exp, issuer, wb = _domain_meta(dom)
         except Exception:
@@ -4187,9 +4184,10 @@ def _enrich_full(addr: str, base_text: str) -> str:
         text = _replace_or_append(text, "SSL:",        ssl_line)
         text = _replace_or_append(text, "Wayback:",    wayback_line)
         text = _strip_mini_lp_if_detailed(text)
-    return text
+        text = _qs_postprocess_header(text)
     except Exception:
         return base_text or ""
+    return text
 
 
 def _kb_dedupe_all(kb: dict) -> dict:
