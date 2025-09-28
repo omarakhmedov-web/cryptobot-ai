@@ -1604,8 +1604,120 @@ def _strip_compact_meta(text: str) -> str:
         return text
 # === /Compact sanitizer ===
 
+# === Stronger QuickScan sanitizer (prevents Wayback/Domain/SSL in compact blocks) ===
+def _strip_qs_meta_if_no_verdict(text: str) -> str:
+    try:
+        if not isinstance(text,str): return text
+        import re as _re
+        if "Metridex QuickScan (MVP+)" in text and "Trust verdict:" not in text:
+            # Remove any Domain/SSL/Wayback lines present in this message
+            text = _re.sub(r"(?m)^\s*Domain:.*\n", "", text)
+            text = _re.sub(r"(?m)^\s*SSL:.*\n", "", text)
+            text = _re.sub(r"(?m)^\s*Wayback:.*\n", "", text)
+        return text
+    except Exception:
+        return text
+# === /Stronger QuickScan sanitizer ===
+
+# === LP chain binder at send-time ===
+EXPLORER_BY_CHAIN = {
+    "ethereum": "etherscan.io",
+    "bsc": "bscscan.com",
+    "polygon": "polygonscan.com",
+    "arbitrum": "arbiscan.io",
+    "optimism": "optimistic.etherscan.io",
+    "base": "basescan.org",
+    "avalanche": "snowtrace.io",
+    "fantom": "ftmscan.com",
+}
+def _extract_token_addr(text: str) -> str:
+    import re as _re
+    m = _re.search(r"/token/(0x[a-fA-F0-9]{40})", text)
+    return m.group(1).lower() if m else ""
+
+def _replace_lp_with_unknown(text: str, chain: str, ca: str) -> str:
+    import re as _re
+    # Build a generic unknown LP block for the hinted chain
+    expl = EXPLORER_BY_CHAIN.get(chain, "etherscan.io")
+    unknown = (f"🔒 LP lock (lite) — chain: {chain}\n"
+               f"Verdict: ⚪ unknown (no LP data)\n"
+               f"• Dead/renounced: n/a\n"
+               f"• UNCX lockers: n/a\n"
+               f"• TeamFinance: n/a\n"
+               f"• Top holder: n/a — n/a of LP\n"
+               f"• Top holder type: n/a\n"
+               f"• Holders (LP token): n/a\n"
+               f"• Owner: n/a\n"
+               f"• Renounced: n/a\n"
+               f"• Proxy: n/a\n"
+               f"Scan token: https://{expl}/token/{ca}\n"
+               f"UNCX: https://app.unicrypt.network/\n"
+               f"TeamFinance: https://app.team.finance/")
+    # Replace the entire LP section in the message if present
+    lp_re = r"🔒 LP lock \(lite\)[\s\S]*$"
+    return _re.sub(lp_re, unknown, text)
+
+def _lp_bind_chain_at_send(text: str) -> str:
+    try:
+        if not isinstance(text,str): return text
+        if "🔒 LP lock (lite)" not in text:
+            return text
+        import re as _re
+        # Parse declared chain
+        mch = _re.search(r"🔒 LP lock \(lite\)\s*—\s*chain:\s*([a-z0-9\-]+)", text, _re.I)
+        declared = (mch.group(1) if mch else "").lower()
+        ca = _extract_token_addr(text)
+        if not ca:
+            return text
+        hinted = ""
+        try:
+            hinted = (ADDR_CHAIN_HINT.get(ca) or "").lower()
+        except Exception:
+            hinted = ""
+        if hinted and declared and declared != hinted:
+            return _replace_lp_with_unknown(text, hinted, ca)
+        # If declared is empty but hinted exists, ensure we show hinted
+        if hinted and not declared:
+            return _replace_lp_with_unknown(text, hinted, ca)
+        return text
+    except Exception:
+        return text
+# === /LP chain binder ===
+
+# === On-chain zeros sanitizer ===
+def _sanitize_onchain_zeros(text: str) -> str:
+    try:
+        if not isinstance(text,str): return text
+        if "On-chain" not in text: return text
+        import re as _re
+        # Drop lines that are clearly zeroed placeholders
+        patterns = [
+            r"(?m)^\s*LP:\s*burned=0\.0%.*topHolder=0\.0%.*\n",
+            r"(?m)^\s*Holders:\s*top0\s*own\s*0%.*\n",
+        ]
+        for pat in patterns:
+            text = _re.sub(pat, "", text)
+        # Collapse extra blank lines after removals
+        text = _re.sub(r"\n{3,}", "\n\n", text)
+        return text
+    except Exception:
+        return text
+# === /On-chain zeros sanitizer ===
+
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
+    try:
+        text = _sanitize_onchain_zeros(text)
+    except Exception:
+        pass
+    try:
+        text = _lp_bind_chain_at_send(text)
+    except Exception:
+        pass
+    try:
+        text = _strip_qs_meta_if_no_verdict(text)
+    except Exception:
+        pass
     try:
         if _is_compact_qs(text):
             text = _strip_compact_meta(text)
