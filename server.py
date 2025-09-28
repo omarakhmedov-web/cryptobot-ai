@@ -36,13 +36,13 @@ APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8")
 
 
 # --- Feature flags (ENV) ---
-DEX_STRICT_CHAIN      = int(os.getenv("DEX_STRICT_CHAIN", "0") or "0")      # 1: forbid cross-chain/search fallbacks for pair links
-DS_ALLOW_FALLBACK     = int(os.getenv("DS_ALLOW_FALLBACK", "1") or "1")     # 0: no 'search?q=' fallback; show base link only
-MDX_ENABLE_POSTPROCESS= int(os.getenv("MDX_ENABLE_POSTPROCESS", "1") or "1")# 1: run post-processors (_sanitize/*)
-MDX_BYPASS_SANITIZERS = int(os.getenv("MDX_BYPASS_SANITIZERS","0") or "0")  # 1: skip sanitizers even if postprocess enabled
-DETAILS_ENFORCE_DOMAIN= int(os.getenv("DETAILS_ENFORCE_DOMAIN","0") or "0") # 1: enforce domain matches current token/site, else strip
-MDX_LAST_SITE_SCOPE   = (os.getenv("MDX_LAST_SITE_SCOPE","chat") or "chat").strip().lower()  # 'chat' | 'message'
-DOMAIN_META_STRICT    = int(os.getenv("DOMAIN_META_STRICT","0") or "0")     # 1: if domain cannot be verified for current token/site — hide meta
+DEX_STRICT_CHAIN       = int(os.getenv("DEX_STRICT_CHAIN", "0") or "0")
+DS_ALLOW_FALLBACK      = int(os.getenv("DS_ALLOW_FALLBACK", "1") or "1")
+MDX_ENABLE_POSTPROCESS = int(os.getenv("MDX_ENABLE_POSTPROCESS", "1") or "1")
+MDX_BYPASS_SANITIZERS  = int(os.getenv("MDX_BYPASS_SANITIZERS","0") or "0")
+DETAILS_ENFORCE_DOMAIN = int(os.getenv("DETAILS_ENFORCE_DOMAIN","0") or "0")
+MDX_LAST_SITE_SCOPE    = (os.getenv("MDX_LAST_SITE_SCOPE","chat") or "chat").strip().lower()
+DOMAIN_META_STRICT     = int(os.getenv("DOMAIN_META_STRICT","0") or "0")
 
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
@@ -105,66 +105,7 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
     except Exception:
         return text
 
-
-def _sanitize_owner_privileges(text: str, chat_id) -> str:
-    """If owner is renounced (0x000… or 'renounced') and no proxy, suppress 'Owner privileges present' everywhere
-    and adjust Risk score accordingly, removing the corresponding Why++ penalty if present."""
-    try:
-        zeros_pattern = r'Owner:\s*(0x0{4,}|0x0{3,}[\.…]+0+)'  # full zeros or truncated with ellipsis
-        renounced_word = r'Owner:\s*renounced'
-        proxy_present = re.search(r'Proxy:\s*(yes|true|1)', text, re.I)
-        is_renounced = bool(re.search(zeros_pattern, text, re.I) or re.search(renounced_word, text, re.I))
-        if is_renounced and not proxy_present:
-            # 1) Remove from Signals line
-            def _strip_owner_in_signals(m):
-                line = m.group(0)
-                line = re.sub(r'(;|\uFF1B|\s)*Owner\s+privileges\s+present', '', line, flags=re.I)
-                line = re.sub(r'\s*;\s*;', ';', line)  # collapse double semicolons
-                line = re.sub(r'\s*;\s*$', '', line)   # trailing semicolon
-                if re.sub(r'^\s*⚠️\s*Signals:\s*', '', line).strip() == '':
-                    return ''
-                return line
-            text = re.sub(r'(?mi)^\s*⚠️\s*Signals:.*$', _strip_owner_in_signals, text)
-
-            # 2) Remove Why++ line and capture its numeric penalty to adjust Risk score
-            penalty = 0
-            def _strip_owner_in_why(m):
-                nonlocal penalty
-                s = m.group(0)
-                mnum = re.search(r'[−-]\s*(\d+)', s)
-                if mnum:
-                    penalty = int(mnum.group(1))
-                return ''
-            text_new = re.sub(r'(?mi)^\s*[−-]\s*\d+\s+Owner\s+privileges\s+present\s*$', _strip_owner_in_why, text)
-            if text_new != text:
-                text = text_new
-                # Adjust Risk score: lower is safer; removing a negative should *reduce* the risk number by 'penalty'
-                mscore = re.search(r'(?mi)Risk\s*score:\s*(\d+)\s*/\s*100', text)
-                if mscore and penalty:
-                    score = int(mscore.group(1))
-                    new_score = max(0, score - penalty)
-                    text = re.sub(r'(?mi)(Risk\s*score:\s*)\d+(\s*/\s*100)', rf'\1{new_score}\2', text)
-
-            # 3) If anywhere standalone phrase appears (unexpected), remove it
-            text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present.*$', '', text)
-
-            # 4) Tidy blank lines
-            text = re.sub(r'\n{3,}', "\n\n", text)
-        return text
-    except Exception:
-        return text
-
-
 def _enforce_details_host(text: str, chat_id) -> str:
-    """Ensure Details use consistent Domain (opt‑in via DETAILS_ENFORCE_DOMAIN).
-    Behavior:
-     • If DETAILS_ENFORCE_DOMAIN=0 → no-op.
-     • If DETAILS_ENFORCE_DOMAIN=1 →
-         - Prefer 'Site:' host from current message.
-         - If MDX_LAST_SITE_SCOPE!='message', allow using last chat host.
-         - If none, try CA→domain mapping.
-         - If still none and DOMAIN_META_STRICT=1 → strip Domain/WHOIS/RDAP/SSL/Wayback block.
-    """
     try:
         if not DETAILS_ENFORCE_DOMAIN:
             return text
@@ -173,14 +114,11 @@ def _enforce_details_host(text: str, chat_id) -> str:
         if not is_details:
             return text
 
-        # 1) 'Site:' host from THIS message
         m_site = _re.search(r'(?mi)^Site:\s*(https?://\S+)', text or '')
         site_host_in_msg = _extract_host(m_site.group(1)) if m_site else ""
 
-        # 2) If allowed, fall back to last chat host
         chat_host = (_LAST_SITE_HOST.get(str(chat_id)) or "") if MDX_LAST_SITE_SCOPE != "message" else ""
 
-        # 3) Fallback to mapping by token CA
         m_ca = _re.search(r'/token/(0x[0-9a-fA-F]{40})', text or '')
         ca = (m_ca.group(1).lower() if m_ca else "")
         map_host = (_KNOWN_DOMAINS.get(ca, "") or "") if ca else ""
@@ -194,10 +132,8 @@ def _enforce_details_host(text: str, chat_id) -> str:
             return text
 
         if not host:
-            # allow existing text if not strict
             return text
 
-        # Rewrite or insert Domain
         m = _re.search(r'^(Domain:\s*)(\S+)', text, _re.M)
         if m:
             dom = m.group(2).strip().lower()
@@ -294,10 +230,6 @@ app = Flask(__name__)
 # === DS URL helper (safe) ===
 
 def _dexscreener_pair_url(chain: str, pair_addr: str) -> str:
-    # Build a DexScreener pair URL if pair_addr looks like 0x + 40 hex chars.
-    # Fallback behavior is controlled by ENV:
-    #  - DEX_STRICT_CHAIN=1 & DS_ALLOW_FALLBACK=0 => NO search fallback (return homepage).
-    #  - otherwise, keep 'search?q=' fallback.
     try:
         ch = (chain or "").split(":")[0].lower()
         addr = (pair_addr or "").strip().lower()
@@ -309,15 +241,6 @@ def _dexscreener_pair_url(chain: str, pair_addr: str) -> str:
         return f"https://dexscreener.com/search?q={q}"
     except Exception:
         return "https://dexscreener.com"
-# === /DS URL helper ===
-# === METRIDEX INTEGRATED PATCHES ===
-# Mutex TTL & LP lock HTML block (Share/PDF untouched)
-
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Optional, Dict
-
-# --- Mutex table & helpers ---
 def _db_mutex():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("""CREATE TABLE IF NOT EXISTS mutex_locks(
@@ -1945,27 +1868,6 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
     except Exception:
         return text
 
-def _sanitize_owner_privileges(text: str, chat_id) -> str:
-    """If owner is renounced (0x000..), suppress 'Owner privileges present' in Why++/Signals."""
-    try:
-        ren = _LAST_OWNER_RENOUNCED.get(chat_id, False)
-        if not ren:
-            # detect renounce inside same message
-            if re.search(r'Owner:\s*0x0{4,}', text, re.I) and not re.search(r'Proxy:\s*(yes|true|1)', text, re.I):
-                ren = True
-                _LAST_OWNER_RENOUNCED[chat_id] = True
-        if ren:
-            # remove lines in Why++ or Signals mentioning Owner privileges
-            text = re.sub(r'^\s*[+\-]\s*20?\s*Owner privileges present\s*$', "", text, flags=re.M|re.I)
-            text = re.sub(r'^\s*⚠️\s*Signals:.*Owner privileges present.*$', lambda m: m.group(0).replace('Owner privileges present;','').replace('Owner privileges present','').strip(), text, flags=re.M)
-            # cleanup multiple separators or leftover punctuation
-            text = re.sub(r';\s*;', '; ', text)
-            text = re.sub(r'⚠️\s*Signals:\s*$', '', text, flags=re.M)
-            text = re.sub(r'\n{3,}', "\n\n", text)
-        return text
-    except Exception:
-        return text
-
 def _track_site_host(text: str, chat_id):
     try:
         m = re.search(r'^Site:\s*(https?://\S+)', text, re.M|re.I)
@@ -1983,56 +1885,37 @@ except Exception:
 
 
 
-
 def _enforce_details_host(text: str, chat_id) -> str:
-    """Ensure Details use consistent Domain (opt‑in via DETAILS_ENFORCE_DOMAIN).
-    Behavior:
-     • If DETAILS_ENFORCE_DOMAIN=0 → no-op.
-     • If DETAILS_ENFORCE_DOMAIN=1 →
-         - Prefer 'Site:' host from current message.
-         - If MDX_LAST_SITE_SCOPE!='message', allow using last chat host.
-         - If none, try CA→domain mapping.
-         - If still none and DOMAIN_META_STRICT=1 → strip Domain/WHOIS/RDAP/SSL/Wayback block.
-    """
+    """Ensure Details use consistent Domain and avoid leaking a previous token's domain."""
     try:
-        if not DETAILS_ENFORCE_DOMAIN:
-            return text
         import re as _re
-        is_details = bool(_re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text or ''))
+        is_details = bool(_re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
         if not is_details:
             return text
-
-        # 1) 'Site:' host from THIS message
-        m_site = _re.search(r'(?mi)^Site:\s*(https?://\S+)', text or '')
-        site_host_in_msg = _extract_host(m_site.group(1)) if m_site else ""
-
-        # 2) If allowed, fall back to last chat host
-        chat_host = (_LAST_SITE_HOST.get(str(chat_id)) or "") if MDX_LAST_SITE_SCOPE != "message" else ""
-
-        # 3) Fallback to mapping by token CA
-        m_ca = _re.search(r'/token/(0x[0-9a-fA-F]{40})', text or '')
-        ca = (m_ca.group(1).lower() if m_ca else "")
-        map_host = (_KNOWN_DOMAINS.get(ca, "") or "") if ca else ""
-
-        host = site_host_in_msg or chat_host or map_host
-
-        if not host and DOMAIN_META_STRICT:
+        # Prefer last Site host captured for this chat
+        site_host = _LAST_SITE_HOST.get(chat_id, "") or ""
+        deduced_host = ""
+        if not site_host:
+            # Fallback: derive from token CA using known_domains mapping
+            m = _re.search(r'/token/(0x[0-9a-fA-F]{40})', text)
+            ca = (m.group(1).lower() if m else "")
+            if ca and isinstance(globals().get('_KNOWN_DOMAINS'), dict):
+                deduced_host = (globals().get('_KNOWN_DOMAINS') or {}).get(ca, "") or ""
+        host = site_host or deduced_host
+        if not host:
+            # Strip potentially wrong domain-related lines
             patt = _re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', _re.M)
-            text = patt.sub("", text or "")
+            text = patt.sub("", text)
             text = _re.sub(r'\n{3,}', "\n\n", text)
             return text
-
-        if not host:
-            # allow existing text if not strict
-            return text
-
-        # Rewrite or insert Domain
+        # Rewrite Domain: line
         m = _re.search(r'^(Domain:\s*)(\S+)', text, _re.M)
         if m:
             dom = m.group(2).strip().lower()
             if dom != host:
                 text = _re.sub(r'^(Domain:\s*)\S+', r'\1' + host, text, flags=_re.M)
         else:
+            # Insert Domain after Site or at top
             if _re.search(r'(?m)^Site:', text):
                 text = _re.sub(r'(?m)^(Site:.*)$', r'\1\nDomain: ' + host, text)
             else:
@@ -2068,30 +1951,49 @@ def _send_text(chat_id, text, **kwargs):
         _track_site_host(text, chat_id)
     except Exception:
         pass
-    if not MDX_ENABLE_POSTPROCESS:
-        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
-    if MDX_BYPASS_SANITIZERS:
-        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+
+    ca = _get_ca_from_text(text)
+    role = _classify_block(text)
+    if role in ("onchain", "lp", "details"):
+        _ctx_update(chat_id, ca, text, role)
+
+    try:
+        need_buffer = False
+        if role == "details":
+            ctx = _ctx_get(chat_id, ca) if ca else {}
+            if not ctx.get("owner_state") and not ctx.get("lp_unknown"):
+                need_buffer = True
+        if need_buffer:
+            _PENDING_DETAILS[(str(chat_id), str(ca))] = (text, kwargs)
+            return {"ok": True, "buffered": "details"}
+    except Exception:
+        pass
+
+    if not MDX_ENABLE_POSTPROCESS or MDX_BYPASS_SANITIZERS:
+        out = tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+        try:
+            if role in ("onchain", "lp"):
+                _flush_pending_details(chat_id, ca)
+        except Exception:
+            pass
+        return out
+
     try:
         text = _sanitize_onchain_zeros(text)
     except Exception:
         pass
-    # Enforce domain if enabled
     try:
         text = _enforce_details_host(text, chat_id)
     except Exception:
         pass
-    # Compact domain meta suppression
     try:
         text = _sanitize_compact_domains(text, is_details=False)
     except Exception:
         pass
-    # Owner privileges suppression when renounced
     try:
         text = _sanitize_owner_privileges(text, chat_id)
     except Exception:
         pass
-    # LP sanity
     try:
         text = _sanitize_lp_claims(text)
     except Exception:
@@ -2109,7 +2011,6 @@ def _send_text(chat_id, text, **kwargs):
             text = _strip_compact_meta(text)
     except Exception:
         pass
-    # Conservative risk for unknown LP verdicts in details
     try:
         import re as _re
         if _re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text):
@@ -2117,11 +2018,17 @@ def _send_text(chat_id, text, **kwargs):
     except Exception:
         pass
     try:
-        if _is_lp_mini_only(text):
-            return {"ok": True, "skipped": "lp_mini"}
+        text = _apply_risk_floor_by_context(text, chat_id)
     except Exception:
         pass
-    return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+
+    out = tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+    try:
+        if role in ("onchain", "lp"):
+            _flush_pending_details(chat_id, ca)
+    except Exception:
+        pass
+    return out
 
 def _admin_debug(chat_id, text):
     try:
@@ -5570,3 +5477,125 @@ except NameError:
     _KNOWN_DOMAINS = {}
 if not _KNOWN_DOMAINS:
     _KNOWN_DOMAINS = dict(_FALLBACK_KNOWN_DOMAINS)
+
+
+# === CA-scoped context across messages ===
+_CTX_PER_CA = {}  # key: (str(chat_id), str(ca)) -> dict(owner_state, proxy, lp_unknown, site_host, pair_addr)
+
+def _get_ca_from_text(text: str) -> str:
+    try:
+        m = re.findall(r'/token/(0x[0-9a-fA-F]{40})', text or "")
+        return (m[-1].lower() if m else "")
+    except Exception:
+        return ""
+
+def _classify_block(text: str) -> str:
+    t = (text or "").lower()
+    if "metridx quickscan" in t or "metridex quickscan" in t:
+        return "compact"
+    if "on-chain" in t or ("token:" in t and "decimals:" in t):
+        return "onchain"
+    if "lp lock (lite)" in t or "holders (lp token)" in t:
+        return "lp"
+    if "trust verdict" in t or "why++ factors" in t or "whois" in t or "ssl:" in t:
+        return "details"
+    return "other"
+
+def _ctx_get(chat_id, ca):
+    return _CTX_PER_CA.setdefault((str(chat_id), str(ca)), {"owner_state": "", "proxy": False, "lp_unknown": False, "site_host": "", "pair_addr": ""})
+
+def _ctx_update(chat_id, ca, text: str, role: str):
+    try:
+        ctx = _ctx_get(chat_id, ca)
+        m_site = re.search(r'(?mi)^Site:\s*(https?://\S+)', text or "")
+        if m_site:
+            host = _extract_host(m_site.group(1))
+            if host:
+                ctx["site_host"] = host
+        if role == "onchain":
+            if re.search(r'(?mi)Owner:\s*(0x0{4,}|0x0{3,}[\.\…]+0+|renounced)', text or ""):
+                ctx["owner_state"] = "renounced"
+            if re.search(r'(?mi)Proxy:\s*(yes|true|1)', text or ""):
+                ctx["proxy"] = True
+        if role == "lp":
+            if re.search(r'(?mi)Verdict:\s*⚪\s*unknown\s*\(no LP data\)', text or ""):
+                ctx["lp_unknown"] = True
+    except Exception:
+        pass
+    return _ctx_get(chat_id, ca)
+
+_PENDING_DETAILS = {}  # key: (chat_id, ca) -> (text, kwargs)
+
+def _apply_risk_floor_by_context(text: str, chat_id) -> str:
+    try:
+        mscore = re.search(r'(?mi)Risk\s*score:\s*(\d+)\s*/\s*100', text or "")
+        if not mscore:
+            return text
+        score = int(mscore.group(1))
+        floor_val = 0
+        ca = _get_ca_from_text(text or "")
+        ctx = _ctx_get(chat_id, ca) if ca else {}
+        if ctx.get("lp_unknown"):
+            floor_val = max(floor_val, 12)
+        neg_strong = False
+        m1 = re.search(r'(?mi)LP\s+concentrated\s+in\s+a\s+single\s+holder:\s*(\d+(?:\.\d+)?)\s*%', text or "")
+        if m1 and float(m1.group(1)) >= 50.0:
+            neg_strong = True
+        m2 = re.search(r'(?mi)Top\s+holders\s+\(top\s+20\)\s+own\s+(\d+(?:\.\d+)?)\s*%', text or "")
+        if m2 and float(m2.group(1)) >= 90.0:
+            neg_strong = True
+        if neg_strong:
+            floor_val = max(floor_val, 10)
+        if floor_val and score < floor_val:
+            text = re.sub(r'(?mi)(Risk\s*score:\s*)\d+(\s*/\s*100)', rf'\1{floor_val}\2', text)
+        return text
+    except Exception:
+        return text
+
+def _flush_pending_details(chat_id, ca):
+    try:
+        key = (str(chat_id), str(ca))
+        if key not in _PENDING_DETAILS:
+            return
+        text, kwargs = _PENDING_DETAILS.pop(key)
+        try:
+            text = _sanitize_onchain_zeros(text)
+        except Exception:
+            pass
+        try:
+            text = _enforce_details_host(text, chat_id)
+        except Exception:
+            pass
+        try:
+            text = _sanitize_compact_domains(text, is_details=False)
+        except Exception:
+            pass
+        try:
+            text = _sanitize_owner_privileges(text, chat_id)
+        except Exception:
+            pass
+        try:
+            text = _sanitize_lp_claims(text)
+        except Exception:
+            pass
+        try:
+            text = _lp_bind_chain_at_send(text)
+        except Exception:
+            pass
+        try:
+            text = _strip_qs_meta_if_no_verdict(text)
+        except Exception:
+            pass
+        try:
+            import re as _re
+            if _re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text):
+                text = _qs_finalize_details_lp_unknown_risk(text)
+        except Exception:
+            pass
+        try:
+            text = _apply_risk_floor_by_context(text, chat_id)
+        except Exception:
+            pass
+        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **(kwargs or {}))
+    except Exception:
+        return None
