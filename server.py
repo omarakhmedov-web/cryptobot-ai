@@ -1315,6 +1315,7 @@ def _holder_concentration(token_addr: str, chain_name: str) -> dict:
 
 def _ds_resolve_pair_and_chain(addr_l: str) -> tuple:
     try:
+        global ADDR_CHAIN_HINT
         url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
         r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
         if r.status_code != 200:
@@ -1325,6 +1326,10 @@ def _ds_resolve_pair_and_chain(addr_l: str) -> tuple:
         if not p:
             return None, None
         chain = (p or {}).get("chainId") or (p or {}).get("chain")
+        try:
+            ADDR_CHAIN_HINT[addr_l] = (chain or '').lower()
+        except Exception:
+            pass
         return p, (chain or "").lower()
     except Exception:
         return None, None
@@ -1369,6 +1374,30 @@ def _delta_cache_put(addr_l: str, changes: dict):
     except Exception:
         pass
 
+
+# === LP chain hinting (bind LP to summary's chain) ===
+ADDR_CHAIN_HINT = {}  # addr_l -> chain string ('ethereum','bsc','polygon',...)
+
+def _ds_resolve_pair_and_chain_on(addr_l: str, desired_chain: str):
+    try:
+        url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
+        r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
+        if r.status_code != 200:
+            return None, None
+        body = r.json() if hasattr(r, "json") else {}
+        pairs = body.get("pairs") or []
+        desired = [p for p in pairs if str(p.get("chainId") or p.get("chain") or "").lower() == (desired_chain or "").lower()]
+        p = _ds_pick_best_pair(desired) if desired else _ds_pick_best_pair(pairs)
+        if not p:
+            return None, None
+        chain = (p or {}).get("chainId") or (p or {}).get("chain")
+        try:
+            ADDR_CHAIN_HINT[addr_l] = (chain or '').lower()
+        except Exception:
+            pass
+        return p, (chain or "").lower()
+    except Exception:
+        return None, None
 def _ds_pick_best_pair(pairs):
     if not isinstance(pairs, list):
         return None
@@ -4135,16 +4164,41 @@ def _qs_finalize_details(text: str) -> str:
     except Exception:
         return text
 # === /QS Finalizer ===
+
+# Add-on: conservative risk if LP is unknown (avoid LOW 0-20/100)
+def _qs_finalize_details_lp_unknown_risk(text: str) -> str:
+    try:
+        if not isinstance(text,str): return text
+        import re as _re
+        t = text
+        if _re.search(r"Verdict:\s*[⚪\w\s]*unknown\s*\(no LP data\)", t, _re.I):
+            t = _re.sub(r"Trust verdict:\s*LOW RISK\s*🟢\s*•\s*Risk score:\s*\d+\s*/\s*100",
+                        "Trust verdict: CAUTION 🟡 • Risk score: 35/100", t)
+        return t
+    except Exception:
+        return text
+
+def _qs_finalize_details_wrap(text: str) -> str:
+    try:
+        t = _qs_strip_summary_meta(_qs_finalize_details_wrap(text))
+    except Exception:
+        t = text
+    try:
+        t = _qs_finalize_details_lp_unknown_risk(t)
+    except Exception:
+        pass
+    return t
+
 def _enrich_full(addr: str, base_text: str) -> str:
     try:
         text = base_text or ""
         try:
-            text = _qs_finalize_details(text)
+            text = _qs_strip_summary_meta(_qs_finalize_details_wrap(text))
         except Exception:
             pass
         # Final formatting (safe)
         try:
-            text = _qs_finalize_details(text)
+            text = _qs_strip_summary_meta(_qs_finalize_details_wrap(text))
         except Exception:
             pass
         addr_l = (addr or "").lower()
@@ -4882,3 +4936,28 @@ def _filter_owner_signal(neg_factors: list[str], context: dict) -> list[str]:
     except Exception:
         pass
     return list(neg_factors or [])
+
+# Strip Domain/SSL from the first (compact) QuickScan block only
+def _qs_strip_summary_meta(text: str) -> str:
+    try:
+        if not isinstance(text,str) or "Metridex QuickScan (MVP+)" not in text:
+            return text
+        import re as _re
+        hdr = "Metridex QuickScan (MVP+)"
+        i0 = text.find(hdr)
+        if i0 < 0: return text
+        # end of compact block
+        m_next = min([x for x in [
+            text.find(hdr, i0+len(hdr)),
+            text.find("Why++ factors", i0),
+            text.find("On-chain", i0),
+            text.find("WHOIS/RDAP", i0),
+            text.find("Trust verdict:", i0)
+        ] if x != -1] or [i0+400])
+        head = text[i0:m_next]
+        tail = text[m_next:]
+        head = _re.sub(r"(?m)^\s*(Domain:.*\n|SSL:.*\n)", "", head)
+        head = _re.sub(r"\n{3,}", "\n\n", head)
+        return text[:i0] + head + tail
+    except Exception:
+        return text
