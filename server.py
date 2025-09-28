@@ -2099,7 +2099,6 @@ def _send_text(chat_id, text, **kwargs):
         return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
     if MDX_BYPASS_SANITIZERS:
         return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
-    try:
     # Clean up cosmetic (+0) counters in Signals/Why lines
     try:
         import re as _re
