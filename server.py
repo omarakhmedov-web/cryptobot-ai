@@ -34,6 +34,17 @@ except Exception as e:
 # ========================
 APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8")
 
+
+# --- Feature flags (ENV) ---
+DEX_STRICT_CHAIN      = int(os.getenv("DEX_STRICT_CHAIN", "0") or "0")      # 1: forbid cross-chain/search fallbacks for pair links
+DS_ALLOW_FALLBACK     = int(os.getenv("DS_ALLOW_FALLBACK", "1") or "1")     # 0: no 'search?q=' fallback; show base link only
+MDX_ENABLE_POSTPROCESS= int(os.getenv("MDX_ENABLE_POSTPROCESS", "1") or "1")# 1: run post-processors (_sanitize/*)
+MDX_BYPASS_SANITIZERS = int(os.getenv("MDX_BYPASS_SANITIZERS","0") or "0")  # 1: skip sanitizers even if postprocess enabled
+DETAILS_ENFORCE_DOMAIN= int(os.getenv("DETAILS_ENFORCE_DOMAIN","0") or "0") # 1: enforce domain matches current token/site, else strip
+MDX_LAST_SITE_SCOPE   = (os.getenv("MDX_LAST_SITE_SCOPE","chat") or "chat").strip().lower()  # 'chat' | 'message'
+DOMAIN_META_STRICT    = int(os.getenv("DOMAIN_META_STRICT","0") or "0")     # 1: if domain cannot be verified for current token/site — hide meta
+
+
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
 LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
@@ -143,37 +154,56 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
     except Exception:
         return text
 
+
 def _enforce_details_host(text: str, chat_id) -> str:
-    """Ensure Details use consistent Domain and avoid leaking a previous token's domain."""
+    """Ensure Details use consistent Domain (opt‑in via DETAILS_ENFORCE_DOMAIN).
+    Behavior:
+     • If DETAILS_ENFORCE_DOMAIN=0 → no-op.
+     • If DETAILS_ENFORCE_DOMAIN=1 →
+         - Prefer 'Site:' host from current message.
+         - If MDX_LAST_SITE_SCOPE!='message', allow using last chat host.
+         - If none, try CA→domain mapping.
+         - If still none and DOMAIN_META_STRICT=1 → strip Domain/WHOIS/RDAP/SSL/Wayback block.
+    """
     try:
+        if not DETAILS_ENFORCE_DOMAIN:
+            return text
         import re as _re
-        is_details = bool(_re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
+        is_details = bool(_re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text or ''))
         if not is_details:
             return text
-        # Prefer last Site host captured for this chat
-        site_host = _LAST_SITE_HOST.get(chat_id, "") or ""
-        deduced_host = ""
-        if not site_host:
-            # Fallback: derive from token CA using known_domains mapping
-            m = _re.search(r'/token/(0x[0-9a-fA-F]{40})', text)
-            ca = (m.group(1).lower() if m else "")
-            if ca and isinstance(globals().get('_KNOWN_DOMAINS'), dict):
-                deduced_host = (globals().get('_KNOWN_DOMAINS') or {}).get(ca, "") or ""
-        host = site_host or deduced_host
-        if not host:
-            # Strip potentially wrong domain-related lines
+
+        # 1) 'Site:' host from THIS message
+        m_site = _re.search(r'(?mi)^Site:\s*(https?://\S+)', text or '')
+        site_host_in_msg = _extract_host(m_site.group(1)) if m_site else ""
+
+        # 2) If allowed, fall back to last chat host
+        chat_host = (_LAST_SITE_HOST.get(str(chat_id)) or "") if MDX_LAST_SITE_SCOPE != "message" else ""
+
+        # 3) Fallback to mapping by token CA
+        m_ca = _re.search(r'/token/(0x[0-9a-fA-F]{40})', text or '')
+        ca = (m_ca.group(1).lower() if m_ca else "")
+        map_host = (_KNOWN_DOMAINS.get(ca, "") or "") if ca else ""
+
+        host = site_host_in_msg or chat_host or map_host
+
+        if not host and DOMAIN_META_STRICT:
             patt = _re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', _re.M)
-            text = patt.sub("", text)
+            text = patt.sub("", text or "")
             text = _re.sub(r'\n{3,}', "\n\n", text)
             return text
-        # Rewrite Domain: line
+
+        if not host:
+            # allow existing text if not strict
+            return text
+
+        # Rewrite or insert Domain
         m = _re.search(r'^(Domain:\s*)(\S+)', text, _re.M)
         if m:
             dom = m.group(2).strip().lower()
             if dom != host:
                 text = _re.sub(r'^(Domain:\s*)\S+', r'\1' + host, text, flags=_re.M)
         else:
-            # Insert Domain after Site or at top
             if _re.search(r'(?m)^Site:', text):
                 text = _re.sub(r'(?m)^(Site:.*)$', r'\1\nDomain: ' + host, text)
             else:
@@ -262,19 +292,51 @@ app = Flask(__name__)
 
 
 # === DS URL helper (safe) ===
+
 def _dexscreener_pair_url(chain: str, pair_addr: str) -> str:
     # Build a DexScreener pair URL if pair_addr looks like 0x + 40 hex chars.
-    # Otherwise fall back to DexScreener search page so the link is not dead.
+    # Fallback behavior is controlled by ENV:
+    #  - DEX_STRICT_CHAIN=1 & DS_ALLOW_FALLBACK=0 => NO search fallback (return homepage).
+    #  - otherwise, keep 'search?q=' fallback.
     try:
         ch = (chain or "").split(":")[0].lower()
         addr = (pair_addr or "").strip().lower()
         if addr.startswith("0x") and len(addr) == 42 and re.fullmatch(r"0x[0-9a-f]{40}", addr):
             return f"https://dexscreener.com/{ch}/{addr}"
+        if DEX_STRICT_CHAIN and not DS_ALLOW_FALLBACK:
+            return "https://dexscreener.com"
         q = addr or (pair_addr or "").strip()
         return f"https://dexscreener.com/search?q={q}"
     except Exception:
         return "https://dexscreener.com"
 # === /DS URL helper ===
+
+# === DEX swap URL helper ===
+def _swap_url_for(chain: str, token_addr: str) -> str:
+    ch = (chain or "").lower().strip()
+    ca = (token_addr or "").strip()
+    try:
+        if ch in {"ethereum","arbitrum","optimism","base","polygon","bsc","avalanche"}:
+            if ch == "ethereum":
+                return f"https://app.uniswap.org/swap?outputCurrency={ca}&chain=ethereum"
+            if ch == "arbitrum":
+                return f"https://app.uniswap.org/swap?outputCurrency={ca}&chain=arbitrum"
+            if ch == "optimism":
+                return f"https://app.uniswap.org/swap?outputCurrency={ca}&chain=optimism"
+            if ch == "base":
+                return f"https://app.uniswap.org/swap?outputCurrency={ca}&chain=base"
+            if ch == "bsc":
+                return f"https://pancakeswap.finance/swap?outputCurrency={ca}"
+            if ch == "polygon":
+                return f"https://quickswap.exchange/#/swap?outputCurrency={ca}"
+            if ch == "avalanche":
+                return f"https://traderjoexyz.com/avalanche/trade?outputCurrency={ca}"
+        # Fallback: DexScreener search
+        return f"https://dexscreener.com/search?q={ca}"
+    except Exception:
+        return f"https://dexscreener.com/search?q={ca}"
+# === /DEX swap URL helper ===
+
 # === METRIDEX INTEGRATED PATCHES ===
 # Mutex TTL & LP lock HTML block (Share/PDF untouched)
 
@@ -946,7 +1008,7 @@ def _cmd_watch(chat_id: int, text: str):
                     {"text": "Unwatch", "callback_data": f"watch:rm:{ca}"}
                 ],
                 [
-                    {"text": "Open in DEX", "url": f"https://dexscreener.com/search?q={ca}"},
+                    {"text": "Open in DEX", "url": f"{_swap_url_for(ch, ca)}"},
                     {"text": "Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(ca))}/token/{ca}"}
                 ]
             ]
@@ -1948,37 +2010,56 @@ except Exception:
 
 
 
+
 def _enforce_details_host(text: str, chat_id) -> str:
-    """Ensure Details use consistent Domain and avoid leaking a previous token's domain."""
+    """Ensure Details use consistent Domain (opt‑in via DETAILS_ENFORCE_DOMAIN).
+    Behavior:
+     • If DETAILS_ENFORCE_DOMAIN=0 → no-op.
+     • If DETAILS_ENFORCE_DOMAIN=1 →
+         - Prefer 'Site:' host from current message.
+         - If MDX_LAST_SITE_SCOPE!='message', allow using last chat host.
+         - If none, try CA→domain mapping.
+         - If still none and DOMAIN_META_STRICT=1 → strip Domain/WHOIS/RDAP/SSL/Wayback block.
+    """
     try:
+        if not DETAILS_ENFORCE_DOMAIN:
+            return text
         import re as _re
-        is_details = bool(_re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
+        is_details = bool(_re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text or ''))
         if not is_details:
             return text
-        # Prefer last Site host captured for this chat
-        site_host = _LAST_SITE_HOST.get(chat_id, "") or ""
-        deduced_host = ""
-        if not site_host:
-            # Fallback: derive from token CA using known_domains mapping
-            m = _re.search(r'/token/(0x[0-9a-fA-F]{40})', text)
-            ca = (m.group(1).lower() if m else "")
-            if ca and isinstance(globals().get('_KNOWN_DOMAINS'), dict):
-                deduced_host = (globals().get('_KNOWN_DOMAINS') or {}).get(ca, "") or ""
-        host = site_host or deduced_host
-        if not host:
-            # Strip potentially wrong domain-related lines
+
+        # 1) 'Site:' host from THIS message
+        m_site = _re.search(r'(?mi)^Site:\s*(https?://\S+)', text or '')
+        site_host_in_msg = _extract_host(m_site.group(1)) if m_site else ""
+
+        # 2) If allowed, fall back to last chat host
+        chat_host = (_LAST_SITE_HOST.get(str(chat_id)) or "") if MDX_LAST_SITE_SCOPE != "message" else ""
+
+        # 3) Fallback to mapping by token CA
+        m_ca = _re.search(r'/token/(0x[0-9a-fA-F]{40})', text or '')
+        ca = (m_ca.group(1).lower() if m_ca else "")
+        map_host = (_KNOWN_DOMAINS.get(ca, "") or "") if ca else ""
+
+        host = site_host_in_msg or chat_host or map_host
+
+        if not host and DOMAIN_META_STRICT:
             patt = _re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', _re.M)
-            text = patt.sub("", text)
+            text = patt.sub("", text or "")
             text = _re.sub(r'\n{3,}', "\n\n", text)
             return text
-        # Rewrite Domain: line
+
+        if not host:
+            # allow existing text if not strict
+            return text
+
+        # Rewrite or insert Domain
         m = _re.search(r'^(Domain:\s*)(\S+)', text, _re.M)
         if m:
             dom = m.group(2).strip().lower()
             if dom != host:
                 text = _re.sub(r'^(Domain:\s*)\S+', r'\1' + host, text, flags=_re.M)
         else:
-            # Insert Domain after Site or at top
             if _re.search(r'(?m)^Site:', text):
                 text = _re.sub(r'(?m)^(Site:.*)$', r'\1\nDomain: ' + host, text)
             else:
@@ -2007,28 +2088,44 @@ def _sanitize_lp_claims(text: str) -> str:
 # === /post-send sanitizers ===
 
 
+
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
-    try:
-        text = _sanitize_onchain_zeros(text)
-    except Exception:
-        pass
     try:
         _track_site_host(text, chat_id)
     except Exception:
         pass
+    if not MDX_ENABLE_POSTPROCESS:
+        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+    if MDX_BYPASS_SANITIZERS:
+        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+    try:
+    # Clean up cosmetic (+0) counters in Signals/Why lines
+    try:
+        import re as _re
+        text = _re.sub(r"\s*\(\+0\)", "", text)
+    except Exception:
+        pass
+
+        text = _sanitize_onchain_zeros(text)
+    except Exception:
+        pass
+    # Enforce domain if enabled
     try:
         text = _enforce_details_host(text, chat_id)
     except Exception:
         pass
+    # Compact domain meta suppression
     try:
         text = _sanitize_compact_domains(text, is_details=False)
     except Exception:
         pass
+    # Owner privileges suppression when renounced
     try:
         text = _sanitize_owner_privileges(text, chat_id)
     except Exception:
         pass
+    # LP sanity
     try:
         text = _sanitize_lp_claims(text)
     except Exception:
@@ -2046,7 +2143,7 @@ def _send_text(chat_id, text, **kwargs):
             text = _strip_compact_meta(text)
     except Exception:
         pass
-    # Conservative risk floor for unknown LP
+    # Conservative risk for unknown LP verdicts in details
     try:
         import re as _re
         if _re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text):
@@ -2234,10 +2331,32 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
     
     # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
     if addr:
-        # Safer cross-chain links via DexScreener search; exact chain link is resolved in callback.
-        ik.append([{"text": "🔍 Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"}])
+
+        try:
+            pair, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
+        except Exception:
+            pair, chain = (None, None)
+        ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
+        # DexScreener link
+        ds_url = ""
+        try:
+            paddr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
+            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else f"https://dexscreener.com/search?q={addr}"
+        except Exception:
+            ds_url = f"https://dexscreener.com/search?q={addr}"
+        # Swap link
+        dex_url = _swap_url_for(ch, addr)
+        # Explorer link
+        scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
+        # Add buttons (single row for DS/DEX, next row for Scan)
+        ik.append([
+            {"text": "🔎 Open on DexScreener", "url": ds_url},
+            {"text": "🟢 Open in DEX", "url": dex_url}
+        ])
+        ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
+        
 
     # Δ timeframe row (single)
     ik.append([
