@@ -2116,7 +2116,7 @@ def _send_text(chat_id, text, **kwargs):
         pass
     # Compact domain meta suppression
     try:
-        text = _sanitize_compact_domains(text, is_details=False)
+        text = _sanitize_compact_domains(text, is_details=bool(kwargs.get('is_details', False)))
     except Exception:
         pass
     # Owner privileges suppression when renounced
@@ -4132,7 +4132,7 @@ def webhook(secret):
                 kb0 = msg_obj.get("reply_markup") or {}
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _compress_keyboard(kb1)
-                st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger)
+                st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger, is_details=True)
                 _store_addr_for_message(body, addr)
                 return ("ok", 200)
 
@@ -4822,7 +4822,7 @@ def _enrich_full(addr: str, base_text: str) -> str:
             dom = None
         try:
             if not dom and ADDR_RE.fullmatch(addr_l or ""):
-                dom = KNOWN_HOMEPAGES.get(addr_l)
+                dom = KNOWN_HOMEPAGES.get(addr_l) or _KNOWN_DOMAINS.get(addr_l)
         except Exception:
             pass
         try:
