@@ -1579,8 +1579,38 @@ def _is_lp_mini_only(text: str) -> bool:
         return False
 # === /Send-time LP filter ===
 
+# === Compact QuickScan send-time sanitizer ===
+def _is_compact_qs(text: str) -> bool:
+    try:
+        if not isinstance(text, str): return False
+        t = text
+        if "Metridex QuickScan (MVP+)" not in t:
+            return False
+        if ("Trust verdict:" in t) or ("Why++ factors" in t) or ("On-chain" in t):
+            return False
+        return True
+    except Exception:
+        return False
+
+def _strip_compact_meta(text: str) -> str:
+    try:
+        if not isinstance(text, str): return text
+        import re as _re
+        text = _re.sub(r"(?m)^\s*Domain:.*\n", "", text)
+        text = _re.sub(r"(?m)^\s*SSL:.*\n", "", text)
+        text = _re.sub(r"(?m)^\s*Wayback:.*\n", "", text)
+        return text
+    except Exception:
+        return text
+# === /Compact sanitizer ===
+
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
+    try:
+        if _is_compact_qs(text):
+            text = _strip_compact_meta(text)
+    except Exception:
+        pass
     try:
         if _is_lp_mini_only(text):
             return {"ok": True, "skipped": "lp_mini"}
@@ -4178,9 +4208,32 @@ def _qs_finalize_details_lp_unknown_risk(text: str) -> str:
     except Exception:
         return text
 
+
+# === Details finalizer add-on: align Domain to Site host ===
+def _qs_fix_domain_from_site(text: str) -> str:
+    try:
+        if not isinstance(text,str): return text
+        import re as _re, urllib.parse as _u
+        m = _re.search(r"Site:\s*(https?://[^\s/]+(?:/[^\s]*)?)", text)
+        if not m:
+            return text
+        host = (_u.urlparse(m.group(1)).hostname or "").strip()
+        if not host:
+            return text
+        # Replace Domain: line with host
+        if "Domain:" in text:
+            text = _re.sub(r"(?m)^\s*Domain:\s*.*$", "Domain: " + host, text)
+        else:
+            text = text.replace(m.group(0), m.group(0) + "\nDomain: " + host)
+        # Shorten SSL issuer if needed
+        text = _re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt", text)
+        return text
+    except Exception:
+        return text
+# === /Align Domain ===
 def _qs_finalize_details_wrap(text: str) -> str:
     try:
-        t = _qs_strip_summary_meta(_qs_finalize_details_wrap(text))
+        t = _qs_fix_domain_from_site(_qs_strip_summary_meta(_qs_finalize_details_wrap(text)))
     except Exception:
         t = text
     try:
@@ -4193,12 +4246,12 @@ def _enrich_full(addr: str, base_text: str) -> str:
     try:
         text = base_text or ""
         try:
-            text = _qs_strip_summary_meta(_qs_finalize_details_wrap(text))
+            text = _qs_fix_domain_from_site(_qs_strip_summary_meta(_qs_finalize_details_wrap(text)))
         except Exception:
             pass
         # Final formatting (safe)
         try:
-            text = _qs_strip_summary_meta(_qs_finalize_details_wrap(text))
+            text = _qs_fix_domain_from_site(_qs_strip_summary_meta(_qs_finalize_details_wrap(text)))
         except Exception:
             pass
         addr_l = (addr or "").lower()
