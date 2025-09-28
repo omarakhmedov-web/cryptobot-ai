@@ -2091,6 +2091,7 @@ def _sanitize_lp_claims(text: str) -> str:
 
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
+    is_details_flag = bool(kwargs.pop('is_details', False))
     try:
         _track_site_host(text, chat_id)
     except Exception:
@@ -2116,7 +2117,7 @@ def _send_text(chat_id, text, **kwargs):
         pass
     # Compact domain meta suppression
     try:
-        text = _sanitize_compact_domains(text, is_details=bool(kwargs.get('is_details', False)))
+        text = _sanitize_compact_domains(text, is_details=is_details_flag)
     except Exception:
         pass
     # Owner privileges suppression when renounced
