@@ -32,7 +32,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe7")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8")
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
@@ -105,7 +105,7 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
             text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present(?:\s*\(\+?\d+\))?\s*$', "", text)
             def _strip_owner_in_signals(m):
                 line = m.group(0)
-                line = re.sub(r'(;\s*)?Owner\s+privileges\s+present', '', line, flags=re.I)
+                line = re.sub(r'(;|\uFF1B|\s)*Owner\s+privileges\s+present', '', line, flags=re.I)
                 line = re.sub(r'^\s*⚠️\s*Signals:\s*$', '', line).strip()
                 return line
             text = re.sub(r'(?mi)^\s*⚠️\s*Signals:.*$', _strip_owner_in_signals, text)
@@ -156,9 +156,16 @@ def _sanitize_lp_claims(text: str) -> str:
         if th and th.group(1).lower() == ca:
             text = re.sub(r'^(•\s*Top holder:\s*)(0x[0-9a-fA-F]{40})', r'\1n/a', text, flags=re.M)
             text = re.sub(r'(•\s*Top holder type:\s*)EOA', r'\1contract', text)
-        return text
+        
+    # Flip verdict wording if needed
+    try:
+        if re.search(r'(Top holder type:\s*)contract', text, re.I):
+            text = re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', text)
     except Exception:
-        return text
+        pass
+    return text
+except Exception:
+    return text
 # === /sanitizers (finalfix3) ===
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
@@ -1872,6 +1879,14 @@ def _track_site_host(text: str, chat_id):
             _LAST_SITE_HOST[chat_id] = _extract_host(m.group(1))
     except Exception:
         pass
+
+try:
+    # If this is a QuickScan message but lacks 'Site:', clear previous host to prevent cross-token leakage
+    if ("Metridex QuickScan (MVP+)" in text) and (re.search(r'^Site:\s*https?://', text, re.M) is None):
+        _LAST_SITE_HOST[chat_id] = ""
+except Exception:
+    pass
+
 
 def _enforce_details_host(text: str, chat_id) -> str:
     """Ensure Details use the host from last compact 'Site'. If absent, strip domain blocks."""
