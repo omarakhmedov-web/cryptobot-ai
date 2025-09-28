@@ -157,15 +157,15 @@ def _sanitize_lp_claims(text: str) -> str:
             text = re.sub(r'^(•\s*Top holder:\s*)(0x[0-9a-fA-F]{40})', r'\1n/a', text, flags=re.M)
             text = re.sub(r'(•\s*Top holder type:\s*)EOA', r'\1contract', text)
         
-    # Flip verdict wording if needed
-    try:
-        if re.search(r'(Top holder type:\s*)contract', text, re.I):
-            text = re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', text)
+        # Flip verdict wording if needed
+        try:
+            if re.search(r'(Top holder type:\s*)contract', text, re.I):
+                text = re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', text)
+        except Exception:
+            pass
+        return text
     except Exception:
-        pass
-    return text
-except Exception:
-    return text
+        return text
 # === /sanitizers (finalfix3) ===
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
