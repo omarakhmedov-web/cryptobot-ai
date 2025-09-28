@@ -32,7 +32,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.113-onepass-safe6")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe7")
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
@@ -102,17 +102,13 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
         proxy_present = re.search(r'Proxy:\s*(yes|true|1)', text, re.I)
         is_renounced = bool(re.search(zeros_pattern, text, re.I) or re.search(renounced_word, text, re.I))
         if is_renounced and not proxy_present:
-            # Remove Why++ bullet like: '+20 Owner privileges present' or '+ Owner privileges present (+0)'
             text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present(?:\s*\(\+?\d+\))?\s*$', "", text)
-            # Also strip from '⚠️ Signals:' line if present
             def _strip_owner_in_signals(m):
                 line = m.group(0)
                 line = re.sub(r'(;\s*)?Owner\s+privileges\s+present', '', line, flags=re.I)
-                # clean trailing label if empty
                 line = re.sub(r'^\s*⚠️\s*Signals:\s*$', '', line).strip()
                 return line
             text = re.sub(r'(?mi)^\s*⚠️\s*Signals:.*$', _strip_owner_in_signals, text)
-            # Compact excessive blank lines
             text = re.sub(r'\n{3,}', "\n\n", text)
         return text
     except Exception:
@@ -126,7 +122,6 @@ def _enforce_details_host(text: str, chat_id) -> str:
         msite = re.search(r'^Site:\s*(https?://\S+)', text, re.M|re.I)
         site_host = _extract_host(msite.group(1)) if msite else ""
         if not site_host:
-            # try by contract address via KNOWN_DOMAINS
             mca = re.search(r'/token/(0x[0-9a-fA-F]{40})', text) or re.search(r'\b(0x[0-9a-fA-F]{40})\b', text)
             if mca:
                 ca = mca.group(1).lower()
@@ -1500,7 +1495,6 @@ def _ds_resolve_pair_and_chain_on(addr_l: str, desired_chain: str):
         want = (desired_chain or "").lower()
         desired = [p for p in pairs if str(p.get("chainId") or p.get("chain") or "").lower() == want]
         if not desired:
-            # Strict: do not fall back to other chains
             return None, None
         pick = globals().get("_ds_pick_best_pair")
         p = pick(desired) if callable(pick) else (desired[0] if desired else None)
@@ -5375,3 +5369,41 @@ def _qs_strip_summary_meta(text: str) -> str:
         return text[:i0] + head + tail
     except Exception:
         return text
+
+
+def _postprocess_report(text: str, chat_id) -> str:
+    """Final pass to prevent cross-token/domain leakage and false LP/owner flags."""
+    try:
+        _track_site_host(text, chat_id)
+    except Exception:
+        pass
+    try:
+        text = _enforce_details_host(text, chat_id)
+    except Exception:
+        pass
+    try:
+        text = _sanitize_owner_privileges(text, chat_id)
+    except Exception:
+        pass
+    try:
+        m_ca = re.search(r'Scan token:\s*\S*?/token/(0x[0-9a-fA-F]{40})', text)
+        if m_ca:
+            ca = m_ca.group(1).lower()
+            def fix_lp_block(block: str) -> str:
+                if re.search(rf'Top holder:\s*{ca}\b', block, re.I):
+                    block = re.sub(r'^(Verdict:\s*).*$',
+                                   r'\1⚪ unknown (no LP data)', block, flags=re.M)
+                    block = re.sub(r'^•\s*Top holder:.*$', '• Top holder: n/a — 0.0% of LP', block, flags=re.M)
+                    block = re.sub(r'^•\s*Top holder type:.*$', '• Top holder type: n/a', block, flags=re.M)
+                    block = re.sub(r'^•\s*Holders \(LP token\):.*$', '• Holders (LP token): 0', block, flags=re.M)
+                    block = re.sub(r'^•\s*Owner:.*$', '• Owner: n/a', block, flags=re.M)
+                    block = re.sub(r'^•\s*Renounced:.*$', '• Renounced: —', block, flags=re.M)
+                    block = re.sub(r'^•\s*Proxy:.*$', '• Proxy: —', block, flags=re.M)
+                return block
+            text = re.sub(r'(🔒 LP lock \(lite\).*?)(?=\n\n|\Z)',
+                          lambda m: fix_lp_block(m.group(1)), text, flags=re.S)
+    except Exception:
+        pass
+    text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present(?:\s*\(\+\d+\))?\s*$', "", text)
+    text = re.sub(r'\n{3,}', "\n\n", text)
+    return text
