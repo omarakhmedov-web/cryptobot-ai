@@ -1706,7 +1706,6 @@ def _sanitize_onchain_zeros(text: str) -> str:
 
 # === METRIDEX post-send sanitizers & context trackers ===
 _LAST_OWNER_RENOUNCED = {}    # chat_id -> bool
-_LAST_SITE_HOST = {}          # chat_id -> host from "Site: https://host/..."
 DETAILS_SUPPRESS = bool(int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT","0") or "0"))
 
 def _extract_host(url: str) -> str:
@@ -1733,93 +1732,84 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
     except Exception:
         return text
 
+
 def _sanitize_owner_privileges(text: str, chat_id) -> str:
-    """If owner is renounced (0x000..), suppress 'Owner privileges present' in Why++/Signals."""
+    """If owner is renounced (0x000…000 or 'renounced') and no proxy, suppress 'Owner privileges present'."""
     try:
-        ren = _LAST_OWNER_RENOUNCED.get(chat_id, False)
-        if not ren:
-            # detect renounce inside same message
-            if re.search(r'Owner:\s*0x0{4,}', text, re.I) and not re.search(r'Proxy:\s*(yes|true|1)', text, re.I):
-                ren = True
-                _LAST_OWNER_RENOUNCED[chat_id] = True
-        if ren:
-            # remove lines in Why++ or Signals mentioning Owner privileges
-            text = re.sub(r'^\s*[+\-]\s*20?\s*Owner privileges present\s*$', "", text, flags=re.M|re.I)
-            text = re.sub(r'^\s*⚠️\s*Signals:.*Owner privileges present.*$', lambda m: m.group(0).replace('Owner privileges present;','').replace('Owner privileges present','').strip(), text, flags=re.M)
-            # cleanup multiple separators or leftover punctuation
-            text = re.sub(r';\s*;', '; ', text)
-            text = re.sub(r'⚠️\s*Signals:\s*$', '', text, flags=re.M)
+        zeros_pattern = r'Owner:\s*(0x0{4,}|0x0{3,}[\.…]+0+)'
+        renounced_word = r'Owner:\s*renounced'
+        proxy_present = re.search(r'Proxy:\s*(yes|true|1)', text, re.I)
+        is_renounced = bool(re.search(zeros_pattern, text, re.I) or re.search(renounced_word, text, re.I))
+        if is_renounced and not proxy_present:
+            text = re.sub(r'^\s*[+\-]?\s*\d*\s*Owner privileges present\s*$', "", text, flags=re.M|re.I)
+            def _strip_owner_in_signals(m):
+                line = m.group(0)
+                line = re.sub(r'(;\s*)?Owner privileges present', '', line, flags=re.I)
+                line = re.sub(r'⚠️\s*Signals:\s*$', '', line)
+                return line.strip()
+            text = re.sub(r'^\s*⚠️\s*Signals:.*$', _strip_owner_in_signals, text, flags=re.M)
             text = re.sub(r'\n{3,}', "\n\n", text)
         return text
     except Exception:
         return text
 
-def _track_site_host(text: str, chat_id):
-    try:
-        m = re.search(r'^Site:\s*(https?://\S+)', text, re.M|re.I)
-        if m:
-            _LAST_SITE_HOST[chat_id] = _extract_host(m.group(1))
-    except Exception:
-        pass
 
 def _enforce_details_host(text: str, chat_id) -> str:
-    """Ensure Details use the host from last compact 'Site'. If absent, strip domain blocks."""
+    """Ensure Details use host ONLY from current message's `Site:`. If absent, strip domain blocks."""
     try:
-        # Heuristic: treat messages containing 'Trust verdict' OR 'WHOIS'/'SSL'/'Wayback' as Details
         is_details = bool(re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
         if not is_details:
             return text
-        site_host = _LAST_SITE_HOST.get(chat_id, "")
-        if not site_host:
-            # no site captured: drop domain blocks to avoid leakage/mismatch
+        msite = re.search(r'^Site:\s*(https?://\S+)', text, re.M|re.I)
+        if not msite:
             patt = re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
             text = patt.sub("", text)
             text = re.sub(r'\n{3,}', "\n\n", text)
             return text
-        # If Domain line exists and mismatches Site host — rewrite to Site host.
-        m = re.search(r'^(Domain:\s*)(\S+)', text, re.M)
-        if m:
-            dom = m.group(2).strip().lower()
+        from urllib.parse import urlparse
+        site_host = urlparse(msite.group(1).strip()).netloc.lower()
+        mdom = re.search(r'^(Domain:\s*)(\S+)', text, re.M)
+        if mdom:
+            dom = mdom.group(2).strip().lower()
             if dom != site_host:
-                text = re.sub(r'^(Domain:\s*)\S+', rf'\1{site_host}', text, flags=re.M)
+                text = re.sub(r'^(Domain:\s*)\S+', f'\\1{site_host}', text, flags=re.M)
         else:
-            # Insert Domain line near the top (after 'source' or 'Site')
             if "source:" in text:
-                text = re.sub(r'^(source:.*)$', rf'\1\nDomain: {site_host}', text, flags=re.M)
+                text = re.sub(r'^(source:.*)$', r'\1' + f'\nDomain: {site_host}', text, flags=re.M)
             else:
                 text = f'Domain: {site_host}\n{text}'
         return text
     except Exception:
         return text
 
+
+
 def _sanitize_lp_claims(text: str) -> str:
-    """Avoid obviously wrong LP claims (when LP holder equals token CA string found nearby)."""
+    """Avoid wrong LP claims: if Top holder equals token CA, neutralize; also fix type EOA->contract."""
     try:
-        # Find token CA from 'Scan token: .../token/<ca>'
-        m = re.search(r'/token/(0x[0-9a-f]{40})', text, re.I)
+        import unicodedata, re
+        norm = unicodedata.normalize("NFKC", text or "")
+        m = re.search(r'/token/(0x[0-9a-fA-F]{40})', norm)
         if not m:
             return text
         ca = m.group(1).lower()
-        # If LP section states Top holder equals that CA — neutralize it.
-        text = re.sub(rf'(Top holder:\s*){ca}\b', r'\1n/a', text, flags=re.I)
-        # Also if On-chain line claims 'topHolder=\d+%' but no LP address is present anywhere,
-        # keep as-is (can't safely change), but if 'Top holder type: EOA' exists together with contract CA, switch to 'contract'.
-        if re.search(rf'\b{ca}\b', text, re.I):
-            text = re.sub(r'(Top holder type:\s*)EOA', r'\1contract', text)
+        # Match bullet Top holder line
+        th_norm = re.search(r'^•\s*Top holder:\s*(0x[0-9a-fA-F]{40})', norm, re.M)
+        if th_norm:
+            top = th_norm.group(1).lower()
+            if top == ca:
+                # Replace in original text for minimal diff
+                text = re.sub(r'^(•\s*Top holder:\s*)(0x[0-9a-fA-F]{40})', r'\1n/a', text, flags=re.M)
+                text = re.sub(r'(•\s*Top holder type:\s*)EOA', r'\1contract', text)
         return text
     except Exception:
         return text
-# === /post-send sanitizers ===
+
 
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     try:
         text = _sanitize_onchain_zeros(text)
-    except Exception:
-        pass
-    # Track compact site host
-    try:
-        _track_site_host(text, chat_id)
     except Exception:
         pass
     # Enforce Details host consistency
