@@ -7,6 +7,7 @@ import socket
 import tempfile
 import hashlib
 import threading
+import unicodedata
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -31,7 +32,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.112-polished+finalfix1+finalfix3+finalfix5")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.113-onepass-safe6")
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
@@ -94,19 +95,24 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
         return text
 
 def _sanitize_owner_privileges(text: str, chat_id) -> str:
+    """If owner is renounced (0x000… or 'renounced') and no proxy, suppress 'Owner privileges present'."""
     try:
-        zeros_pattern = r'Owner:\s*(0x0{4,}|0x0{3,}[\.…]+0+)'
+        zeros_pattern = r'Owner:\s*(0x0{4,}|0x0{3,}[\.…]+0+)'  # full zeros or truncated with ellipsis
         renounced_word = r'Owner:\s*renounced'
         proxy_present = re.search(r'Proxy:\s*(yes|true|1)', text, re.I)
         is_renounced = bool(re.search(zeros_pattern, text, re.I) or re.search(renounced_word, text, re.I))
         if is_renounced and not proxy_present:
-            text = re.sub(r'^[\s]*[+\-−]?\s*\d*\s*Owner privileges present\s*$', "", text, flags=re.M|re.I)
+            # Remove Why++ bullet like: '+20 Owner privileges present' or '+ Owner privileges present (+0)'
+            text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present(?:\s*\(\+?\d+\))?\s*$', "", text)
+            # Also strip from '⚠️ Signals:' line if present
             def _strip_owner_in_signals(m):
                 line = m.group(0)
-                line = re.sub(r'(;\s*)?Owner privileges present', '', line, flags=re.I)
-                line = re.sub(r'⚠️\s*Signals:\s*$', '', line)
-                return line.strip()
-            text = re.sub(r'^\s*⚠️\s*Signals:.*$', _strip_owner_in_signals, text, flags=re.M)
+                line = re.sub(r'(;\s*)?Owner\s+privileges\s+present', '', line, flags=re.I)
+                # clean trailing label if empty
+                line = re.sub(r'^\s*⚠️\s*Signals:\s*$', '', line).strip()
+                return line
+            text = re.sub(r'(?mi)^\s*⚠️\s*Signals:.*$', _strip_owner_in_signals, text)
+            # Compact excessive blank lines
             text = re.sub(r'\n{3,}', "\n\n", text)
         return text
     except Exception:
@@ -120,6 +126,7 @@ def _enforce_details_host(text: str, chat_id) -> str:
         msite = re.search(r'^Site:\s*(https?://\S+)', text, re.M|re.I)
         site_host = _extract_host(msite.group(1)) if msite else ""
         if not site_host:
+            # try by contract address via KNOWN_DOMAINS
             mca = re.search(r'/token/(0x[0-9a-fA-F]{40})', text) or re.search(r'\b(0x[0-9a-fA-F]{40})\b', text)
             if mca:
                 ca = mca.group(1).lower()
@@ -1490,8 +1497,13 @@ def _ds_resolve_pair_and_chain_on(addr_l: str, desired_chain: str):
             return None, None
         body = r.json() if hasattr(r, "json") else {}
         pairs = body.get("pairs") or []
-        desired = [p for p in pairs if str(p.get("chainId") or p.get("chain") or "").lower() == (desired_chain or "").lower()]
-        p = _ds_pick_best_pair(desired) if desired else _ds_pick_best_pair(pairs)
+        want = (desired_chain or "").lower()
+        desired = [p for p in pairs if str(p.get("chainId") or p.get("chain") or "").lower() == want]
+        if not desired:
+            # Strict: do not fall back to other chains
+            return None, None
+        pick = globals().get("_ds_pick_best_pair")
+        p = pick(desired) if callable(pick) else (desired[0] if desired else None)
         if not p:
             return None, None
         chain = (p or {}).get("chainId") or (p or {}).get("chain")
@@ -1502,6 +1514,7 @@ def _ds_resolve_pair_and_chain_on(addr_l: str, desired_chain: str):
         return p, (chain or "").lower()
     except Exception:
         return None, None
+
 def _ds_pick_best_pair(pairs):
     if not isinstance(pairs, list):
         return None
