@@ -94,26 +94,54 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
     except Exception:
         return text
 
+
 def _sanitize_owner_privileges(text: str, chat_id) -> str:
-    """If owner is renounced (0x000… or 'renounced') and no proxy, suppress 'Owner privileges present'."""
+    """If owner is renounced (0x000… or 'renounced') and no proxy, suppress 'Owner privileges present' everywhere
+    and adjust Risk score accordingly, removing the corresponding Why++ penalty if present."""
     try:
         zeros_pattern = r'Owner:\s*(0x0{4,}|0x0{3,}[\.…]+0+)'  # full zeros or truncated with ellipsis
         renounced_word = r'Owner:\s*renounced'
         proxy_present = re.search(r'Proxy:\s*(yes|true|1)', text, re.I)
         is_renounced = bool(re.search(zeros_pattern, text, re.I) or re.search(renounced_word, text, re.I))
         if is_renounced and not proxy_present:
-            text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present(?:\s*\(\+?\d+\))?\s*$', "", text)
+            # 1) Remove from Signals line
             def _strip_owner_in_signals(m):
                 line = m.group(0)
                 line = re.sub(r'(;|\uFF1B|\s)*Owner\s+privileges\s+present', '', line, flags=re.I)
-                line = re.sub(r'^\s*⚠️\s*Signals:\s*$', '', line).strip()
+                line = re.sub(r'\s*;\s*;', ';', line)  # collapse double semicolons
+                line = re.sub(r'\s*;\s*$', '', line)   # trailing semicolon
+                if re.sub(r'^\s*⚠️\s*Signals:\s*', '', line).strip() == '':
+                    return ''
                 return line
             text = re.sub(r'(?mi)^\s*⚠️\s*Signals:.*$', _strip_owner_in_signals, text)
+
+            # 2) Remove Why++ line and capture its numeric penalty to adjust Risk score
+            penalty = 0
+            def _strip_owner_in_why(m):
+                nonlocal penalty
+                s = m.group(0)
+                mnum = re.search(r'[−-]\s*(\d+)', s)
+                if mnum:
+                    penalty = int(mnum.group(1))
+                return ''
+            text_new = re.sub(r'(?mi)^\s*[−-]\s*\d+\s+Owner\s+privileges\s+present\s*$', _strip_owner_in_why, text)
+            if text_new != text:
+                text = text_new
+                # Adjust Risk score: lower is safer; removing a negative should *reduce* the risk number by 'penalty'
+                mscore = re.search(r'(?mi)Risk\s*score:\s*(\d+)\s*/\s*100', text)
+                if mscore and penalty:
+                    score = int(mscore.group(1))
+                    new_score = max(0, score - penalty)
+                    text = re.sub(r'(?mi)(Risk\s*score:\s*)\d+(\s*/\s*100)', rf'\1{new_score}\2', text)
+
+            # 3) If anywhere standalone phrase appears (unexpected), remove it
+            text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present.*$', '', text)
+
+            # 4) Tidy blank lines
             text = re.sub(r'\n{3,}', "\n\n", text)
         return text
     except Exception:
         return text
-
 
 def _enforce_details_host(text: str, chat_id) -> str:
     """Ensure Details use consistent Domain and avoid leaking a previous token's domain."""
@@ -154,8 +182,30 @@ def _enforce_details_host(text: str, chat_id) -> str:
     except Exception:
         return text
 
+
 def _sanitize_lp_claims(text: str) -> str:
     try:
+        norm = unicodedata.normalize("NFKC", text or "")
+        # Prefer CA from "Scan token:" line; fallback to the last "/token/0x..." occurrence
+        m_token = re.search(r'(?mi)^Scan\s+token:\s*\S*/token/(0x[0-9a-fA-F]{40})', norm)
+        if not m_token:
+            m_all = re.findall(r'/token/(0x[0-9a-fA-F]{40})', norm)
+            ca = (m_all[-1].lower() if m_all else "")
+        else:
+            ca = m_token.group(1).lower()
+        if not ca:
+            return text
+        th = re.search(r'^•\s*Top holder:\s*(0x[0-9a-fA-F]{40}|n/a)', norm, re.M)
+        if th and th.group(1).lower() == ca:
+            # If top holder equals the token CA → that's not an LP holder; sanitize
+            text = re.sub(r'^(•\s*Top holder:\s*)(0x[0-9a-fA-F]{40})', r'\1n/a', text, flags=re.M)
+            text = re.sub(r'(•\s*Top holder type:\s*)EOA', r'\1contract', text)
+        # Wording fix: if type is 'contract' → replace '(EOA holds LP)' phrasing
+        if re.search(r'(Top holder type:\s*)contract', text, re.I):
+            text = re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', text)
+        return text
+    except Exception:
+        return text
         norm = unicodedata.normalize("NFKC", text or "")
         m = re.search(r'/token/(0x[0-9a-fA-F]{40})', norm)
         if not m:
@@ -5444,3 +5494,16 @@ def _postprocess_report(text: str, chat_id) -> str:
     text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present(?:\s*\(\+\d+\))?\s*$', "", text)
     text = re.sub(r'\n{3,}', "\n\n", text)
     return text
+
+# === Fallback mapping for well-known tokens → domains (used if KNOWN_DOMAINS file not provided) ===
+_FALLBACK_KNOWN_DOMAINS = {
+    "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": "pancakeswap.finance",  # CAKE
+    "0x831753dd7087cac61ab5644b308642cc1c33dc13": "quickswap.exchange",   # QUICK
+    "0x6982508145454ce325ddbe47a25d4ec3d2311933": "www.pepe.vip",        # PEPE
+}
+try:
+    _KNOWN_DOMAINS  # noqa: F401
+except NameError:
+    _KNOWN_DOMAINS = {}
+if not _KNOWN_DOMAINS:
+    _KNOWN_DOMAINS = dict(_FALLBACK_KNOWN_DOMAINS)
