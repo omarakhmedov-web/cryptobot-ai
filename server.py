@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.112-polished+finalfix1+finalfix3")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.112-polished+finalfix1+finalfix3+finalfix4")
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
@@ -5362,3 +5362,65 @@ def _qs_strip_summary_meta(text: str) -> str:
         return text[:i0] + head + tail
     except Exception:
         return text
+
+
+# --- robust details host enforcement v2 (finalfix4) ---
+def _enforce_details_host2(text: str, chat_id) -> str:
+    """Stronger Details sanitizer: use current Site:, else known-domain, else strip. Handles indents and case."""
+    try:
+        is_details = bool(re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
+        if not is_details:
+            return text
+        msite = re.search(r'^[ \t]*Site:\s*(https?://\S+)', text, re.M|re.I)
+        def _host(u):
+            try:
+                from urllib.parse import urlparse
+                return urlparse(str(u).strip()).netloc.lower()
+            except Exception:
+                return ""
+        site_host = _host(msite.group(1)) if msite else ""
+        if not site_host:
+            mca = re.search(r'/token/(0x[0-9a-fA-F]{40})', text) or re.search(r'\b(0x[0-9a-fA-F]{40})\b', text)
+            if mca:
+                ca = mca.group(1).lower()
+                site_host = _KNOWN_DOMAINS.get(ca, "")
+        if not site_host:
+            patt = re.compile(r'^[ \t]*(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
+            text = patt.sub("", text)
+            text = re.sub(r'\n{3,}', "\n\n", text)
+            return text
+        # Rewrite or insert Domain line
+        if re.search(r'^[ \t]*[Dd]omain:\s*\S+', text, re.M):
+            text = re.sub(r'^[ \t]*([Dd]omain:\s*)\S+', r'\1' + site_host, text, flags=re.M)
+        else:
+            if re.search(r'^[ \t]*source:.*$', text, re.M):
+                text = re.sub(r'^([ \t]*source:.*)$', r'\1' + f'\nDomain: {site_host}', text, flags=re.M)
+            else:
+                text = f'Domain: {site_host}\n' + text
+        return text
+    except Exception:
+        return text
+
+def _apply_all_sanitizers(text: str, chat_id):
+    try:
+        t = text or ""
+        t = _enforce_details_host2(t, chat_id)
+        t = _sanitize_compact_domains(t, is_details=False)
+        t = _sanitize_owner_privileges(t, chat_id)
+        t = _sanitize_lp_claims(t)
+        return t
+    except Exception:
+        return text
+
+# Monkeypatch tg_send_message to always run sanitizers at the end
+try:
+    _tg_send_message_orig = tg_send_message
+    def tg_send_message(chat_id, text, **kwargs):
+        try:
+            text = _apply_all_sanitizers(text, chat_id)
+        except Exception:
+            pass
+        return _tg_send_message_orig(chat_id, text, **kwargs)
+except Exception:
+    pass
+# --- /finalfix4 ---
