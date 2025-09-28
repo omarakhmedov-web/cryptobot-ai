@@ -4817,6 +4817,12 @@ def _enrich_full(addr: str, base_text: str) -> str:
             pass
         addr_l = (addr or "").lower()
         dom = None
+        # Hard fallback for well-known tokens (bypass ENV issues)
+        FALLBACK_BRANDS = {
+            "0x6982508145454ce325ddbe47a25d4ec3d2311933": "www.pepe.vip",
+            "0x831753dd7087cac61ab5644b308642cc1c33dc13": "quickswap.exchange",
+            "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": "pancakeswap.finance",
+        }
         try:
             dom = _extract_domain_from_text(text)
         except Exception:
