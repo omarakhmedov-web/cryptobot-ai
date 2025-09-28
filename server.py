@@ -31,7 +31,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.112-polished")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.112-polished+finalfix1")
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
@@ -1704,10 +1704,142 @@ def _sanitize_onchain_zeros(text: str) -> str:
         return text
 # === /On-chain zeros sanitizer ===
 
+# === METRIDEX post-send sanitizers & context trackers ===
+_LAST_OWNER_RENOUNCED = {}    # chat_id -> bool
+_LAST_SITE_HOST = {}          # chat_id -> host from "Site: https://host/..."
+DETAILS_SUPPRESS = bool(int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT","0") or "0"))
+
+def _extract_host(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        h = urlparse(str(url).strip()).netloc.lower()
+        return h
+    except Exception:
+        return ""
+
+def _sanitize_compact_domains(text: str, is_details: bool) -> str:
+    """Remove Domain/WHOIS/SSL/Wayback from compact blocks when flag is on."""
+    try:
+        if not DETAILS_SUPPRESS or is_details:
+            return text
+        # If it's compact (no 'Trust verdict'), drop domain-related lines.
+        if "Trust verdict" in text:
+            return text
+        patt = re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
+        text = patt.sub("", text)
+        # Also collapse extra blanks
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text
+    except Exception:
+        return text
+
+def _sanitize_owner_privileges(text: str, chat_id) -> str:
+    """If owner is renounced (0x000..), suppress 'Owner privileges present' in Why++/Signals."""
+    try:
+        ren = _LAST_OWNER_RENOUNCED.get(chat_id, False)
+        if not ren:
+            # detect renounce inside same message
+            if re.search(r'Owner:\s*0x0{4,}', text, re.I) and not re.search(r'Proxy:\s*(yes|true|1)', text, re.I):
+                ren = True
+                _LAST_OWNER_RENOUNCED[chat_id] = True
+        if ren:
+            # remove lines in Why++ or Signals mentioning Owner privileges
+            text = re.sub(r'^\s*[+\-]\s*20?\s*Owner privileges present\s*$', "", text, flags=re.M|re.I)
+            text = re.sub(r'^\s*⚠️\s*Signals:.*Owner privileges present.*$', lambda m: m.group(0).replace('Owner privileges present;','').replace('Owner privileges present','').strip(), text, flags=re.M)
+            # cleanup multiple separators or leftover punctuation
+            text = re.sub(r';\s*;', '; ', text)
+            text = re.sub(r'⚠️\s*Signals:\s*$', '', text, flags=re.M)
+            text = re.sub(r'\n{3,}', "\n\n", text)
+        return text
+    except Exception:
+        return text
+
+def _track_site_host(text: str, chat_id):
+    try:
+        m = re.search(r'^Site:\s*(https?://\S+)', text, re.M|re.I)
+        if m:
+            _LAST_SITE_HOST[chat_id] = _extract_host(m.group(1))
+    except Exception:
+        pass
+
+def _enforce_details_host(text: str, chat_id) -> str:
+    """Ensure Details use the host from last compact 'Site'. If absent, strip domain blocks."""
+    try:
+        # Heuristic: treat messages containing 'Trust verdict' OR 'WHOIS'/'SSL'/'Wayback' as Details
+        is_details = bool(re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
+        if not is_details:
+            return text
+        site_host = _LAST_SITE_HOST.get(chat_id, "")
+        if not site_host:
+            # no site captured: drop domain blocks to avoid leakage/mismatch
+            patt = re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
+            text = patt.sub("", text)
+            text = re.sub(r'\n{3,}', "\n\n", text)
+            return text
+        # If Domain line exists and mismatches Site host — rewrite to Site host.
+        m = re.search(r'^(Domain:\s*)(\S+)', text, re.M)
+        if m:
+            dom = m.group(2).strip().lower()
+            if dom != site_host:
+                text = re.sub(r'^(Domain:\s*)\S+', rf'\1{site_host}', text, flags=re.M)
+        else:
+            # Insert Domain line near the top (after 'source' or 'Site')
+            if "source:" in text:
+                text = re.sub(r'^(source:.*)$', rf'\1\nDomain: {site_host}', text, flags=re.M)
+            else:
+                text = f'Domain: {site_host}\n{text}'
+        return text
+    except Exception:
+        return text
+
+def _sanitize_lp_claims(text: str) -> str:
+    """Avoid obviously wrong LP claims (when LP holder equals token CA string found nearby)."""
+    try:
+        # Find token CA from 'Scan token: .../token/<ca>'
+        m = re.search(r'/token/(0x[0-9a-f]{40})', text, re.I)
+        if not m:
+            return text
+        ca = m.group(1).lower()
+        # If LP section states Top holder equals that CA — neutralize it.
+        text = re.sub(rf'(Top holder:\s*){ca}\b', r'\1n/a', text, flags=re.I)
+        # Also if On-chain line claims 'topHolder=\d+%' but no LP address is present anywhere,
+        # keep as-is (can't safely change), but if 'Top holder type: EOA' exists together with contract CA, switch to 'contract'.
+        if re.search(rf'\b{ca}\b', text, re.I):
+            text = re.sub(r'(Top holder type:\s*)EOA', r'\1contract', text)
+        return text
+    except Exception:
+        return text
+# === /post-send sanitizers ===
+
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     try:
         text = _sanitize_onchain_zeros(text)
+    except Exception:
+        pass
+    # Track compact site host
+    try:
+        _track_site_host(text, chat_id)
+    except Exception:
+        pass
+    # Enforce Details host consistency
+    try:
+        text = _enforce_details_host(text, chat_id)
+    except Exception:
+        pass
+    # Suppress domain/wayback in compact if flag set
+    try:
+        text = _sanitize_compact_domains(text, is_details=False)
+    except Exception:
+        pass
+    # Owner privileges suppression when renounced
+    try:
+        text = _sanitize_owner_privileges(text, chat_id)
+    except Exception:
+        pass
+    # LP sanity
+    try:
+        text = _sanitize_lp_claims(text)
     except Exception:
         pass
     try:
