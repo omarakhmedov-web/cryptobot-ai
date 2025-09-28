@@ -114,33 +114,42 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
     except Exception:
         return text
 
+
 def _enforce_details_host(text: str, chat_id) -> str:
+    """Ensure Details use consistent Domain and avoid leaking a previous token's domain."""
     try:
-        is_details = bool(re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
+        import re as _re
+        is_details = bool(_re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
         if not is_details:
             return text
-        msite = re.search(r'^Site:\s*(https?://\S+)', text, re.M|re.I)
-        site_host = _extract_host(msite.group(1)) if msite else ""
+        # Prefer last Site host captured for this chat
+        site_host = _LAST_SITE_HOST.get(chat_id, "") or ""
+        deduced_host = ""
         if not site_host:
-            mca = re.search(r'/token/(0x[0-9a-fA-F]{40})', text) or re.search(r'\b(0x[0-9a-fA-F]{40})\b', text)
-            if mca:
-                ca = mca.group(1).lower()
-                site_host = _KNOWN_DOMAINS.get(ca, "")
-        if not site_host:
-            patt = re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
+            # Fallback: derive from token CA using known_domains mapping
+            m = _re.search(r'/token/(0x[0-9a-fA-F]{40})', text)
+            ca = (m.group(1).lower() if m else "")
+            if ca and isinstance(globals().get('_KNOWN_DOMAINS'), dict):
+                deduced_host = (globals().get('_KNOWN_DOMAINS') or {}).get(ca, "") or ""
+        host = site_host or deduced_host
+        if not host:
+            # Strip potentially wrong domain-related lines
+            patt = _re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', _re.M)
             text = patt.sub("", text)
-            text = re.sub(r'\n{3,}', "\n\n", text)
+            text = _re.sub(r'\n{3,}', "\n\n", text)
             return text
-        mdom = re.search(r'^(Domain:\s*)(\S+)', text, re.M)
-        if mdom:
-            dom = mdom.group(2).strip().lower()
-            if dom != site_host:
-                text = re.sub(r'^(Domain:\s*)\S+', r'\1' + site_host, text, flags=re.M)
+        # Rewrite Domain: line
+        m = _re.search(r'^(Domain:\s*)(\S+)', text, _re.M)
+        if m:
+            dom = m.group(2).strip().lower()
+            if dom != host:
+                text = _re.sub(r'^(Domain:\s*)\S+', r'\1' + host, text, flags=_re.M)
         else:
-            if re.search(r'^source:.*$', text, re.M):
-                text = re.sub(r'^(source:.*)$', r'\1' + f'\nDomain: {site_host}', text, flags=re.M)
+            # Insert Domain after Site or at top
+            if _re.search(r'(?m)^Site:', text):
+                text = _re.sub(r'(?m)^(Site:.*)$', r'\1\nDomain: ' + host, text)
             else:
-                text = f'Domain: {site_host}\n' + text
+                text = f'Domain: {host}\n' + text
         return text
     except Exception:
         return text
@@ -1888,32 +1897,42 @@ except Exception:
     pass
 
 
+
 def _enforce_details_host(text: str, chat_id) -> str:
-    """Ensure Details use the host from last compact 'Site'. If absent, strip domain blocks."""
+    """Ensure Details use consistent Domain and avoid leaking a previous token's domain."""
     try:
-        # Heuristic: treat messages containing 'Trust verdict' OR 'WHOIS'/'SSL'/'Wayback' as Details
-        is_details = bool(re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
+        import re as _re
+        is_details = bool(_re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text))
         if not is_details:
             return text
-        site_host = _LAST_SITE_HOST.get(chat_id, "")
+        # Prefer last Site host captured for this chat
+        site_host = _LAST_SITE_HOST.get(chat_id, "") or ""
+        deduced_host = ""
         if not site_host:
-            # no site captured: drop domain blocks to avoid leakage/mismatch
-            patt = re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
+            # Fallback: derive from token CA using known_domains mapping
+            m = _re.search(r'/token/(0x[0-9a-fA-F]{40})', text)
+            ca = (m.group(1).lower() if m else "")
+            if ca and isinstance(globals().get('_KNOWN_DOMAINS'), dict):
+                deduced_host = (globals().get('_KNOWN_DOMAINS') or {}).get(ca, "") or ""
+        host = site_host or deduced_host
+        if not host:
+            # Strip potentially wrong domain-related lines
+            patt = _re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', _re.M)
             text = patt.sub("", text)
-            text = re.sub(r'\n{3,}', "\n\n", text)
+            text = _re.sub(r'\n{3,}', "\n\n", text)
             return text
-        # If Domain line exists and mismatches Site host — rewrite to Site host.
-        m = re.search(r'^(Domain:\s*)(\S+)', text, re.M)
+        # Rewrite Domain: line
+        m = _re.search(r'^(Domain:\s*)(\S+)', text, _re.M)
         if m:
             dom = m.group(2).strip().lower()
-            if dom != site_host:
-                text = re.sub(r'^(Domain:\s*)\S+', rf'\1{site_host}', text, flags=re.M)
+            if dom != host:
+                text = _re.sub(r'^(Domain:\s*)\S+', r'\1' + host, text, flags=_re.M)
         else:
-            # Insert Domain line near the top (after 'source' or 'Site')
-            if "source:" in text:
-                text = re.sub(r'^(source:.*)$', rf'\1\nDomain: {site_host}', text, flags=re.M)
+            # Insert Domain after Site or at top
+            if _re.search(r'(?m)^Site:', text):
+                text = _re.sub(r'(?m)^(Site:.*)$', r'\1\nDomain: ' + host, text)
             else:
-                text = f'Domain: {site_host}\n{text}'
+                text = f'Domain: {host}\n' + text
         return text
     except Exception:
         return text
@@ -1937,33 +1956,29 @@ def _sanitize_lp_claims(text: str) -> str:
         return text
 # === /post-send sanitizers ===
 
+
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     try:
         text = _sanitize_onchain_zeros(text)
     except Exception:
         pass
-    # Track compact site host
     try:
         _track_site_host(text, chat_id)
     except Exception:
         pass
-    # Enforce Details host consistency
     try:
         text = _enforce_details_host(text, chat_id)
     except Exception:
         pass
-    # Suppress domain/wayback in compact if flag set
     try:
         text = _sanitize_compact_domains(text, is_details=False)
     except Exception:
         pass
-    # Owner privileges suppression when renounced
     try:
         text = _sanitize_owner_privileges(text, chat_id)
     except Exception:
         pass
-    # LP sanity
     try:
         text = _sanitize_lp_claims(text)
     except Exception:
@@ -1979,6 +1994,13 @@ def _send_text(chat_id, text, **kwargs):
     try:
         if _is_compact_qs(text):
             text = _strip_compact_meta(text)
+    except Exception:
+        pass
+    # Conservative risk floor for unknown LP
+    try:
+        import re as _re
+        if _re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text):
+            text = _qs_finalize_details_lp_unknown_risk(text)
     except Exception:
         pass
     try:
