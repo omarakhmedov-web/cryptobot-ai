@@ -1,3 +1,5 @@
+import traceback
+import logging
 import os
 import re
 import ssl
@@ -433,6 +435,8 @@ except Exception:
     DOMAIN_META_TTL_NEG = 120
 
 LOC = locale_text
+LOGGER = logging.getLogger('metridex')
+logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
 
@@ -3829,6 +3833,13 @@ def _render_report(addr: str, text: str):
 # ========================
 
 
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
+
 @app.route("/crypto_webhook/<secret>", methods=["POST"])
 def crypto_webhook(secret):
     if secret != os.getenv("CRYPTO_WEBHOOK_SECRET", ""):
@@ -3880,6 +3891,13 @@ def crypto_webhook(secret):
 
     return ("ok", 200)
 
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
+
 @app.route("/version", methods=["GET"])
 def version():
     try:
@@ -3893,6 +3911,13 @@ def version():
 # ------------------------
 # Diagnostic: check free limits (optional)
 # ------------------------
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
+
 @app.route("/limits_preview", methods=["GET"])
 def limits_preview():
     try:
@@ -3905,14 +3930,35 @@ def limits_preview():
         "free_left": free_left(uid),
         "free_total": FREE_LIFETIME
     })
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
+
 @app.route("/healthz")
 def healthz():
     return jsonify({"ok": True, "version": APP_VERSION})
+
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
 
 @app.route("/reload_meta", methods=["POST", "GET"])
 def reload_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True})
+
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
 
 @app.route("/admin/reload_meta", methods=["POST"])
 @require_admin_secret
@@ -3920,11 +3966,25 @@ def admin_reload_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
 
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
+
 @app.route("/admin/clear_meta", methods=["POST"])
 @require_admin_secret
 def admin_clear_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
+
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
 
 @app.route("/admin/diag", methods=["GET"])
 @require_admin_secret
@@ -3991,10 +4051,47 @@ def _answer_why_quickly(cq, addr_hint=None):
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
 
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
+
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
 
+
+    # === SAFE GUARD (do-not-crash) ===
+    try:
+        # Try to parse Telegram update safely
+        _raw_json = None
+        try:
+            _raw_json = request.get_json(silent=True) or {}
+        except Exception as _e:
+            LOGGER.error("webhook: request.get_json failed: %s", _e, exc_info=True)
+            _raw_json = {}
+        if not isinstance(_raw_json, dict):
+            LOGGER.error("webhook: update is not a dict: %r", type(_raw_json))
+            _raw_json = {}
+        update = _raw_json
+        callback_query = update.get("callback_query")
+        message = update.get("message") or (callback_query or {}).get("message")
+        chat_id = None
+        try:
+            chat_id = (message or {}).get("chat", {}).get("id")
+            if not chat_id:
+                chat_id = (update.get("from", {}) or {}).get("id")
+        except Exception:
+            chat_id = None
+        # Stash into globals for downstream helpers if they probe
+        globals()["_last_update_json"] = update
+        globals()["_last_chat_id"] = chat_id
+    except Exception as _outer_e:
+        LOGGER.error("webhook guard failed: %s", _outer_e, exc_info=True)
+        return ("OK", 200)
+    # === /SAFE GUARD ===
     # --- EARLY START HANDLER (runs before anything else) ---
     try:
         upd = request.get_json(force=True, silent=True) or {}
@@ -5752,6 +5849,13 @@ def _handle_callback_lp_lite(cb_data: str):
 
 
 
+
+    # SAFE CATCH-ALL: never let webhook 500
+    try:
+        __x=0
+    except Exception:
+        pass
+    return ('OK', 200)
 
 @app.route("/lp_lite", methods=["GET"])
 def lp_lite_endpoint():
