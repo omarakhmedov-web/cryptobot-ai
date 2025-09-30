@@ -255,159 +255,7 @@ def _sanitize_lp_claims(text: str) -> str:
         return text
     except Exception:
         return text
-
-def _normalize_whois_rdap(text: str) -> str:
-    """Ensure a stable WHOIS/RDAP line is present and human-friendly.
-    Rules:
-      • If Domain: present but WHOIS/RDAP is missing — insert a placeholder line.
-      • If WHOIS/RDAP says 'RDAP unavailable …' and Created/Registrar are '—',
-        try to borrow Wayback first date as '~YYYY-MM-DD (Wayback)' for Created.
-      • Keep formatting one-line: 'WHOIS/RDAP: <info> | Created: <...> | Registrar: <...>'
-    """
-    try:
-        norm = str(text or "")
-        # Only operate when a Domain block exists (avoid false inserts elsewhere)
-        has_domain = re.search(r'(?mi)^Domain:\s*\S+', norm) is not None
-        if not has_domain:
-            return text
-
-        # Extract Wayback first date if any
-        m_wb = re.search(r'(?mi)^Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})', norm)
-        wayback_date = m_wb.group(1) if m_wb else None
-
-        # Find existing WHOIS/RDAP line
-        m_wr = re.search(r'(?mi)^WHOIS\s*/\s*RDAP:\s*(.*)$', norm)
-        if not m_wr:
-            # Insert a canonical placeholder line right after Domain:
-            norm = re.sub(r'(?mi)^(Domain:\s*\S+\s*)$',
-                          r"""\1\nWHOIS/RDAP: — | Created: — | Registrar: —""",
-                          norm, count=1)
-            return norm
-
-        line = m_wr.group(0)
-        body = m_wr.group(1).strip()
-
-        # Parse Created and Registrar parts if already there
-        has_created = re.search(r'Created:\s*[^|]+', body) is not None
-        has_registrar = re.search(r'Registrar:\s*[^|]+', body) is not None
-
-        # If RDAP unavailable and both Created/Registrar are missing or '—', try Wayback date
-        if re.search(r'RDAP\s+unavailable', body, re.I):
-            need_created = (not has_created) or re.search(r'Created:\s*[—-]+\s*(\||$)', body)
-            if wayback_date and need_created:
-                # Replace or append Created with Wayback-based surrogate
-                if has_created:
-                    body = re.sub(r'(Created:\s*)([—-]+|—)?', r"""\1~%s (Wayback)""" % wayback_date, body)
-                else:
-                    # append at end
-                    body = (body + f" | Created: ~{wayback_date} (Wayback)").strip()
-
-        # Ensure Created and Registrar stubs exist in a consistent order
-        if 'Created:' not in body:
-            body += ' | Created: —'
-        if 'Registrar:' not in body:
-            body += ' | Registrar: —'
-
-        # Canonical capitalization and spacing
-        body = re.sub(r'\s*\|\s*', ' | ', body)
-        fixed = 'WHOIS/RDAP: ' + body.strip()
-
-        # Rewrite the line in text
-        norm = norm[:m_wr.start()] + fixed + norm[m_wr.end():]
-        # Collapse extra blank lines
-        norm = re.sub(r'\n{3,}', '\n\n', norm)
-        return norm
-    except Exception:
-        return text
-
-
 # === /sanitizers (finalfix3) ===
-# === Risk Gates (contest-safe, SAFE8-FOX) ===
-CONTEST_SAFE_MODE = int(os.getenv("CONTEST_SAFE_MODE", "1") or "1")
-
-_RISK_VERDICT_PAT = re.compile(r'(?mi)^Trust\s*verdict:\s*([A-Z \-/]+)\s*[🟢🟡🟠🔴]?\s*•\s*Risk\s*score:\s*(\d+)\s*/\s*100')
-_RISK_SCORE_PAT   = re.compile(r'(?mi)(Risk\s*score:\s*)(\d+)(\s*/\s*100)')
-_SIGNALS_LINE_PAT = re.compile(r'(?mi)^\s*⚠️\s*Signals:.*$', re.M)
-
-def _clamp_risk(score: int) -> int:
-    try:
-        return max(0, min(100, int(score)))
-    except Exception:
-        return 0
-
-def _rewrite_risk_verdict(text: str, new_score: int, new_verdict: str) -> str:
-    def _sub_score(m):
-        return f"{m.group(1)}{_clamp_risk(new_score)}{m.group(3)}"
-    t = _RISK_SCORE_PAT.sub(_sub_score, text, count=1)
-    if _RISK_VERDICT_PAT.search(t):
-        t = _RISK_VERDICT_PAT.sub(lambda m: f"Trust verdict: {new_verdict} • Risk score: {_clamp_risk(new_score)}/100", t, count=1)
-    return t
-
-def _has_no_pools(text: str) -> bool:
-    return bool(re.search(r'(?mi)No\s+pools\s+found\s+on\s+DexScreener', text or ''))
-
-def _whypp_empty(text: str) -> bool:
-    if re.search(r'(?mi)No\s+weighted\s+factors\s+captured', text or ''):
-        return True
-    has_why_header = re.search(r'(?mi)^Why\+\+\s*factors', text or '')
-    has_why_bullets = re.search(r'(?m)^[\-\u2212]\s*\d+\s+', text or '')
-    return bool(has_why_header and not has_why_bullets)
-
-def _owner_priv_present_quick(text: str) -> bool:
-    return bool(re.search(r'(?mi)Owner\s+privileges\s+present', text or ''))
-
-def _verified_code_negative_hint(text: str) -> bool:
-    return bool(re.search(r'(?mi)Contract\s+not\s+verified', text or ''))
-
-def _append_reason(text: str, reason: str) -> str:
-    if _SIGNALS_LINE_PAT.search(text or ''):
-        return _SIGNALS_LINE_PAT.sub(lambda m: (m.group(0).rstrip() + f"; {reason}").rstrip(';'), text, count=1)
-    return (text.rstrip() + f"\n⚠️ Signals: {reason}").strip() + "\n"
-
-def _enforce_risk_gates(text: str, chat_id=None) -> str:
-    try:
-        if not isinstance(text, str) or not text.strip():
-            return text
-
-        pools_none   = _has_no_pools(text)
-        whypp_empty_ = _whypp_empty(text)
-        owner_flag   = _owner_priv_present_quick(text)
-        unverif_flag = _verified_code_negative_hint(text)
-
-        m = _RISK_VERDICT_PAT.search(text)
-        cur_score = int(m.group(2)) if m else 50
-
-        base_score = cur_score
-
-        if pools_none:
-            new_score = max(base_score, 85 if CONTEST_SAFE_MODE else 80)
-            text = _rewrite_risk_verdict(text, new_score, "NOT TRADABLE")
-            text = _append_reason(text, "No active pools/liquidity")
-            text = re.sub(r'(?mi)No\s+pools\s+found\s+on\s+DexScreener\.', 
-                          "No active pools/liquidity — trading not available.", text)
-
-        if whypp_empty_:
-            now_score = int(_RISK_SCORE_PAT.search(text).group(2)) if _RISK_SCORE_PAT.search(text) else 50
-            new_score = max(now_score, 65 if CONTEST_SAFE_MODE else 60)
-            text = _rewrite_risk_verdict(text, new_score, "MEDIUM")
-            text = _append_reason(text, "Insufficient on-chain checks")
-
-        if owner_flag or unverif_flag:
-            cur = int(_RISK_SCORE_PAT.search(text).group(2)) if _RISK_SCORE_PAT.search(text) else 50
-            new_score = max(cur, 60)
-            text = _rewrite_risk_verdict(text, new_score, "MEDIUM")
-
-        m2 = _RISK_VERDICT_PAT.search(text)
-        if m2:
-            score_now = int(m2.group(2))
-            verdict_now = m2.group(1).upper()
-            if verdict_now.startswith("LOW") and (pools_none or whypp_empty_):
-                text = _rewrite_risk_verdict(text, max(score_now, 65), "MEDIUM")
-        return text
-    except Exception:
-        return text
-# === /Risk Gates ===
-
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
@@ -1335,42 +1183,6 @@ def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
             _send_text(chat_id, txt, logger=app.logger)
         except Exception:
             pass
-# === SAFE8-FOX postprocess hook ===
-def _postprocess_text(text: str, chat_id=None) -> str:
-    try:
-        if not MDX_ENABLE_POSTPROCESS or MDX_BYPASS_SANITIZERS:
-            return text
-        t = text
-        t = _normalize_whois_rdap(t)
-        t = _sanitize_owner_privileges(t, chat_id)
-        t = _enforce_risk_gates(t, chat_id)
-        return t
-    except Exception:
-        return text
-
-try:
-    _ORIG_TG_SEND = tg_send_message
-except Exception:
-    _ORIG_TG_SEND = None
-
-def _send_text(chat_id, text, **kwargs):
-    try:
-        t = _postprocess_text(text, chat_id)
-    except Exception:
-        t = text
-    if callable(_ORIG_TG_SEND):
-        try:
-            return _ORIG_TG_SEND(chat_id, t, **kwargs)
-        except Exception:
-            pass
-    try:
-        print(f"[send_text fallback] chat={chat_id} -> {str(t)[:200]}")
-    except Exception:
-        pass
-    return None
-# === /SAFE8-FOX postprocess hook ===
-
-
 # ========================
 # Caches
 # ========================
@@ -2285,9 +2097,9 @@ def _send_text(chat_id, text, **kwargs):
     except Exception:
         pass
     if not MDX_ENABLE_POSTPROCESS:
-        return _send_text(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
     if MDX_BYPASS_SANITIZERS:
-        return _send_text(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
     # Clean up cosmetic (+0) counters in Signals/Why lines
     try:
         import re as _re
@@ -2301,10 +2113,6 @@ def _send_text(chat_id, text, **kwargs):
     # Enforce domain if enabled
     try:
         text = _enforce_details_host(text, chat_id)
-    try:
-        text = _normalize_whois_rdap(text)
-    except Exception:
-        pass
     except Exception:
         pass
     # Compact domain meta suppression
@@ -2347,7 +2155,7 @@ def _send_text(chat_id, text, **kwargs):
             return {"ok": True, "skipped": "lp_mini"}
     except Exception:
         pass
-    return _send_text(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+    return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
 def _admin_debug(chat_id, text):
     try:
