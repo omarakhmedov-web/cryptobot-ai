@@ -443,14 +443,11 @@ app = Flask(__name__)
 def _coerce_qs_tuple(res):
     try:
         if isinstance(res, tuple):
-            # ensure two elements; pad keyboard as dict
             if len(res) >= 2:
                 return res[0], (res[1] or {})
-            # tuple but not 2 items => use first as text
             return (res[0] if len(res) else "Temporary error while scanning. Please try again.", {})
         if isinstance(res, str):
             return res, {}
-        # Any other falsy/non‑tuple => standard fallback
         return "Temporary error while scanning. Please try again.", {}
     except Exception:
         return "Temporary error while scanning. Please try again.", {}
@@ -4338,8 +4335,7 @@ def webhook(secret):
                 addrs = _extract_addrs_from_pair_payload(data)
                 base_addr = _pick_addr(addrs)
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
-                res = _qs_call_safe(quickscan_pair_entrypoint, data)
-        text_out, keyboard = _coerce_qs_tuple(res)
+                text_out, keyboard = _coerce_qs_tuple(_qs_call_safe(quickscan_pair_entrypoint, data))
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
                 keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
@@ -4366,8 +4362,7 @@ def webhook(secret):
                 except Exception:
                     pass
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
-                res = _qs_call_safe(quickscan_entrypoint, base_addr)
-        text_out, keyboard = _coerce_qs_tuple(res)
+                text_out, keyboard = _coerce_qs_tuple(_qs_call_safe(quickscan_entrypoint, base_addr))
                 keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
@@ -4731,8 +4726,7 @@ def webhook(secret):
                     pass
                 # ##LIMITS_END
                 try:
-                    res = _qs_call_safe(quickscan_entrypoint, arg)
-        text_out, keyboard = _coerce_qs_tuple(res)
+                    text_out, keyboard = _coerce_qs_tuple(_qs_call_safe(quickscan_entrypoint, arg))
                     base_addr = _extract_addr_from_text(arg) or _extract_base_addr_from_keyboard(keyboard)
                     keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
@@ -4774,8 +4768,7 @@ def webhook(secret):
     # ##LIMITS_END_NC
     st0, proc_body = _send_text_tuple(chat_id, "Processing…", logger=app.logger)
     try:
-        res = _qs_call_safe(quickscan_entrypoint, text)
-        text_out, keyboard = _coerce_qs_tuple(res)
+        text_out, keyboard = _coerce_qs_tuple(_qs_call_safe(quickscan_entrypoint, text))
         base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
         keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
