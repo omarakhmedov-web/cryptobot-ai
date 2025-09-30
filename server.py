@@ -255,6 +255,72 @@ def _sanitize_lp_claims(text: str) -> str:
         return text
     except Exception:
         return text
+
+def _normalize_whois_rdap(text: str) -> str:
+    """Ensure a stable WHOIS/RDAP line is present and human-friendly.
+    Rules:
+      • If Domain: present but WHOIS/RDAP is missing — insert a placeholder line.
+      • If WHOIS/RDAP says 'RDAP unavailable …' and Created/Registrar are '—',
+        try to borrow Wayback first date as '~YYYY-MM-DD (Wayback)' for Created.
+      • Keep formatting one-line: 'WHOIS/RDAP: <info> | Created: <...> | Registrar: <...>'
+    """
+    try:
+        norm = str(text or "")
+        # Only operate when a Domain block exists (avoid false inserts elsewhere)
+        has_domain = re.search(r'(?mi)^Domain:\s*\S+', norm) is not None
+        if not has_domain:
+            return text
+
+        # Extract Wayback first date if any
+        m_wb = re.search(r'(?mi)^Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})', norm)
+        wayback_date = m_wb.group(1) if m_wb else None
+
+        # Find existing WHOIS/RDAP line
+        m_wr = re.search(r'(?mi)^WHOIS\s*/\s*RDAP:\s*(.*)$', norm)
+        if not m_wr:
+            # Insert a canonical placeholder line right after Domain:
+            norm = re.sub(r'(?mi)^(Domain:\s*\S+\s*)$',
+                          r"""\1\nWHOIS/RDAP: — | Created: — | Registrar: —""",
+                          norm, count=1)
+            return norm
+
+        line = m_wr.group(0)
+        body = m_wr.group(1).strip()
+
+        # Parse Created and Registrar parts if already there
+        has_created = re.search(r'Created:\s*[^|]+', body) is not None
+        has_registrar = re.search(r'Registrar:\s*[^|]+', body) is not None
+
+        # If RDAP unavailable and both Created/Registrar are missing or '—', try Wayback date
+        if re.search(r'RDAP\s+unavailable', body, re.I):
+            need_created = (not has_created) or re.search(r'Created:\s*[—-]+\s*(\||$)', body)
+            if wayback_date and need_created:
+                # Replace or append Created with Wayback-based surrogate
+                if has_created:
+                    body = re.sub(r'(Created:\s*)([—-]+|—)?', r"""\1~%s (Wayback)""" % wayback_date, body)
+                else:
+                    # append at end
+                    body = (body + f" | Created: ~{wayback_date} (Wayback)").strip()
+
+        # Ensure Created and Registrar stubs exist in a consistent order
+        if 'Created:' not in body:
+            body += ' | Created: —'
+        if 'Registrar:' not in body:
+            body += ' | Registrar: —'
+
+        # Canonical capitalization and spacing
+        body = re.sub(r'\s*\|\s*', ' | ', body)
+        fixed = 'WHOIS/RDAP: ' + body.strip()
+
+        # Rewrite the line in text
+        norm = norm[:m_wr.start()] + fixed + norm[m_wr.end():]
+        # Collapse extra blank lines
+        norm = re.sub(r'\n{3,}', '\n\n', norm)
+        return norm
+    except Exception:
+        return text
+
+
 # === /sanitizers (finalfix3) ===
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
@@ -2113,6 +2179,10 @@ def _send_text(chat_id, text, **kwargs):
     # Enforce domain if enabled
     try:
         text = _enforce_details_host(text, chat_id)
+    try:
+        text = _normalize_whois_rdap(text)
+    except Exception:
+        pass
     except Exception:
         pass
     # Compact domain meta suppression
