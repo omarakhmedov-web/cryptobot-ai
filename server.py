@@ -1395,9 +1395,6 @@ def _postprocess_text(text: str, chat_id=None) -> str:
         pass
     return t
 
-def _send_text(chat_id, text, **kwargs):
-
-
 # ========================
 # Caches
 # ========================
