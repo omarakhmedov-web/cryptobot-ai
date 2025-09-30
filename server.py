@@ -4752,7 +4752,7 @@ def webhook(secret):
     except Exception:
         pass
     # ##LIMITS_END_NC
-    st0, proc_body = _send_text(chat_id, "Processing…", logger=app.logger)
+    st0, proc_body = _send_text_tuple(chat_id, "Processing…", logger=app.logger)
     try:
         text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
         base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
@@ -5493,6 +5493,25 @@ def build_buy_keyboard(links: dict):
 
 
 import os
+
+# --- Helper to normalize _send_text return to a (status, body) tuple ---
+def _send_text_tuple(chat_id, text, **kwargs):
+    try:
+        res = _send_text(chat_id, text, **kwargs)
+        if isinstance(res, tuple) and len(res) == 2:
+            return res
+        return (True, res)
+    except Exception as e:
+        logger = kwargs.get("logger", None)
+        try:
+            if logger:
+                logger.error("send_text_tuple error: %s", e, exc_info=True)
+        except Exception:
+            pass
+        return (False, None)
+# --- /Helper ---
+
+
 
 
 # ===== LP-LITE HELPERS (safe, no external deps) =====
