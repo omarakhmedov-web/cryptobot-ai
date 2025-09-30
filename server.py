@@ -2163,6 +2163,10 @@ def _send_text(chat_id, text, **kwargs):
     except Exception:
         pass
     if not MDX_ENABLE_POSTPROCESS:
+        try:
+            text = _apply_risk_gates__text(text)
+        except Exception:
+            pass
         return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
     if MDX_BYPASS_SANITIZERS:
         return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
