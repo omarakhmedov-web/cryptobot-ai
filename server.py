@@ -1,5 +1,3 @@
-import traceback
-import logging
 import os
 import re
 import ssl
@@ -435,23 +433,7 @@ except Exception:
     DOMAIN_META_TTL_NEG = 120
 
 LOC = locale_text
-LOGGER = logging.getLogger('metridex')
-logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
-
-# --- SAFE TUPLE COERCER (minimal, no side-effects) ---
-def _coerce_qs_tuple(res):
-    try:
-        if isinstance(res, tuple):
-            if len(res) >= 2:
-                return res[0], (res[1] or {})
-            return (res[0] if len(res) else "Temporary error while scanning. Please try again.", {})
-        if isinstance(res, str):
-            return res, {}
-        return "Temporary error while scanning. Please try again.", {}
-    except Exception:
-        return "Temporary error while scanning. Please try again.", {}
-# --- /SAFE TUPLE COERCER ---
 
 
 
@@ -3847,13 +3829,6 @@ def _render_report(addr: str, text: str):
 # ========================
 
 
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
-
 @app.route("/crypto_webhook/<secret>", methods=["POST"])
 def crypto_webhook(secret):
     if secret != os.getenv("CRYPTO_WEBHOOK_SECRET", ""):
@@ -3905,13 +3880,6 @@ def crypto_webhook(secret):
 
     return ("ok", 200)
 
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
-
 @app.route("/version", methods=["GET"])
 def version():
     try:
@@ -3925,13 +3893,6 @@ def version():
 # ------------------------
 # Diagnostic: check free limits (optional)
 # ------------------------
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
-
 @app.route("/limits_preview", methods=["GET"])
 def limits_preview():
     try:
@@ -3944,35 +3905,14 @@ def limits_preview():
         "free_left": free_left(uid),
         "free_total": FREE_LIFETIME
     })
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
-
 @app.route("/healthz")
 def healthz():
     return jsonify({"ok": True, "version": APP_VERSION})
-
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
 
 @app.route("/reload_meta", methods=["POST", "GET"])
 def reload_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True})
-
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
 
 @app.route("/admin/reload_meta", methods=["POST"])
 @require_admin_secret
@@ -3980,25 +3920,11 @@ def admin_reload_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
 
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
-
 @app.route("/admin/clear_meta", methods=["POST"])
 @require_admin_secret
 def admin_clear_meta():
     DOMAIN_META_CACHE.clear()
     return jsonify({"ok": True, "cleared": True, "ts": int(time.time())})
-
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
 
 @app.route("/admin/diag", methods=["GET"])
 @require_admin_secret
@@ -4065,47 +3991,10 @@ def _answer_why_quickly(cq, addr_hint=None):
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
 
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
-
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
 
-
-    # === SAFE GUARD (do-not-crash) ===
-    try:
-        # Try to parse Telegram update safely
-        _raw_json = None
-        try:
-            _raw_json = request.get_json(silent=True) or {}
-        except Exception as _e:
-            LOGGER.error("webhook: request.get_json failed: %s", _e, exc_info=True)
-            _raw_json = {}
-        if not isinstance(_raw_json, dict):
-            LOGGER.error("webhook: update is not a dict: %r", type(_raw_json))
-            _raw_json = {}
-        update = _raw_json
-        callback_query = update.get("callback_query")
-        message = update.get("message") or (callback_query or {}).get("message")
-        chat_id = None
-        try:
-            chat_id = (message or {}).get("chat", {}).get("id")
-            if not chat_id:
-                chat_id = (update.get("from", {}) or {}).get("id")
-        except Exception:
-            chat_id = None
-        # Stash into globals for downstream helpers if they probe
-        globals()["_last_update_json"] = update
-        globals()["_last_chat_id"] = chat_id
-    except Exception as _outer_e:
-        LOGGER.error("webhook guard failed: %s", _outer_e, exc_info=True)
-        return ("OK", 200)
-    # === /SAFE GUARD ===
     # --- EARLY START HANDLER (runs before anything else) ---
     try:
         upd = request.get_json(force=True, silent=True) or {}
@@ -4335,7 +4224,7 @@ def webhook(secret):
                 addrs = _extract_addrs_from_pair_payload(data)
                 base_addr = _pick_addr(addrs)
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
-                text_out, keyboard = _coerce_qs_tuple(_qs_call_safe(quickscan_pair_entrypoint, data))
+                text_out, keyboard = _qs_call_safe(quickscan_pair_entrypoint, data)
                 base_addr = base_addr or _extract_base_addr_from_keyboard(keyboard)
                 keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
@@ -4362,7 +4251,7 @@ def webhook(secret):
                 except Exception:
                     pass
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "updating…", logger=app.logger)
-                text_out, keyboard = _coerce_qs_tuple(_qs_call_safe(quickscan_entrypoint, base_addr))
+                text_out, keyboard = _qs_call_safe(quickscan_entrypoint, base_addr)
                 keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                 keyboard = _compress_keyboard(keyboard)
                 st, body = _send_text(chat_id, text_out, reply_markup=keyboard, logger=app.logger)
@@ -4726,7 +4615,7 @@ def webhook(secret):
                     pass
                 # ##LIMITS_END
                 try:
-                    text_out, keyboard = _coerce_qs_tuple(_qs_call_safe(quickscan_entrypoint, arg))
+                    text_out, keyboard = _qs_call_safe(quickscan_entrypoint, arg)
                     base_addr = _extract_addr_from_text(arg) or _extract_base_addr_from_keyboard(keyboard)
                     keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
                     keyboard = _compress_keyboard(keyboard)
@@ -4766,9 +4655,9 @@ def webhook(secret):
     except Exception:
         pass
     # ##LIMITS_END_NC
-    st0, proc_body = _send_text_tuple(chat_id, "Processing…", logger=app.logger)
+    st0, proc_body = _send_text(chat_id, "Processing…", logger=app.logger)
     try:
-        text_out, keyboard = _coerce_qs_tuple(_qs_call_safe(quickscan_entrypoint, text))
+        text_out, keyboard = _qs_call_safe(quickscan_entrypoint, text)
         base_addr = _extract_addr_from_text(text) or _extract_base_addr_from_keyboard(keyboard)
         keyboard = _ensure_action_buttons(base_addr, keyboard, want_more=True, want_why=True, want_report=False, want_hp=True)
         keyboard = _compress_keyboard(keyboard)
@@ -5507,102 +5396,6 @@ def build_buy_keyboard(links: dict):
 
 
 import os
-
-# --- Helper to normalize _send_text return to a (status, body) tuple ---
-def _send_text_tuple(chat_id, text, **kwargs):
-    try:
-        res = _send_text(chat_id, text, **kwargs)
-        if isinstance(res, tuple) and len(res) == 2:
-            return res
-        return (True, res)
-    except Exception as e:
-        logger = kwargs.get("logger", None)
-        try:
-            if logger:
-                logger.error("send_text_tuple error: %s", e, exc_info=True)
-        except Exception:
-            pass
-        return (False, None)
-# --- /Helper ---
-
-
-
-
-# ===== LP-LITE HELPERS (safe, no external deps) =====
-def _lp_lite_render(chain: str, ca: str) -> str:
-    """
-    Returns a short, robust LP lock (lite) text.
-    Does not rely on paid APIs; focuses on actionable links and basic heuristics.
-    """
-    chain = (chain or "").lower().strip()
-    ca = (ca or "").strip()
-    burn_set = {
-        "0x0000000000000000000000000000000000000000",
-        "0x000000000000000000000000000000000000dead",
-        "0x000000000000000000000000000000000000dEaD",
-        "0xdead000000000000000042069420694206942069",
-    }
-
-    # Basic header
-    lines = ["LP lock (lite)"]
-
-    # Very conservative heuristic: if user sent burn address as CA, mark as burn.
-    lp_burn = ca.lower() in burn_set
-    if lp_burn:
-        lines.append("• LP burn: yes (sent to burn address)")
-    else:
-        lines.append("• LP burn: not detected")
-
-    # We cannot assert % lock without API responses; set expectation and guide.
-    lines.append("• Locked %: unknown (requires locker or holder scan)")
-    lines.append("• Next unlock: unknown (no locker schedule detected)")
-    lines.append("• Note: use the buttons below to verify locker/burn quickly.")
-
-    return "\n".join(lines)
-
-
-def _lp_lite_buttons(chain: str, ca: str):
-    """Return a list of (text, url) tuples for inline keyboard."""
-    chain = (chain or "").lower().strip()
-    ca = (ca or "").strip()
-
-    # Explorers per chain (address view)
-    explorers = {
-        "ethereum": "https://etherscan.io/address/",
-        "eth": "https://etherscan.io/address/",
-        "bsc": "https://bscscan.com/address/",
-        "binance": "https://bscscan.com/address/",
-        "polygon": "https://polygonscan.com/address/",
-        "matic": "https://polygonscan.com/address/",
-        "arbitrum": "https://arbiscan.io/address/",
-        "optimism": "https://optimistic.etherscan.io/address/",
-        "base": "https://basescan.org/address/",
-    }
-    scan = explorers.get(chain, explorers.get("ethereum")) + ca if ca else None
-
-    # DexScreener search by CA (doesn't require pair id)
-    ds = f"https://dexscreener.com/search?q={ca}" if ca else None
-
-    # Popular lockers search pages
-    lockers = [
-        ("Open Team.Finance", f"https://app.team.finance/search?query={ca}" if ca else None),
-        ("Open Unicrypt", f"https://unicrypt.network/search?query={ca}" if ca else None),
-        ("Open PinkLock", f"https://www.pinksale.finance/?chain={chain}&query={ca}" if ca else None),
-    ]
-
-    buttons = []
-    if ds:
-        buttons.append(("Open on DexScreener", ds))
-    if scan:
-        buttons.append(("Open in Scan", scan))
-    for text, url in lockers:
-        if url:
-            buttons.append((text, url))
-    return buttons
-# ===== END LP-LITE HELPERS =====
-
-
-
 def _get_pay_links():
     return {
         "deep": os.getenv("CRYPTO_LINK_DEEP", "").strip(),
@@ -5837,63 +5630,3 @@ except NameError:
     _KNOWN_DOMAINS = {}
 if not _KNOWN_DOMAINS:
     _KNOWN_DOMAINS = dict(_FALLBACK_KNOWN_DOMAINS)
-
-
-def _handle_callback_lp_lite(cb_data: str):
-    """
-    Expected formats:
-      lp:<chain>:<ca>
-      lp::<ca>                (chain omitted → defaults to 'ethereum')
-      lp:<ca>                 (legacy two-part)
-
-    Returns: dict with 'text' and 'buttons' (list of tuples).
-    Safe: never raises; returns graceful message on malformed data.
-    """
-    try:
-        raw = (cb_data or "").strip()
-        payload = raw.split(":", 2)  # at most 3 parts
-        # Remove leading 'lp'
-        if payload and payload[0] == "lp":
-            payload = payload[1:]
-        chain = "ethereum"
-        ca = ""
-        if len(payload) == 2:
-            # lp:<chain>:<ca>
-            chain, ca = payload[0].strip(), payload[1].strip()
-        elif len(payload) == 1:
-            # lp:<ca>  or lp::<ca>
-            if payload[0] == "":
-                # means 'lp::<ca>'
-                ca = ""
-            else:
-                # assume it's the CA
-                ca = payload[0].strip()
-        # Basic validation
-        if not ca or not ca.startswith("0x") or len(ca) < 10:
-            text = "LP lock (lite)\n• Unable to parse contract address from callback.\n• Tip: pass 'lp:<chain>:<contractAddress>'."
-            return {"text": text, "buttons": []}
-        text = _lp_lite_render(chain, ca)
-        btns = _lp_lite_buttons(chain, ca)
-        return {"text": text, "buttons": btns}
-    except Exception as e:
-        text = f"LP lock (lite)\n• Error: {type(e).__name__}: {e}\n• Try again later."
-        return {"text": text, "buttons": []}
-
-
-
-
-
-    # SAFE CATCH-ALL: never let webhook 500
-    try:
-        __x=0
-    except Exception:
-        pass
-    return ('OK', 200)
-
-@app.route("/lp_lite", methods=["GET"])
-def lp_lite_endpoint():
-    chain = request.args.get("chain", "ethereum")
-    ca = request.args.get("ca", "")
-    res = _handle_callback_lp_lite(f"lp:{chain}:{ca}")
-    return jsonify(res), 200
-
