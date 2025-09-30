@@ -2179,10 +2179,10 @@ def _send_text(chat_id, text, **kwargs):
     # Enforce domain if enabled
     try:
         text = _enforce_details_host(text, chat_id)
-    try:
-        text = _normalize_whois_rdap(text)
     except Exception:
         pass
+    try:
+        text = _normalize_whois_rdap(text)
     except Exception:
         pass
     # Compact domain meta suppression
