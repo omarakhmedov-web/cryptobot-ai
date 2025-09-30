@@ -439,7 +439,7 @@ LOGGER = logging.getLogger('metridex')
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# --- SAFE TUPLE COERCER (guards _qs_call_safe returning None/str) ---
+# --- SAFE TUPLE COERCER ---
 def _coerce_qs_tuple(res):
     try:
         if isinstance(res, tuple):
@@ -452,6 +452,29 @@ def _coerce_qs_tuple(res):
     except Exception:
         return "Temporary error while scanning. Please try again.", {}
 # --- /SAFE TUPLE COERCER ---
+
+# ---- Webhook header guard (DEV-safe) ----
+def _header_ok(req):
+    try:
+        import os
+        secret = os.getenv("WEBHOOK_HEADER_SECRET", "").strip()
+        allow_insecure = os.getenv("ALLOW_INSECURE_WEBHOOK", "0").strip() == "1"
+        if not secret:
+            # No secret configured: accept for compatibility, but log once.
+            app.logger.debug("Webhook header guard: no WEBHOOK_HEADER_SECRET set -> accepting")
+            return True
+        got = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if got == secret:
+            return True
+        if allow_insecure:
+            app.logger.warning("Webhook header mismatch; ALLOW_INSECURE_WEBHOOK=1 -> accepting request anyway")
+            return True
+        app.logger.warning("Webhook header mismatch; rejecting (set ALLOW_INSECURE_WEBHOOK=1 to bypass in DEV)")
+        return False
+    except Exception as e:
+        app.logger.exception("Webhook header guard error: %s", e)
+        return False
+# ---- /Webhook header guard ----
 
 
 
