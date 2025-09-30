@@ -322,92 +322,6 @@ def _normalize_whois_rdap(text: str) -> str:
 
 
 # === /sanitizers (finalfix3) ===
-# === Risk Gates (contest-safe, SAFE8-FOX) ===
-CONTEST_SAFE_MODE = int(os.getenv("CONTEST_SAFE_MODE", "1") or "1")
-
-_RISK_VERDICT_PAT = re.compile(r'(?mi)^Trust\s*verdict:\s*([A-Z \-/]+)\s*[🟢🟡🟠🔴]?\s*•\s*Risk\s*score:\s*(\d+)\s*/\s*100')
-_RISK_SCORE_PAT   = re.compile(r'(?mi)(Risk\s*score:\s*)(\d+)(\s*/\s*100)')
-_SIGNALS_LINE_PAT = re.compile(r'(?mi)^\s*⚠️\s*Signals:.*$', re.M)
-
-def _clamp_risk(score: int) -> int:
-    try:
-        return max(0, min(100, int(score)))
-    except Exception:
-        return 0
-
-def _rewrite_risk_verdict(text: str, new_score: int, new_verdict: str) -> str:
-    def _sub_score(m):
-        return f"{m.group(1)}{_clamp_risk(new_score)}{m.group(3)}"
-    t = _RISK_SCORE_PAT.sub(_sub_score, text, count=1)
-    if _RISK_VERDICT_PAT.search(t):
-        t = _RISK_VERDICT_PAT.sub(lambda m: f"Trust verdict: {new_verdict} • Risk score: {_clamp_risk(new_score)}/100", t, count=1)
-    return t
-
-def _has_no_pools(text: str) -> bool:
-    return bool(re.search(r'(?mi)No\s+pools\s+found\s+on\s+DexScreener', text or ''))
-
-def _whypp_empty(text: str) -> bool:
-    if re.search(r'(?mi)No\s+weighted\s+factors\s+captured', text or ''):
-        return True
-    has_why_header = re.search(r'(?mi)^Why\+\+\s*factors', text or '')
-    has_why_bullets = re.search(r'(?m)^[\-\u2212]\s*\d+\s+', text or '')
-    return bool(has_why_header and not has_why_bullets)
-
-def _owner_priv_present_quick(text: str) -> bool:
-    return bool(re.search(r'(?mi)Owner\s+privileges\s+present', text or ''))
-
-def _verified_code_negative_hint(text: str) -> bool:
-    return bool(re.search(r'(?mi)Contract\s+not\s+verified', text or ''))
-
-def _append_reason(text: str, reason: str) -> str:
-    if _SIGNALS_LINE_PAT.search(text or ''):
-        return _SIGNALS_LINE_PAT.sub(lambda m: (m.group(0).rstrip() + f"; {reason}").rstrip(';'), text, count=1)
-    return (text.rstrip() + f"\n⚠️ Signals: {reason}").strip() + "\n"
-
-def _enforce_risk_gates(text: str, chat_id=None) -> str:
-    try:
-        if not isinstance(text, str) or not text.strip():
-            return text
-
-        pools_none   = _has_no_pools(text)
-        whypp_empty_ = _whypp_empty(text)
-        owner_flag   = _owner_priv_present_quick(text)
-        unverif_flag = _verified_code_negative_hint(text)
-
-        m = _RISK_VERDICT_PAT.search(text)
-        cur_score = int(m.group(2)) if m else 50
-
-        base_score = cur_score
-
-        if pools_none:
-            new_score = max(base_score, 85 if CONTEST_SAFE_MODE else 80)
-            text = _rewrite_risk_verdict(text, new_score, "NOT TRADABLE")
-            text = _append_reason(text, "No active pools/liquidity")
-            text = re.sub(r'(?mi)No\s+pools\s+found\s+on\s+DexScreener\.', 
-                          "No active pools/liquidity — trading not available.", text)
-
-        if whypp_empty_:
-            now_score = int(_RISK_SCORE_PAT.search(text).group(2)) if _RISK_SCORE_PAT.search(text) else 50
-            new_score = max(now_score, 65 if CONTEST_SAFE_MODE else 60)
-            text = _rewrite_risk_verdict(text, new_score, "MEDIUM")
-            text = _append_reason(text, "Insufficient on-chain checks")
-
-        if owner_flag or unverif_flag:
-            cur = int(_RISK_SCORE_PAT.search(text).group(2)) if _RISK_SCORE_PAT.search(text) else 50
-            new_score = max(cur, 60)
-            text = _rewrite_risk_verdict(text, new_score, "MEDIUM")
-
-        m2 = _RISK_VERDICT_PAT.search(text)
-        if m2:
-            score_now = int(m2.group(2))
-            verdict_now = m2.group(1).upper()
-            if verdict_now.startswith("LOW") and (pools_none or whypp_empty_):
-                text = _rewrite_risk_verdict(text, max(score_now, 65), "MEDIUM")
-        return text
-    except Exception:
-        return text
-# === /Risk Gates ===
-
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
@@ -1335,66 +1249,6 @@ def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
             _send_text(chat_id, txt, logger=app.logger)
         except Exception:
             pass
-# === SAFE8-FOX postprocess hook ===
-def _postprocess_text(text: str, chat_id=None) -> str:
-    try:
-        if not MDX_ENABLE_POSTPROCESS or MDX_BYPASS_SANITIZERS:
-            return text
-        t = text
-        t = _normalize_whois_rdap(t)
-        t = _sanitize_owner_privileges(t, chat_id)
-        t = _enforce_risk_gates(t, chat_id)
-        return t
-    except Exception:
-        return text
-
-try:
-    _ORIG_TG_SEND = tg_send_message
-except Exception:
-    _ORIG_TG_SEND = None
-
-def _send_text(chat_id, text, **kwargs):
-    try:
-        t = _postprocess_text(text, chat_id)
-    except Exception:
-        t = text
-    if callable(_ORIG_TG_SEND):
-        try:
-            return _ORIG_TG_SEND(chat_id, t, **kwargs)
-        except Exception:
-            pass
-    try:
-        print(f"[send_text fallback] chat={chat_id} -> {str(t)[:200]}")
-    except Exception:
-        pass
-    return None
-# === /SAFE8-FOX postprocess hook ===
-
-def _postprocess_text(text: str, chat_id=None) -> str:
-    """
-    SAFE8-FOX: centralized postprocess
-    - Normalizes WHOIS/RDAP
-    - Sanitizes owner-privilege phrasing
-    - Enforces risk gates
-    Any step failure must not raise.
-    """
-    if not MDX_ENABLE_POSTPROCESS or MDX_BYPASS_SANITIZERS:
-        return text
-    t = text
-    try:
-        t = _normalize_whois_rdap(t)
-    except Exception:
-        pass
-    try:
-        t = _sanitize_owner_privileges(t, chat_id)
-    except Exception:
-        pass
-    try:
-        t = _enforce_risk_gates(t, chat_id)
-    except Exception:
-        pass
-    return t
-
 # ========================
 # Caches
 # ========================
@@ -2300,6 +2154,78 @@ def _sanitize_lp_claims(text: str) -> str:
 # === /post-send sanitizers ===
 
 
+
+def _send_text(chat_id, text, **kwargs):
+    text = NEWLINE_ESC_RE.sub("\n", text or "")
+    is_details_flag = bool(kwargs.pop('is_details', False))
+    try:
+        _track_site_host(text, chat_id)
+    except Exception:
+        pass
+    if not MDX_ENABLE_POSTPROCESS:
+        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+    if MDX_BYPASS_SANITIZERS:
+        return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
+    # Clean up cosmetic (+0) counters in Signals/Why lines
+    try:
+        import re as _re
+        text = _re.sub(r"\s*\(\+0\)", "", text)
+    except Exception:
+        pass
+
+        text = _sanitize_onchain_zeros(text)
+    except Exception:
+        pass
+    # Enforce domain if enabled
+    try:
+        text = _enforce_details_host(text, chat_id)
+    try:
+        text = _normalize_whois_rdap(text)
+    except Exception:
+        pass
+    except Exception:
+        pass
+    # Compact domain meta suppression
+    try:
+        text = _sanitize_compact_domains(text, is_details=is_details_flag)
+    except Exception:
+        pass
+    # Owner privileges suppression when renounced
+    try:
+        text = _sanitize_owner_privileges(text, chat_id)
+    except Exception:
+        pass
+    # LP sanity
+    try:
+        text = _sanitize_lp_claims(text)
+    except Exception:
+        pass
+    try:
+        text = _lp_bind_chain_at_send(text)
+    except Exception:
+        pass
+    try:
+        text = _strip_qs_meta_if_no_verdict(text)
+    except Exception:
+        pass
+    try:
+        if _is_compact_qs(text):
+            text = _strip_compact_meta(text)
+    except Exception:
+        pass
+    # Conservative risk for unknown LP verdicts in details
+    try:
+        import re as _re
+        if _re.search(r'(Trust verdict|WHOIS|RDAP|SSL:|Wayback:)', text):
+            text = _qs_finalize_details_lp_unknown_risk(text)
+    except Exception:
+        pass
+    try:
+        if _is_lp_mini_only(text):
+            return {"ok": True, "skipped": "lp_mini"}
+    except Exception:
+        pass
+    return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
 
 def _admin_debug(chat_id, text):
     try:
@@ -3721,8 +3647,6 @@ def _merge_onchain_into_risk(addr: str, info: dict):
         except Exception:
             pass
 
-    except Exception:
-        pass
 # Recompute label
         if entry["score"] >= RISK_THRESH_HIGH:
             entry["label"] = "HIGH RISK 🔴"
@@ -4394,12 +4318,160 @@ def webhook(secret):
 
             
             if data.startswith("lp:"):
+                addr = data.split(":",1)[1].strip().lower()
+                # Resolve pair & chain
+                pair, chain = _ds_resolve_pair_and_chain(addr)
+                chain = (chain or "").lower()
+                paddr = None
+                if isinstance(pair, dict):
+                    paddr = pair.get("pairAddress") or pair.get("pair")
+                stats = {}
+                if paddr and chain:
+                    stats = _infer_lp_status(paddr, chain) or {}
+                # unpack stats
+                dead = float(stats.get("dead_pct", 0.0) or 0.0)
+                uncx = float(stats.get("uncx_pct", 0.0) or 0.0)
+                tfp  = float(stats.get("team_finance_pct", 0.0) or 0.0)
+                th   = (stats.get("top_holder") or "")[:42]
+                thp  = float(stats.get("top_holder_pct", 0.0) or 0.0)
+                # contract / custodian detection for top holder
+                th_contract = False
+                th_label = None
                 try:
-                    _send_text(chat_id, "LP lock details are temporarily unavailable.", logger=app.logger)
+                    if th:
+                        code = _get_code_chain(th, chain)
+                        th_contract = bool(code and code != "0x")
+                        th_label = (KNOWN_CUSTODIANS.get(chain) or {}).get(th)
+                        if th_label:
+                            th_contract = True
                 except Exception:
                     pass
-        except Exception:
-            pass
+                holders = int(stats.get("holders_count", 0) or 0)
+                
+                # Build detail lines
+                lines = []
+                lines.append(f"🔒 LP lock (lite): dead={dead:.2f}%, UNCX={uncx:.2f}%, TeamFinance={tfp:.2f}%")
+                if th:
+                    lines.append(f"Top holder: {th} ({thp:.2f}%)" + (f" [{th_label}]" if th_label else ""))
+                lines.append(f"Holders: {holders}")
+                if LP_LOCK_HTML_ENABLED:
+                    try:
+                        _send_text(chat_id, "\n".join(lines), logger=app.logger)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        _send_text(chat_id, "\n".join(lines), logger=app.logger)
+                    except Exception:
+                        pass
+# Owner/renounce/proxy (lite) using chain-aware RPC
+                owner_addr = _get_owner(paddr, chain) if (paddr and chain) else ""
+                renounced = (owner_addr.lower() in DEAD_ADDRS) if owner_addr else False
+                impl_addr = _get_proxy_impl(paddr, chain) if (paddr and chain) else ""
+                is_proxy = bool(impl_addr)
+                # Multi-locker detection among top holders (if we have a list from provider)
+                locker_hits = []
+                try:
+                    hp_data = stats.get("_raw_holders") or {}
+                    holders_list = hp_data.get("holders") or []
+                    for h in holders_list[:10]:
+                        a = (h.get("address") or "").lower()
+                        if a in (UNCX_LOCKERS.get(chain) or {}) or a in (TEAMFINANCE_LOCKERS.get(chain) or {}):
+                            locker_hits.append(a)
+                except Exception:
+                    pass
+                multi_lockers = len(set(locker_hits)) >= 2
+                # Locker providers in holders (map addresses -> provider)
+                locker_providers = []
+                try:
+                    ch = (chain or "").lower()
+                    for a in set(locker_hits):
+                        if a in (UNCX_LOCKERS.get(ch) or {}):
+                            locker_providers.append("uncx")
+                        if a in (TEAMFINANCE_LOCKERS.get(ch) or {}):
+                            locker_providers.append("teamfinance")
+                except Exception:
+                    pass
+                # Try to fetch unlock info (best-effort) for each detected provider
+                lock_lines = []
+                seen = set()
+                for prov in locker_providers[:2]:  # cap to 2 providers to keep response short
+                    if prov in seen:
+                        continue
+                    seen.add(prov)
+                    info = _locker_locktime(prov, paddr, chain) if (paddr and chain) else {}
+                    if info:
+                        if info.get("unlock"):
+                            lock_lines.append(f"• {prov}: unlock {info['unlock']}")
+                        link = info.get("link")
+                        if link:
+                            lock_lines.append(f"  ↪ {link}")
+
+
+
+                # If LP holders data missing, degrade to unknown verdict
+                data_insufficient = (holders == 0 and not th and (uncx + tfp + dead) == 0.0)
+
+
+                # verdict (very-lite heuristics)
+                verdict = "⚪ n/a"
+                if data_insufficient:
+                    verdict = "⚪ unknown (no LP data)"
+                elif dead >= 95 or (uncx + tfp) >= 50:
+                    verdict = "🟢 likely locked"
+                elif thp >= 50 and (uncx + tfp) < 10 and dead < 50:
+                    if th_contract or th_label:
+                        verdict = "🟡 mixed (contract/custodian holds LP)"
+                    else:
+                        verdict = "🔴 high risk (EOA holds LP)"
+                else:
+                    verdict = "🟡 mixed"
+
+                # links
+                ds_link = None
+                if paddr and chain:
+                    ds_link = _dexscreener_pair_url(chain, paddr)
+                scan_domain = "etherscan.io"
+                if chain in ("bsc","bscscan","bnb","binance"):
+                    scan_domain = "bscscan.com"
+                elif chain in ("polygon","matic"):
+                    scan_domain = "polygonscan.com"
+                scan_lp = f"https://{scan_domain}/token/{paddr}#balances" if paddr else None
+                scan_token = f"https://{scan_domain}/token/{addr}"
+                tf_site = "https://app.team.finance/"
+                uncx_site = "https://app.unicrypt.network/"
+
+                lines = [
+                    ("ℹ️ data source: LP holders API/rate-limit" if data_insufficient else None),
+                    f"🔒 LP lock (lite) — chain: {chain or 'n/a'}",
+                    f"Verdict: {verdict}",
+                    f"• Dead/renounced: {dead}%",
+                    f"• UNCX lockers: {uncx}%",
+                    f"• TeamFinance: {tfp}%",
+                    f"• Top holder: {th or 'n/a'} — {thp}% of LP{(f' — scan: ' + _explorer_base_for(chain) + '/address/' + th) if th else ''}",
+                    f"• Top holder type: {'contract' if (th_contract or th_label) else 'EOA' if th else 'n/a'}{(' (' + th_label + ')') if th_label else ''}",
+                    f"• Holders (LP token): {holders}",
+                    (f"• Owner: {owner_addr}" if owner_addr else "• Owner: n/a"),
+                    f"• Renounced: {'yes' if renounced else 'no'}",
+                    f"• Proxy: {'yes, impl: ' + impl_addr if is_proxy else 'no'}",
+                    ("• Multiple lockers detected" if multi_lockers else None),
+                ]
+                link_lines = []
+                link_lines.extend(lock_lines)
+                if ds_link: link_lines.append(f"DEX pair: {ds_link}")
+                if scan_lp: link_lines.append(f"Scan LP holders: {scan_lp}")
+                link_lines.append(f"Scan token: {scan_token}")
+                link_lines.append(f"UNCX: {uncx_site}")
+                link_lines.append(f"TeamFinance: {tf_site}")
+
+                try:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "LP info", logger=app.logger)
+                except Exception:
+                    pass
+                _send_text(chat_id, "\n".join([x for x in (lines + link_lines) if x]), logger=app.logger)
+                return ("ok", 200)
+
+
             if data.startswith("rep:"):
                 addr = data.split(":", 1)[1].strip().lower()
                 # Ensure on-chain factors are present in cache (best-effort)
