@@ -5702,3 +5702,124 @@ except NameError:
     _KNOWN_DOMAINS = {}
 if not _KNOWN_DOMAINS:
     _KNOWN_DOMAINS = dict(_FALLBACK_KNOWN_DOMAINS)
+
+
+# ========================
+# Risk Gatekeeper (contest-safe)
+# Enforces conservative verdicts when data is insufficient.
+# ========================
+try:
+    _CONTEST_SAFE_MODE = bool(int(os.environ.get("CONTEST_SAFE_MODE", "1") or "1"))
+except Exception:
+    _CONTEST_SAFE_MODE = True
+
+def _apply_risk_gates__text(text: str) -> str:
+    try:
+        if not isinstance(text, str):
+            return text
+        t = text
+
+        # Helpers
+        def _has_verdict_line(s: str) -> bool:
+            return bool(re.search(r'(?mi)^\\s*Trust\\s+verdict\\s*:', s))
+
+        def _set_verdict(s: str, verdict_text: str, risk_floor: int = None):
+            # Replace or insert Trust verdict line; update Risk score floor if present
+            if _has_verdict_line(s):
+                s = re.sub(r'(?mi)^\\s*Trust\\s+verdict\\s*:\\s*.*$',
+                           f'Trust verdict: {verdict_text}', s)
+            else:
+                # append at the end of the QuickScan block
+                hdr = "Metridex QuickScan (MVP+)"
+                i0 = s.find(hdr)
+                if i0 != -1:
+                    # find end of that block (before Why++/On-chain/next header)
+                    ends = [s.find(hdr, i0+len(hdr)),
+                            s.find("Why++ factors", i0),
+                            s.find("On-chain", i0)]
+                    ends = [x for x in ends if x != -1]
+                    j = min(ends) if ends else i0 + 300
+                    s = s[:j].rstrip() + "\\n" + f"Trust verdict: {verdict_text}" + "\\n" + s[j:]
+                else:
+                    s = s.rstrip() + "\\n" + f"Trust verdict: {verdict_text}" + "\\n"
+
+            if risk_floor is not None:
+                m = re.search(r'(?mi)Risk\\s*score\\s*:\\s*(\\d+)\\s*/\\s*100', s)
+                if m:
+                    cur = int(m.group(1))
+                    if cur < risk_floor:
+                        s = s[:m.start(1)] + str(risk_floor) + s[m.end(1):]
+                else:
+                    # No risk score present — append a standard one after verdict
+                    s = re.sub(r'(?mi)(Trust\\s+verdict\\s*:.*)$',
+                               r'\\1\\nRisk score: {}/100'.format(risk_floor if risk_floor is not None else 60), s)
+            return s
+
+        if not _CONTEST_SAFE_MODE:
+            return t
+
+        # Gate A: No markets/pools → NOT TRADABLE + risk >= 80
+        no_pools = bool(re.search(r'(?mi)No\\s+pools\\s+found\\s+on\\s+DexScreener', t)) or \
+                   bool(re.search(r'(?mi)No\\s+active\\s+pools|No\\s+liquidity', t))
+        if no_pools:
+            t = _set_verdict(t, "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)", risk_floor=80)
+
+        # Gate B: Why++ empty or not run → MEDIUM (Insufficient data) + risk >= 60
+        why_empty = bool(re.search(r'(?mi)No\\s+weighted\\s+factors\\s+captured\\s+yet', t)) or \
+                    ("Why++ factors" in t and not re.search(r'(?mi)^\\s*[+−-]\\s*\\d+\\s+', t))
+        if why_empty:
+            # Only upgrade if verdict is currently green/low
+            if re.search(r'(?mi)Trust\\s+verdict\\s*:\\s*LOW\\s+RISK', t) or not _has_verdict_line(t):
+                prefix = "MEDIUM RISK 🟡 • Insufficient data (run 🧪 On-chain)"
+                # If no pools already forced HIGH, keep HIGH
+                if not no_pools:
+                    t = _set_verdict(t, prefix, risk_floor=60)
+
+        # Gate C: Owner privileges before renounce/proxy checks → bump to >= 60 unless bluechip/whitelisted
+        try:
+            # Detect an early "Owner privileges present" in Signals or Why++
+            owner_flag = bool(re.search(r'(?mi)Owner\\s+privileges\\s+present', t))
+            whitelisted = False
+            m_ca = re.search(r'(?mi)Scan token:\\s*\\S*?/token/(0x[0-9a-fA-F]{40})', t)
+            ca = m_ca.group(1).lower() if m_ca else ""
+            if ca:
+                try:
+                    # Use existing whitelist helper if present
+                    if "_is_whitelisted" in globals():
+                        whitelisted, _ = _is_whitelisted(ca, t)  # type: ignore
+                except Exception:
+                    pass
+            if owner_flag and not whitelisted and not no_pools:
+                # Do not override HIGH risk from Gate A; otherwise enforce at least MEDIUM 60
+                t = _set_verdict(t, "MEDIUM RISK 🟡 • Admin privileges present", risk_floor=60)
+        except Exception:
+            pass
+
+        # Never show LOW RISK if either gate triggered
+        if no_pools or why_empty:
+            t = re.sub(r'(?mi)^\\s*Trust\\s+verdict\\s*:\\s*LOW\\s+RISK.*$', 
+                       'Trust verdict: MEDIUM RISK 🟡 • Insufficient/unstable data', t)
+
+        return t
+    except Exception:
+        return text
+
+# Hook into existing post-processing pipeline
+try:
+    if '_postprocess_report' in globals():
+        _postprocess_report__orig_rg = _postprocess_report
+        def _postprocess_report(text: str, chat_id):
+            try:
+                s = _postprocess_report__orig_rg(text, chat_id)
+            except Exception:
+                s = text
+            try:
+                s = _apply_risk_gates__text(s)
+            except Exception:
+                pass
+            return s
+except Exception:
+    pass
+# ========================
+# /Risk Gatekeeper
+# ========================
