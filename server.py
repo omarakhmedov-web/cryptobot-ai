@@ -1370,6 +1370,33 @@ def _send_text(chat_id, text, **kwargs):
     return None
 # === /SAFE8-FOX postprocess hook ===
 
+def _postprocess_text(text: str, chat_id=None) -> str:
+    """
+    SAFE8-FOX: centralized postprocess
+    - Normalizes WHOIS/RDAP
+    - Sanitizes owner-privilege phrasing
+    - Enforces risk gates
+    Any step failure must not raise.
+    """
+    if not MDX_ENABLE_POSTPROCESS or MDX_BYPASS_SANITIZERS:
+        return text
+    t = text
+    try:
+        t = _normalize_whois_rdap(t)
+    except Exception:
+        pass
+    try:
+        t = _sanitize_owner_privileges(t, chat_id)
+    except Exception:
+        pass
+    try:
+        t = _enforce_risk_gates(t, chat_id)
+    except Exception:
+        pass
+    return t
+
+def _send_text(chat_id, text, **kwargs):
+
 
 # ========================
 # Caches
