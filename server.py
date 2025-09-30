@@ -3769,6 +3769,8 @@ def _merge_onchain_into_risk(addr: str, info: dict):
         except Exception:
             pass
 
+    except Exception:
+        pass
 # Recompute label
         if entry["score"] >= RISK_THRESH_HIGH:
             entry["label"] = "HIGH RISK 🔴"
@@ -4486,6 +4488,8 @@ def webhook(secret):
                         _send_text(chat_id, "\n".join(lines), logger=app.logger)
                     except Exception:
                         pass
+        except Exception:
+            pass
 # Owner/renounce/proxy (lite) using chain-aware RPC
                 owner_addr = _get_owner(paddr, chain) if (paddr and chain) else ""
                 renounced = (owner_addr.lower() in DEAD_ADDRS) if owner_addr else False
