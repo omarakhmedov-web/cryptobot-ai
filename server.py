@@ -6171,3 +6171,108 @@ except Exception:
 # ========================
 # /Contest Lock v4
 # ========================
+
+
+# ========================
+# Contest Lock v5 (transport-layer filter)
+# Intercept Telegram API calls to ensure:
+# - No DEX/Swap buttons unless DEX_BUTTONS_ENABLED=1
+# - Text/caption always pass through normalization + gates + dedupe
+# ========================
+def _mdx_filter_reply_markup(reply_markup: dict) -> dict:
+    try:
+        import copy, re as _re
+        if not isinstance(reply_markup, dict):
+            return reply_markup
+        if os.environ.get("DEX_BUTTONS_ENABLED", "0") == "1":
+            return reply_markup
+        rm = copy.deepcopy(reply_markup)
+        kb = rm.get("inline_keyboard")
+        if isinstance(kb, list):
+            kb2 = []
+            for row in kb:
+                row2 = []
+                for btn in (row or []):
+                    try:
+                        txt = str(btn.get("text", ""))
+                        url = str(btn.get("url", ""))
+                        # Text-based filter
+                        if "DEX" in txt.upper() or "SWAP" in txt.upper():
+                            continue
+                        # URL-based filter
+                        L = url.lower()
+                        if any(p in L for p in ["uniswap.org", "pancakeswap.finance", "quickswap.exchange", "matcha.xyz", "1inch.io"]):
+                            continue
+                    except Exception:
+                        pass
+                    row2.append(btn)
+                if row2:
+                    kb2.append(row2)
+            rm["inline_keyboard"] = kb2
+        return rm
+    except Exception:
+        return reply_markup
+
+def _mdx_sanitize_textlike(s: str) -> str:
+    try:
+        s = _normalize_escapes(s)
+    except Exception:
+        pass
+    try:
+        s = _apply_risk_gates__text(s)
+    except Exception:
+        pass
+    try:
+        s = _normalize_escapes(s)
+    except Exception:
+        pass
+    try:
+        s = _dedupe_verdict_and_risk_strict(s)
+    except Exception:
+        pass
+    return s
+
+# Wrap requests.post to catch any Telegram API call variants
+try:
+    import requests as _rq
+    if hasattr(_rq, "post") and not globals().get("_MDX_REQ_POST_ORIG_V5"):
+        _MDX_REQ_POST_ORIG_V5 = _rq.post
+        def post(url, *args, **kwargs):
+            try:
+                if isinstance(url, str) and "api.telegram.org" in url:
+                    # Sanitize both 'data' and 'json' payloads
+                    if "json" in kwargs and isinstance(kwargs["json"], dict):
+                        js = dict(kwargs["json"])
+                        if "text" in js and isinstance(js["text"], str):
+                            js["text"] = _mdx_sanitize_textlike(js["text"])
+                        if "caption" in js and isinstance(js["caption"], str):
+                            js["caption"] = _mdx_sanitize_textlike(js["caption"])
+                        if "reply_markup" in js:
+                            js["reply_markup"] = _mdx_filter_reply_markup(js["reply_markup"])
+                        kwargs["json"] = js
+                    if "data" in kwargs and isinstance(kwargs["data"], dict):
+                        dt = dict(kwargs["data"])
+                        if "text" in dt and isinstance(dt["text"], str):
+                            dt["text"] = _mdx_sanitize_textlike(dt["text"])
+                        if "caption" in dt and isinstance(dt["caption"], str):
+                            dt["caption"] = _mdx_sanitize_textlike(dt["caption"])
+                        # reply_markup may be JSON-encoded string
+                        rm_raw = dt.get("reply_markup")
+                        if isinstance(rm_raw, str) and rm_raw.strip().startswith("{"):
+                            try:
+                                import json as _json
+                                rm = _json.loads(rm_raw)
+                                rm = _mdx_filter_reply_markup(rm)
+                                dt["reply_markup"] = _json.dumps(rm, separators=(",",":"))
+                            except Exception:
+                                pass
+                        kwargs["data"] = dt
+            except Exception:
+                pass
+            return _MDX_REQ_POST_ORIG_V5(url, *args, **kwargs)
+        _rq.post = post
+except Exception:
+    pass
+# ========================
+# /Contest Lock v5
+# ========================
