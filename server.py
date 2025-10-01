@@ -6350,3 +6350,113 @@ except Exception:
 # ========================
 # /Report Caption Normalizer
 # ========================
+
+
+# ==== MDX Report Normalizer (body + caption) ====
+# This block guarantees consistency between chat, HTML content, and Telegram caption.
+# It patches the transport layer (requests.post to Telegram) for sendDocument.
+import re as _re_html, io as _io_html
+
+def _mdx_extract_from_html(txt: str):
+    """Return (verdict, score, neg_lines, pos_lines) parsed from the HTML text (Summary/Why++)."""
+    verdict, score = None, None
+    m1 = _re_html.search(r'Risk\s*score\s*:\s*(\d+)\s*/\s*100', txt, _re_html.I)
+    m2 = _re_html.search(r'Trust\s+verdict\s*:\s*([^\n<]+)', txt, _re_html.I)
+    if m1: score = int(m1.group(1))
+    if m2: verdict = m2.group(1).strip()
+    # Why++ factors → signals
+    neg, pos = [], []
+    mstart = _re_html.search(r'(?mi)^\s*Why\+\+\s*factors\s*$', txt)
+    if mstart:
+        tail = txt[mstart.end():]
+        mend = _re_html.search(r'(?mi)^\s*(On-chain|ℹ️|🔒|Scan token:|$)', tail)
+        block = tail[:mend.start()] if mend else tail
+        for ln in block.splitlines():
+            s = ln.strip()
+            if not s: 
+                continue
+            mneg = _re_html.match(r'^[−\-]\s*(\d+)\s+(.+)$', s)
+            mpos = _re_html.match(r'^[\+]\s*(\d+)\s+(.+)$', s)
+            if mneg:
+                neg.append(f"− {mneg.group(1)}  {mneg.group(2).strip()}")
+            elif mpos:
+                pos.append(f"+ {mpos.group(1)}  {mpos.group(2).strip()}")
+    return verdict, score, neg, pos
+
+def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
+    """Rewrite Risk verdict card and Signals inside the HTML to match Summary/Why++."""
+    try:
+        txt = raw.decode("utf-8", errors="ignore")
+        verdict, score, neg, pos = _mdx_extract_from_html(txt)
+        if verdict is None or score is None:
+            return raw  # nothing to fix
+        # 1) Rewrite Risk verdict <p><b>...</b></p> in the corresponding box
+        def repl_verdict(m):
+            before = m.group(1)
+            return before + f'<p><b>{verdict} (Risk score: {score}/100)</b></p>'
+        txt = _re_html.sub(
+            r'(<div class="box">\s*<h2>\s*Risk\s+verdict\s*</h2>\s*)<p><b>.*?</b></p>',
+            repl_verdict, txt, flags=_re_html.I|_re_html.S
+        )
+        # 2) Replace Signals/Positives blocks (if present)
+        def block(lines): 
+            return "\\n".join(lines) if lines else "—"
+        txt = _re_html.sub(
+            r'(<h3>\s*Signals\s*</h3>\s*)<pre>.*?</pre>',
+            r'\\1<pre>' + block(neg) + r'</pre>', txt, flags=_re_html.I|_re_html.S
+        )
+        txt = _re_html.sub(
+            r'(<h3>\s*Positives\s*</h3>\s*)<pre>.*?</pre>',
+            r'\\1<pre>' + block(pos) + r'</pre>', txt, flags=_re_html.I|_re_html.S
+        )
+        # 3) Tidy up excess blank lines
+        txt = _re_html.sub(r'\n{3,}', '\n\n', txt)
+        return txt.encode("utf-8", errors="ignore")
+    except Exception:
+        return raw
+
+def _mdx_caption_from_html_bytes(raw: bytes) -> str|None:
+    try:
+        txt = raw.decode("utf-8", errors="ignore")
+        v, sc, *_ = _mdx_extract_from_html(txt)
+        if v is not None and sc is not None:
+            return f"{v} (score {sc}/100)"
+    except Exception:
+        return None
+    return None
+
+# Patch Telegram sendDocument to fix BOTH the HTML body and the caption
+try:
+    import requests as _rq
+    if hasattr(_rq, "post") and not globals().get("_MDX_REQ_POST_REPORT_FIX_v3"):
+        _MDX_REQ_POST_REPORT_FIX_v3 = _rq.post
+        def post(url, *args, **kwargs):
+            try:
+                if isinstance(url, str) and "api.telegram.org" in url and url.endswith("/sendDocument"):
+                    data = kwargs.get("data", {})
+                    files = kwargs.get("files", {})
+                    if isinstance(files, dict) and "document" in files:
+                        name, fobj, *rest = files["document"]
+                        mtype = (rest[0] if rest else "") or ""
+                        pos = fobj.tell() if hasattr(fobj, "tell") else None
+                        raw = fobj.read() if hasattr(fobj, "read") else None
+                        if raw is not None and (str(name).lower().endswith(".html") or "html" in str(mtype).lower()):
+                            fixed = _mdx_fix_report_html_bytes(raw)
+                            cap = _mdx_caption_from_html_bytes(fixed)
+                            # Replace the file object with the fixed content
+                            files["document"] = (name, _io_html.BytesIO(fixed), mtype or "text/html")
+                            kwargs["files"] = files
+                            # Rewrite caption deterministically
+                            if isinstance(data, dict) and cap:
+                                data = dict(data); data["caption"] = cap; kwargs["data"] = data
+                        # Reset pointer if we didn't replace
+                        if raw is not None and pos is not None and hasattr(fobj, "seek"):
+                            try: fobj.seek(pos)
+                            except Exception: pass
+            except Exception:
+                pass
+            return _MDX_REQ_POST_REPORT_FIX_v3(url, *args, **kwargs)
+        _rq.post = post
+except Exception:
+    pass
+# ==== /MDX Report Normalizer ====
