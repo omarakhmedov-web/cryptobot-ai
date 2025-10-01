@@ -5937,3 +5937,116 @@ except Exception:
 # ========================
 # /Contest Lock v2
 # ========================
+
+
+# ========================
+# Contest Lock v3 tweaks
+# - Deduplicate 'Trust verdict' and 'Risk score' lines
+# - Strip escaped '\n' artifacts like '\nTrust...' or trailing '\n\1'
+# - Stronger keyboard filter: remove any button with 'DEX'/'Swap' text (case-insensitive)
+# ========================
+def _dedupe_verdict_and_risk(s: str) -> str:
+    try:
+        import re as _re
+        # Normalize escaped \n into real newlines first (if any slipped through)
+        s = s.replace("\\n", "\n")
+        # Keep only the first 'Trust verdict' line
+        lines = s.splitlines()
+        out = []
+        seen_verdict = False
+        seen_risk = False
+        for ln in lines:
+            if _re.search(r'(?i)^\s*Trust\s+verdict\s*:', ln):
+                if seen_verdict:
+                    continue
+                seen_verdict = True
+                out.append(ln.strip())
+                continue
+            if _re.search(r'(?i)^\s*Risk\s*score\s*:\s*\d+\s*/\s*100\s*$', ln):
+                if seen_risk:
+                    continue
+                seen_risk = True
+                out.append(ln.strip())
+                continue
+            # Drop stray '\1' or single '1' artifacts on their own line
+            if ln.strip() in (r'\1', '1'):
+                continue
+            out.append(ln)
+        # Collapse 3+ blank lines
+        s2 = "\n".join(out)
+        s2 = _re.sub(r'\n{3,}', '\n\n', s2)
+        return s2
+    except Exception:
+        return s
+
+def _kbd_hard_filter(kbd):
+    try:
+        kk = []
+        for row in (kbd or []):
+            row2 = []
+            for btn in (row or []):
+                try:
+                    txt = str(btn.get("text", ""))
+                    url = str(btn.get("url", ""))
+                    # Remove any DEX/swap intentions
+                    if re.search(r'(?i)\bDEX\b', txt) or re.search(r'(?i)swap', txt):
+                        continue
+                    if _is_swap_url(url):
+                        continue
+                except Exception:
+                    pass
+                row2.append(btn)
+            if row2:
+                kk.append(row2)
+        return kk
+    except Exception:
+        return kbd
+
+# Override wrappers to apply the new sanitizers
+try:
+    if 'tg_send_message' in globals():
+        _MDX_TG_SEND_ORIG_V3 = tg_send_message
+        def tg_send_message(token, chat_id, text, **kwargs):
+            try:
+                text = _apply_risk_gates__text(text)
+            except Exception:
+                pass
+            try:
+                text = _strip_backref_artifacts(text)
+            except Exception:
+                pass
+            try:
+                text = _dedupe_verdict_and_risk(text)
+            except Exception:
+                pass
+            return _MDX_TG_SEND_ORIG_V3(token, chat_id, text, **kwargs)
+except Exception:
+    pass
+
+try:
+    if 'tg_send_inline_keyboard' in globals():
+        _MDX_TG_KBD_ORIG_V3 = tg_send_inline_keyboard
+        def tg_send_inline_keyboard(token, chat_id, caption, kbd):
+            try:
+                caption = _apply_risk_gates__text(caption)
+            except Exception:
+                pass
+            try:
+                caption = _strip_backref_artifacts(caption)
+            except Exception:
+                pass
+            try:
+                caption = _dedupe_verdict_and_risk(caption)
+            except Exception:
+                pass
+            try:
+                if os.environ.get("DEX_BUTTONS_ENABLED", "0") != "1":
+                    kbd = _kbd_hard_filter(kbd)
+            except Exception:
+                pass
+            return _MDX_TG_KBD_ORIG_V3(token, chat_id, caption, kbd)
+except Exception:
+    pass
+# ========================
+# /Contest Lock v3 tweaks
+# ========================
