@@ -6383,37 +6383,44 @@ def _mdx_extract_from_html(txt: str):
                 pos.append(f"+ {mpos.group(1)}  {mpos.group(2).strip()}")
     return verdict, score, neg, pos
 
+
 def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
-    """Rewrite Risk verdict card and Signals inside the HTML to match Summary/Why++."""
+    """Rewrite Risk verdict card and Signals inside the HTML to match Summary/Why++ (safe, no backrefs)."""
     try:
         txt = raw.decode("utf-8", errors="ignore")
         verdict, score, neg, pos = _mdx_extract_from_html(txt)
         if verdict is None or score is None:
-            return raw  # nothing to fix
-        # 1) Rewrite Risk verdict <p><b>...</b></p> in the corresponding box
-        def repl_verdict(m):
-            before = m.group(1)
-            return before + f'<p><b>{verdict} (Risk score: {score}/100)</b></p>'
-        txt = _re_html.sub(
-            r'(<div class="box">\s*<h2>\s*Risk\s+verdict\s*</h2>\s*)<p><b>.*?</b></p>',
-            repl_verdict, txt, flags=_re_html.I|_re_html.S
+            return txt.replace(r'\1', '').encode("utf-8", errors="ignore")
+        def replace_verdict_box(m):
+            head = m.group(1)
+            return head + f'<p><b>{verdict} (Risk score: {score}/100)</b></p></div>'
+        txt = re.sub(
+            r'(<div class="box">\s*<h2>\s*Risk\s+verdict\s*</h2>\s*)(?:.*?)</div>',
+            replace_verdict_box, txt, flags=re.I|re.S
         )
-        # 2) Replace Signals/Positives blocks (if present)
-        def block(lines): 
-            return "\\n".join(lines) if lines else "—"
-        txt = _re_html.sub(
-            r'(<h3>\s*Signals\s*</h3>\s*)<pre>.*?</pre>',
-            r'\\1<pre>' + block(neg) + r'</pre>', txt, flags=_re_html.I|_re_html.S
+        def block(lines):
+            return "\n".join(lines) if lines else "—"
+        txt = re.sub(r'<h3>\s*Signals\s*</h3>\s*<pre>.*?</pre>', '', txt, flags=re.I|re.S)
+        txt = re.sub(r'<h3>\s*Positives\s*</h3>\s*<pre>.*?</pre>', '', txt, flags=re.I|re.S)
+        def insert_after_verdict(m):
+            box = m.group(0)
+            injection = (
+                f'\n<h3>Signals</h3><pre>{block(neg)}</pre>'
+                f'\n<h3>Positives</h3><pre>{block(pos)}</pre>'
+            )
+            return box + injection
+        txt = re.sub(
+            r'(<div class="box">\s*<h2>\s*Risk\s+verdict\s*</h2>\s*<p><b>.*?Risk score:\s*\d+\s*/\s*100\)</b></p>\s*</div>)',
+            insert_after_verdict, txt, flags=re.I|re.S
         )
-        txt = _re_html.sub(
-            r'(<h3>\s*Positives\s*</h3>\s*)<pre>.*?</pre>',
-            r'\\1<pre>' + block(pos) + r'</pre>', txt, flags=_re_html.I|_re_html.S
-        )
-        # 3) Tidy up excess blank lines
-        txt = _re_html.sub(r'\n{3,}', '\n\n', txt)
+        txt = txt.replace(r'\1', '')
+        txt = re.sub(r'\n{3,}', '\n\n', txt)
         return txt.encode("utf-8", errors="ignore")
     except Exception:
-        return raw
+        try:
+            return raw.decode("utf-8", errors="ignore").replace(r'\1','').encode("utf-8", errors="ignore")
+        except Exception:
+            return raw
 
 def _mdx_caption_from_html_bytes(raw: bytes) -> str|None:
     try:
