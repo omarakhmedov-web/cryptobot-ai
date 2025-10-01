@@ -5788,3 +5788,62 @@ except Exception:
 # ========================
 # /Risk Gatekeeper
 # ========================
+
+
+# ========================
+# Contest Lock: enforce risk gates on ALL outgoing messages
+# and (by default) hide "Open in DEX" buttons.
+# Toggle via ENV: DEX_BUTTONS_ENABLED=1 to show.
+# ========================
+try:
+    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "0") == "1")
+except Exception:
+    _DEX_BTN_ENABLED = False
+
+try:
+    # Wrap tg_send_message
+    if 'tg_send_message' in globals() and '_MDX_TG_SEND_ORIG' not in globals():
+        _MDX_TG_SEND_ORIG = tg_send_message
+        def tg_send_message(token, chat_id, text, **kwargs):
+            try:
+                text = _apply_risk_gates__text(text)
+            except Exception:
+                pass
+            return _MDX_TG_SEND_ORIG(token, chat_id, text, **kwargs)
+except Exception:
+    pass
+
+try:
+    # Wrap tg_send_inline_keyboard
+    if 'tg_send_inline_keyboard' in globals() and '_MDX_TG_KBD_ORIG' not in globals():
+        _MDX_TG_KBD_ORIG = tg_send_inline_keyboard
+        def tg_send_inline_keyboard(token, chat_id, caption, kbd):
+            try:
+                # Optional: filter out DEX button rows unless explicitly enabled
+                if not _DEX_BTN_ENABLED:
+                    kk = []
+                    for row in (kbd or []):
+                        row2 = []
+                        for btn in (row or []):
+                            try:
+                                txt = btn.get("text", "")
+                                if isinstance(txt, str) and "Open in DEX" in txt:
+                                    continue
+                            except Exception:
+                                pass
+                            row2.append(btn)
+                        if row2:
+                            kk.append(row2)
+                    kbd = kk
+            except Exception:
+                pass
+            try:
+                caption = _apply_risk_gates__text(caption)
+            except Exception:
+                pass
+            return _MDX_TG_KBD_ORIG(token, chat_id, caption, kbd)
+except Exception:
+    pass
+# ========================
+# /Contest Lock
+# ========================
