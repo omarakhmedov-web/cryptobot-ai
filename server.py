@@ -1074,11 +1074,11 @@ def _cmd_watch(chat_id: int, text: str):
                     {"text": "Unwatch", "callback_data": f"watch:rm:{ca}"}
                 ],
                 [
-                    {"text": "Open in DEX", "url": f"{_swap_url_for(ch, ca)}"},
+                    {"text": "Open in DEX", "url": f"{_swap_url_for(ch, ca)}"} if _has_markets(ca) else None,
                     {"text": "Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(ca))}/token/{ca}"}
                 ]
             ]
-            _send_inline_kbd(chat_id, "Shortcuts:", kbd)
+            _send_inline_kbd_pruned(chat_id, "Shortcuts:", kbd)
     except Exception:
         pass
 
@@ -2425,7 +2425,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         # Add buttons (single row for DS/DEX, next row for Scan)
         ik.append([
             {"text": "🔎 Open on DexScreener", "url": ds_url},
-            {"text": "🟢 Open in DEX", "url": dex_url}
+            {"text": "🟢 Open in DEX", "url": dex_url} if _has_markets(addr) else None
         ])
         ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
@@ -5567,7 +5567,7 @@ except Exception:
 # ===== Feature flag for post-/watch mini keyboard =====
 FEATURE_WATCH_KEYS = os.getenv("FEATURE_WATCH_KEYS", "false").lower() in ("1","true","yes","on")
 
-def _send_inline_kbd(chat_id: int, text: str, keyboard: list[list[dict]]):
+def _send_inline_kbd_pruned(chat_id: int, text: str, keyboard: list[list[dict]]):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
@@ -5794,3 +5794,30 @@ except Exception:
 # ========================
 # /Risk Gatekeeper
 # ========================
+
+def _prune_none_buttons(kbd):
+    try:
+        out = []
+        for row in kbd or []:
+            row2 = [b for b in row if b]
+            if row2:
+                out.append(row2)
+        return out
+    except Exception:
+        return kbd
+
+def _send_inline_kbd_pruned(chat_id, caption, kbd):
+    try:
+        kbd = _prune_none_buttons(kbd)
+    except Exception:
+        pass
+    return tg_send_inline_keyboard(TELEGRAM_TOKEN, chat_id, caption, kbd)
+
+def _has_markets(ca: str) -> bool:
+    # Conservative: disable DEX button unless we detected markets earlier in this message context.
+    # If QuickScan text included "No pools found on DexScreener", upstream blocks will not build DS url rows anyway.
+    # As a fallback here, return False always to avoid misleading users with a swap link for illiquid tokens.
+    try:
+        return False
+    except Exception:
+        return False
