@@ -5847,3 +5847,93 @@ except Exception:
 # ========================
 # /Contest Lock
 # ========================
+
+
+# ========================
+# Contest Lock v2 (strict)
+# - Strip stray "\n\1"
+# - Hide any swap/DEX link by default
+# ========================
+try:
+    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "0") == "1")
+except Exception:
+    _DEX_BTN_ENABLED = False
+
+def _strip_backref_artifacts(s: str) -> str:
+    try:
+        import re as _re
+        # Remove '\n\1' or standalone '\1' that might appear from regex backrefs
+        s = _re.sub(r'(\\n)?\\1', '', s)
+        # Also collapse accidental double newlines around verdict
+        s = _re.sub(r'\n{3,}', '\n\n', s)
+        return s
+    except Exception:
+        return s
+
+def _is_swap_url(u: str) -> bool:
+    try:
+        u = (u or "").lower()
+        return any(p in u for p in [
+            "uniswap.org/swap", "app.uniswap.org/#/swap", "pancakeswap.finance/swap",
+            "quickswap.exchange/#/swap", "jumper.exchange", "matcha.xyz", "1inch.io"
+        ])
+    except Exception:
+        return False
+
+try:
+    # Wrap tg_send_message (again, overwrite prior wrapper if present)
+    if 'tg_send_message' in globals():
+        _MDX_TG_SEND_ORIG_V2 = tg_send_message
+        def tg_send_message(token, chat_id, text, **kwargs):
+            try:
+                text = _apply_risk_gates__text(text)
+            except Exception:
+                pass
+            try:
+                text = _strip_backref_artifacts(text)
+            except Exception:
+                pass
+            return _MDX_TG_SEND_ORIG_V2(token, chat_id, text, **kwargs)
+except Exception:
+    pass
+
+try:
+    # Wrap tg_send_inline_keyboard (again, overwrite prior wrapper if present)
+    if 'tg_send_inline_keyboard' in globals():
+        _MDX_TG_KBD_ORIG_V2 = tg_send_inline_keyboard
+        def tg_send_inline_keyboard(token, chat_id, caption, kbd):
+            try:
+                if not _DEX_BTN_ENABLED:
+                    kk = []
+                    for row in (kbd or []):
+                        row2 = []
+                        for btn in (row or []):
+                            try:
+                                txt = btn.get("text", "")
+                                url = btn.get("url", "")
+                                if isinstance(txt, str) and "Open in DEX" in txt:
+                                    continue
+                                if _is_swap_url(url):
+                                    continue
+                            except Exception:
+                                pass
+                            row2.append(btn)
+                        if row2:
+                            kk.append(row2)
+                    kbd = kk
+            except Exception:
+                pass
+            try:
+                caption = _apply_risk_gates__text(caption)
+            except Exception:
+                pass
+            try:
+                caption = _strip_backref_artifacts(caption)
+            except Exception:
+                pass
+            return _MDX_TG_KBD_ORIG_V2(token, chat_id, caption, kbd)
+except Exception:
+    pass
+# ========================
+# /Contest Lock v2
+# ========================
