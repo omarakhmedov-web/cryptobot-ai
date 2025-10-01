@@ -1074,11 +1074,11 @@ def _cmd_watch(chat_id: int, text: str):
                     {"text": "Unwatch", "callback_data": f"watch:rm:{ca}"}
                 ],
                 [
-                    {"text": "Open in DEX", "url": f"{_swap_url_for(ch, ca)}"} if _has_markets(ca) else None,
+                    {"text": "Open in DEX", "url": f"{_swap_url_for(ch, ca)}"},
                     {"text": "Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(ca))}/token/{ca}"}
                 ]
             ]
-            _send_inline_kbd_pruned(chat_id, "Shortcuts:", kbd)
+            _send_inline_kbd(chat_id, "Shortcuts:", kbd)
     except Exception:
         pass
 
@@ -2167,6 +2167,7 @@ def _send_text(chat_id, text, **kwargs):
             text = _apply_risk_gates__text(text)
         except Exception:
             pass
+
         return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
     if MDX_BYPASS_SANITIZERS:
         return tg_send_message(TELEGRAM_TOKEN, chat_id, text, **kwargs)
@@ -2425,7 +2426,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         # Add buttons (single row for DS/DEX, next row for Scan)
         ik.append([
             {"text": "🔎 Open on DexScreener", "url": ds_url},
-            {"text": "🟢 Open in DEX", "url": dex_url} if _has_markets(addr) else None
+            {"text": "🟢 Open in DEX", "url": dex_url}
         ])
         ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
@@ -5567,7 +5568,7 @@ except Exception:
 # ===== Feature flag for post-/watch mini keyboard =====
 FEATURE_WATCH_KEYS = os.getenv("FEATURE_WATCH_KEYS", "false").lower() in ("1","true","yes","on")
 
-def _send_inline_kbd_pruned(chat_id: int, text: str, keyboard: list[list[dict]]):
+def _send_inline_kbd(chat_id: int, text: str, keyboard: list[list[dict]]):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
@@ -5709,63 +5710,56 @@ if not _KNOWN_DOMAINS:
 
 
 # ========================
-# Risk Gatekeeper (contest-safe)
-# Enforces conservative verdicts when data is insufficient.
+# Risk Gatekeeper (contest-safe) — stronger gates
 # ========================
+import os as _os_rg, re as _re_rg
 try:
-    _CONTEST_SAFE_MODE = bool(int(os.environ.get("CONTEST_SAFE_MODE", "1") or "1"))
+    _CONTEST_SAFE_MODE = bool(int(_os_rg.environ.get("CONTEST_SAFE_MODE", "1") or "1"))
 except Exception:
     _CONTEST_SAFE_MODE = True
 
 def _apply_risk_gates__text(text: str) -> str:
-    import re as _re
     try:
         if not isinstance(text, str):
             return text
         t = text
-        try:
-            _csm = _CONTEST_SAFE_MODE
-        except Exception:
-            import os as _os
-            try:
-                _csm = bool(int(_os.environ.get("CONTEST_SAFE_MODE", "1") or "1"))
-            except Exception:
-                _csm = True
-        if not _csm:
+        if not _CONTEST_SAFE_MODE:
             return t
 
         def _has_verdict_line(s: str) -> bool:
-            return bool(_re.search(r'(?mi)^\s*Trust\s+verdict\s*:', s))
+            return bool(_re_rg.search(r'(?mi)^\s*Trust\s+verdict\s*:', s))
 
         def _bump_risk_floor(s: str, floor: int) -> str:
-            m = _re.search(r'(?mi)(Risk\s*score\s*:\s*)(\d+)(\s*/\s*100)', s)
+            m = _re_rg.search(r'(?mi)(Risk\s*score\s*:\s*)(\d+)(\s*/\s*100)', s)
             if m:
                 cur = int(m.group(2))
                 if cur < floor:
                     s = s[:m.start(2)] + str(floor) + s[m.end(2):]
             else:
-                s = _re.sub(r'(?mi)(Trust\s+verdict\s*:.*)$', r"\1\nRisk score: {}/100".format(floor), s)
+                s = _re_rg.sub(r'(?mi)(Trust\s+verdict\s*:.*)$', r"\\1\nRisk score: {}/100".format(floor), s)
             return s
 
         def _force_verdict(s: str, verdict_text: str, floor: int) -> str:
             if _has_verdict_line(s):
-                s = _re.sub(r'(?mi)^\s*Trust\s+verdict\s*:\s*.*$', "Trust verdict: " + verdict_text, s)
+                s = _re_rg.sub(r'(?mi)^\s*Trust\s+verdict\s*:\s*.*$', "Trust verdict: " + verdict_text, s)
             else:
-                s = s.rstrip() + "\nTrust verdict: " + verdict_text + "\n"
+                s = s.rstrip() + "\\nTrust verdict: " + verdict_text + "\\n"
             s = _bump_risk_floor(s, floor)
             return s
 
-        no_pools = bool(_re.search(r'(?mi)No\s+pools\s+found\s+on\s+DexScreener', t)) or                    bool(_re.search(r'(?mi)No\s+active\s+pools|No\s+liquidity', t))
-        why_empty = bool(_re.search(r'(?mi)No\s+weighted\s+factors\s+captured\s+yet', t)) or                     ("Why++ factors" in t and not _re.search(r'(?mi)^\s*[+−-]\s*\d+\s+', t))
+        no_pools = bool(_re_rg.search(r'(?mi)No\s+pools\s+found\s+on\s+DexScreener', t)) or \
+                   bool(_re_rg.search(r'(?mi)No\s+active\s+pools|No\s+liquidity', t))
+        why_empty = bool(_re_rg.search(r'(?mi)No\s+weighted\s+factors\s+captured\s+yet', t)) or \
+                    ("Why++ factors" in t and not _re_rg.search(r'(?mi)^\s*[+−-]\s*\d+\s+', t))
 
         if no_pools:
             t = _force_verdict(t, "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)", 80)
 
         if why_empty and not no_pools:
-            if not _re.search(r'(?mi)Trust\s+verdict\s*:\s*HIGH\s+RISK', t):
+            if not _re_rg.search(r'(?mi)Trust\s+verdict\s*:\s*HIGH\s+RISK', t):
                 t = _force_verdict(t, "MEDIUM RISK 🟡 • Insufficient data (run 🧪 On-chain)", 60)
 
-        if (no_pools or why_empty) and _re.search(r'(?mi)Trust\s+verdict\s*:\s*LOW\s+RISK', t):
+        if (no_pools or why_empty) and _re_rg.search(r'(?mi)Trust\s+verdict\s*:\s*LOW\s+RISK', t):
             if no_pools:
                 t = _force_verdict(t, "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)", 80)
             else:
@@ -5775,7 +5769,7 @@ def _apply_risk_gates__text(text: str) -> str:
     except Exception:
         return text
 
-# Hook into existing post-processing pipeline
+# Hook into existing post-processing pipeline if present
 try:
     if '_postprocess_report' in globals():
         _postprocess_report__orig_rg = _postprocess_report
@@ -5794,30 +5788,3 @@ except Exception:
 # ========================
 # /Risk Gatekeeper
 # ========================
-
-def _prune_none_buttons(kbd):
-    try:
-        out = []
-        for row in kbd or []:
-            row2 = [b for b in row if b]
-            if row2:
-                out.append(row2)
-        return out
-    except Exception:
-        return kbd
-
-def _send_inline_kbd_pruned(chat_id, caption, kbd):
-    try:
-        kbd = _prune_none_buttons(kbd)
-    except Exception:
-        pass
-    return tg_send_inline_keyboard(TELEGRAM_TOKEN, chat_id, caption, kbd)
-
-def _has_markets(ca: str) -> bool:
-    # Conservative: disable DEX button unless we detected markets earlier in this message context.
-    # If QuickScan text included "No pools found on DexScreener", upstream blocks will not build DS url rows anyway.
-    # As a fallback here, return False always to avoid misleading users with a swap link for illiquid tokens.
-    try:
-        return False
-    except Exception:
-        return False
