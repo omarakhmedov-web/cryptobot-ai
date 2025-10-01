@@ -6050,3 +6050,124 @@ except Exception:
 # ========================
 # /Contest Lock v3 tweaks
 # ========================
+
+
+# ========================
+# Contest Lock v4 (final tweaks)
+# ========================
+def _normalize_escapes(s: str) -> str:
+    try:
+        # Replace escaped \n and \r\n into real newlines
+        s = s.replace("\\r\\n", "\n").replace("\\n", "\n")
+        return s
+    except Exception:
+        return s
+
+def _dedupe_verdict_and_risk_strict(s: str) -> str:
+    try:
+        import re as _re
+        s = _normalize_escapes(s)
+        lines = s.splitlines()
+        out = []
+        seen_verdict = False
+        seen_risk = False
+        for ln in lines:
+            lns = ln.strip()
+            if _re.search(r'(?i)^trust\s+verdict\s*:', lns):
+                if seen_verdict:
+                    continue
+                seen_verdict = True
+                out.append(lns)
+                continue
+            if _re.search(r'(?i)^risk\s*score\s*:\s*\d+\s*/\s*100\s*$', lns):
+                if seen_risk:
+                    continue
+                seen_risk = True
+                out.append(lns)
+                continue
+            if lns in (r'\1', '1'):
+                continue
+            out.append(ln)
+        s2 = "\n".join(out)
+        # Remove any repeated identical verdict lines that slipped in one paragraph
+        s2 = _re.sub(r'(?mi)^(Trust\s+verdict:.*\n)(?:\1)+', r'\1', s2)
+        s2 = _re.sub(r'\n{3,}', '\n\n', s2)
+        return s2
+    except Exception:
+        return s
+
+# Override wrappers with stricter order: normalize -> gates -> normalize -> dedupe
+try:
+    if 'tg_send_message' in globals():
+        _MDX_TG_SEND_ORIG_V4 = tg_send_message
+        def tg_send_message(token, chat_id, text, **kwargs):
+            try:
+                text = _normalize_escapes(text)
+            except Exception:
+                pass
+            try:
+                text = _apply_risk_gates__text(text)
+            except Exception:
+                pass
+            try:
+                text = _normalize_escapes(text)
+            except Exception:
+                pass
+            try:
+                text = _dedupe_verdict_and_risk_strict(text)
+            except Exception:
+                pass
+            return _MDX_TG_SEND_ORIG_V4(token, chat_id, text, **kwargs)
+except Exception:
+    pass
+
+try:
+    if 'tg_send_inline_keyboard' in globals():
+        _MDX_TG_KBD_ORIG_V4 = tg_send_inline_keyboard
+        def tg_send_inline_keyboard(token, chat_id, caption, kbd):
+            # Caption pipeline
+            try:
+                caption = _normalize_escapes(caption)
+            except Exception:
+                pass
+            try:
+                caption = _apply_risk_gates__text(caption)
+            except Exception:
+                pass
+            try:
+                caption = _normalize_escapes(caption)
+            except Exception:
+                pass
+            try:
+                caption = _dedupe_verdict_and_risk_strict(caption)
+            except Exception:
+                pass
+            # Keyboard filter (remove any DEX/swap presence unless explicitly enabled)
+            try:
+                if os.environ.get("DEX_BUTTONS_ENABLED", "0") != "1":
+                    kk = []
+                    for row in (kbd or []):
+                        row2 = []
+                        for btn in (row or []):
+                            try:
+                                txt = str(btn.get("text", ""))
+                                url = str(btn.get("url", ""))
+                                if ("DEX" in txt.upper()) or ("SWAP" in txt.upper()):
+                                    continue
+                                low = url.lower()
+                                if any(p in low for p in ["uniswap.org", "pancakeswap.finance", "quickswap.exchange", "matcha.xyz", "1inch.io"]):
+                                    continue
+                            except Exception:
+                                pass
+                            row2.append(btn)
+                        if row2:
+                            kk.append(row2)
+                    kbd = kk
+            except Exception:
+                pass
+            return _MDX_TG_KBD_ORIG_V4(token, chat_id, caption, kbd)
+except Exception:
+    pass
+# ========================
+# /Contest Lock v4
+# ========================
