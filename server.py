@@ -6530,18 +6530,24 @@ def _normalize_action_row(kb: dict) -> dict:
         # 2) If we have Scan URL, infer chain and CA, then rebuild DEX URL accordingly
         import re as _re
         from urllib.parse import urlparse as _urlparse
+
         if scan_btn:
             scan_url = str(scan_btn.get("url") or "")
             try:
                 ca = (_re.search(r"(0x[a-fA-F0-9]{40})", scan_url) or [None, ""])[1]
             except Exception:
                 ca = ""
+
+            # Prefer chain from DexScreener resolver (if available)
             ch = ""
             try:
-                # Prefer helper if present
-                ch = _chain_from_scan_url(scan_url)
+                _pair, _ds_chain = _ds_resolve_pair_and_chain(ca) or (None, None)
+                if _ds_chain:
+                    ch = _ds_chain
             except Exception:
-                ch = ""
+                ch = ch or ""
+
+            # Fallback 1: derive from scan URL host
             if not ch:
                 try:
                     host = (_urlparse(scan_url).hostname or "").lower()
@@ -6554,6 +6560,14 @@ def _normalize_action_row(kb: dict) -> dict:
                     elif "snowtrace" in host or "avax" in host: ch = "avalanche"
                 except Exception:
                     pass
+
+            # Fallback 2: internal resolver used by scan_url
+            if not ch:
+                try:
+                    ch = (_resolve_chain_for_scan(ca) or "") or ch
+                except Exception:
+                    pass
+
             # If we can rebuild, do it
             if ca and ch:
                 new_dex = ""
@@ -6571,14 +6585,9 @@ def _normalize_action_row(kb: dict) -> dict:
                         new_dex = f"https://traderjoexyz.com/trade?outputCurrency={ca}"
                     if not new_dex:
                         new_dex = f"https://app.uniswap.org/swap?outputCurrency={ca}"
-                # If a dex_btn exists but wrong host for chain (e.g., Pancake on non-BSC), replace it
-                need_replace = True
-                if dex_btn and str(dex_btn.get("url") or ""):
-                    host_old = (_urlparse(dex_btn["url"]).hostname or "").lower()
-                    host_new = (_urlparse(new_dex).hostname or "").lower()
-                    need_replace = (host_old != host_new)
-                if need_replace:
-                    dex_btn = {"text": "🟢 Open in DEX", "url": new_dex}
+
+                # Replace/insert DEX button
+                dex_btn = {"text": "🟢 Open in DEX", "url": new_dex}
 
         # 3) Build top row and return
         top = []
