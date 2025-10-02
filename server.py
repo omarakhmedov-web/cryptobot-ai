@@ -2363,7 +2363,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             sample_url = sample_url + ('&' if '?' in sample_url else '?') + 'utm_source=bot&utm_medium=quickscan&utm_campaign=sample_report'
         ik.append([{ 'text': '📄 HTML report (sample)', 'url': sample_url }])
     
-    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
+        # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
     if addr:
 
         try:
@@ -2371,24 +2371,54 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         except Exception:
             pair, chain = (None, None)
         ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
-        # DexScreener link
-        ds_url = ""
+
+        # Swap link with robust fallback
         try:
-            paddr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
-            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else f"https://dexscreener.com/search?q={addr}"
+            dex_url = _swap_url_for(ch, addr)
         except Exception:
-            ds_url = f"https://dexscreener.com/search?q={addr}"
-        # Swap link
-        dex_url = _swap_url_for(ch, addr)
+            dex_url = ""
+
+        if not dex_url:
+            _ch = (str(ch) or "ethereum").lower()
+            if _ch == "ethereum":
+                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=ethereum"
+            elif _ch == "arbitrum":
+                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=arbitrum"
+            elif _ch == "optimism":
+                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=optimism"
+            elif _ch == "base":
+                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=base"
+            elif _ch == "bsc":
+                dex_url = f"https://pancakeswap.finance/swap?outputCurrency={addr}"
+            elif _ch == "polygon":
+                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
+            elif _ch == "avalanche":
+                dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
+
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-        # Add buttons (single row for DS/DEX, next row for Scan)
-        ik.append([{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
+
+        # Make sure DEX+Scan row is FIRST (top row)
+        # Remove any pre-existing DEX/Scan buttons to avoid duplicates
+        _ik = []
+        for _row in (ik or []):
+            _new = []
+            for _btn in (_row or []):
+                _txt = str((_btn or {}).get("text") or "")
+                if _txt.strip() in {"🟢 Open in DEX","Open in DEX","🔍 Open in Scan","Open in Scan"}:
+                    continue
+                _new.append(_btn)
+            if _new:
+                _ik.append(_new)
+        ik = _ik
+        ik.insert(0, [{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
+
+        # Utility rows
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
-        
 
     # Δ timeframe row (single)
+    # (single)
     ik.append([
         {"text": "Δ 5m",  "callback_data": "tf:5"},
         {"text": "Δ 1h",  "callback_data": "tf:1"},
