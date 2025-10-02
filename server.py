@@ -61,6 +61,7 @@ except Exception as e:
 # ========================
 APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8")
 
+
 # --- Feature flags (ENV) ---
 DEX_STRICT_CHAIN      = int(os.getenv("DEX_STRICT_CHAIN", "0") or "0")      # 1: forbid cross-chain/search fallbacks for pair links
 DS_ALLOW_FALLBACK     = int(os.getenv("DS_ALLOW_FALLBACK", "1") or "1")     # 0: no 'search?q=' fallback; show base link only
@@ -69,6 +70,7 @@ MDX_BYPASS_SANITIZERS = int(os.getenv("MDX_BYPASS_SANITIZERS","0") or "0")  # 1:
 DETAILS_ENFORCE_DOMAIN= int(os.getenv("DETAILS_ENFORCE_DOMAIN","0") or "0") # 1: enforce domain matches current token/site, else strip
 MDX_LAST_SITE_SCOPE   = (os.getenv("MDX_LAST_SITE_SCOPE","chat") or "chat").strip().lower()  # 'chat' | 'message'
 DOMAIN_META_STRICT    = int(os.getenv("DOMAIN_META_STRICT","0") or "0")     # 1: if domain cannot be verified for current token/site — hide meta
+
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
@@ -91,11 +93,13 @@ def _soften_lp_verdict_html(html: str) -> str:
         return html
 # === /LP/lock post-processor ===
 
+
 # === Metridex sanitizers & domain fallback (finalfix3) ===
 KNOWN_DOMAINS_FILE_PATH = os.environ.get("KNOWN_DOMAINS_FILE_PATH", "/opt/render/project/src/known_domains.json")
 KNOWN_DOMAINS_DEFAULT = {
     "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": "pancakeswap.finance",
-    "0x831753dd7087cac61ab5644b308642cc1c33dc13": "quickswap.exchange"}
+    "0x831753dd7087cac61ab5644b308642cc1c33dc13": "quickswap.exchange",
+}
 def _load_known_domains() -> dict:
     try:
         p = KNOWN_DOMAINS_FILE_PATH
@@ -123,16 +127,17 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
             return text
         patt = re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
         text = patt.sub("", text)
-        text = re.sub(r"\n{3}", "\n\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
         return text
     except Exception:
         return text
+
 
 def _sanitize_owner_privileges(text: str, chat_id) -> str:
     """If owner is renounced (0x000… or 'renounced') and no proxy, suppress 'Owner privileges present' everywhere
     and adjust Risk score accordingly, removing the corresponding Why++ penalty if present."""
     try:
-        zeros_pattern = r'Owner:\s*(0x0{4}|0x0{3}[\.…]+0+)'  # full zeros or truncated with ellipsis
+        zeros_pattern = r'Owner:\s*(0x0{4,}|0x0{3,}[\.…]+0+)'  # full zeros or truncated with ellipsis
         renounced_word = r'Owner:\s*renounced'
         proxy_present = re.search(r'Proxy:\s*(yes|true|1)', text, re.I)
         is_renounced = bool(re.search(zeros_pattern, text, re.I) or re.search(renounced_word, text, re.I))
@@ -171,10 +176,11 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
             text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present.*$', '', text)
 
             # 4) Tidy blank lines
-            text = re.sub(r'\n{3}', "\n\n", text)
+            text = re.sub(r'\n{3,}', "\n\n", text)
         return text
     except Exception:
         return text
+
 
 def _enforce_details_host(text: str, chat_id) -> str:
     """Ensure Details use consistent Domain (opt‑in via DETAILS_ENFORCE_DOMAIN).
@@ -211,7 +217,7 @@ def _enforce_details_host(text: str, chat_id) -> str:
         if not host and DOMAIN_META_STRICT:
             patt = _re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', _re.M)
             text = patt.sub("", text or "")
-            text = _re.sub(r'\n{3}', "\n\n", text)
+            text = _re.sub(r'\n{3,}', "\n\n", text)
             return text
 
         if not host:
@@ -232,6 +238,7 @@ def _enforce_details_host(text: str, chat_id) -> str:
         return text
     except Exception:
         return text
+
 
 def _sanitize_lp_claims(text: str) -> str:
     try:
@@ -335,10 +342,11 @@ def _normalize_whois_rdap(text: str) -> str:
         # Rewrite the line in text
         norm = norm[:m_wr.start()] + fixed + norm[m_wr.end():]
         # Collapse extra blank lines
-        norm = re.sub(r'\n{3}', '\n\n', norm)
+        norm = re.sub(r'\n{3,}', '\n\n', norm)
         return norm
     except Exception:
         return text
+
 
 # === /sanitizers (finalfix3) ===
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
@@ -367,6 +375,14 @@ except Exception:
 
 LOC = locale_text
 app = Flask(__name__)
+
+
+
+
+
+
+
+
 
 # === DS URL helper (safe) ===
 
@@ -509,17 +525,20 @@ def should_send_alert(chat_id: int, chain: str, ca: str, atype: str) -> bool:
 UNCX_LINKS = {
     "ethereum": "https://app.uncx.network/lockers/uniswap-v2/pair/{pair}",
     "bsc": "https://app.uncx.network/lockers/pancakeswap-v2/pair/{pair}",
-    "polygon": "https://app.uncx.network/lockers/quickswap-v2/pair/{pair}"}
+    "polygon": "https://app.uncx.network/lockers/quickswap-v2/pair/{pair}",
+}
 TEAMFINANCE_LINKS = {
     "ethereum": "https://app.team.finance/uniswap/{pair}",
     "bsc": "https://app.team.finance/pancakeswap/{pair}",
-    "polygon": "https://app.team.finance/quickswap/{pair}"}
+    "polygon": "https://app.team.finance/quickswap/{pair}",
+}
 
 def _fmt_pct(v):
     try:
         return f"{float(v):.2f}%"
     except Exception:
         return "—"
+
 
 def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     if not LP_LOCK_HTML_ENABLED:
@@ -715,6 +734,7 @@ def _send_text_guarded(chat_id: int, chain: str, ca: str, atype: str, text: str,
     return None
 # === /METRIDEX GUARDED ALERTS ===
 
+
 # ===== Entitlements (SQLite) =====
 DB_PATH = os.getenv("DB_PATH", "/tmp/metridex.db")
 
@@ -870,6 +890,7 @@ def _ensure_watch_loop():
     t.start()
     _watch_thread_started = True
 
+
 def grant_entitlement(chat_id: str, product: str, now_ts: int | None = None):
     now_ts = now_ts or int(datetime.utcnow().timestamp())
     conn = _db()
@@ -927,7 +948,8 @@ def _pay_links() -> dict:
         "pro": os.getenv("CRYPTO_LINK_PRO") or "",
         "daypass": os.getenv("CRYPTO_LINK_DAYPASS") or "",
         "deep": os.getenv("CRYPTO_LINK_DEEP") or "",
-        "teams": os.getenv("CRYPTO_LINK_TEAMS") or ""}
+        "teams": os.getenv("CRYPTO_LINK_TEAMS") or "",
+    }
 
 def _upsell_enabled() -> bool:
     return str(os.getenv("UPSALE_CALLBACKS_ENABLED","")).lower() in ("1","true","yes","on")
@@ -937,7 +959,8 @@ def _upsell_text(kind: str) -> str:
         "pro":   "Upgrade to Pro — $29/mo",
         "daypass":"Day‑Pass — $9 for 24h Pro",
         "deep":  "Deep report — $3 one‑off",
-        "teams": "Teams — from $99/mo"}
+        "teams": "Teams — from $99/mo",
+    }
     return m.get(kind, "Upgrade")
 
 def _send_upsell_link(chat_id, kind: str, logger=None):
@@ -957,7 +980,8 @@ def _ux_welcome_keyboard() -> dict:
         "deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
-        "teams": links.get("teams")})
+        "teams": links.get("teams"),
+    })
     # append How it works? button
     try:
         help_url = (os.getenv('HELP_URL', '').strip() or 'https://metridex.com/help')
@@ -1011,12 +1035,14 @@ def _ux_upgrade_keyboard(lang: str = "en") -> dict:
             [{"text": f"Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
              {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
             [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
-             {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}]]}
+             {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
+        ]}
     return {"inline_keyboard": [
         [{"text": f"Upgrade to Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
          {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
         [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
-         {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}]]}
+         {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
+    ]}
 
 def _ux_welcome_text(lang: str = "en") -> str:
     if str(lang).lower().startswith("ru"):
@@ -1030,6 +1056,8 @@ def _ux_welcome_text(lang: str = "en") -> str:
         "Send a token address, TX hash, or a link — I'll run a QuickScan.\n"
         "Commands: /quickscan, /upgrade, /limits"
     )
+
+
 
 # ===== Commands: /watch /unwatch /mywatch =====
 
@@ -1081,6 +1109,7 @@ def _cmd_watch(chat_id: int, text: str):
     except Exception:
         pass
 
+
 def _cmd_unwatch(chat_id: int, text: str):
     try:
         t = re.sub(r'[\u200b-\u200f\uFEFF]', '', str(text or ""))
@@ -1090,6 +1119,7 @@ def _cmd_unwatch(chat_id: int, text: str):
         _send_text(chat_id, "🧹 Watchlist updated", logger=app.logger)
     except Exception:
         pass
+
 
 def _cmd_mywatch(chat_id: int):
     try:
@@ -1225,10 +1255,15 @@ def maybe_slow_lane(user_id: int):
 # Optional helper texts (can be used by upstream webhook server)
 UPSELL_TEXT_EN = {
     "after_first": "You have 1 free QuickScan left. Unlock Deep, export and fast lane: Pro $29/mo or Day‑Pass $9.",
-    "exhausted": "Free checks are over. Choose access:\n• Pro $29/mo – 300 scans + Deep + export\n• Day‑Pass $9 – 24h of Pro\n• Deep Report $3 – one detailed report"}
+    "exhausted": "Free checks are over. Choose access:\n• Pro $29/mo – 300 scans + Deep + export\n• Day‑Pass $9 – 24h of Pro\n• Deep Report $3 – one detailed report",
+}
 UPSELL_TEXT_RU = {
     "after_first": "Осталась 1 бесплатная проверка. Открой Deep, экспорт и быстрый доступ: Pro $29/мес или Day‑Pass $9.",
-    "exhausted": "Бесплатные проверки закончились. Доступ:\n• Pro $29/мес — 300 проверок + Deep + экспорт\n• Day‑Pass $9 — сутки Pro\n• Deep Report $3 — разовый отчёт"}
+    "exhausted": "Бесплатные проверки закончились. Доступ:\n• Pro $29/мес — 300 проверок + Deep + экспорт\n• Day‑Pass $9 — сутки Pro\n• Deep Report $3 — разовый отчёт",
+}
+
+
+
 
 def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
     """Send a short upsell message (EN/RU). Non‑blocking; safe to call anywhere."""
@@ -1265,24 +1300,29 @@ _TOPH_TTL = int(os.environ.get("TOPH_TTL", "1200"))
 DEAD_ADDRS = {
     "0x0000000000000000000000000000000000000000",
     "0x000000000000000000000000000000000000dEaD",
-    "0xdead000000000000000042069420694206942069"}
+    "0xdead000000000000000042069420694206942069",
+}
 
 UNCX_LOCKERS = {
     "ethereum": {"v2":"0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214", "v3":"0x7f5c649856f900d15c83741f45ae46f5c6858234"},
     "bsc":      {"v2":"0xc765bddb93b0d1c1a88282ba0fa6b2d00e3e0c83", "v3":"0x0d29598ec01fa03665feead91d4fb423f393886c"},
     "polygon":  {"v2":"0xadb2437e6f65682b85f814fbc12fec0508a7b1d0", "v3":"0xc22218406983bf88bb634bb4bf15fa4e0a1a8c84"},
     "arbitrum": {"v2":"0x275720567e5955f5f2d53a7a1ab8a0fc643de50e", "v3":"0xfa104eb3925a27e6263e05acc88f2e983a890637"},
-    "base":     {"v2":"0xc4e637d37113192f4f1f060daebd7758de7f4131", "v3":"0x231278edd38b00b07fbd52120cef685b9baebcc1"}}
+    "base":     {"v2":"0xc4e637d37113192f4f1f060daebd7758de7f4131", "v3":"0x231278edd38b00b07fbd52120cef685b9baebcc1"},
+}
 
 TEAMFINANCE_LOCKERS = {
-    "ethereum": ["0xe2fe530c047f2d85298b07d9333c05737f1435fb"]}
+    "ethereum": ["0xe2fe530c047f2d85298b07d9333c05737f1435fb"],
+}
 
 # Known custodial/staking contracts that may legitimately hold LP
 KNOWN_CUSTODIANS = {
     "bsc": {
-        "0xa5f8c5dbd5f286960b9d90548680ae5ebff07652": "PancakeSwap MasterChef/Pool"},
+        "0xa5f8c5dbd5f286960b9d90548680ae5ebff07652": "PancakeSwap MasterChef/Pool",
+    },
     "eth": {},
-    "polygon": {}}
+    "polygon": {},
+}
 
 # Optional external override/extend for KNOWN_CUSTODIANS
 KNOWN_CUSTODIANS_FILE_PATH = os.environ.get("KNOWN_CUSTODIANS_FILE_PATH", "/opt/render/project/src/known_custodians.json")
@@ -1319,7 +1359,9 @@ CHAIN_NAME_TO_ID = {
     "bsc": 56, "bnb":56,
     "polygon": 137, "matic":137,
     "arbitrum": 42161, "arb":42161,
-    "base": 8453}
+    "base": 8453,
+}
+
 
 def _explorer_base_for(chain: str) -> str:
     c = (chain or "").lower()
@@ -1332,7 +1374,11 @@ def _explorer_base_for(chain: str) -> str:
         "matic": "https://polygonscan.com",
         "arbitrum": "https://arbiscan.io",
         "arb": "https://arbiscan.io",
-        "base": "https://basescan.org"}.get(c, "https://etherscan.io")
+        "base": "https://basescan.org",
+    }.get(c, "https://etherscan.io")
+
+
+
 
 # Known blue‑chip token addresses (ETH mainnet, lowercase)
 BLUECHIP_ADDRS = {
@@ -1341,7 +1387,8 @@ BLUECHIP_ADDRS = {
     "0xdac17f958d2ee523a2206206994597c13d831ec7",
     "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-    "0x6b175474e89094c44da98b954eedeac495271d0f"}
+    "0x6b175474e89094c44da98b954eedeac495271d0f",
+}
 
 def _is_bluechip_addr(addr: str) -> bool:
     try:
@@ -1406,6 +1453,9 @@ def _hp_top_holders(token_or_lp_addr: str, chain_name: str) -> dict:
         return body or {}
     except Exception:
         return {}
+
+
+
 
 # Locker providers (no-API best effort)
 _LOCKER_CACHE = {}
@@ -1618,6 +1668,7 @@ except Exception:
 
 _DELTA_CACHE = {}  # addr_l -> {"ts": epoch, "changes": {"m5": v, "h1": v, "h6": v, "h24": v}}
 
+
 def _qs_call_safe(func, *args, **kwargs):
     """Call quickscan entrypoints safely, dropping unsupported kwargs like 'lang'/'lean'."""
     try:
@@ -1649,6 +1700,7 @@ def _delta_cache_put(addr_l: str, changes: dict):
         _DELTA_CACHE[addr_l or ""] = {"ts": time.time(), "changes": changes or {}}
     except Exception:
         pass
+
 
 # === LP chain hinting (bind LP to summary's chain) ===
 ADDR_CHAIN_HINT = {}  # addr_l -> chain string ('ethereum','bsc','polygon',...)
@@ -1698,6 +1750,7 @@ def _ds_pick_best_pair(pairs):
             best = p
     return best or (pairs[0] if pairs else None)
 
+
 def _ds_candle_delta(pair: dict, tf: str) -> tuple:
     """
     Try to compute Δ% from candles when priceChange[tf] is missing.
@@ -1737,6 +1790,7 @@ def _ds_candle_delta(pair: dict, tf: str) -> tuple:
         return (None, None)
     except Exception:
         return (None, None)
+
 
 def _delta_src_tag(changes: dict, key: str) -> str:
     try:
@@ -1804,7 +1858,8 @@ KNOWN_HOMEPAGES = {
     "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",
     "0x6b175474e89094c44da98b954eedeac495271d0f": "makerdao.com",
     "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "ethereum.org",
-    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org"}
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",
+}
 
 # Domain metadata cache
 DOMAIN_META_CACHE = {}  # domain -> {t, h, created, reg, exp, issuer, wb}
@@ -1826,7 +1881,8 @@ WL_ADDRESSES_DEFAULT = {
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
     "0x6b175474e89094c44da98b954eedeac495271d0f",
     "0x853d955acef822db058eb8505911ed77f175b99e",
-    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"}
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+}
 def _env_set(name: str):
     try:
         v = os.getenv(name, "")
@@ -1904,7 +1960,8 @@ EXPLORER_BY_CHAIN = {
     "optimism": "optimistic.etherscan.io",
     "base": "basescan.org",
     "avalanche": "snowtrace.io",
-    "fantom": "ftmscan.com"}
+    "fantom": "ftmscan.com",
+}
 def _extract_token_addr(text: str) -> str:
     import re as _re
     m = _re.search(r"/token/(0x[a-fA-F0-9]{40})", text)
@@ -1968,11 +2025,12 @@ def _sanitize_onchain_zeros(text: str) -> str:
         # Drop lines that are clearly zeroed placeholders
         patterns = [
             r"(?m)^\s*LP:\s*burned=0\.0%.*topHolder=0\.0%.*\n",
-            r"(?m)^\s*Holders:\s*top0\s*own\s*0%.*\n"]
+            r"(?m)^\s*Holders:\s*top0\s*own\s*0%.*\n",
+        ]
         for pat in patterns:
             text = _re.sub(pat, "", text)
         # Collapse extra blank lines after removals
-        text = _re.sub(r"\n{3}", "\n\n", text)
+        text = _re.sub(r"\n{3,}", "\n\n", text)
         return text
     except Exception:
         return text
@@ -2002,7 +2060,7 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
         patt = re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
         text = patt.sub("", text)
         # Also collapse extra blanks
-        text = re.sub(r"\n{3}", "\n\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
         return text
     except Exception:
         return text
@@ -2013,7 +2071,7 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
         ren = _LAST_OWNER_RENOUNCED.get(chat_id, False)
         if not ren:
             # detect renounce inside same message
-            if re.search(r'Owner:\s*0x0{4}', text, re.I) and not re.search(r'Proxy:\s*(yes|true|1)', text, re.I):
+            if re.search(r'Owner:\s*0x0{4,}', text, re.I) and not re.search(r'Proxy:\s*(yes|true|1)', text, re.I):
                 ren = True
                 _LAST_OWNER_RENOUNCED[chat_id] = True
         if ren:
@@ -2023,7 +2081,7 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
             # cleanup multiple separators or leftover punctuation
             text = re.sub(r';\s*;', '; ', text)
             text = re.sub(r'⚠️\s*Signals:\s*$', '', text, flags=re.M)
-            text = re.sub(r'\n{3}', "\n\n", text)
+            text = re.sub(r'\n{3,}', "\n\n", text)
         return text
     except Exception:
         return text
@@ -2042,6 +2100,9 @@ try:
         _LAST_SITE_HOST[chat_id] = ""
 except Exception:
     pass
+
+
+
 
 def _enforce_details_host(text: str, chat_id) -> str:
     """Ensure Details use consistent Domain (opt‑in via DETAILS_ENFORCE_DOMAIN).
@@ -2078,7 +2139,7 @@ def _enforce_details_host(text: str, chat_id) -> str:
         if not host and DOMAIN_META_STRICT:
             patt = _re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', _re.M)
             text = patt.sub("", text or "")
-            text = _re.sub(r'\n{3}', "\n\n", text)
+            text = _re.sub(r'\n{3,}', "\n\n", text)
             return text
 
         if not host:
@@ -2120,83 +2181,8 @@ def _sanitize_lp_claims(text: str) -> str:
 # === /post-send sanitizers ===
 
 
-def _infer_addr_from_keyboard(kb: dict, text: str = "") -> str:
-    """Infer CA from keyboard (callback_data) or from text body."""
-    try:
-        ik = (kb or {}).get("inline_keyboard") or []
-        import re as _re
-        for row in ik:
-            for btn in (row or []):
-                cd = str((btn or {}).get("callback_data") or "")
-                m = _re.search(r'(0x[a-fA-F0-9]{40})', cd)
-                if m:
-                    return m.group(1)
-        # Fallback: scan text for first 0x40 hex
-        if text:
-            m2 = _re.search(r'(0x[a-fA-F0-9]{40})', text)
-            if m2:
-                return m2.group(1)
-    except Exception:
-        pass
-    return ""
 
-def _inject_dex_scan_top(addr: str, kb: dict) -> dict:
-    """Ensure top row has [Open in DEX | Open in Scan] for given addr; safe for repeated use."""
-    kb = kb or {}
-    ik = (kb.get("inline_keyboard") or [])[:]
-
-    # Build URLs
-    ch = (_resolve_chain_for_scan(addr) or "ethereum")
-    try:
-        dex_url = _swap_url_for(ch, addr)
-    except Exception:
-        dex_url = ""
-    if not dex_url:
-        _ch = (str(ch) or "ethereum").lower()
-        if _ch == "ethereum":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=ethereum"
-        elif _ch == "arbitrum":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=arbitrum"
-        elif _ch == "optimism":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=optimism"
-        elif _ch == "base":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=base"
-        elif _ch == "bsc":
-            dex_url = f"https://pancakeswap.finance/swap?outputCurrency={addr}"
-        elif _ch == "polygon":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
-        elif _ch == "avalanche":
-            dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
-    if not dex_url:
-        dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
-    scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-
-    # Remove existing DEX/Scan texts, then insert at top
-    cleaned = []
-    for row in ik:
-        new_row = []
-        for btn in (row or []):
-            t = str((btn or {}).get("text") or "")
-            if t.strip() in {"🟢 Open in DEX","Open in DEX","🔍 Open in Scan","Open in Scan"}:
-                continue
-            new_row.append(btn)
-        if new_row:
-            cleaned.append(new_row)
-    cleaned.insert(0, [{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
-    return {"inline_keyboard": cleaned}
-
-def _strip_hp_if_onchain_view(text: str, kb: dict) -> dict:
-    return kb or {}
 def _send_text(chat_id, text, **kwargs):
-    # --- MDX: enforce DEX/Scan top row & strip hp in On-chain view ---
-    try:
-        _kb = kwargs.get('reply_markup') or {}
-        _addr = _infer_addr_from_keyboard(_kb, text)
-        if _addr:
-            _kb = _inject_dex_scan_top(_addr, _kb)
-        kwargs['reply_markup'] = _kb
-    except Exception:
-        pass
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     is_details_flag = bool(kwargs.pop('is_details', False))
     try:
@@ -2321,121 +2307,6 @@ def _compress_keyboard(kb: dict):
 
     return _kb_dedupe_all({"inline_keyboard": ik})
 
-
-def _force_action_row(addr: str, kb: dict) -> dict:
-    """Hard-enforce top row with DEX+Scan URLs; never drop it."""
-    try:
-        if not addr:
-            return kb or {}
-        base = kb or {}
-        ik = (base.get("inline_keyboard") or [])[:]
-
-        # Derive chain
-        try:
-            _, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
-        except Exception:
-            chain = None
-        ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
-
-        # Build URLs with fallback
-        try:
-            dex_url = _swap_url_for(ch, addr)
-        except Exception:
-            dex_url = ""
-        if not dex_url:
-            _ch = (str(ch) or "ethereum").lower()
-            if _ch == "ethereum":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=ethereum"
-            elif _ch == "arbitrum":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=arbitrum"
-            elif _ch == "optimism":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=optimism"
-            elif _ch == "base":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=base"
-            elif _ch == "bsc":
-                dex_url = f"https://pancakeswap.finance/swap?outputCurrency={addr}"
-            elif _ch == "polygon":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
-            elif _ch == "avalanche":
-                dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
-
-        scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-
-        # Remove any existing DEX/Scan texts
-        cleaned = []
-        for row in ik:
-            new_row = []
-            for btn in (row or []):
-                t = str((btn or {}).get("text") or "")
-                if t.strip() in {"🟢 Open in DEX","Open in DEX","🔍 Open in Scan","Open in Scan"}:
-                    continue
-                new_row.append(btn)
-            if new_row:
-                cleaned.append(new_row)
-
-        # Insert our top row
-        cleaned.insert(0, [{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
-        return {"inline_keyboard": cleaned}
-    except Exception:
-        return kb or {}
-
-
-
-def _build_action_row(addr: str) -> list:
-    """Return a consistent top-row with DEX+Scan URL buttons for given CA."""
-    if not addr:
-        return []
-    try:
-        _, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
-    except Exception:
-        chain = None
-    ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
-    # Build DEX url with robust fallback
-    try:
-        dex_url = _swap_url_for(ch, addr)
-    except Exception:
-        dex_url = ""
-    if not dex_url:
-        _ch = (str(ch) or "ethereum").lower()
-        if _ch == "ethereum":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=ethereum"
-        elif _ch == "arbitrum":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=arbitrum"
-        elif _ch == "optimism":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=optimism"
-        elif _ch == "base":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=base"
-        elif _ch == "bsc":
-            dex_url = f"https://pancakeswap.finance/swap?outputCurrency={addr}"
-        elif _ch == "polygon":
-            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
-        elif _ch == "avalanche":
-            dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
-    if not dex_url:
-        dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
-    scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-    row = []
-    if dex_url:
-        row.append({"text": "🟢 Open in DEX", "url": dex_url})
-    row.append({"text": "🔍 Open in Scan", "url": scan_url})
-    return row
-
-def _remove_button_by_callback_prefix(kb: dict, prefix: str) -> dict:
-    """Remove any buttons whose callback_data starts with the given prefix."""
-    kb = kb or {}
-    ik = (kb.get("inline_keyboard") or [])
-    out = []
-    for row in ik:
-        new_row = []
-        for btn in (row or []):
-            cd = str((btn or {}).get("callback_data") or "")
-            if cd.startswith(prefix):
-                continue
-            new_row.append(btn)
-        if new_row:
-            out.append(new_row)
-    return {"inline_keyboard": out}
-
 def _kb_clone(kb):
     if not kb or not isinstance(kb, dict):
         return {"inline_keyboard": []}
@@ -2456,6 +2327,10 @@ def _kb_strip_prefixes(kb, prefixes):
         if new_row:
             out.append(new_row)
     return {"inline_keyboard": out}
+
+
+
+
 
 def _answer_why_deep(cq: dict, addr_hint: str = None):
     try:
@@ -2515,6 +2390,7 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
     except Exception:
         pass
 
+
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
     ik = base.get("inline_keyboard") or []
@@ -2555,56 +2431,23 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             sample_url = sample_url + ('&' if '?' in sample_url else '?') + 'utm_source=bot&utm_medium=quickscan&utm_campaign=sample_report'
         ik.append([{ 'text': '📄 HTML report (sample)', 'url': sample_url }])
     
-        # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
+    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
     if addr:
-        # Clean previous DEX/Scan rows and enforce our top action row
-        cleaned = []
-        for _row in (ik or []):
-            _new = []
-            for _btn in (_row or []):
-                _t = str((_btn or {}).get("text") or "")
-                if _t.strip() in {"🟢 Open in DEX","Open in DEX","🔍 Open in Scan","Open in Scan"}:
-                    continue
-                _new.append(_btn)
-            if _new:
-                cleaned.append(_new)
-        ik = cleaned
-        ik.insert(0, _build_action_row(addr))
-        # Utility rows
-        ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
-        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
 
-    # Δ timeframe row (single)
-# Δ timeframe row (single)
-    # (single)
-    ik.append([
-        {"text": "Δ 5m",  "callback_data": "tf:5"},
-        {"text": "Δ 1h",  "callback_data": "tf:1"},
-        {"text": "Δ 6h",  "callback_data": "tf:6"},
-        {"text": "Δ 24h", "callback_data": "tf:24"}])
-    return _kb_dedupe_all({"inline_keyboard": ik})
-
-
-def _force_action_row(addr: str, kb: dict) -> dict:
-    """Hard-enforce top row with DEX+Scan URLs; never drop it."""
-    try:
-        if not addr:
-            return kb or {}
-        base = kb or {}
-        ik = (base.get("inline_keyboard") or [])[:]
-
-        # Derive chain
         try:
-            _, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
+            pair, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
         except Exception:
-            chain = None
+            pair, chain = (None, None)
         ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
-
-        # Build URLs with fallback
+        # DexScreener link
+        ds_url = ""
         try:
-            dex_url = _swap_url_for(ch, addr)
+            paddr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
+            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else f"https://dexscreener.com/search?q={addr}"
         except Exception:
-            dex_url = ""
+            ds_url = f"https://dexscreener.com/search?q={addr}"
+        # Swap link
+        dex_url = _swap_url_for(ch, addr)
         if not dex_url:
             _ch = (str(ch) or "ethereum").lower()
             if _ch == "ethereum":
@@ -2621,27 +2464,24 @@ def _force_action_row(addr: str, kb: dict) -> dict:
                 dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
             elif _ch == "avalanche":
                 dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
-
+            if not dex_url:
+                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
+        # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
+        # Add buttons (single row for DS/DEX, next row for Scan)
+        ik.append([{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
+        ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
+        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
+        
 
-        # Remove any existing DEX/Scan texts
-        cleaned = []
-        for row in ik:
-            new_row = []
-            for btn in (row or []):
-                t = str((btn or {}).get("text") or "")
-                if t.strip() in {"🟢 Open in DEX","Open in DEX","🔍 Open in Scan","Open in Scan"}:
-                    continue
-                new_row.append(btn)
-            if new_row:
-                cleaned.append(new_row)
-
-        # Insert our top row
-        cleaned.insert(0, [{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
-        return {"inline_keyboard": cleaned}
-    except Exception:
-        return kb or {}
-
+    # Δ timeframe row (single)
+    ik.append([
+        {"text": "Δ 5m",  "callback_data": "tf:5"},
+        {"text": "Δ 1h",  "callback_data": "tf:1"},
+        {"text": "Δ 6h",  "callback_data": "tf:6"},
+        {"text": "Δ 24h", "callback_data": "tf:24"},
+    ])
+    return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _extract_addrs_from_pair_payload(data: str):
     try:
@@ -2657,6 +2497,7 @@ def _pick_addr(addrs):
         if a.lower() in KNOWN_HOMEPAGES:
             return a.lower()
     return addrs[-1].lower() if addrs else None
+
 
 def _extract_base_addr_from_keyboard(kb: dict):
     if not kb or not isinstance(kb, dict):
@@ -3012,7 +2853,8 @@ def _symbol_homepage_hint(text: str):
         ("LUSD", "liquity.org"),
         ("SUSD", "synthetix.io"),
         ("CRVUSD", "curve.fi"),
-        ("USDE", "ether.fi")]
+        ("USDE", "ether.fi"),
+    ]
     for sym, dom in hints:
         if sym in t:
             return dom
@@ -3127,11 +2969,11 @@ def _risk_verdict(addr, text):
     vol = _parse_metric_from_dexline(text, "Vol24h")
     if liq is not None:
         if liq < RISK_LIQ_LOW:
-            w = (8 if whitelisted else 25); score += w; neg.append("Low liquidity (<${:})".format(int(RISK_LIQ_LOW))); weights_neg.append(w)
+            w = (8 if whitelisted else 25); score += w; neg.append("Low liquidity (<${:,})".format(int(RISK_LIQ_LOW))); weights_neg.append(w)
         elif liq < RISK_LIQ_MED:
-            w = (3 if whitelisted else 10); score += w; neg.append("Moderate liquidity (<${:})".format(int(RISK_LIQ_MED))); weights_neg.append(w)
+            w = (3 if whitelisted else 10); score += w; neg.append("Moderate liquidity (<${:,})".format(int(RISK_LIQ_MED))); weights_neg.append(w)
         elif liq >= RISK_POSITIVE_LIQ:
-            w = 15; pos.append("High liquidity (≥${:})".format(int(RISK_POSITIVE_LIQ))); weights_pos.append(w)
+            w = 15; pos.append("High liquidity (≥${:,})".format(int(RISK_POSITIVE_LIQ))); weights_pos.append(w)
     if vol is not None and vol < RISK_VOL_LOW:
         w = 10; score += w; neg.append("Very low 24h volume (<$5k)"); weights_neg.append(w)
 
@@ -3212,6 +3054,7 @@ def _risk_verdict(addr, text):
         pass
     
     return int(min(100, score)), label, {"neg": neg, "pos": pos, "w_neg": weights_neg, "w_pos": weights_pos}
+
 
 def _wrap_kv_line(prefix: str, items, width: int = 96, indent: int = 2) -> str:
     """Wrap a 'Key: a; b; c; ...' line across multiple lines,
@@ -3336,6 +3179,7 @@ def _rpc_call(method, params):
             last_err = e
             continue
     raise RuntimeError(f"All RPC providers failed for {method}: {type(last_err).__name__}: {last_err}")
+
 
 def _parse_chain_rpc_urls(chain_name: str):
     """Return list of RPC URLs for given chain name from env.
@@ -3470,6 +3314,8 @@ def _get_proxy_impl(addr: str, chain_name: str) -> str:
         pass
     return ""
 
+
+
 def _eth_getStorageAt(addr, slot):
     return _rpc_call("eth_getStorageAt", [addr, slot, "latest"])
 
@@ -3561,6 +3407,7 @@ def _call_u8(addr, selector):
     except Exception:
         return None
 
+
 def _call_bytes32(addr: str, selector_hex: str):
     try:
         data = selector_hex if selector_hex.startswith("0x") else ("0x" + selector_hex)
@@ -3607,10 +3454,11 @@ EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505
 EIP1967_BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
 EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103"
 
+
 def _fmt_int(v):
     try:
         n = int(v)
-        return f"{n:}"
+        return f"{n:,}"
     except Exception:
         try:
             f = float(v)
@@ -3876,6 +3724,9 @@ def _tg_send_document(token: str, chat_id: int, filepath: str, caption: str = No
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
 
+
+
+
 # === Idempotent wrapper for Telegram document send (30s window)
 try:
     _tg_send_document_orig = _tg_send_document
@@ -3949,6 +3800,7 @@ def _render_report(addr: str, text: str):
 # HTTP routes
 # ========================
 
+
 @app.route("/crypto_webhook/<secret>", methods=["POST"])
 def crypto_webhook(secret):
     if secret != os.getenv("CRYPTO_WEBHOOK_SECRET", ""):
@@ -4008,6 +3860,7 @@ def version():
     except Exception:
         h = ""
     return jsonify({"ok": True, "version": APP_VERSION, "code_hash": h})
+
 
 # ------------------------
 # Diagnostic: check free limits (optional)
@@ -4140,6 +3993,7 @@ def webhook(secret):
         _cmd_unwatch(_chat, _txt_raw); return ('ok', 200)
     if isinstance(_txt, str) and _chat and _txt.startswith('/mywatch'):
         _cmd_mywatch(_chat); return ('ok', 200)
+
 
     # /buy commands -> send payment links directly (no callbacks needed)
     if "message" in update:
@@ -4276,7 +4130,7 @@ def webhook(secret):
                                 tx = (p.get("txns") or {}).get("h24") or {}
                                 buys = tx.get("buys"); sells = tx.get("sells")
                                 add = []
-                                if liq is not None: add.append(f"liq≈${int(liq):}")
+                                if liq is not None: add.append(f"liq≈${int(liq):,}")
                                 if buys is not None and sells is not None: add.append(f"buys:sells={buys}:{sells}")
                                 if add:
                                     ans = ans + " | " + " • ".join(add)
@@ -4284,6 +4138,7 @@ def webhook(secret):
                         pass
                 tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), ans, logger=app.logger)
                 return ("ok", 200)
+
 
         # >>> TF_HANDLER_EARLY
         if isinstance(data, str) and re.match(r'^(tf:(5|1|6|24)|/24h|5|1|6|24)$', data):
@@ -4319,6 +4174,7 @@ def webhook(secret):
             return ("ok", 200)
         # <<< TF_HANDLER_EARLY
             # <<< TF_HANDLER_EARLY
+
 
         
         
@@ -4394,7 +4250,6 @@ def webhook(secret):
                 enriched = _append_verdict_block(addr, enriched)
                 kb0 = msg_obj.get("reply_markup") or {}
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
-                kb1 = _force_action_row(addr, kb1)
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger, is_details=True)
                 _store_addr_for_message(body, addr)
@@ -4467,10 +4322,9 @@ def webhook(secret):
                 out, meta = _onchain_inspect(addr)
                 _merge_onchain_into_risk(addr, meta)
                 kb0 = msg_obj.get("reply_markup") or {}
-                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
-                kb1 = _force_action_row(addr, kb1)
+                kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=False)
                 kb1 = _compress_keyboard(kb1)
-                _send_text(chat_id, "On-chain\n" + out, reply_markup=_remove_button_by_callback_prefix(_remove_button_by_callback_prefix, "hp:")(kb1, "hp:"), logger=app.logger)
+                _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
                 return ("ok", 200)
 
             if data.startswith("copyca:"):
@@ -4601,8 +4455,11 @@ def webhook(secret):
                         if link:
                             lock_lines.append(f"  ↪ {link}")
 
+
+
                 # If LP holders data missing, degrade to unknown verdict
                 data_insufficient = (holders == 0 and not th and (uncx + tfp + dead) == 0.0)
+
 
                 # verdict (very-lite heuristics)
                 verdict = "⚪ n/a"
@@ -4645,7 +4502,8 @@ def webhook(secret):
                     (f"• Owner: {owner_addr}" if owner_addr else "• Owner: n/a"),
                     f"• Renounced: {'yes' if renounced else 'no'}",
                     f"• Proxy: {'yes, impl: ' + impl_addr if is_proxy else 'no'}",
-                    ("• Multiple lockers detected" if multi_lockers else None)]
+                    ("• Multiple lockers detected" if multi_lockers else None),
+                ]
                 link_lines = []
                 link_lines.extend(lock_lines)
                 if ds_link: link_lines.append(f"DEX pair: {ds_link}")
@@ -4660,6 +4518,7 @@ def webhook(secret):
                     pass
                 _send_text(chat_id, "\n".join([x for x in (lines + link_lines) if x]), logger=app.logger)
                 return ("ok", 200)
+
 
             if data.startswith("rep:"):
                 addr = data.split(":", 1)[1].strip().lower()
@@ -4948,6 +4807,8 @@ def webhook(secret):
         _send_text(chat_id, "Temporary error while scanning. Please try again.", logger=app.logger)
     return ("ok", 200)
 
+
+
 # === QS Finalizer: single header, LP unify, Wayback/SSL/Risk fix (format-only) ===
 def _qs_finalize_details(text: str) -> str:
     try:
@@ -5006,7 +4867,7 @@ def _qs_finalize_details(text: str) -> str:
                     pass
 
         # 7) Clean extra blank lines
-        text = _re.sub(r"\n{3}", "\n\n", text).strip()
+        text = _re.sub(r"\n{3,}", "\n\n", text).strip()
 
         return text
     except Exception:
@@ -5025,6 +4886,7 @@ def _qs_finalize_details_lp_unknown_risk(text: str) -> str:
         return t
     except Exception:
         return text
+
 
 # === Details finalizer add-on: align Domain to Site host ===
 def _qs_fix_domain_from_site(text: str) -> str:
@@ -5077,7 +4939,8 @@ def _enrich_full(addr: str, base_text: str) -> str:
         FALLBACK_BRANDS = {
             "0x6982508145454ce325ddbe47a25d4ec3d2311933": "www.pepe.vip",
             "0x831753dd7087cac61ab5644b308642cc1c33dc13": "quickswap.exchange",
-            "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": "pancakeswap.finance"}
+            "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": "pancakeswap.finance",
+        }
         try:
             dom = _extract_domain_from_text(text)
         except Exception:
@@ -5130,6 +4993,7 @@ def _enrich_full(addr: str, base_text: str) -> str:
     except Exception:
         return base_text or ""
 
+
 def _kb_dedupe_all(kb: dict) -> dict:
     try:
         ik = (kb or {}).get("inline_keyboard") or []
@@ -5139,14 +5003,7 @@ def _kb_dedupe_all(kb: dict) -> dict:
             new_row = []
             for btn in (row or []):
                 cd = str((btn or {}).get("callback_data") or "")
-                url = str((btn or {}).get("url") or "")
-                txt = str((btn or {}).get("text") or "")
-                if cd:
-                    key = ("cd", cd)
-                elif url:
-                    key = ("url", url)
-                else:
-                    key = ("tx", txt)
+                key = ("cd", cd) if cd else ("tx", str((btn or {}).get("text") or ""))
                 if key in seen:
                     continue
                 seen.add(key)
@@ -5156,6 +5013,7 @@ def _kb_dedupe_all(kb: dict) -> dict:
         return {"inline_keyboard": out}
     except Exception:
         return kb or {}
+
 
 def _kb_strip_tf_rows(kb: dict) -> dict:
     """Remove any Δ timeframe rows regardless of encoding."""
@@ -5195,6 +5053,7 @@ def _normalize_hp_line(addr, text, block:str) -> str:
     except Exception:
         return _normalize_hp_line(addr, text, block)
 
+
 def _html_sanitize_risk(risk):
     try:
         neg = list(risk.get("neg") or [])
@@ -5219,6 +5078,7 @@ def _html_sanitize_risk(risk):
     except Exception:
         pass
     return risk
+
 
 # ========================
 # Post-processing wrappers (safe, non-invasive)
@@ -5287,6 +5147,8 @@ try:
             return html
 except Exception:
     pass
+
+
 
 # ========================
 # HTML post-processing: Links + Metrics + Signals cleanup (POLYFIX)
@@ -5407,6 +5269,7 @@ try:
 except Exception:
     pass
 
+
 # === BEGIN: CHAIN RPC OVERRIDE HELPERS ===
 __OVERRIDE_RPC_URLS = []
 
@@ -5418,6 +5281,8 @@ def _clear_chain_rpc_override():
     global __OVERRIDE_RPC_URLS
     __OVERRIDE_RPC_URLS = []
 # === END: CHAIN RPC OVERRIDE HELPERS ===
+
+
 
 # === PATCH: 0.3.18-polyfix2+deltas ===
 # Robust Δ-candles fallback (supports DEX_CANDLES_BASE) and chain-override fallback for Polygon/BSC.
@@ -5566,6 +5431,9 @@ def _onchain_inspect(addr: str):
     return text, info
 # === /PATCH: 0.3.18-polyfix2+deltas ===
 
+
+
+
 # === PATCH: uptime & polydebug guard ===
 try:
     from flask import request, Response
@@ -5588,6 +5456,7 @@ try:
 except Exception:
     pass
 # === /PATCH: uptime & polydebug guard ===
+
 
 # --- Health route for uptime monitors (GET/HEAD /) ---
 try:
@@ -5631,7 +5500,8 @@ def build_buy_keyboard(links: dict):
         ("🔎 Deep report — $3", links.get("deep")),
         ("⏱ Day Pass — $9", links.get("daypass")),
         ("⚙️ Pro — $29", links.get("pro")),
-        ("👥 Teams — from $99", links.get("teams"))]
+        ("👥 Teams — from $99", links.get("teams")),
+    ]
     row = []
     for label, url in mapping:
         if url and isinstance(url, str) and url.startswith("http"):
@@ -5642,13 +5512,19 @@ def build_buy_keyboard(links: dict):
         rows.append(row)
     return {"inline_keyboard": rows}
 
+
+
+
 import os
 def _get_pay_links():
     return {
         "deep": os.getenv("CRYPTO_LINK_DEEP", "").strip(),
         "daypass": os.getenv("CRYPTO_LINK_DAYPASS", "").strip(),
         "pro": os.getenv("CRYPTO_LINK_PRO", "").strip(),
-        "teams": os.getenv("CRYPTO_LINK_TEAMS", "").strip()}
+        "teams": os.getenv("CRYPTO_LINK_TEAMS", "").strip(),
+    }
+
+
 
 # --- injected start override ---
 def _send_start(chat_id, bot=None):
@@ -5669,6 +5545,11 @@ def _handle_kbtest(chat_id, bot=None):
     except Exception as e:
         print("KBTEST_SEND_ERROR", e)
 
+
+
+
+
+
 # --- injected: guarded debug endpoints (no duplicate registration) ---
 def _dbg_env():
     import os as _os
@@ -5680,6 +5561,7 @@ def _dbg_env():
 def _dbg_buy_links():
     kb = build_buy_keyboard_priced()
     return {"links": kb["links"], "labels": kb["labels"]}, 200
+
 
 def _handle_kbforce(chat_id, bot=None):
     kb = build_buy_keyboard_priced()
@@ -5698,13 +5580,15 @@ def build_buy_keyboard_priced():
         "deep": _os.getenv("CRYPTO_LINK_DEEP", "").strip(),
         "daypass": _os.getenv("CRYPTO_LINK_DAYPASS", "").strip(),
         "pro": _os.getenv("CRYPTO_LINK_PRO", "").strip(),
-        "teams": _os.getenv("CRYPTO_LINK_TEAMS", "").strip()}
+        "teams": _os.getenv("CRYPTO_LINK_TEAMS", "").strip(),
+    }
     # Hard labels:
     labels = {
         "deep":   "🔎 Deep report — $3",
         "daypass":"⏱ Day Pass — $9",
         "pro":    "⚙️ Pro — $29",
-        "teams":  "👥 Teams — from $99"}
+        "teams":  "👥 Teams — from $99",
+    }
     rows, row = [], []
     for key in ["deep","daypass","pro","teams"]:
         url = links.get(key)
@@ -5716,10 +5600,13 @@ def build_buy_keyboard_priced():
         rows.append(row)
     return {"inline_keyboard": rows}
 
+
+
 try:
     _ensure_watch_loop()
 except Exception:
     pass
+
 
 # ===== Feature flag for post-/watch mini keyboard =====
 FEATURE_WATCH_KEYS = os.getenv("FEATURE_WATCH_KEYS", "false").lower() in ("1","true","yes","on")
@@ -5737,6 +5624,8 @@ def _send_inline_kbd(chat_id: int, text: str, keyboard: list[list[dict]]):
         requests.post(url, json=payload, timeout=6)
     except Exception:
         pass
+
+
 
 def _resolve_chain_for_scan(ca_l: str) -> str:
     try:
@@ -5767,6 +5656,7 @@ def _human_trigger(wtype: str, thr) -> str:
     if wtype=="lp_top": return "LP top-holder ≥50%"
     if wtype=="new_lock": return "New/raised LP lock"
     return wtype
+
 
 def _ensure_watch_index(conn):
     try:
@@ -5805,10 +5695,11 @@ def _qs_strip_summary_meta(text: str) -> str:
         head = text[i0:m_next]
         tail = text[m_next:]
         head = _re.sub(r"(?m)^\s*(Domain:.*\n|SSL:.*\n)", "", head)
-        head = _re.sub(r"\n{3}", "\n\n", head)
+        head = _re.sub(r"\n{3,}", "\n\n", head)
         return text[:i0] + head + tail
     except Exception:
         return text
+
 
 def _postprocess_report(text: str, chat_id) -> str:
     """Final pass to prevent cross-token/domain leakage and false LP/owner flags."""
@@ -5844,7 +5735,7 @@ def _postprocess_report(text: str, chat_id) -> str:
     except Exception:
         pass
     text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present(?:\s*\(\+\d+\))?\s*$', "", text)
-    text = re.sub(r'\n{3}', "\n\n", text)
+    text = re.sub(r'\n{3,}', "\n\n", text)
     return text
 
 # === Fallback mapping for well-known tokens → domains (used if KNOWN_DOMAINS file not provided) ===
@@ -5859,6 +5750,7 @@ except NameError:
     _KNOWN_DOMAINS = {}
 if not _KNOWN_DOMAINS:
     _KNOWN_DOMAINS = dict(_FALLBACK_KNOWN_DOMAINS)
+
 
 # ========================
 # Risk Gatekeeper (contest-safe) — stronger gates
@@ -5940,6 +5832,7 @@ except Exception:
 # /Risk Gatekeeper
 # ========================
 
+
 # ========================
 # Contest Lock: enforce risk gates on ALL outgoing messages
 # and (by default) hide "Open in DEX" buttons.
@@ -5998,6 +5891,7 @@ except Exception:
 # /Contest Lock
 # ========================
 
+
 # ========================
 # Contest Lock v2 (strict)
 # - Strip stray "\n\1"
@@ -6014,7 +5908,7 @@ def _strip_backref_artifacts(s: str) -> str:
         # Remove '\n\1' or standalone '\1' that might appear from regex backrefs
         s = _re.sub(r'(\\n)?\\1', '', s)
         # Also collapse accidental double newlines around verdict
-        s = _re.sub(r'\n{3}', '\n\n', s)
+        s = _re.sub(r'\n{3,}', '\n\n', s)
         return s
     except Exception:
         return s
@@ -6087,6 +5981,7 @@ except Exception:
 # /Contest Lock v2
 # ========================
 
+
 # ========================
 # Contest Lock v3 tweaks
 # - Deduplicate 'Trust verdict' and 'Risk score' lines
@@ -6122,7 +6017,7 @@ def _dedupe_verdict_and_risk(s: str) -> str:
             out.append(ln)
         # Collapse 3+ blank lines
         s2 = "\n".join(out)
-        s2 = _re.sub(r'\n{3}', '\n\n', s2)
+        s2 = _re.sub(r'\n{3,}', '\n\n', s2)
         return s2
     except Exception:
         return s
@@ -6199,6 +6094,7 @@ except Exception:
 # /Contest Lock v3 tweaks
 # ========================
 
+
 # ========================
 # Contest Lock v4 (final tweaks)
 # ========================
@@ -6238,7 +6134,7 @@ def _dedupe_verdict_and_risk_strict(s: str) -> str:
         s2 = "\n".join(out)
         # Remove any repeated identical verdict lines that slipped in one paragraph
         s2 = _re.sub(r'(?mi)^(Trust\s+verdict:.*\n)(?:\1)+', r'\1', s2)
-        s2 = _re.sub(r'\n{3}', '\n\n', s2)
+        s2 = _re.sub(r'\n{3,}', '\n\n', s2)
         return s2
     except Exception:
         return s
@@ -6318,6 +6214,7 @@ except Exception:
 # ========================
 # /Contest Lock v4
 # ========================
+
 
 # ========================
 # Contest Lock v5 (transport-layer filter)
@@ -6423,6 +6320,7 @@ except Exception:
 # /Contest Lock v5
 # ========================
 
+
 # ========================
 # Report Caption Normalizer (HTML-aware)
 # Ensures Telegram document captions reflect the final gated verdict/score from the HTML content itself.
@@ -6496,6 +6394,7 @@ except Exception:
 # /Report Caption Normalizer
 # ========================
 
+
 # ==== MDX Report Normalizer (body + caption) ====
 # This block guarantees consistency between chat, HTML content, and Telegram caption.
 # It patches the transport layer (requests.post to Telegram) for sendDocument.
@@ -6527,6 +6426,7 @@ def _mdx_extract_from_html(txt: str):
                 pos.append(f"+ {mpos.group(1)}  {mpos.group(2).strip()}")
     return verdict, score, neg, pos
 
+
 def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
     """Rewrite Risk verdict card and Signals inside the HTML to match Summary/Why++ (safe, no backrefs)."""
     try:
@@ -6557,7 +6457,7 @@ def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
             insert_after_verdict, txt, flags=re.I|re.S
         )
         txt = txt.replace(r'\1', '')
-        txt = re.sub(r'\n{3}', '\n\n', txt)
+        txt = re.sub(r'\n{3,}', '\n\n', txt)
         return txt.encode("utf-8", errors="ignore")
     except Exception:
         try:
