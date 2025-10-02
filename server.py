@@ -5062,7 +5062,14 @@ def _kb_dedupe_all(kb: dict) -> dict:
             new_row = []
             for btn in (row or []):
                 cd = str((btn or {}).get("callback_data") or "")
-                key = ("cd", cd) if cd else ("tx", str((btn or {}).get("text") or ""))
+                url = str((btn or {}).get("url") or "")
+                txt = str((btn or {}).get("text") or "")
+                if cd:
+                    key = ("cd", cd)
+                elif url:
+                    key = ("url", url)
+                else:
+                    key = ("tx", txt)
                 if key in seen:
                     continue
                 seen.add(key)
