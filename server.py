@@ -2305,6 +2305,29 @@ def _compress_keyboard(kb: dict):
             cb_cache.set(token, data)
             btn["callback_data"] = token
 
+    
+    # --- Force "Open on DexScreener" button (minimal safe patch) ---
+    try:
+        _has_ds = False
+        for _row in ik:
+            for _btn in (_row or []):
+                if isinstance(_btn, dict) and str(_btn.get("text","")).lower().find("dexscreener") >= 0:
+                    _has_ds = True
+                    break
+            if _has_ds:
+                break
+        if not _has_ds:
+            try:
+                # Try to compute a reasonable ds_url from existing context
+                _addr = addr if addr else (ca if "ca" in locals() else "")
+                _ch = (chain or _resolve_chain_for_scan(_addr) or "ethereum") if "chain" in locals() else "ethereum"
+                _ds_url = f"https://dexscreener.com/search?q={_addr}" if _addr else "https://dexscreener.com"
+            except Exception:
+                _ds_url = "https://dexscreener.com"
+            ik.append([{"text": "🔎 Open on DexScreener", "url": _ds_url}])
+    except Exception:
+        pass
+
     return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _kb_clone(kb):
@@ -2451,7 +2474,10 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
         # Add buttons (single row for DS/DEX, next row for Scan)
-        ik.append([{"text": "🔎 Open on DexScreener", "url": ds_url}])
+        ik.append([
+            {"text": "🔎 Open on DexScreener", "url": ds_url},
+            {"text": "🟢 Open in DEX", "url": dex_url}
+        ])
         ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
