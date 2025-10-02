@@ -6568,24 +6568,33 @@ def _normalize_action_row(kb: dict) -> dict:
                 except Exception:
                     pass
 
+            
             # If we can rebuild, do it
-            if ca and ch:
+            # Change: prefer DexScreener PAIR URL exactly; fallback to DexScreener search.
+            if ca:
                 new_dex = ""
                 try:
-                    new_dex = _swap_url_for(ch, ca)
+                    pair_info, ch2 = _ds_resolve_pair_and_chain(ca)
+                except Exception:
+                    pair_info, ch2 = None, (ch or "")
+                try:
+                    if isinstance(pair_info, dict):
+                        paddr = pair_info.get("pairAddress") or pair_info.get("pair")
+                        if paddr and (ch2 or ch):
+                            new_dex = _dexscreener_pair_url((ch2 or ch), paddr)
                 except Exception:
                     new_dex = ""
                 if not new_dex:
-                    ch_low = (str(ch) or "ethereum").lower()
-                    if ch_low == "bsc":
-                        new_dex = f"https://pancakeswap.finance/swap?outputCurrency={ca}"
-                    elif ch_low in ("ethereum","arbitrum","optimism","base","polygon"):
-                        new_dex = f"https://app.uniswap.org/swap?outputCurrency={ca}&chain={ch_low if ch_low!='ethereum' else 'ethereum'}"
-                    elif ch_low == "avalanche":
-                        new_dex = f"https://traderjoexyz.com/trade?outputCurrency={ca}"
-                    if not new_dex:
-                        new_dex = f"https://app.uniswap.org/swap?outputCurrency={ca}"
-
+                    # Strict mode: no search fallback
+                    try:
+                        strict = bool(int(os.getenv("DEX_STRICT_CHAIN", "0") or "0")) and not bool(int(os.getenv("DS_ALLOW_FALLBACK", "1") or "1"))
+                    except Exception:
+                        strict = False
+                    if strict:
+                        new_dex = "https://dexscreener.com"
+                    else:
+                        query = ca
+                        new_dex = f"https://dexscreener.com/search?q={query}"
                 # Replace/insert DEX button
                 dex_btn = {"text": "🟢 Open in DEX", "url": new_dex}
 
