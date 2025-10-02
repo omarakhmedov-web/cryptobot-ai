@@ -2430,24 +2430,38 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         if 'utm_' not in sample_url:
             sample_url = sample_url + ('&' if '?' in sample_url else '?') + 'utm_source=bot&utm_medium=quickscan&utm_campaign=sample_report'
         ik.append([{ 'text': '📄 HTML report (sample)', 'url': sample_url }])
-        # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
-        if addr:
-            # Resolve chain once; no DexScreener here by request
-            ch = (_resolve_chain_for_scan(addr) or "ethereum")
+    
+    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
+    if addr:
 
-            # Swap URL и Explorer URL
-            dex_url  = _swap_url_for(ch, addr)
-            scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
+        try:
+            pair, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
+        except Exception:
+            pair, chain = (None, None)
+        ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
 
-            # Row 1: DEX + Scan (same row)
-            ik.append([
-                {"text": "🟢 Open in DEX",  "url": dex_url},
-                {"text": "🔍 Open in Scan", "url": scan_url}
-            ])
-            # Row 2–3: Copy CA + LP lock (lite)
-            ik.append([{"text": "📋 Copy CA",        "callback_data": f"copyca:{addr}"}])
-            ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
+    
+        ik.append([{"text": "🟢 Open in DEX",  "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
 
+        # DexScreener link
+        ds_url = ""
+        try:
+            paddr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
+            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else f"https://dexscreener.com/search?q={addr}"
+        except Exception:
+            ds_url = f"https://dexscreener.com/search?q={addr}"
+        # Swap link
+        dex_url = _swap_url_for(ch, addr)
+        # Explorer link
+        scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
+        # Add buttons (single row for DS/DEX, next row for Scan)
+        ik.append([
+            {"text": "🔎 Open on DexScreener", "url": ds_url},
+            {"text": "🟢 Open in DEX", "url": dex_url}
+        ])
+        ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
+        ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
+        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
         
 
     # Δ timeframe row (single)
