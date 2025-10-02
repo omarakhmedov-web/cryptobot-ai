@@ -2450,10 +2450,12 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         dex_url = _swap_url_for(ch, addr)
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-        # Add buttons (single row for DS/DEX, next row for Scan)
+        # Add buttons (single row: DEX + Scan)
         dex_url = "https://dexscreener.com/bsc/0x683c425d917e8fef34c8bbbeab57246dd2a8b718"
-        ik.append([{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
-
+        ik.append([
+            {"text": "🟢 Open in DEX", "url": dex_url},
+            {"text": "🔍 Open in Scan", "url": scan_url}
+        ])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
         
