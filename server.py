@@ -2439,6 +2439,16 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         except Exception:
             pair, chain = (None, None)
         ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
+
+    
+    ik.append([{"text": "🟢 Open in DEX", "url": dex_url}])
+
+    
+    ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
+
+    
+    ik.append([{"text": "🔎 Open on DexScreener", "url": ds_url}])
+
         # DexScreener link
         ds_url = ""
         try:
@@ -2456,19 +2466,6 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             {"text": "🟢 Open in DEX", "url": dex_url}
         ])
         ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
-        # DexScreener row (after 'Open in Scan')
-        try:
-            _pair, _chain = _ds_resolve_pair_and_chain(addr) or (None, None)
-        except Exception:
-            _pair, _chain = (None, None)
-        _ch = (_chain or _resolve_chain_for_scan(addr) or "ethereum")
-        try:
-            _paddr = (_pair or {}).get("pairAddress") or (_pair or {}).get("pair") or ""
-            ds_url = _dexscreener_pair_url(_ch, _paddr) if _paddr else f"https://dexscreener.com/search?q={addr}"
-        except Exception:
-            ds_url = f"https://dexscreener.com/search?q={addr}"
-        ik.append([{"text": "🔎 Open on DexScreener", "url": ds_url}])
-
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
         
