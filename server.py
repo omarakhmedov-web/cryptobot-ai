@@ -1,5 +1,3 @@
-# Metridex server — SAFE8_RC1 — dsbutton build
-# Change: ensured 'Open on DexScreener' action button present; no logic changes elsewhere.
 import os
 import re
 import ssl
@@ -1103,7 +1101,7 @@ def _cmd_watch(chat_id: int, text: str):
                     {"text": "Unwatch", "callback_data": f"watch:rm:{ca}"}
                 ],
                 [
-                    {"text": "Open in DEX", "url": f"{_swap_url_for(ch, ca)}"},
+                    {"text": "Open on DexScreener", "url": f"https://dexscreener.com/search?q={ca}"},
                     {"text": "Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(ca))}/token/{ca}"}
                 ]
             ]
@@ -2453,10 +2451,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
         # Add buttons (single row for DS/DEX, next row for Scan)
-        ik.append([
-            {"text": "🔎 Open on DexScreener", "url": ds_url},
-            {"text": "🟢 Open in DEX", "url": dex_url}
-        ])
+        ik.append([{"text": "🔎 Open on DexScreener", "url": ds_url}])
         ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
