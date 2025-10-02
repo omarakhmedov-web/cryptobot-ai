@@ -2263,6 +2263,8 @@ def _force_action_row(addr: str, kb: dict) -> dict:
         # Build URLs with fallback
         try:
             dex_url = _swap_url_for(ch, addr)
+            if not dex_url:
+                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
         except Exception:
             dex_url = ""
         if not dex_url:
@@ -2281,6 +2283,8 @@ def _force_action_row(addr: str, kb: dict) -> dict:
                 dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
             elif _ch == "avalanche":
                 dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
+                if not dex_url:
+                    dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
 
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
 
@@ -2434,6 +2438,8 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         # Swap link with robust fallback
         try:
             dex_url = _swap_url_for(ch, addr)
+            if not dex_url:
+                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
         except Exception:
             dex_url = ""
 
@@ -2453,6 +2459,8 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
                 dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
             elif _ch == "avalanche":
                 dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
+                if not dex_url:
+                    dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
 
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
@@ -2504,6 +2512,8 @@ def _force_action_row(addr: str, kb: dict) -> dict:
         # Build URLs with fallback
         try:
             dex_url = _swap_url_for(ch, addr)
+            if not dex_url:
+                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
         except Exception:
             dex_url = ""
         if not dex_url:
@@ -2522,6 +2532,8 @@ def _force_action_row(addr: str, kb: dict) -> dict:
                 dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
             elif _ch == "avalanche":
                 dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
+                if not dex_url:
+                    dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
 
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
 
