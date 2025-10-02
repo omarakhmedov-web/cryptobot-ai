@@ -2392,42 +2392,73 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
 
 
 
-def _kb_force_ds(kb: dict, addr: str):
-    """
-    Ensure '🔎 Open on DexScreener' row exists just AFTER the '🔍 Open in Scan' row.
-    Safe: no-ops on errors or when DS row already present.
+def _kb_force_ds_any(kb: dict, addr: str=None):
+    """Post-process inline keyboard to ensure '🔎 Open on DexScreener' appears
+    right AFTER the '🔍 Open in Scan' row. If addr is None, try to infer it from kb.
+    Safe: idempotent; returns kb unchanged on errors.
     """
     try:
         if not kb or not isinstance(kb, dict):
             return kb
-        ik = kb.get("inline_keyboard") or []
-        # If already present — do nothing
+        ik = kb.get('inline_keyboard') or []
+        # Already present? do nothing
         for row in ik:
-            for btn in row or []:
-                if (btn or {}).get("text") == "🔎 Open on DexScreener":
+            for btn in (row or []):
+                if (btn or {}).get('text') == '🔎 Open on DexScreener':
                     return kb
-        # Resolve DS URL
+        # Try infer addr from keyboard if not given
+        if not addr:
+            try:
+                # Prefer project helper if exists
+                if '_extract_base_addr_from_keyboard' in globals():
+                    addr = _extract_base_addr_from_keyboard(kb)
+            except Exception:
+                addr = None
+            if not addr:
+                # Fallback: brute-force parse callback_data/text
+                for row in ik:
+                    for btn in (row or []):
+                        data = str((btn or {}).get('callback_data') or '')
+                        txt  = str((btn or {}).get('text') or '')
+                        # common prefixes
+                        for pref in ('qs2:','qs:','more:','why:','rep:','hp:','copyca:','lp:'):
+                            if data.startswith(pref):
+                                payload = data.split(':',1)[1]
+                                payload = payload.split('?',1)[0]
+                                # quick addr pick
+                                m = ADDR_RE.search(payload) if 'ADDR_RE' in globals() and hasattr(ADDR_RE,'search') else None
+                                if m:
+                                    addr = m.group(0).lower()
+                                    break
+                        if not addr and txt.endswith('(HTML)'):
+                            # Last resort: nothing
+                            pass
+                        if addr:
+                            break
+                    if addr:
+                        break
+        # Build ds_url; if still no addr, place a generic DS search that opens bot name
         try:
-            pair, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
+            pair, chain = _ds_resolve_pair_and_chain(addr) if addr else (None, None)
         except Exception:
             pair, chain = (None, None)
-        ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
+        ch = (chain or (_resolve_chain_for_scan(addr) if addr else None) or 'ethereum')
         try:
-            paddr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
-            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else f"https://dexscreener.com/search?q={addr}"
+            paddr = (pair or {}).get('pairAddress') or (pair or {}).get('pair') or ''
+            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else (f'https://dexscreener.com/search?q={addr}' if addr else 'https://dexscreener.com')
         except Exception:
-            ds_url = f"https://dexscreener.com/search?q={addr}"
-        # Find 'Open in Scan' row index (prefer the last one if multiple)
+            ds_url = (f'https://dexscreener.com/search?q={addr}' if addr else 'https://dexscreener.com')
+        # Locate 'Open in Scan' row
         scan_idx = -1
         for i, row in enumerate(ik):
             try:
-                if any((b or {}).get("text") == "🔍 Open in Scan" for b in (row or [])):
+                if any((b or {}).get('text') == '🔍 Open in Scan' for b in (row or [])):
                     scan_idx = i
             except Exception:
                 pass
         insert_at = scan_idx + 1 if scan_idx >= 0 else len(ik)
-        ik.insert(insert_at, [{"text": "🔎 Open on DexScreener", "url": ds_url}])
-        return {"inline_keyboard": ik}
+        ik.insert(insert_at, [{'text': '🔎 Open on DexScreener', 'url': ds_url}])
+        return {'inline_keyboard': ik}
     except Exception:
         return kb
 
@@ -2509,7 +2540,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         {"text": "Δ 24h", "callback_data": "tf:24"},
     ])
     kbout = _kb_dedupe_all({'inline_keyboard': ik})
-    kbout = _kb_force_ds(kbout, addr)
+    kbout = _kb_force_ds_any(kbout, addr)
     return kbout
 
 def _extract_addrs_from_pair_payload(data: str):
