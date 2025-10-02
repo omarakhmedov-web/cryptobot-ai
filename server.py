@@ -6501,13 +6501,15 @@ except Exception:
 # ==== /MDX Report Normalizer ====
 
 
+
 def _normalize_action_row(kb: dict) -> dict:
-    """Remove DexScreener everywhere and move [Open in DEX | Open in Scan] to the TOP row."""
+    """Remove DexScreener; put [Open in DEX | Open in Scan] on top; rebuild DEX URL from Scan URL & CA."""
     try:
         ik = (kb or {}).get("inline_keyboard") or []
         dex_btn = None
         scan_btn = None
         cleaned_rows = []
+        # 1) Sweep rows: strip DexScreener, capture DEX & Scan (drop them from in-place rows)
         for row in ik:
             new_row = []
             for btn in (row or []):
@@ -6524,6 +6526,61 @@ def _normalize_action_row(kb: dict) -> dict:
                 new_row.append(btn)
             if new_row:
                 cleaned_rows.append(new_row)
+
+        # 2) If we have Scan URL, infer chain and CA, then rebuild DEX URL accordingly
+        import re as _re
+        from urllib.parse import urlparse as _urlparse
+        if scan_btn:
+            scan_url = str(scan_btn.get("url") or "")
+            try:
+                ca = (_re.search(r"(0x[a-fA-F0-9]{40})", scan_url) or [None, ""])[1]
+            except Exception:
+                ca = ""
+            ch = ""
+            try:
+                # Prefer helper if present
+                ch = _chain_from_scan_url(scan_url)
+            except Exception:
+                ch = ""
+            if not ch:
+                try:
+                    host = (_urlparse(scan_url).hostname or "").lower()
+                    if "bscscan" in host: ch = "bsc"
+                    elif "etherscan" in host: ch = "ethereum"
+                    elif "arbiscan" in host: ch = "arbitrum"
+                    elif "basescan" in host: ch = "base"
+                    elif "polygonscan" in host: ch = "polygon"
+                    elif "optimistic" in host or "optimism" in host: ch = "optimism"
+                    elif "snowtrace" in host or "avax" in host: ch = "avalanche"
+                except Exception:
+                    pass
+            # If we can rebuild, do it
+            if ca and ch:
+                new_dex = ""
+                try:
+                    new_dex = _swap_url_for(ch, ca)
+                except Exception:
+                    new_dex = ""
+                if not new_dex:
+                    ch_low = (str(ch) or "ethereum").lower()
+                    if ch_low == "bsc":
+                        new_dex = f"https://pancakeswap.finance/swap?outputCurrency={ca}"
+                    elif ch_low in ("ethereum","arbitrum","optimism","base","polygon"):
+                        new_dex = f"https://app.uniswap.org/swap?outputCurrency={ca}&chain={ch_low if ch_low!='ethereum' else 'ethereum'}"
+                    elif ch_low == "avalanche":
+                        new_dex = f"https://traderjoexyz.com/trade?outputCurrency={ca}"
+                    if not new_dex:
+                        new_dex = f"https://app.uniswap.org/swap?outputCurrency={ca}"
+                # If a dex_btn exists but wrong host for chain (e.g., Pancake on non-BSC), replace it
+                need_replace = True
+                if dex_btn and str(dex_btn.get("url") or ""):
+                    host_old = (_urlparse(dex_btn["url"]).hostname or "").lower()
+                    host_new = (_urlparse(new_dex).hostname or "").lower()
+                    need_replace = (host_old != host_new)
+                if need_replace:
+                    dex_btn = {"text": "🟢 Open in DEX", "url": new_dex}
+
+        # 3) Build top row and return
         top = []
         if dex_btn:
             top.append(dex_btn)
