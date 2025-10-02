@@ -2431,20 +2431,7 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             sample_url = sample_url + ('&' if '?' in sample_url else '?') + 'utm_source=bot&utm_medium=quickscan&utm_campaign=sample_report'
         ik.append([{ 'text': '📄 HTML report (sample)', 'url': sample_url }])
     
-    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)        # Ensure scan_url is available (guard, no side effects)
-        if 'scan_url' not in locals():
-            try:
-                _ch_tmp = (_resolve_chain_for_scan(addr) or "ethereum")
-            except Exception:
-                _ch_tmp = "ethereum"
-            try:
-                scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-            except Exception:
-                scan_url = f"{_explorer_base_for(_ch_tmp)}/token/{addr}"
-            # DEX+Scan combined row (DEX → fixed DexScreener pair on BSC as requested)
-            dex_url = "https://dexscreener.com/bsc/0x683c425d917e8fef34c8bbbeab57246dd2a8b718"
-            ik.append([{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
-
+    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
     if addr:
 
         try:
@@ -2464,11 +2451,9 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
         # Add buttons (single row for DS/DEX, next row for Scan)
-        ik.append([
-            {"text": "🔎 Open on DexScreener", "url": ds_url},
-            {"text": "🟢 Open in DEX", "url": dex_url}
-        ])
-        ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
+        dex_url = "https://dexscreener.com/bsc/0x683c425d917e8fef34c8bbbeab57246dd2a8b718"
+        ik.append([{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
+
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
         
