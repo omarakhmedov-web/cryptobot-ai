@@ -2450,12 +2450,9 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         dex_url = _swap_url_for(ch, addr)
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-        # Add buttons (single row: DEX + Scan)
-        dex_url = "https://dexscreener.com/bsc/0x683c425d917e8fef34c8bbbeab57246dd2a8b718"
-        ik.append([
-            {"text": "🟢 Open in DEX", "url": dex_url},
-            {"text": "🔍 Open in Scan", "url": scan_url}
-        ])
+        # Add buttons (single row for DS/DEX, next row for Scan)
+
+        ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
         
@@ -4978,6 +4975,62 @@ def _enrich_full(addr: str, base_text: str) -> str:
         return text
     except Exception:
         return base_text or ""
+
+
+
+def _kb_enforce_dex_scan_top(kb: dict) -> dict:
+    """Remove any DexScreener buttons and force first row = [DEX | Scan].
+    Idempotent. Uses existing Scan URL from the keyboard, and fixed DEX URL.
+    """
+    try:
+        if not isinstance(kb, dict):
+            return kb
+        ik = kb.get("inline_keyboard") or []
+        if not isinstance(ik, list):
+            return kb
+
+        # strip DexScreener rows; capture Scan URL (if present)
+        scan_url = None
+        cleaned = []
+        for row in ik:
+            row = row or []
+            labels = [ (b or {}).get("text") for b in row ]
+            # capture scan url
+            for b in row:
+                if (b or {}).get("text") == "🔍 Open in Scan":
+                    scan_url = (b or {}).get("url") or scan_url
+            # drop any DexScreener rows or singletons (DEX/Scan) and any previous combined row
+            if any(lbl == "🔎 Open on DexScreener" for lbl in labels):
+                continue
+            if labels == ["🟢 Open in DEX"] or labels == ["🔍 Open in Scan"]:
+                continue
+            if "🟢 Open in DEX" in labels and "🔍 Open in Scan" in labels:
+                # we'll recreate a clean combined row; skip this one
+                continue
+            cleaned.append(row)
+
+        # Require Scan URL; if absent, try to infer from any remaining rows (edge case)
+        if scan_url is None:
+            # try to find any button with '/token/' in URL as fallback
+            for row in ik:
+                for b in (row or []):
+                    u = (b or {}).get("url") or ""
+                    if "/token/" in u:
+                        scan_url = u
+                        break
+                if scan_url: break
+
+        # Build the combined first row (if we have scan_url)
+        combined = [
+            {"text": "🟢 Open in DEX",  "url": "https://dexscreener.com/bsc/0x683c425d917e8fef34c8bbbeab57246dd2a8b718"},
+            {"text": "🔍 Open in Scan", "url": scan_url or ""},
+        ]
+        # Put combined first
+        new_ik = [combined] + cleaned
+
+        return {"inline_keyboard": new_ik}
+    except Exception:
+        return kb
 
 
 def _kb_dedupe_all(kb: dict) -> dict:
