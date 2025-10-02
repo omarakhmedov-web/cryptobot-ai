@@ -1088,7 +1088,7 @@ def _cmd_watch(chat_id: int, text: str):
             elif tok.startswith("chain="): chain = tok.split("=",1)[1].strip().lower()
         watch_add(chat_id, ca, wtype, thr, chain)
         _ensure_watch_loop()
-        _send_text(chat_id, f"👁️ Added to watchlist: {ca} ({wtype}{' thr='+str(thr) if thr is not None else ''}{' '+chain if chain else ''})", logger=app.logger)
+        _send_text(chat_id, f"👁️ Added to watchlist: {ca} {('['+chain+']') if chain else ''}", logger=app.logger)
 
         # Mini-keyboard (unchanged)
         if FEATURE_WATCH_KEYS:
@@ -1099,7 +1099,7 @@ def _cmd_watch(chat_id: int, text: str):
                     {"text": "Unwatch", "callback_data": f"watch:rm:{ca}"}
                 ],
                 [
-                    "},
+                    {"text": "Open on DexScreener", "url": f"https://dexscreener.com/search?q={ca}"},
                     {"text": "Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(ca))}/token/{ca}"}
                 ]
             ]
@@ -2479,26 +2479,9 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         {"text": "Δ 1h",  "callback_data": "tf:1"},
         {"text": "Δ 6h",  "callback_data": "tf:6"},
         {"text": "Δ 24h", "callback_data": "tf:24"}])
-    
-        # -- force-add DexScreener button if missing (safe, idempotent) --
-        try:
-            _has_ds = False
-            for _row in ik:
-                for _btn in (_row or []):
-                    if isinstance(_btn, dict) and "DexScreener" in str(_btn.get("text","")):
-                        _has_ds = True; break
-                if _has_ds: break
-            if not _has_ds:
-                try:
-                    _addr = addr if "addr" in locals() else (ca if "ca" in locals() else "")
-                    _ds_url = ds_url if "ds_url" in locals() else (f"https://dexscreener.com/search?q={_addr}" if _addr else "https://dexscreener.com")
-                except Exception:
-                    _ds_url = "https://dexscreener.com"
-                ik.append([{"text": "🔎 Open on DexScreener", "url": _ds_url}])
-        except Exception:
-            pass
 
-        return _kb_dedupe_all({"inline_keyboard": ik})
+    return _kb_dedupe_all({"inline_keyboard": ik})
+
 
 def _extract_addrs_from_pair_payload(data: str):
     try:
