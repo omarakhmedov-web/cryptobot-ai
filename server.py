@@ -2263,8 +2263,6 @@ def _force_action_row(addr: str, kb: dict) -> dict:
         # Build URLs with fallback
         try:
             dex_url = _swap_url_for(ch, addr)
-            if not dex_url:
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
         except Exception:
             dex_url = ""
         if not dex_url:
@@ -2283,8 +2281,6 @@ def _force_action_row(addr: str, kb: dict) -> dict:
                 dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
             elif _ch == "avalanche":
                 dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
-                if not dex_url:
-                    dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
 
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
 
@@ -2306,6 +2302,58 @@ def _force_action_row(addr: str, kb: dict) -> dict:
     except Exception:
         return kb or {}
 
+
+
+def _build_action_row(addr: str) -> list:
+    """Return a consistent top-row with DEX+Scan URL buttons for given CA."""
+    if not addr:
+        return []
+    try:
+        _, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
+    except Exception:
+        chain = None
+    ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
+    # Build DEX url with robust fallback
+    try:
+        dex_url = _swap_url_for(ch, addr)
+    except Exception:
+        dex_url = ""
+    if not dex_url:
+        _ch = (str(ch) or "ethereum").lower()
+        if _ch == "ethereum":
+            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=ethereum"
+        elif _ch == "arbitrum":
+            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=arbitrum"
+        elif _ch == "optimism":
+            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=optimism"
+        elif _ch == "base":
+            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=base"
+        elif _ch == "bsc":
+            dex_url = f"https://pancakeswap.finance/swap?outputCurrency={addr}"
+        elif _ch == "polygon":
+            dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
+        elif _ch == "avalanche":
+            dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
+    if not dex_url:
+        dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
+    scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
+    return [{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}]
+
+def _remove_button_by_callback_prefix(kb: dict, prefix: str) -> dict:
+    """Remove any buttons whose callback_data starts with the given prefix."""
+    kb = kb or {}
+    ik = (kb.get("inline_keyboard") or [])
+    out = []
+    for row in ik:
+        new_row = []
+        for btn in (row or []):
+            cd = str((btn or {}).get("callback_data") or "")
+            if cd.startswith(prefix):
+                continue
+            new_row.append(btn)
+        if new_row:
+            out.append(new_row)
+    return {"inline_keyboard": out}
 
 def _kb_clone(kb):
     if not kb or not isinstance(kb, dict):
@@ -2428,63 +2476,25 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
     
         # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
     if addr:
-
-        try:
-            pair, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
-        except Exception:
-            pair, chain = (None, None)
-        ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
-
-        # Swap link with robust fallback
-        try:
-            dex_url = _swap_url_for(ch, addr)
-            if not dex_url:
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
-        except Exception:
-            dex_url = ""
-
-        if not dex_url:
-            _ch = (str(ch) or "ethereum").lower()
-            if _ch == "ethereum":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=ethereum"
-            elif _ch == "arbitrum":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=arbitrum"
-            elif _ch == "optimism":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=optimism"
-            elif _ch == "base":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=base"
-            elif _ch == "bsc":
-                dex_url = f"https://pancakeswap.finance/swap?outputCurrency={addr}"
-            elif _ch == "polygon":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
-            elif _ch == "avalanche":
-                dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
-                if not dex_url:
-                    dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
-
-        # Explorer link
-        scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-
-        # Make sure DEX+Scan row is FIRST (top row)
-        # Remove any pre-existing DEX/Scan buttons to avoid duplicates
-        _ik = []
+        # Clean previous DEX/Scan rows and enforce our top action row
+        cleaned = []
         for _row in (ik or []):
             _new = []
             for _btn in (_row or []):
-                _txt = str((_btn or {}).get("text") or "")
-                if _txt.strip() in {"🟢 Open in DEX","Open in DEX","🔍 Open in Scan","Open in Scan"}:
+                _t = str((_btn or {}).get("text") or "")
+                if _t.strip() in {"🟢 Open in DEX","Open in DEX","🔍 Open in Scan","Open in Scan"}:
                     continue
                 _new.append(_btn)
             if _new:
-                _ik.append(_new)
-        ik = _ik
-        ik.insert(0, [{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
-
+                cleaned.append(_new)
+        ik = cleaned
+        ik.insert(0, _build_action_row(addr))
         # Utility rows
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
 
     # Δ timeframe row (single)
+# Δ timeframe row (single)
     # (single)
     ik.append([
         {"text": "Δ 5m",  "callback_data": "tf:5"},
@@ -2512,8 +2522,6 @@ def _force_action_row(addr: str, kb: dict) -> dict:
         # Build URLs with fallback
         try:
             dex_url = _swap_url_for(ch, addr)
-            if not dex_url:
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
         except Exception:
             dex_url = ""
         if not dex_url:
@@ -2532,8 +2540,6 @@ def _force_action_row(addr: str, kb: dict) -> dict:
                 dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
             elif _ch == "avalanche":
                 dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
-                if not dex_url:
-                    dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
 
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
 
@@ -4308,6 +4314,7 @@ def webhook(secret):
                 kb0 = msg_obj.get("reply_markup") or {}
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _force_action_row(addr, kb1)
+                kb1 = _remove_button_by_callback_prefix(kb1, "hp:")
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger, is_details=True)
                 _store_addr_for_message(body, addr)
@@ -4382,6 +4389,7 @@ def webhook(secret):
                 kb0 = msg_obj.get("reply_markup") or {}
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _force_action_row(addr, kb1)
+                kb1 = _remove_button_by_callback_prefix(kb1, "hp:")
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
                 return ("ok", 200)
