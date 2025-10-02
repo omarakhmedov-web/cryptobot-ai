@@ -2448,28 +2448,14 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             ds_url = f"https://dexscreener.com/search?q={addr}"
         # Swap link
         dex_url = _swap_url_for(ch, addr)
-        if not dex_url:
-            _ch = (str(ch) or "ethereum").lower()
-            if _ch == "ethereum":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=ethereum"
-            elif _ch == "arbitrum":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=arbitrum"
-            elif _ch == "optimism":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=optimism"
-            elif _ch == "base":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=base"
-            elif _ch == "bsc":
-                dex_url = f"https://pancakeswap.finance/swap?outputCurrency={addr}"
-            elif _ch == "polygon":
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain=polygon"
-            elif _ch == "avalanche":
-                dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
-            if not dex_url:
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
         # Add buttons (single row for DS/DEX, next row for Scan)
-        ik.append([{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
+        ik.append([
+            {"text": "🔎 Open on DexScreener", "url": ds_url},
+            {"text": "🟢 Open in DEX", "url": dex_url}
+        ])
+        ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
         
@@ -5839,7 +5825,7 @@ except Exception:
 # Toggle via ENV: DEX_BUTTONS_ENABLED=1 to show.
 # ========================
 try:
-    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "0") == "1")
+    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "1") == "1")
 except Exception:
     _DEX_BTN_ENABLED = False
 
@@ -5870,7 +5856,7 @@ try:
                         for btn in (row or []):
                             try:
                                 txt = btn.get("text", "")
-                                if isinstance(txt, str) and "Open in DEX" in txt:
+                                if (not _DEX_BTN_ENABLED) and isinstance(txt, str) and "Open in DEX" in txt:
                                     continue
                             except Exception:
                                 pass
@@ -5898,7 +5884,7 @@ except Exception:
 # - Hide any swap/DEX link by default
 # ========================
 try:
-    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "0") == "1")
+    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "1") == "1")
 except Exception:
     _DEX_BTN_ENABLED = False
 
@@ -5954,7 +5940,7 @@ try:
                             try:
                                 txt = btn.get("text", "")
                                 url = btn.get("url", "")
-                                if isinstance(txt, str) and "Open in DEX" in txt:
+                                if (not _DEX_BTN_ENABLED) and isinstance(txt, str) and "Open in DEX" in txt:
                                     continue
                                 if _is_swap_url(url):
                                     continue
