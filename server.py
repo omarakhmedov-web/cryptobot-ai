@@ -3744,16 +3744,16 @@ def _render_report(addr: str, text: str):
 </body></html>"""
 html = _mdx_inject_logo_into_html(html)
 
-    try:
-        tsf = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        safe_addr = (addr or "unknown")[:10]
-        filename = f"metridex_report_{safe_addr}_{tsf}.html"
-        path = os.path.join(tempfile.gettempdir(), filename)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(html)
-        return path, html
-    except Exception:
-        return None, html
+try:
+    tsf = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_addr = (addr or "unknown")[:10]
+    filename = f"metridex_report_{safe_addr}_{tsf}.html"
+    path = os.path.join(tempfile.gettempdir(), filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    return path, html
+except Exception:
+    return None, html
 
 # ========================
 # HTTP routes
