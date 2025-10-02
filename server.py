@@ -2180,6 +2180,13 @@ def _sanitize_lp_claims(text: str) -> str:
 def _send_text(chat_id, text, **kwargs):
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     is_details_flag = bool(kwargs.pop('is_details', False))
+    # Normalize keyboard (remove DexScreener, put DEX+Scan on top)
+    try:
+        kb = kwargs.get('reply_markup')
+        if kb:
+            kwargs['reply_markup'] = _normalize_action_row(kb)
+    except Exception:
+        pass
     try:
         _track_site_host(text, chat_id)
     except Exception:
@@ -6492,3 +6499,38 @@ try:
 except Exception:
     pass
 # ==== /MDX Report Normalizer ====
+
+
+def _normalize_action_row(kb: dict) -> dict:
+    """Remove DexScreener everywhere and move [Open in DEX | Open in Scan] to the TOP row."""
+    try:
+        ik = (kb or {}).get("inline_keyboard") or []
+        dex_btn = None
+        scan_btn = None
+        cleaned_rows = []
+        for row in ik:
+            new_row = []
+            for btn in (row or []):
+                t = str((btn or {}).get("text") or "")
+                u = str((btn or {}).get("url") or "")
+                if "DexScreener" in t or "dexscreener." in u.lower():
+                    continue
+                if t.strip() in {"🟢 Open in DEX", "Open in DEX"} and u:
+                    dex_btn = {"text": "🟢 Open in DEX", "url": u}
+                    continue
+                if t.strip() in {"🔍 Open in Scan", "Open in Scan"} and u:
+                    scan_btn = {"text": "🔍 Open in Scan", "url": u}
+                    continue
+                new_row.append(btn)
+            if new_row:
+                cleaned_rows.append(new_row)
+        top = []
+        if dex_btn:
+            top.append(dex_btn)
+        if scan_btn:
+            top.append(scan_btn)
+        if top:
+            cleaned_rows.insert(0, top)
+        return {"inline_keyboard": cleaned_rows}
+    except Exception:
+        return kb or {}
