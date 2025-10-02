@@ -2469,9 +2469,9 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         except Exception:
             ds_url = f"https://dexscreener.com/search?q={addr}"
         ik.append([{"text": "🔎 Open on DexScreener", "url": ds_url}])
+        ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
+        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
 
-                ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
-                ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
         
 
     # Δ timeframe row (single)
