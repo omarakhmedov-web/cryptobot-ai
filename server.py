@@ -2337,7 +2337,11 @@ def _build_action_row(addr: str) -> list:
     if not dex_url:
         dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
     scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-    return [{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}]
+    row = []
+    if dex_url:
+        row.append({"text": "🟢 Open in DEX", "url": dex_url})
+    row.append({"text": "🔍 Open in Scan", "url": scan_url})
+    return row
 
 def _remove_button_by_callback_prefix(kb: dict, prefix: str) -> dict:
     """Remove any buttons whose callback_data starts with the given prefix."""
@@ -4314,7 +4318,6 @@ def webhook(secret):
                 kb0 = msg_obj.get("reply_markup") or {}
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _force_action_row(addr, kb1)
-                kb1 = _remove_button_by_callback_prefix(kb1, "hp:")
                 kb1 = _compress_keyboard(kb1)
                 st, body = _send_text(chat_id, enriched, reply_markup=kb1, logger=app.logger, is_details=True)
                 _store_addr_for_message(body, addr)
@@ -4389,7 +4392,6 @@ def webhook(secret):
                 kb0 = msg_obj.get("reply_markup") or {}
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _force_action_row(addr, kb1)
-                kb1 = _remove_button_by_callback_prefix(kb1, "hp:")
                 kb1 = _compress_keyboard(kb1)
                 _send_text(chat_id, "On-chain\n" + out, reply_markup=kb1, logger=app.logger)
                 return ("ok", 200)
