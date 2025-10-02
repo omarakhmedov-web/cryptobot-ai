@@ -6303,6 +6303,38 @@ def _mdx_extract_verdict_score_from_html_bytes(b: bytes):
         return None
     return None
 
+
+def _mdx_inject_logo_into_html(html: str) -> str:
+    """Injects a right-aligned Metridex logo at the top of HTML reports.
+    Non-destructive: if id="mdx-report-logo" already present, returns unchanged.
+    """
+    try:
+        if not isinstance(html, str) or not html.strip():
+            return html
+        if 'id="mdx-report-logo"' in html or "metridex_logo_header.png" in html:
+            return html
+        # Build header block (right-aligned)
+        block = (
+            '<div id="mdx-report-logo" style="width:100%;'
+            'display:block; text-align:right; margin:0; padding:4px 0 8px;">'
+            '<a href="https://metridex.com" target="_blank" rel="noopener">'
+            '<img src="/logo/metridex_logo_header.png" alt="Metridex" '
+            'style="height:108px; max-width:100%; width:auto; vertical-align:middle" />'
+            '</a></div>'
+        )
+        # insert after <body ...> or at very start if no <body>
+        m = re.search(r'(?i)<body[^>]*>', html)
+        if m:
+            idx = m.end()
+            return html[:idx] + block + html[idx:]
+        # fallback: before first <h1> or at start
+        m2 = re.search(r'(?is)<h1[^>]*>', html)
+        if m2:
+            return html[:m2.start()] + block + html[m2.start():]
+        return block + html
+    except Exception:
+        return html
+
 # Patch requests.post wrapper to normalize caption for sendDocument
 try:
     import requests as _rq
