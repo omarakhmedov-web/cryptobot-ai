@@ -2391,6 +2391,47 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         pass
 
 
+
+def _kb_force_ds(kb: dict, addr: str):
+    """
+    Ensure '🔎 Open on DexScreener' row exists just AFTER the '🔍 Open in Scan' row.
+    Safe: no-ops on errors or when DS row already present.
+    """
+    try:
+        if not kb or not isinstance(kb, dict):
+            return kb
+        ik = kb.get("inline_keyboard") or []
+        # If already present — do nothing
+        for row in ik:
+            for btn in row or []:
+                if (btn or {}).get("text") == "🔎 Open on DexScreener":
+                    return kb
+        # Resolve DS URL
+        try:
+            pair, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
+        except Exception:
+            pair, chain = (None, None)
+        ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
+        try:
+            paddr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
+            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else f"https://dexscreener.com/search?q={addr}"
+        except Exception:
+            ds_url = f"https://dexscreener.com/search?q={addr}"
+        # Find 'Open in Scan' row index (prefer the last one if multiple)
+        scan_idx = -1
+        for i, row in enumerate(ik):
+            try:
+                if any((b or {}).get("text") == "🔍 Open in Scan" for b in (row or [])):
+                    scan_idx = i
+            except Exception:
+                pass
+        insert_at = scan_idx + 1 if scan_idx >= 0 else len(ik)
+        ik.insert(insert_at, [{"text": "🔎 Open on DexScreener", "url": ds_url}])
+        return {"inline_keyboard": ik}
+    except Exception:
+        return kb
+
+
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
     ik = base.get("inline_keyboard") or []
@@ -2456,22 +2497,8 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             {"text": "🟢 Open in DEX", "url": dex_url}
         ])
         ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
-
-        # DexScreener row (placed AFTER 'Open in Scan')
-        try:
-            _pair, _chain = _ds_resolve_pair_and_chain(addr) or (None, None)
-        except Exception:
-            _pair, _chain = (None, None)
-        _ch = (_chain or _resolve_chain_for_scan(addr) or "ethereum")
-        try:
-            _paddr = (_pair or {}).get("pairAddress") or (_pair or {}).get("pair") or ""
-            ds_url = _dexscreener_pair_url(_ch, _paddr) if _paddr else f"https://dexscreener.com/search?q={addr}"
-        except Exception:
-            ds_url = f"https://dexscreener.com/search?q={addr}"
-        ik.append([{"text": "🔎 Open on DexScreener", "url": ds_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
-
         
 
     # Δ timeframe row (single)
@@ -2481,7 +2508,9 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         {"text": "Δ 6h",  "callback_data": "tf:6"},
         {"text": "Δ 24h", "callback_data": "tf:24"},
     ])
-    return _kb_dedupe_all({"inline_keyboard": ik})
+    kbout = _kb_dedupe_all({'inline_keyboard': ik})
+    kbout = _kb_force_ds(kbout, addr)
+    return kbout
 
 def _extract_addrs_from_pair_payload(data: str):
     try:
