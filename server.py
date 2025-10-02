@@ -35,7 +35,7 @@ def _mdx_inject_logo_into_html(html: str) -> str:
             '<div id="mdx-report-logo" style="width:100%;display:block;text-align:right;'
             'margin:0;padding:4px 0 8px;">'
             '<a href="https://metridex.com" target="_blank" rel="noopener">'
-            '<img src="/logo/metridex_logo_header.png" alt="Metridex" '
+            '<img src="https://metridex.com/logo/metridex_logo_header.png" alt="Metridex" '
             'style="height:108px;max-width:100%;width:auto;vertical-align:middle" />'
             '</a></div>'
         )
