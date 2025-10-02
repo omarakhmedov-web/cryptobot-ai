@@ -2460,13 +2460,6 @@ if addr:
     ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
 
 
-        # DexScreener link
-        ds_url = ""
-        try:
-            paddr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
-            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else f"https://dexscreener.com/search?q={addr}"
-        except Exception:
-            ds_url = f"https://dexscreener.com/search?q={addr}"
         # Swap link
         dex_url = _swap_url_for(ch, addr)
         # Explorer link
