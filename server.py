@@ -2488,89 +2488,10 @@ def _pick_addr(addrs):
 def _extract_base_addr_from_keyboard(kb: dict):
     if not kb or not isinstance(kb, dict):
         return None
-    ik = 
-
-    
-    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
-
-    
-    if addr:
-
-    
-        try:
-
-    
-            pair, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
-
-    
-        except Exception:
-
-    
-            pair, chain = (None, None)
-
-    
-        ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
-
-
-    
-        # DexScreener URL (pair → /{chain}/{pair}; fallback → /search?q=)
-
-    
-        try:
-
-    
-            paddr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
-
-    
-            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else f"https://dexscreener.com/search?q={addr}"
-
-    
-        except Exception:
-
-    
-            ds_url = f"https://dexscreener.com/search?q={addr}"
-
-
-    
-        # Swap URL и Explorer URL
-
-    
-        dex_url  = _swap_url_for(ch, addr)
-
-    
-        scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-
-
-    
-        # 1-я строка: DexScreener + DEX
-
-    
-        ik.append([
-
-    
-            {"text": "🔎 Open on DexScreener", "url": ds_url},
-
-    
-            {"text": "🟢 Open in DEX",          "url": dex_url}
-
-    
-        ])
-
-    
-        # 2-я строка: Scan
-
-    
-        ik.append([{"text": "🔍 Open in Scan",   "url": scan_url}])
-
-    
-        # 3-4 строки: Copy CA и LP lock (lite)
-
-    
-        ik.append([{"text": "📋 Copy CA",        "callback_data": f"copyca:{addr}"}])
-
-    
-        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
-
+    ik = kb.get("inline_keyboard") or []
+    for row in ik:
+        for btn in row or []:
+            data = str((btn or {}).get("callback_data") or "")
             # Fast path: any known prefixes ('qs2:', 'qs:', 'more:', 'why:', 'rep:', 'hp:') may carry the addr
             for prefix in ("qs2:","qs:","more:","why:","rep:","hp:"):
                 if data.startswith(prefix):
