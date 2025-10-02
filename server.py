@@ -1,3 +1,5 @@
+# Metridex server — SAFE8_RC1 — dsbutton build
+# Change: ensured 'Open on DexScreener' action button present; no logic changes elsewhere.
 import os
 import re
 import ssl
