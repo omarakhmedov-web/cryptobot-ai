@@ -2120,8 +2120,8 @@ def _sanitize_lp_claims(text: str) -> str:
 # === /post-send sanitizers ===
 
 
-def _infer_addr_from_keyboard(kb: dict) -> str:
-    """Try to infer contract address from callback_data of any button (why:/rep:/hp:/more:/mon:/tf:)."""
+def _infer_addr_from_keyboard(kb: dict, text: str = "") -> str:
+    """Infer CA from keyboard (callback_data) or from text body."""
     try:
         ik = (kb or {}).get("inline_keyboard") or []
         import re as _re
@@ -2131,6 +2131,11 @@ def _infer_addr_from_keyboard(kb: dict) -> str:
                 m = _re.search(r'(0x[a-fA-F0-9]{40})', cd)
                 if m:
                     return m.group(1)
+        # Fallback: scan text for first 0x40 hex
+        if text:
+            m2 = _re.search(r'(0x[a-fA-F0-9]{40})', text)
+            if m2:
+                return m2.group(1)
     except Exception:
         pass
     return ""
@@ -2181,23 +2186,14 @@ def _inject_dex_scan_top(addr: str, kb: dict) -> dict:
     return {"inline_keyboard": cleaned}
 
 def _strip_hp_if_onchain_view(text: str, kb: dict) -> dict:
-    """Heuristic: if text clearly is On-chain view, drop the hp: button from the kb."""
-    try:
-        t = (text or "").lower()
-        cues = ["on-chain", "honeypot", "contract", "holders", "liquidity", "lp lock"]
-        if any(c in t for c in cues):
-            return _remove_button_by_callback_prefix(kb or {}, "hp:")
-    except Exception:
-        pass
     return kb or {}
 def _send_text(chat_id, text, **kwargs):
     # --- MDX: enforce DEX/Scan top row & strip hp in On-chain view ---
     try:
         _kb = kwargs.get('reply_markup') or {}
-        _addr = _infer_addr_from_keyboard(_kb)
+        _addr = _infer_addr_from_keyboard(_kb, text)
         if _addr:
             _kb = _inject_dex_scan_top(_addr, _kb)
-        _kb = _strip_hp_if_onchain_view(text, _kb)
         kwargs['reply_markup'] = _kb
     except Exception:
         pass
@@ -4474,7 +4470,7 @@ def webhook(secret):
                 kb1 = _ensure_action_buttons(addr, {}, want_more=False, want_why=True, want_report=True, want_hp=True)
                 kb1 = _force_action_row(addr, kb1)
                 kb1 = _compress_keyboard(kb1)
-                _send_text(chat_id, "On-chain\n" + out, reply_markup=_remove_button_by_callback_prefix(kb1, "hp:"), logger=app.logger)
+                _send_text(chat_id, "On-chain\n" + out, reply_markup=_remove_button_by_callback_prefix(_remove_button_by_callback_prefix, "hp:")(kb1, "hp:"), logger=app.logger)
                 return ("ok", 200)
 
             if data.startswith("copyca:"):
