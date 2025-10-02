@@ -1035,12 +1035,14 @@ def _ux_upgrade_keyboard(lang: str = "en") -> dict:
             [{"text": f"Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
              {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
             [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
-             {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}]]}
+             {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
+        ]}
     return {"inline_keyboard": [
         [{"text": f"Upgrade to Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
          {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
         [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
-         {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}]]}
+         {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
+    ]}
 
 def _ux_welcome_text(lang: str = "en") -> str:
     if str(lang).lower().startswith("ru"):
@@ -1088,7 +1090,7 @@ def _cmd_watch(chat_id: int, text: str):
             elif tok.startswith("chain="): chain = tok.split("=",1)[1].strip().lower()
         watch_add(chat_id, ca, wtype, thr, chain)
         _ensure_watch_loop()
-        _send_text(chat_id, f"👁️ Added to watchlist: {ca} {('['+chain+']') if chain else ''}", logger=app.logger)
+        _send_text(chat_id, f"👁️ Added to watchlist: {ca} ({wtype}{' thr='+str(thr) if thr is not None else ''}{' '+chain if chain else ''})", logger=app.logger)
 
         # Mini-keyboard (unchanged)
         if FEATURE_WATCH_KEYS:
@@ -1099,7 +1101,7 @@ def _cmd_watch(chat_id: int, text: str):
                     {"text": "Unwatch", "callback_data": f"watch:rm:{ca}"}
                 ],
                 [
-                    {"text": "Open on DexScreener", "url": f"https://dexscreener.com/search?q={ca}"},
+                    {"text": "Open in DEX", "url": f"{_swap_url_for(ch, ca)}"},
                     {"text": "Open in Scan", "url": f"{_explorer_base_for(_resolve_chain_for_scan(ca))}/token/{ca}"}
                 ]
             ]
@@ -2023,7 +2025,8 @@ def _sanitize_onchain_zeros(text: str) -> str:
         # Drop lines that are clearly zeroed placeholders
         patterns = [
             r"(?m)^\s*LP:\s*burned=0\.0%.*topHolder=0\.0%.*\n",
-            r"(?m)^\s*Holders:\s*top0\s*own\s*0%.*\n"]
+            r"(?m)^\s*Holders:\s*top0\s*own\s*0%.*\n",
+        ]
         for pat in patterns:
             text = _re.sub(pat, "", text)
         # Collapse extra blank lines after removals
@@ -2302,26 +2305,7 @@ def _compress_keyboard(kb: dict):
             cb_cache.set(token, data)
             btn["callback_data"] = token
 
-    
-        # -- force-add DexScreener button if missing (safe, idempotent) --
-        try:
-            _has_ds = False
-            for _row in ik:
-                for _btn in (_row or []):
-                    if isinstance(_btn, dict) and "DexScreener" in str(_btn.get("text","")):
-                        _has_ds = True; break
-                if _has_ds: break
-            if not _has_ds:
-                try:
-                    _addr = addr if "addr" in locals() else (ca if "ca" in locals() else "")
-                    _ds_url = ds_url if "ds_url" in locals() else (f"https://dexscreener.com/search?q={_addr}" if _addr else "https://dexscreener.com")
-                except Exception:
-                    _ds_url = "https://dexscreener.com"
-                ik.append([{"text": "🔎 Open on DexScreener", "url": _ds_url}])
-        except Exception:
-            pass
-
-        return _kb_dedupe_all({"inline_keyboard": ik})
+    return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _kb_clone(kb):
     if not kb or not isinstance(kb, dict):
@@ -2467,7 +2451,10 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
         # Add buttons (single row for DS/DEX, next row for Scan)
-        ik.append([{"text": "🔎 Open on DexScreener", "url": ds_url}])
+        ik.append([
+            {"text": "🔎 Open on DexScreener", "url": ds_url},
+            {"text": "🟢 Open in DEX", "url": dex_url}
+        ])
         ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
@@ -2478,10 +2465,9 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         {"text": "Δ 5m",  "callback_data": "tf:5"},
         {"text": "Δ 1h",  "callback_data": "tf:1"},
         {"text": "Δ 6h",  "callback_data": "tf:6"},
-        {"text": "Δ 24h", "callback_data": "tf:24"}])
-
+        {"text": "Δ 24h", "callback_data": "tf:24"},
+    ])
     return _kb_dedupe_all({"inline_keyboard": ik})
-
 
 def _extract_addrs_from_pair_payload(data: str):
     try:
@@ -2502,10 +2488,89 @@ def _pick_addr(addrs):
 def _extract_base_addr_from_keyboard(kb: dict):
     if not kb or not isinstance(kb, dict):
         return None
-    ik = kb.get("inline_keyboard") or []
-    for row in ik:
-        for btn in row or []:
-            data = str((btn or {}).get("callback_data") or "")
+    ik = 
+
+    
+    # Smart buttons (DEX/Scan) + Copy CA + LP lock (lite)
+
+    
+    if addr:
+
+    
+        try:
+
+    
+            pair, chain = _ds_resolve_pair_and_chain(addr) or (None, None)
+
+    
+        except Exception:
+
+    
+            pair, chain = (None, None)
+
+    
+        ch = (chain or _resolve_chain_for_scan(addr) or "ethereum")
+
+
+    
+        # DexScreener URL (pair → /{chain}/{pair}; fallback → /search?q=)
+
+    
+        try:
+
+    
+            paddr = (pair or {}).get("pairAddress") or (pair or {}).get("pair") or ""
+
+    
+            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else f"https://dexscreener.com/search?q={addr}"
+
+    
+        except Exception:
+
+    
+            ds_url = f"https://dexscreener.com/search?q={addr}"
+
+
+    
+        # Swap URL и Explorer URL
+
+    
+        dex_url  = _swap_url_for(ch, addr)
+
+    
+        scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
+
+
+    
+        # 1-я строка: DexScreener + DEX
+
+    
+        ik.append([
+
+    
+            {"text": "🔎 Open on DexScreener", "url": ds_url},
+
+    
+            {"text": "🟢 Open in DEX",          "url": dex_url}
+
+    
+        ])
+
+    
+        # 2-я строка: Scan
+
+    
+        ik.append([{"text": "🔍 Open in Scan",   "url": scan_url}])
+
+    
+        # 3-4 строки: Copy CA и LP lock (lite)
+
+    
+        ik.append([{"text": "📋 Copy CA",        "callback_data": f"copyca:{addr}"}])
+
+    
+        ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
+
             # Fast path: any known prefixes ('qs2:', 'qs:', 'more:', 'why:', 'rep:', 'hp:') may carry the addr
             for prefix in ("qs2:","qs:","more:","why:","rep:","hp:"):
                 if data.startswith(prefix):
@@ -2853,7 +2918,8 @@ def _symbol_homepage_hint(text: str):
         ("LUSD", "liquity.org"),
         ("SUSD", "synthetix.io"),
         ("CRVUSD", "curve.fi"),
-        ("USDE", "ether.fi")]
+        ("USDE", "ether.fi"),
+    ]
     for sym, dom in hints:
         if sym in t:
             return dom
@@ -4501,7 +4567,8 @@ def webhook(secret):
                     (f"• Owner: {owner_addr}" if owner_addr else "• Owner: n/a"),
                     f"• Renounced: {'yes' if renounced else 'no'}",
                     f"• Proxy: {'yes, impl: ' + impl_addr if is_proxy else 'no'}",
-                    ("• Multiple lockers detected" if multi_lockers else None)]
+                    ("• Multiple lockers detected" if multi_lockers else None),
+                ]
                 link_lines = []
                 link_lines.extend(lock_lines)
                 if ds_link: link_lines.append(f"DEX pair: {ds_link}")
@@ -5498,7 +5565,8 @@ def build_buy_keyboard(links: dict):
         ("🔎 Deep report — $3", links.get("deep")),
         ("⏱ Day Pass — $9", links.get("daypass")),
         ("⚙️ Pro — $29", links.get("pro")),
-        ("👥 Teams — from $99", links.get("teams"))]
+        ("👥 Teams — from $99", links.get("teams")),
+    ]
     row = []
     for label, url in mapping:
         if url and isinstance(url, str) and url.startswith("http"):
