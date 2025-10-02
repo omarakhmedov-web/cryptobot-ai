@@ -12,7 +12,73 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask,
+
+# === DS button enforcer ===
+def _kb_force_ds_any(kb: dict, addr: str=None):
+    try:
+        if not isinstance(kb, dict):
+            return kb
+        ik = kb.get('inline_keyboard') or []
+        # already present? no-op
+        for row in ik:
+            for btn in (row or []):
+                if (btn or {}).get('text') == '🔎 Open on DexScreener':
+                    return kb
+        # infer addr if not provided
+        if not addr:
+            try:
+                if '_extract_base_addr_from_keyboard' in globals():
+                    addr = _extract_base_addr_from_keyboard(kb)
+            except Exception:
+                addr = None
+        try:
+            pair, chain = _ds_resolve_pair_and_chain(addr) if addr else (None, None)
+        except Exception:
+            pair, chain = (None, None)
+        ch = (chain or (_resolve_chain_for_scan(addr) if addr else None) or 'ethereum')
+        try:
+            paddr = (pair or {}).get('pairAddress') or (pair or {}).get('pair') or ''
+            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else (f'https://dexscreener.com/search?q={addr}' if addr else 'https://dexscreener.com')
+        except Exception:
+            ds_url = (f'https://dexscreener.com/search?q={addr}' if addr else 'https://dexscreener.com')
+        # find 'Open in Scan' row; else append at end
+        scan_idx = -1
+        for i, row in enumerate(ik):
+            try:
+                if any((b or {}).get('text') == '🔍 Open in Scan' for b in (row or [])):
+                    scan_idx = i
+            except Exception:
+                pass
+        insert_at = scan_idx + 1 if scan_idx >= 0 else len(ik)
+        ik.insert(insert_at, [{'text': '🔎 Open on DexScreener', 'url': ds_url}])
+        return {'inline_keyboard': ik}
+    except Exception:
+        return kb
+
+# Monkey‑patch requests.post to enforce DS button on Telegram API calls
+_mdx_requests_post = requests.post
+def _mdx_requests_post_patch(url, *args, **kwargs):
+    try:
+        # Only touch Telegram Bot API calls
+        if 'api.telegram.org' in str(url):
+            payload = kwargs.get('json') if 'json' in kwargs else kwargs.get('data')
+            if isinstance(payload, dict) and 'reply_markup' in payload:
+                try:
+                    payload['reply_markup'] = _kb_force_ds_any(payload.get('reply_markup') or {}, None)
+                    if 'json' in kwargs:
+                        kwargs['json'] = payload
+                    else:
+                        kwargs['data'] = payload
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return _mdx_requests_post(url, *args, **kwargs)
+requests.post = _mdx_requests_post_patch
+# === end DS enforcer ===
+
+ request, jsonify
 
 # Project-local utilities (must exist in your project)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
@@ -4980,49 +5046,6 @@ def _enrich_full(addr: str, base_text: str) -> str:
         return base_text or ""
 
 
-
-def _kb_force_ds_any(kb: dict, addr: str=None):
-    try:
-        if not kb or not isinstance(kb, dict):
-            return kb
-        ik = kb.get('inline_keyboard') or []
-        # If already present — do nothing
-        for row in ik:
-            for btn in (row or []):
-                if (btn or {}).get('text') == '🔎 Open on DexScreener':
-                    return kb
-        # Try to infer addr from keyboard if not given
-        if not addr and '_extract_base_addr_from_keyboard' in globals():
-            try:
-                addr = _extract_base_addr_from_keyboard(kb)
-            except Exception:
-                addr = None
-        # Build DS url
-        try:
-            pair, chain = _ds_resolve_pair_and_chain(addr) if addr else (None, None)
-        except Exception:
-            pair, chain = (None, None)
-        ch = (chain or (_resolve_chain_for_scan(addr) if addr else None) or 'ethereum')
-        try:
-            paddr = (pair or {}).get('pairAddress') or (pair or {}).get('pair') or ''
-            ds_url = _dexscreener_pair_url(ch, paddr) if paddr else (f'https://dexscreener.com/search?q={addr}' if addr else 'https://dexscreener.com')
-        except Exception:
-            ds_url = (f'https://dexscreener.com/search?q={addr}' if addr else 'https://dexscreener.com')
-        # Find 'Open in Scan' row and insert after it (else append)
-        scan_idx = -1
-        for i, row in enumerate(ik):
-            try:
-                if any((b or {}).get('text') == '🔍 Open in Scan' for b in (row or [])):
-                    scan_idx = i
-            except Exception:
-                pass
-        insert_at = scan_idx + 1 if scan_idx >= 0 else len(ik)
-        ik.insert(insert_at, [{'text': '🔎 Open on DexScreener', 'url': ds_url}])
-        return {'inline_keyboard': ik}
-    except Exception:
-        return kb
-
-
 def _kb_dedupe_all(kb: dict) -> dict:
     try:
         ik = (kb or {}).get("inline_keyboard") or []
@@ -5043,9 +5066,6 @@ def _kb_dedupe_all(kb: dict) -> dict:
     except Exception:
         return kb or {}
 
-
-    kb = _kb_force_ds_any(kb)
-    return kb
 
 def _kb_strip_tf_rows(kb: dict) -> dict:
     """Remove any Δ timeframe rows regardless of encoding."""
