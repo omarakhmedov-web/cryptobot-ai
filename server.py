@@ -6525,27 +6525,6 @@ def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
     try:
         txt = raw.decode("utf-8", errors="ignore")
         verdict, score, neg, pos = _mdx_extract_from_html(txt)
-
-        # Normalize for NOT TRADABLE and Domain/Wayback, and fix LP-lite wording when needed
-        try:
-            import re as _re
-            # Enforce NOT TRADABLE floor in HTML if pools/liquidity absent
-            if _re.search(r"(?mi)No\s+pools\s+found\s+on\s+DexScreener|No\s+active\s+pools|No\s+liquidity", txt):
-                try:
-                    score = max(int(score or 0), 80)
-                except Exception:
-                    score = 80
-                verdict = "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)"
-            # If Domain is not present/unknown — drop Wayback‑related negatives/signals
-            has_domain = bool(_re.search(r"(?mi)^\s*Domain\s*:\s*(?!—|—|-|n/?a|none)\S+", txt))
-            if not has_domain and isinstance(neg, list):
-                neg = [t for t in neg if "wayback" not in str(t).lower()]
-            # LP‑lite: if Top holder type is contract, do not say 'EOA holds LP'
-            if _re.search(r"🔒\s*LP lock \(lite\)", txt) and _re.search(r"Top holder type:\s*contract", txt, _re.I):
-                txt = _re.sub(r"(Verdict:\s*)🔴\s*high risk \(EOA holds LP\)", r"\1🟡 mixed (contract/custodian holds LP)", txt)
-        except Exception:
-            pass
-
         if verdict is None or score is None:
             return txt.replace(r'\1', '').encode("utf-8", errors="ignore")
         def replace_verdict_box(m):
@@ -6557,8 +6536,8 @@ def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
         )
         def block(lines):
             return "\n".join(lines) if lines else "—"
-        txt = re.sub(r'<h3>\s*Signals\s*</h3>\s*<pre>.*?</pre>', '<h3>Signals</h3><pre>'+("\n".join(neg) if isinstance(neg,list) and neg else '—') +'</pre>', txt, flags=re.I|re.S)
-        txt = re.sub(r'<h3>\s*Positives\s*</h3>\s*<pre>.*?</pre>', '<h3>Positives</h3><pre>'+("\n".join(pos) if isinstance(pos,list) and pos else '—') +'</pre>', txt, flags=re.I|re.S)
+        txt = re.sub(r'<h3>\s*Signals\s*</h3>\s*<pre>.*?</pre>', '', txt, flags=re.I|re.S)
+        txt = re.sub(r'<h3>\s*Positives\s*</h3>\s*<pre>.*?</pre>', '', txt, flags=re.I|re.S)
         def insert_after_verdict(m):
             box = m.group(0)
             injection = (
@@ -6880,3 +6859,72 @@ except Exception as _e_fb:
     except Exception:
         pass
 # ===== /Feedback API =====
+
+# ==== BEGIN: COMPETITION SAFE HTML PATCH (non-invasive) ====
+try:
+    _ORIG__MDX_FIX = _mdx_fix_report_html_bytes  # keep original
+    import re as _re
+
+    def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
+        try:
+            txt = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            return _ORIG__MDX_FIX(raw)
+
+        try:
+            verdict, score, neg, pos = _mdx_extract_from_html(txt)
+        except Exception:
+            verdict, score, neg, pos = None, None, [], []
+
+        # 1) Floor + unified verdict for NOT TRADABLE / no-liquidity
+        try:
+            if _re.search(r"(?mi)NOT\\s+TRADABLE|No\\s+active\\s+pools|No\\s+liquidity|No\\s+pools\\s+found", txt):
+                try:
+                    score = max(int(score or 0), 80)
+                except Exception:
+                    score = 80
+                verdict = "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)"
+        except Exception:
+            pass
+
+        # 2) Drop Wayback negatives when Domain is absent
+        try:
+            has_domain = bool(_re.search(r"(?mi)^\\s*Domain\\s*:\\s*(?!—|—|-|n/?a|none)\\S+", txt))
+            if not has_domain and isinstance(neg, list):
+                neg = [t for t in neg if "wayback" not in str(t).lower()]
+        except Exception:
+            pass
+
+        # 3) Fix LP-lite contradiction: contract holder ≠ EOA
+        try:
+            if _re.search(r"🔒\\s*LP lock \\(lite\\)", txt) and \
+               _re.search(r"Top holder type:\\s*contract", txt) and \
+               _re.search(r"Verdict:\\s*🔴\\s*high risk \\(EOA holds LP\\)", txt):
+                txt = _re.sub(r"(Verdict:\\s*)🔴\\s*high risk \\(EOA holds LP\\)", r"\\1🟡 mixed (contract/custodian holds LP)", txt)
+        except Exception:
+            pass
+
+        # 4) Fill sections <h3>Signals</h3><pre> and <h3>Positives</h3><pre>
+        try:
+            signals_txt   = "\\n".join([f"− {t}" for t in (neg or [])]) or "—"
+            positives_txt = "\\n".join([f"+ {t}" for t in (pos or [])]) or "—"
+
+            def _fill(title: str, block: str, html: str):
+                m = _re.search(r"(<h3>"+title+r"</h3>\\s*<pre>)(.*?)(</pre>)", html, _re.S)
+                if not m:
+                    return html
+                return _re.sub(r"(<h3>"+title+r"</h3>\\s*<pre>)(.*?)(</pre>)", r"\\1"+block+r"\\3", html, 1, _re.S)
+
+            txt = _fill("Signals",   signals_txt,   txt)
+            txt = _fill("Positives", positives_txt, txt)
+        except Exception:
+            pass
+
+        # 5) Re-encode
+        try:
+            return txt.encode("utf-8", errors="ignore")
+        except Exception:
+            return _ORIG__MDX_FIX(raw)
+except Exception:
+    pass
+# ==== END: COMPETITION SAFE HTML PATCH ====
