@@ -6860,71 +6860,122 @@ except Exception as _e_fb:
         pass
 # ===== /Feedback API =====
 
-# ==== BEGIN: COMPETITION SAFE HTML PATCH (non-invasive) ====
+# ===== BEGIN FINAL2 PATCH: report & lp-lite harmonization =====
 try:
-    _ORIG__MDX_FIX = _mdx_fix_report_html_bytes  # keep original
     import re as _re
 
+    # --- HTML report postprocess override (idempotent) ---
+    _MDX_FIX_PREV = globals().get("_mdx_fix_report_html_bytes")
+
     def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
+        """
+        Stronger normalizer:
+        - Align <Risk verdict> with Summary (verdict+score)
+        - Fill <Signals>/<Positives> blocks from parsed lists
+        - Remove Wayback negatives when Domain is absent
+        - Floor NOT TRADABLE/no-liquidity to 80 + unified wording
+        """
         try:
             txt = raw.decode("utf-8", errors="ignore")
         except Exception:
-            return _ORIG__MDX_FIX(raw)
+            return _MDX_FIX_PREV(raw) if callable(_MDX_FIX_PREV) else raw
 
+        # Extract Summary content
         try:
-            verdict, score, neg, pos = _mdx_extract_from_html(txt)
+            # Summary <pre> ... </pre>
+            msum = _re.search(r"(?s)<h2>Summary</h2><pre>(.*?)</pre>", txt)
+            sumtxt = msum.group(1) if msum else ""
+
+            # verdict + score from summary lines
+            mscore = _re.search(r"(?mi)^Risk score:\s*(\d+)\s*/\s*100", sumtxt)
+            mver = _re.search(r"(?mi)^Trust verdict:\s*(.+)$", sumtxt)
+            score = int(mscore.group(1)) if mscore else None
+            verdict = mver.group(1).strip() if mver else None
         except Exception:
-            verdict, score, neg, pos = None, None, [], []
+            score, verdict = None, None
 
-        # 1) Floor + unified verdict for NOT TRADABLE / no-liquidity
+        # Check for NOT TRADABLE / no liquidity markers
         try:
-            if _re.search(r"(?mi)NOT\\s+TRADABLE|No\\s+active\\s+pools|No\\s+liquidity|No\\s+pools\\s+found", txt):
-                try:
-                    score = max(int(score or 0), 80)
-                except Exception:
+            if _re.search(r"(?mi)NOT\s+TRADABLE|No\s+active\s+pools|No\s+liquidity|No\s+pools\s+found", txt) or \
+               _re.search(r"(?mi)NOT\s+TRADABLE|No\s+active\s+pools|No\s+liquidity|No\s+pools\s+found", sumtxt or ""):
+                if score is None or score < 80:
                     score = 80
                 verdict = "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)"
         except Exception:
             pass
 
-        # 2) Drop Wayback negatives when Domain is absent
-        try:
-            has_domain = bool(_re.search(r"(?mi)^\\s*Domain\\s*:\\s*(?!—|—|-|n/?a|none)\\S+", txt))
-            if not has_domain and isinstance(neg, list):
-                neg = [t for t in neg if "wayback" not in str(t).lower()]
-        except Exception:
-            pass
+        # Domain present?
+        has_domain = bool(_re.search(r"(?mi)<b>Domain:</b>\s*(?!—|—|-|n/?a|none)\S+", txt))
 
-        # 3) Fix LP-lite contradiction: contract holder ≠ EOA
-        try:
-            if _re.search(r"🔒\\s*LP lock \\(lite\\)", txt) and \
-               _re.search(r"Top holder type:\\s*contract", txt) and \
-               _re.search(r"Verdict:\\s*🔴\\s*high risk \\(EOA holds LP\\)", txt):
-                txt = _re.sub(r"(Verdict:\\s*)🔴\\s*high risk \\(EOA holds LP\\)", r"\\1🟡 mixed (contract/custodian holds LP)", txt)
-        except Exception:
-            pass
+        # Remove Wayback negatives when domain is absent - in Summary lines
+        if not has_domain and sumtxt:
+            sumtxt2 = _re.sub(r"(?mi)^\s*⚠️\s*Signals:\s*No Wayback snapshots\s*$", "⚠️ Signals: —", sumtxt)
+            if sumtxt2 != sumtxt:
+                txt = txt.replace(sumtxt, sumtxt2)
+                sumtxt = sumtxt2
 
-        # 4) Fill sections <h3>Signals</h3><pre> and <h3>Positives</h3><pre>
-        try:
-            signals_txt   = "\\n".join([f"− {t}" for t in (neg or [])]) or "—"
-            positives_txt = "\\n".join([f"+ {t}" for t in (pos or [])]) or "—"
+        # Extract lists of negatives/positives from Summary (fallback)
+        neg_list = []
+        pos_list = []
+        # Try to parse "⚠️ Signals: a; b; c" line
+        mneg = _re.search(r"(?mi)⚠️\s*Signals:\s*(.+)$", sumtxt)
+        if mneg:
+            raw_neg = mneg.group(1).strip()
+            if raw_neg != "—":
+                neg_list = [x.strip() for x in raw_neg.split(";") if x.strip()]
+        # Try to parse "✅ Positives: d; e" line
+        mpos = _re.search(r"(?mi)✅\s*Positives:\s*(.+)$", sumtxt)
+        if mpos:
+            raw_pos = mpos.group(1).strip()
+            if raw_pos != "—":
+                pos_list = [x.strip() for x in raw_pos.split(";") if x.strip()]
 
-            def _fill(title: str, block: str, html: str):
-                m = _re.search(r"(<h3>"+title+r"</h3>\\s*<pre>)(.*?)(</pre>)", html, _re.S)
-                if not m:
-                    return html
-                return _re.sub(r"(<h3>"+title+r"</h3>\\s*<pre>)(.*?)(</pre>)", r"\\1"+block+r"\\3", html, 1, _re.S)
+        # Fill Signals/Positives blocks
+        def _fill_block(title, items, prefix):
+            block = "—"
+            if items:
+                block = "\n".join([f"{prefix} {t}" for t in items])
+            # Replace content inside the section
+            def rep(m):
+                return f"{m.group(1)}{block}{m.group(3)}"
+            pattern = rf"(<h3>{title}</h3><pre>)(.*?)(</pre>)"
+            return _re.sub(pattern, rep, txt, 1, flags=_re.S)
 
-            txt = _fill("Signals",   signals_txt,   txt)
-            txt = _fill("Positives", positives_txt, txt)
-        except Exception:
-            pass
+        txt = _fill_block("Signals", neg_list, "-")
+        txt = _fill_block("Positives", pos_list, "-")
 
-        # 5) Re-encode
-        try:
-            return txt.encode("utf-8", errors="ignore")
-        except Exception:
-            return _ORIG__MDX_FIX(raw)
+        # Rewrite Risk verdict box <p><b>...</b></p> to match canonical verdict/score
+        if verdict and score is not None:
+            # Replace anything like <p><b>... (N/100)</b></p> with verdict + (score/100)
+            def rep_rv(m):
+                return f"<p><b>{verdict.splitlines()[0]} ({int(score)}/100)</b></p>"
+            txt = _re.sub(r"(<h2>Risk verdict</h2>\s*<p><b>)(.*?)(</b></p>)",
+                          lambda m: f"{m.group(1)}{verdict.splitlines()[0]} ({int(score)}/100){m.group(3)}",
+                          txt, 1, flags=_re.S)
+
+        # LP-lite contradiction fix in HTML
+        if _re.search(r"🔒\s*LP lock \(lite\)", txt) and \
+           _re.search(r"Top holder type:\s*contract", txt) and \
+           _re.search(r"Verdict:\s*🔴\s*high risk \(EOA holds LP\)", txt):
+            txt = _re.sub(r"(Verdict:\s*)🔴\s*high risk \(EOA holds LP\)",
+                          r"\1🟡 mixed (contract/custodian holds LP)", txt)
+
+        return txt.encode("utf-8", errors="ignore")
+
+    # --- Outbound text filter for LP-lite in chat (idempotent) ---
+    _SEND_TEXT_PREV = globals().get("tg_send_text")
+    if callable(_SEND_TEXT_PREV):
+        def tg_send_text(token, chat_id, text, **kw):
+            try:
+                if ("LP lock (lite)" in str(text) and
+                    "Top holder type: contract" in str(text) and
+                    "Verdict:" in str(text) and
+                    "EOA holds LP" in str(text)):
+                    text = text.replace("Verdict: 🔴 high risk (EOA holds LP)",
+                                        "Verdict: 🟡 mixed (contract/custodian holds LP)")
+            except Exception:
+                pass
+            return _SEND_TEXT_PREV(token, chat_id, text, **kw)
 except Exception:
     pass
-# ==== END: COMPETITION SAFE HTML PATCH ====
+# ===== END FINAL2 PATCH =====
