@@ -1274,9 +1274,12 @@ UPSELL_TEXT_RU = {
 
 def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
     """Send a short upsell message (EN/RU). Non‑blocking; safe to call anywhere."""
-    # Demo guard: suppress upsell while DEV flags are on
+    # Hide upsell texts in competition/demo mode without touching limits
     try:
-        if str(os.getenv('DEV_FREE','')).lower() in ('1','true','yes') or str(os.getenv('DEV_FREE_FORCE','')).lower() in ('1','true','yes'):
+        hide = str(os.getenv('HIDE_UPSELL','')).lower() in ('1','true','yes')
+        comp = str(os.getenv('COMPETITION_MODE','')).lower() in ('1','true','yes')
+        dev  = str(os.getenv('DEV_FREE','')).lower() in ('1','true','yes') or str(os.getenv('DEV_FREE_FORCE','')).lower() in ('1','true','yes')
+        if hide or comp or dev:
             return
     except Exception:
         pass
@@ -4015,6 +4018,24 @@ def _answer_why_quickly(cq, addr_hint=None):
         msg_obj = cq.get("message", {}) or {}
         text = msg_obj.get("text") or ""
         addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
+        # Use cached canonical risk if available to keep WHY consistent with Summary
+        try:
+            key = (addr or '').lower()
+            info = RISK_CACHE.get(key) if key else None
+            if isinstance(info, dict) and 'score' in info and 'label' in info:
+                pairs_neg = list(zip(info.get('neg') or [], info.get('w_neg') or []))
+                pairs_pos = list(zip(info.get('pos') or [], info.get('w_pos') or []))
+                neg_s = '; '.join([f"{t} (−{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ''
+                pos_s = '; '.join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ''
+                body = f"{info['label']} ({int(info['score'])}/100)"
+                if neg_s: body += f" — ⚠️ {neg_s}"
+                if pos_s: body += f" — ✅ {pos_s}"
+                if len(body) > 190: body = body[:187] + '…'
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), body, logger=app.logger)
+                return
+        except Exception:
+            pass
+
         info = RISK_CACHE.get(addr) if addr else None
         if not info:
             score, label, rs = _risk_verdict(addr or "", text or "")
