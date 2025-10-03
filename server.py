@@ -6685,3 +6685,149 @@ def _normalize_action_row(kb: dict) -> dict:
         return {"inline_keyboard": cleaned_rows}
     except Exception:
         return kb or {}
+
+
+# ========================
+# Feedback API (Help page → /api/feedback)
+# ========================
+try:
+    import os, time, smtplib, socket, json as _json
+    from email.message import EmailMessage
+    from flask import request, jsonify, Response
+    # Reuse existing Telegram sender if available
+    try:
+        _tg_send = tg_send_message
+    except Exception:
+        _tg_send = None
+
+    # ENV (documented for deployment)
+    _ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://metridex.com,https://www.metridex.com,https://metridex.vercel.app").split(",")
+    _SMTP_HOST   = os.getenv("SMTP_HOST", "").strip()
+    _SMTP_PORT   = int(os.getenv("SMTP_PORT", "587") or "587")
+    _SMTP_USER   = os.getenv("SMTP_USER", "").strip()
+    _SMTP_PASS   = os.getenv("SMTP_PASS", "").strip()
+    _SMTP_FROM   = os.getenv("SMTP_FROM", (_SMTP_USER or "no-reply@metridex.com")).strip()
+    _SMTP_STARTTLS = (os.getenv("SMTP_STARTTLS", "1") or "1").lower() not in ("0","false","no")
+    _FEEDBACK_TO = os.getenv("FEEDBACK_TO", os.getenv("CONTACT_EMAIL", "contact@metridex.com")).strip()
+    _FEEDBACK_SUBJ = os.getenv("FEEDBACK_SUBJECT_PREFIX", "[Metridex.Help] ").strip()
+    _RATE_TTL = int(os.getenv("FEEDBACK_RATE_LIMIT_SEC","60") or "60")
+    _TG_CHAT  = os.getenv("TELEGRAM_FEEDBACK_CHAT_ID", os.getenv("ADMIN_CHAT_ID","")).strip()
+    _TG_TOKEN = os.getenv("TELEGRAM_TOKEN","").strip()  # tg_send_message already knows token
+
+    _FEED_RL = {}  # ip->ts
+
+    def _origin_allowed(req):
+        try:
+            o = (req.headers.get("Origin") or "").strip()
+            if not o:
+                return True
+            for allowed in (_ALLOWED_ORIGINS or []):
+                a = (allowed or "").strip()
+                if not a: 
+                    continue
+                if a == "*" or o.startswith(a):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _with_cors(resp):
+        try:
+            o = (request.headers.get("Origin") or "")
+            if _origin_allowed(request):
+                resp.headers["Access-Control-Allow-Origin"] = o or "*"
+                resp.headers["Vary"] = "Origin"
+                resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+                resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        except Exception:
+            pass
+        return resp
+
+    def _send_email(to_addr: str, subject: str, body: str) -> bool:
+        if not (_SMTP_HOST and to_addr):
+            return False
+        try:
+            s = smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=12)
+            try:
+                if _SMTP_STARTTLS:
+                    s.starttls()
+                if _SMTP_USER:
+                    s.login(_SMTP_USER, _SMTP_PASS)
+                msg = EmailMessage()
+                msg["Subject"] = subject
+                msg["From"] = _SMTP_FROM
+                msg["To"] = to_addr
+                msg.set_content(body)
+                s.send_message(msg)
+                return True
+            finally:
+                try: s.quit()
+                except Exception: pass
+        except Exception:
+            try:
+                app.logger.exception("feedback: SMTP failed")
+            except Exception:
+                pass
+            return False
+
+    def _send_telegram(text: str) -> bool:
+        try:
+            if not (_tg_send and _TG_CHAT and _TG_TOKEN):
+                return False
+            _tg_send(_TG_TOKEN, _TG_CHAT, text, logger=app.logger)
+            return True
+        except Exception:
+            try:
+                app.logger.exception("feedback: telegram failed")
+            except Exception:
+                pass
+            return False
+
+    @app.route("/api/feedback", methods=["POST","OPTIONS"])
+    def feedback_api():
+        # Preflight
+        if request.method == "OPTIONS":
+            return _with_cors(Response(status=204))
+
+        # CORS check
+        if not _origin_allowed(request):
+            return _with_cors(jsonify(ok=False, error="origin_forbidden")), 403
+
+        # Basic rate-limit by IP
+        ip = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Real-IP") or request.remote_addr or "0.0.0.0"
+        now = time.time()
+        ts = _FEED_RL.get(ip, 0)
+        if now - ts < _RATE_TTL:
+            return _with_cors(jsonify(ok=False, error="rate_limited")), 429
+        _FEED_RL[ip] = now
+
+        data = request.get_json(silent=True) or {}
+        email = (data.get("email") or "").strip()[:200]
+        subj  = (data.get("subject") or "").strip()[:200]
+        msg   = (data.get("message") or "").strip()[:4000]
+
+        if not msg:
+            return _with_cors(jsonify(ok=False, error="message_required")), 400
+
+        # Compose
+        site = request.headers.get("Origin") or request.headers.get("Referer") or ""
+        ua = request.headers.get("User-Agent") or ""
+        s = f"{_FEEDBACK_SUBJ}{subj or 'New message'}"
+        b = f"From: {email or 'anonymous'}\nIP: {ip}\nSite: {site}\nUA: {ua}\n\n{msg}"
+
+        sent_email = _send_email(_FEEDBACK_TO, s, b)
+        sent_tg = _send_telegram(f"✉️ Feedback\n{subj or 'New message'}\nfrom: {email or 'anonymous'}\nIP: {ip}\n\n{msg[:1800]}")
+
+        return _with_cors(jsonify(ok=True, email=bool(sent_email), telegram=bool(sent_tg)))
+
+    # Simple ping for healthchecks
+    @app.get("/api/feedback/ping")
+    def feedback_ping():
+        return jsonify(ok=True, ts=int(time.time()))
+
+except Exception as _e_fb:
+    try:
+        app.logger.exception("feedback api init failed")
+    except Exception:
+        pass
+# ===== /Feedback API =====
