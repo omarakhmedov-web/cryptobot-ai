@@ -1,8 +1,9 @@
-# server_feedback_patched_diag.py
-# Same feedback API, plus:
-#  - richer SMTP logging (codes & messages)
-#  - protected diag endpoint /api/feedback/_smtp_diag?token=... for one-off tests
-import os, time, smtplib, json as _json
+# server_feedback_patched_diag_fallback.py
+# Feedback API with:
+#  - SMTP STARTTLS(587) primary + SSL(465) fallback
+#  - Rich SMTP logging
+#  - Diagnostics: /api/feedback/_smtp_diag and /api/feedback/_smtp_netcheck (token-protected)
+import os, time, smtplib, socket, json as _json
 from email.message import EmailMessage
 from flask import Flask, request, jsonify, Response
 
@@ -24,6 +25,7 @@ _SMTP_USER      = os.getenv("SMTP_USER","").strip()
 _SMTP_PASS      = os.getenv("SMTP_PASS","").strip()
 _SMTP_FROM      = os.getenv("SMTP_FROM", _SMTP_USER or "no-reply@metridex.com").strip()
 _SMTP_STARTTLS  = (os.getenv("SMTP_STARTTLS","1") or "1").lower() not in ("0","false","no")
+_SMTP_SSL_FALLBACK = (os.getenv("SMTP_SSL_FALLBACK","1") or "1").lower() not in ("0","false","no")
 _FEEDBACK_TO    = os.getenv("FEEDBACK_TO", os.getenv("CONTACT_EMAIL", "contact@metridex.com")).strip()
 _FEEDBACK_SUBJ  = os.getenv("FEEDBACK_SUBJECT_PREFIX","[Metridex.Help] ").strip()
 _RATE_TTL       = int(os.getenv("FEEDBACK_RATE_LIMIT_SEC","60") or "60")
@@ -56,6 +58,30 @@ def _with_cors(resp):
 
 _last_smtp_err = None  # (code:int|None, msg:str|None)
 
+def _smtp_send_with_starttls(msg: EmailMessage):
+    s = smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=15)
+    try:
+        if _SMTP_STARTTLS:
+            s.starttls()
+        if _SMTP_USER:
+            s.login(_SMTP_USER, _SMTP_PASS)
+        s.send_message(msg)
+        return True
+    finally:
+        try: s.quit()
+        except Exception: pass
+
+def _smtp_send_with_ssl465(msg: EmailMessage):
+    s = smtplib.SMTP_SSL(_SMTP_HOST, 465, timeout=15)
+    try:
+        if _SMTP_USER:
+            s.login(_SMTP_USER, _SMTP_PASS)
+        s.send_message(msg)
+        return True
+    finally:
+        try: s.quit()
+        except Exception: pass
+
 def _send_email(to_addr: str, subject: str, body: str) -> bool:
     global _last_smtp_err
     _last_smtp_err = None
@@ -63,26 +89,39 @@ def _send_email(to_addr: str, subject: str, body: str) -> bool:
         _last_smtp_err = (None, "smtp_not_configured")
         return False
     try:
-        s = smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=15)
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = _SMTP_FROM
+        msg["To"] = to_addr
+        msg.set_content(body)
+
+        # 1) Try STARTTLS:587
         try:
-            if _SMTP_STARTTLS:
-                s.starttls()
-            if _SMTP_USER:
-                s.login(_SMTP_USER, _SMTP_PASS)
-            msg = EmailMessage()
-            msg["Subject"] = subject
-            msg["From"] = _SMTP_FROM
-            msg["To"] = to_addr
-            msg.set_content(body)
-            s.send_message(msg)
-            return True
-        finally:
-            try: s.quit()
+            if _smtp_send_with_starttls(msg):
+                return True
+        except smtplib.SMTPResponseException as e1:
+            _last_smtp_err = (int(getattr(e1, "smtp_code", 0) or 0), (getattr(e1, "smtp_error", b"") or b"").decode("utf-8","ignore"))
+            try: app.logger.error(f"feedback: SMTP 587 failed code={_last_smtp_err[0]} msg={_last_smtp_err[1]}")
             except Exception: pass
-    except smtplib.SMTPResponseException as e:
-        _last_smtp_err = (int(getattr(e, "smtp_code", 0) or 0), (getattr(e, "smtp_error", b"") or b"").decode("utf-8","ignore"))
-        try: app.logger.error(f"feedback: SMTP failed code={_last_smtp_err[0]} msg={_last_smtp_err[1]}")
-        except Exception: pass
+        except Exception as e1:
+            _last_smtp_err = (None, f"587:{str(e1)}")
+            try: app.logger.error(f"feedback: SMTP 587 failed {e1}")
+            except Exception: pass
+
+        # 2) Fallback SSL:465
+        if _SMTP_SSL_FALLBACK:
+            try:
+                if _smtp_send_with_ssl465(msg):
+                    return True
+            except smtplib.SMTPResponseException as e2:
+                _last_smtp_err = (int(getattr(e2, "smtp_code", 0) or 0), (getattr(e2, "smtp_error", b"") or b"").decode("utf-8","ignore"))
+                try: app.logger.error(f"feedback: SMTP 465 failed code={_last_smtp_err[0]} msg={_last_smtp_err[1]}")
+                except Exception: pass
+            except Exception as e2:
+                _last_smtp_err = (None, f"465:{str(e2)}")
+                try: app.logger.error(f"feedback: SMTP 465 failed {e2}")
+                except Exception: pass
+
         return False
     except Exception as e:
         _last_smtp_err = (None, str(e))
@@ -131,13 +170,19 @@ def feedback_api():
     ok_email = _send_email(_FEEDBACK_TO, subject, body)
     ok_tg    = _send_telegram(f"✉️ Feedback\n{subj or 'New message'}\nfrom: {email or 'anonymous'}\nIP: {ip}\n\n{msg[:1800]}")
 
-    return _with_cors(jsonify(ok=True, email=bool(ok_email), telegram=bool(ok_tg)))
+    resp = {"ok": True, "email": bool(ok_email), "telegram": bool(ok_tg)}
+    # Attach last SMTP error if failed (for front-end debug in staging; strip in prod later)
+    if not ok_email:
+        code, err = (None, None)
+        if isinstance(globals().get("_last_smtp_err"), tuple):
+            code, err = _last_smtp_err
+        resp["smtp_error"] = {"code": code, "msg": err}
+    return _with_cors(jsonify(resp))
 
 @app.get("/api/feedback/ping")
 def feedback_ping():
     return jsonify(ok=True, ts=int(time.time()))
 
-# Protected SMTP diag (on-demand). Use only with a token you set in env DEBUG_FEEDBACK_TOKEN.
 @app.get("/api/feedback/_smtp_diag")
 def feedback_smtp_diag():
     if not _DEBUG_TOKEN or request.args.get("token") != _DEBUG_TOKEN:
@@ -150,3 +195,18 @@ def feedback_smtp_diag():
         code, msg = _last_smtp_err
     return _with_cors(jsonify(ok=bool(ok), smtp_code=code, smtp_err=msg,
                               host=_SMTP_HOST, user=_SMTP_USER, from_addr=_SMTP_FROM, to=_FEEDBACK_TO))
+
+@app.get("/api/feedback/_smtp_netcheck")
+def feedback_netcheck():
+    if not _DEBUG_TOKEN or request.args.get("token") != _DEBUG_TOKEN:
+        return _with_cors(jsonify(ok=False, error="forbidden")), 403
+    out = {}
+    for port in (587, 465):
+        try:
+            sock = socket.create_connection((_SMTP_HOST, port), timeout=5)
+            try: sock.close()
+            except Exception: pass
+            out[str(port)] = True
+        except Exception as e:
+            out[str(port)] = False
+    return _with_cors(jsonify(ok=True, reachability=out, host=_SMTP_HOST))
