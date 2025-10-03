@@ -6979,3 +6979,88 @@ try:
 except Exception:
     pass
 # ===== END FINAL2 PATCH =====
+
+# ==== BEGIN: CHAT SANITIZER PATCH (final) ====
+try:
+    import re as _re
+    import unicodedata as _uni
+
+    def _mdx_chat_sanitize(text: str, chat_id=None) -> str:
+        try:
+            t = str(text or "")
+            if not t.strip():
+                return t
+
+            # 1) LP-lite contradiction fixes (re-use existing sanitizer if present)
+            try:
+                if '_sanitize_lp_claims' in globals() and callable(_sanitize_lp_claims):
+                    t = _sanitize_lp_claims(t)
+                else:
+                    # Minimal wording fix
+                    if _re.search(r'(Top holder type:\s*)contract', t, _re.I):
+                        t = _re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', t)
+            except Exception:
+                pass
+
+            # 2) Wayback: suppress when Domain is absent in the same message
+            try:
+                has_domain = bool(_re.search(r'(?mi)^\s*Domain\s*:\s*\S+', t))
+                if not has_domain:
+                    t = _re.sub(r'(?mi)(;?\s*)No\s+Wayback\s+snapshots', '', t)
+                    # Clean possible trailing punctuation/spaces after removal
+                    t = _re.sub(r'\s*;\s*(\n|$)', r'\1', t)
+            except Exception:
+                pass
+
+            # 3) Optional host enforcement if helper exists
+            try:
+                if '_enforce_details_host' in globals() and callable(_enforce_details_host):
+                    t = _enforce_details_host(t, chat_id)
+            except Exception:
+                pass
+
+            # 4) Collapse duplicate blank lines and stray semicolons
+            t = _re.sub(r'\n{3,}', '\n\n', t)
+            t = _re.sub(r';\s*;', ';', t)
+            return t
+        except Exception:
+            return text
+
+    # Wrap tg_send_message
+    if 'tg_send_message' in globals() and callable(tg_send_message):
+        _ORIG_TG_SEND = tg_send_message
+        def tg_send_message(chat_id, text, *args, **kwargs):
+            try:
+                text = _mdx_chat_sanitize(text, chat_id)
+            except Exception:
+                pass
+            return _ORIG_TG_SEND(chat_id, text, *args, **kwargs)
+
+    # Wrap _send_text if used internally
+    if '_send_text' in globals() and callable(_send_text):
+        _ORIG_SEND_TEXT = _send_text
+        def _send_text(chat_id, text, *args, **kwargs):
+            try:
+                text = _mdx_chat_sanitize(text, chat_id)
+            except Exception:
+                pass
+            return _ORIG_SEND_TEXT(chat_id, text, *args, **kwargs)
+
+    # Wrap tg_answer_callback for WHY popups
+    if 'tg_answer_callback' in globals() and callable(tg_answer_callback):
+        _ORIG_TG_ANS = tg_answer_callback
+        def tg_answer_callback(*args, **kwargs):
+            # Heuristic: 3rd positional arg is the text per typical signature (token, cq_id, text, ...)
+            try:
+                if len(args) >= 3 and isinstance(args[2], str):
+                    lst = list(args)
+                    lst[2] = _mdx_chat_sanitize(lst[2], kwargs.get('chat_id'))
+                    args = tuple(lst)
+                elif 'text' in kwargs and isinstance(kwargs.get('text'), str):
+                    kwargs['text'] = _mdx_chat_sanitize(kwargs['text'], kwargs.get('chat_id'))
+            except Exception:
+                pass
+            return _ORIG_TG_ANS(*args, **kwargs)
+except Exception:
+    pass
+# ==== END: CHAT SANITIZER PATCH (final) ====
