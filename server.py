@@ -1274,14 +1274,12 @@ UPSELL_TEXT_RU = {
 
 def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
     """Send a short upsell message (EN/RU). Non‑blocking; safe to call anywhere."""
-
-# Demo guard: suppress upsell messages (e.g., "Осталась 1 бесплатная проверка")
-# when DEV_FREE/DEV_FREE_FORCE is enabled. This avoids promo text in recordings.
-try:
-    if str(os.getenv("DEV_FREE","")).lower() in ("1","true","yes") or str(os.getenv("DEV_FREE_FORCE","")).lower() in ("1","true","yes"):
-        return
-except Exception:
-    pass
+    # Demo guard: suppress upsell while DEV flags are on
+    try:
+        if str(os.getenv('DEV_FREE','')).lower() in ('1','true','yes') or str(os.getenv('DEV_FREE_FORCE','')).lower() in ('1','true','yes'):
+            return
+    except Exception:
+        pass
 
     try:
         txt = (UPSELL_TEXT_RU if (str(lang).lower().startswith("ru")) else UPSELL_TEXT_EN).get(key)
