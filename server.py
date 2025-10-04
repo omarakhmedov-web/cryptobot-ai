@@ -7064,13 +7064,43 @@ try:
     # Wrap _send_text if used internally
     if '_send_text' in globals() and callable(_send_text):
         _ORIG_SEND_TEXT = _send_text
-        def _send_text(chat_id, text, *args, **kwargs):
-            text = mdx_postprocess_text(text, chat_id)
-            try:
-                text = _mdx_chat_sanitize(text, chat_id)
-            except Exception:
-                pass
-            return _ORIG_SEND_TEXT(chat_id, text, *args, **kwargs)
+        def _send_text(*args, **kwargs):
+            # Try to extract chat_id and text from kwargs or positional args
+            chat_id = kwargs.get('chat_id')
+            text_val = kwargs.get('text')
+            a = list(args)
+
+            # Heuristics for positional extraction
+            if chat_id is None and len(a) >= 1:
+                chat_id = a[0]
+            if text_val is None:
+                if len(a) >= 2 and isinstance(a[1], str):
+                    text_val = a[1]
+                elif len(a) >= 1 and isinstance(a[0], str):
+                    text_val = a[0]
+
+            # Post-process if we have both
+            if isinstance(text_val, str) and chat_id is not None:
+                try:
+                    text_val = mdx_postprocess_text(text_val, chat_id)
+                except Exception:
+                    pass
+                try:
+                    text_val = _mdx_chat_sanitize(text_val, chat_id)
+                except Exception:
+                    pass
+
+                # Put updated text back to the right place
+                if 'text' in kwargs:
+                    kwargs['text'] = text_val
+                elif len(a) >= 2 and isinstance(a[1], str):
+                    a[1] = text_val
+                elif len(a) >= 1 and isinstance(a[0], str):
+                    a[0] = text_val
+                else:
+                    kwargs['text'] = text_val
+
+            return _ORIG_SEND_TEXT(*tuple(a), **kwargs)
 
     # Wrap tg_answer_callback for WHY popups
     if 'tg_answer_callback' in globals() and callable(tg_answer_callback):
@@ -7282,3 +7312,82 @@ def _send_text(token, chat_id, text, **kw):
     except Exception:
         pass
     return tg_send_text(token, chat_id, text, **kw)
+# ==== SAFE DISPATCHER: unify _send_text signatures (chat_id,text) vs (token,chat_id,text) ====
+try:
+    _MDX_BASIC_SEND = _ORIG_SEND_TEXT   # captured earlier before token-first override
+except NameError:
+    _MDX_BASIC_SEND = None
+
+_MDX_TOKEN_FIRST_SEND = _send_text  # current definition at this point
+
+def _send_text(*args, **kwargs):
+    """
+    Flexible wrapper that supports both call styles:
+      1) _send_text(chat_id, text, **kwargs)
+      2) _send_text(token, chat_id, text, **kwargs)
+    It also applies mdx_postprocess_text and _mdx_chat_sanitize when chat_id & text are available.
+    """
+    a = list(args)
+
+    # Try to detect if first arg looks like a token (long string with ':'), and count of args
+    looks_like_token = (len(a) >= 1 and isinstance(a[0], str) and ':' in a[0] and len(a) >= 3)
+
+    # If caller passed explicit 'token' kwarg, route to token-first
+    has_kw_token = 'token' in kwargs
+
+    if looks_like_token or has_kw_token or len(a) >= 3:
+        # token-first path
+        token = kwargs.pop('token', a[0] if len(a) >= 1 else None)
+        chat_id = kwargs.pop('chat_id', a[1] if len(a) >= 2 else None)
+        text = kwargs.pop('text',  a[2] if len(a) >= 3 else None)
+
+        if isinstance(text, str) and chat_id is not None:
+            try:
+                text = mdx_postprocess_text(text, chat_id)
+            except Exception:
+                pass
+            try:
+                text = _mdx_chat_sanitize(text, chat_id)
+            except Exception:
+                pass
+
+        # rebuild args: token, chat_id, text, rest...
+        rest = a[3:] if len(a) > 3 else []
+        new_args = []
+        if token is not None: new_args.append(token)
+        if chat_id is not None: new_args.append(chat_id)
+        if text is not None: new_args.append(text)
+        new_args.extend(rest)
+        return _MDX_TOKEN_FIRST_SEND(*tuple(new_args), **kwargs)
+
+    # basic path (chat_id, text)
+    chat_id = kwargs.pop('chat_id', a[0] if len(a) >= 1 else None)
+    text = kwargs.pop('text',  a[1] if len(a) >= 2 else None)
+
+    if isinstance(text, str) and chat_id is not None:
+        try:
+            text = mdx_postprocess_text(text, chat_id)
+        except Exception:
+            pass
+        try:
+            text = _mdx_chat_sanitize(text, chat_id)
+        except Exception:
+            pass
+
+    if _MDX_BASIC_SEND is not None:
+        rest = a[2:] if len(a) > 2 else []
+        new_args = []
+        if chat_id is not None: new_args.append(chat_id)
+        if text is not None: new_args.append(text)
+        new_args.extend(rest)
+        return _MDX_BASIC_SEND(*tuple(new_args), **kwargs)
+
+    # Fallback: call token-first with empty token (shouldn't happen in normal flow)
+    rest = a[2:] if len(a) > 2 else []
+    new_args = [None]
+    if chat_id is not None: new_args.append(chat_id)
+    if text is not None: new_args.append(text)
+    new_args.extend(rest)
+    return _MDX_TOKEN_FIRST_SEND(*tuple(new_args), **kwargs)
+
+# ==== END SAFE DISPATCHER ====
