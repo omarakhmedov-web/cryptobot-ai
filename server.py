@@ -4216,18 +4216,6 @@ def webhook(secret):
             return ("ok", 200)
 
         # Inflate hashed payloads early
-        # === LP routing (fixed; early) ===
-        if isinstance(data, str) and (data.startswith('lp') or data.startswith('lp:') or data.startswith('lp_') or 'lpmore' in data.lower()):
-            try:
-                _lp_send_deep(cq)
-            except Exception:
-                pass
-            try:
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), 'Sent details', logger=app.logger)
-            except Exception:
-                pass
-            return ('ok', 200)
-        # === /LP routing ===
 
         # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
         if isinstance(data, str) and (data.startswith('why++') or data.startswith('why2')):
@@ -7710,7 +7698,8 @@ def _mdx_pre_router():
                 if orig:
                     data = orig
                     cq["data"] = orig
-        except Exception:
+                data = cq.get('data', data)
+except Exception:
             pass
         if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
             _answer_why_deep(cq)
