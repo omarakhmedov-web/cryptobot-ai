@@ -7790,3 +7790,111 @@ def _guard_callback_once(kind: str, callback):
     except Exception:
         pass
     return False
+
+
+# ==== MDX FINAL OVERRIDES (2025-10-04) ====
+# Robust WHY popup and LP deep sender. Placed at EOF to override earlier defs.
+
+def _mdx_infer_chain_from_text(_txt: str) -> str:
+    try:
+        t = (_txt or "").lower()
+        for ch, host in EXPLORER_BY_CHAIN.items():
+            if host in t:
+                return ch
+        # Header hint: "on uniswap (ethereum)" or "(bsc)"
+        import re as _re
+        m = _re.search(r"\((ethereum|bsc|polygon|arbitrum|optimism|base|avalanche|fantom)\)", t)
+        if m:
+            return m.group(1).lower()
+    except Exception:
+        pass
+    return "ethereum"
+
+def _mdx_extract_ca_any(_txt: str) -> str:
+    try:
+        # Prefer token link
+        ca = _extract_token_addr(_txt)
+        if ca: return ca
+        import re as _re
+        m = _re.search(r"(0x[a-fA-F0-9]{40})", _txt or "")
+        return m.group(1).lower() if m else ""
+    except Exception:
+        return ""
+
+def _handle_why_popup(_cq: dict, _chat_id: int):
+    """WHY? + WHY++ handler with contextual extraction and safe fallbacks."""
+    try:
+        msg_obj = _cq.get('message') or {}
+        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
+        cb_id = _cq.get('id')
+        data = _cq.get('data') or ''
+
+        # Build WHY text: prefer explicit Why++ block, else contextual
+        why = ""
+        try:
+            why = _extract_why_block_from_message(txt) or _extract_why_contextual(txt)
+        except Exception:
+            pass
+        if not why:
+            import re as _re
+            m = _re.search(r"(?mi)Trust verdict:\s*([^\n]+)", txt or "")
+            if m:
+                why = "Why (summary)\n" + m.group(1).strip()
+
+        # Deep?
+        is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
+        if is_deep or (why and len(why) > 140):
+            if why:
+                try: _safe_tg_send(_chat_id, why)
+                except Exception: pass
+            try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
+            except Exception: pass
+            return ("ok", 200)
+
+        short = (why or '—').strip()
+        if len(short) > 190 and why:
+            short = short[:187] + '…'
+            try: _safe_tg_send(_chat_id, why)
+            except Exception: pass
+        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
+        except Exception: pass
+        return ("ok", 200)
+    except Exception:
+        return ("ok", 200)
+
+def _lp_send_deep(cq):
+    """LP button → send full '🔒 LP lock (lite)' block to chat. If absent, craft minimal block."""
+    try:
+        msg_obj = cq.get('message', {}) or {}
+        text = (msg_obj.get('text') or msg_obj.get('caption') or '')
+        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
+        cb_id = cq.get('id')
+        payload = ""
+        try:
+            payload = _extract_lp_block(text)
+        except Exception:
+            payload = ""
+
+        if not payload:
+            chain = _mdx_infer_chain_from_text(text)
+            ca = _mdx_extract_ca_any(text)
+            if ca:
+                try:
+                    payload = _replace_lp_with_unknown(text, chain, ca)
+                except Exception:
+                    payload = (f"🔒 LP lock (lite) — chain: {chain}\n"
+                               f"Verdict: ⚪ unknown (no LP data)\n"
+                               f"Scan token: https://{EXPLORER_BY_CHAIN.get(chain,'etherscan.io')}/token/{ca}")
+            else:
+                payload = ("🔒 LP lock (lite)\nNo LP data in this message. "
+                           "Tap ‘More details’ first.")
+
+        if chat_id and payload:
+            try: _safe_tg_send(chat_id, payload)
+            except Exception: pass
+        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
+        except Exception: pass
+        return True
+    except Exception:
+        return False
+# ==== /FINAL OVERRIDES ====
