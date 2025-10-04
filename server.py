@@ -4217,9 +4217,16 @@ def webhook(secret):
 
         # Inflate hashed payloads early
 
-        # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
-        if isinstance(data, str) and (data.startswith("why") or data.startswith("why2")):
+        # === Mobile Why?/Why++ routing (fixed) ===
+
+        if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
+
+            return _answer_why_deep(cq)
+
+        if isinstance(data, str) and (data.startswith("why?") or data == "why" or data.startswith("why")):
+
             return _handle_why_popup(cq, chat_id)
+
         # === /Mobile Why ===
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
