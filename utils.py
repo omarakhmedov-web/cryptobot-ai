@@ -1,4 +1,3 @@
-
 import os
 import json
 import ssl
@@ -6,6 +5,10 @@ import socket
 from datetime import datetime, timezone
 
 import requests
+try:
+    from metri_domain_rdap import _rdap as _rdap_hardened
+except Exception:
+    _rdap_hardened = None
 
 USER_AGENT = os.environ.get("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
@@ -49,11 +52,43 @@ def http_post_json(url, payload):
     return None
 
 def rdap_domain(domain):
+    """Return minimal RDAP dict using hardened resolver when available."""
     try:
+        if _rdap_hardened is not None:
+            h, created, registrar = _rdap_hardened((domain or '').strip().lower())
+            return {
+                "handle": h,
+                "name": h,
+                "created": created if created else None,
+                "registrar": registrar if registrar else None,
+            }
+        # Fallback to legacy rdap.net
         url = f"https://www.rdap.net/domain/{domain}"
         data = http_get_json(url)
         if not data:
             return None
+        out = {
+            "handle": data.get("handle"),
+            "name": (data.get("name") or ""),
+            "created": None,
+            "registrar": None,
+        }
+        for ev in data.get("events", []):
+            if ev.get("eventAction") == "registration":
+                out["created"] = ev.get("eventDate")
+        ents = data.get("entities") or []
+        for e in ents:
+            if (e.get("roles") or []) and ("registrar" in e.get("roles")):
+                vcard = e.get("vcardArray")
+                if isinstance(vcard, list) and len(vcard) > 1:
+                    for item in vcard[1]:
+                        if item[0] == "fn":
+                            out["registrar"] = item[3]
+                            break
+        return out
+    except Exception as e:
+        _dbg(f"RDAP EXC {e}")
+        return None
         out = {
             "handle": data.get("handle"),
             "name": (data.get("name") or ""),
@@ -154,6 +189,53 @@ def format_kv(d):
         else:
             parts.append(f"{k}: {v}")
     return " | ".join(parts)
+
+
+KNOWN_DOMAINS_PATH = os.environ.get("KNOWN_DOMAINS_PATH", "./known_domains.json")
+
+def _normalize_host(h: str) -> str:
+    h = (h or "").strip().lower()
+    if h.startswith("www."):
+        h = h[4:]
+    return h
+
+def load_known_domains(path: str = None):
+    """Load a flat CA->host mapping. Returns {} on failure."""
+    p = (path or KNOWN_DOMAINS_PATH).strip()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        flat = {}
+        if isinstance(data, dict):
+            # chain maps or flat map
+            if all(isinstance(v, str) for v in data.values()):
+                for k, v in data.items():
+                    flat[str(k).lower()] = _normalize_host(str(v))
+            else:
+                for _, sub in data.items():
+                    if isinstance(sub, dict):
+                        for k, v in sub.items():
+                            flat[str(k).lower()] = _normalize_host(str(v))
+        return flat
+    except Exception as e:
+        _dbg(f"KNOWN_DOMAINS load fail: {e}")
+        return {}
+
+# Preload once (safe for heroku/render dynos)
+try:
+    KNOWN_DOMAINS = load_known_domains()
+except Exception:
+    KNOWN_DOMAINS = {}
+
+def get_known_domain_for_address(addr: str):
+    try:
+        a = (addr or "").strip().lower()
+        if not a:
+            return None
+        host = KNOWN_DOMAINS.get(a)
+        return host
+    except Exception:
+        return None
 
 I18N = {
   "en": {
