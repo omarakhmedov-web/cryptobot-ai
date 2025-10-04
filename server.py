@@ -76,7 +76,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+cleanfixed+release-g+fixparen")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+cleanfixed+release-g+fixparen+release-h")
 
 
 # --- Feature flags (ENV) ---
@@ -7274,3 +7274,11 @@ def mdx_postprocess_text(text: str, chat_id=None, is_details: bool=False) -> str
         return t
     except Exception:
         return text
+
+def _send_text(token, chat_id, text, **kw):
+    """Unified sender: ALWAYS postprocess before sending."""
+    try:
+        text = mdx_postprocess_text(text, chat_id)
+    except Exception:
+        pass
+    return tg_send_text(token, chat_id, text, **kw)
