@@ -4211,18 +4211,21 @@ def webhook(secret):
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
-
-
         msg_obj = cq.get("message", {})
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
 
         # Inflate hashed payloads early
-        # === Precise WHY/LP routing (fixed, post-cb inflate) ===
+        # === Summary router (robust; after cb inflate) ===
         dl = (data or '').lower() if isinstance(data, str) else ''
-        if dl.startswith('why++') or dl.startswith('why2') or dl.startswith('whypp'):
+        # Why++ / deep
+        if ('why' in dl and ('++' in dl or dl.startswith('why2') or 'whypp' in dl)):
             return _answer_why_deep(cq)
-        if dl.startswith('lp') or dl.startswith('lp:') or dl.startswith('lpmore') or dl.startswith('lp_'):
+        # Why? / short (popup; long → chat handled inside handler)
+        if dl.startswith('why'):
+            return _handle_why_popup(cq, chat_id)
+        # LP lock block to chat
+        if dl.startswith('lp') or dl.startswith('lp:') or 'lpmore' in dl or dl.startswith('lp_'):
             try:
                 _lp_send_deep(cq)
             finally:
@@ -4231,33 +4234,7 @@ def webhook(secret):
                 except Exception:
                     pass
             return ('ok', 200)
-        # === /Precise routing ===
-
-        # === Mobile Why?/Why++ routing (fixed) ===
-
-        if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
-
-            _answer_why_deep(cq)
-
-            return ("ok", 200)
-
-        if isinstance(data, str) and (data.startswith("why?") or data == "why" or data.startswith("why")):
-
-            _handle_why_popup(cq, chat_id)
-
-            return ("ok", 200)
-
-        # === /Mobile Why ===
-
-        # === Mobile LP routing (fixed) ===
-
-        if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:") or data.startswith("lpmore")):
-
-            _lp_send_deep(cq)
-
-            return ("ok", 200)
-
-        # === /Mobile LP ===
+        # === /Summary router ===
 
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
@@ -5646,6 +5623,9 @@ except Exception:
     pass
 
 # --- injected buttonsfix: build URL inline keyboard for /buy ---
+def _btn_url(text, url):
+    return {"text": text, "url": url}
+
 def build_buy_keyboard(links: dict):
     # links keys: deep, daypass, pro, teams (values must be full https URLs)
     rows = []
@@ -7733,13 +7713,25 @@ def _mdx_pre_router():
                     cq["data"] = orig
         except Exception:
             pass
+        # === Summary router (pre-router; robust) ===
+        dl = (data or '').lower() if isinstance(data, str) else ''
+        if ('why' in dl and ('++' in dl or dl.startswith('why2') or 'whypp' in dl)):
+            _answer_why_deep(cq)
+            return ('ok', 200)
+        if dl.startswith('why'):
+            _handle_why_popup(cq, chat_id)
+            return ('ok', 200)
+        if dl.startswith('lp') or dl.startswith('lp:') or 'lpmore' in dl or dl.startswith('lp_'):
+            _lp_send_deep(cq)
+            return ('ok', 200)
+        # === /Summary router ===
         if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
             _answer_why_deep(cq)
             return ("ok", 200)
         if isinstance(data, str) and data.startswith("why"):
             _handle_why_popup(cq, chat_id)
             return ("ok", 200)
-        if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:") or data.startswith("lpmore")):
+        if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:")):
             _lp_send_deep(cq)
             return ("ok", 200)
         return None
