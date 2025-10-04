@@ -1926,54 +1926,45 @@ def _extract_why_block_from_message(_txt: str) -> str:
     except Exception:
         return ""
 
+
 def _handle_why_popup(_cq: dict, _chat_id: int):
-    """Show Why text as a modal alert (doesn't auto-dismiss). If too long, send full text as a message."""
+    """Show Why text as a modal alert (doesn't auto-dismiss). If too long, also send full text as a message."""
     try:
         msg_obj = _cq.get("message") or {}
-        txt = (msg_obj.get("text") or "")
+        txt = (msg_obj.get("text") or msg_obj.get("caption") or "")
         cb_id = _cq.get("id")
-        why_block = _extract_why_block_from_message(txt) or "Why++ factors: n/a"
-        # Telegram alert limit is ~200 chars; keep it safe around 190
-        short = why_block.strip()
+        # 1) Prefer contextual reasons per block; fallback to legacy Why++ extractor
+        why_block = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or "Why++ factors: n/a"
+        short = (why_block or "—").strip()
         limit = 190
         truncated = False
         if len(short) > limit:
             short = short[:limit-1].rstrip() + "…"
             truncated = True
-        # Use Telegram API directly to guarantee show_alert=True
+        # 2) Answer as non-disappearing alert
         try:
             import requests as _rq
             _rq.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
-                json={"callback_query_id": cb_id, "text": short, "show_alert": True},
+                json={"callback_query_id": cb_id, "text": short or "—", "show_alert": True},
                 timeout=6,
-                headers={"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
             )
         except Exception:
-            # Silent fallback
+            # fallback to helper if available
             try:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short, show_alert=True, logger=app.logger)  # type: ignore
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or "—", logger=app.logger)
             except Exception:
                 pass
-        # If truncated, send the full block into chat so it can be fully read and scrolled
-        if truncated:
+        # 3) If truncated, also send the full Why text into chat
+        if truncated and why_block:
             try:
-                _send_text(_chat_id, why_block, logger=app.logger)
+                _tg_send_message(_chat_id, why_block)
             except Exception:
                 pass
-        return ("ok", 200)
-    except Exception as _e:
-        try:
-            _admin_debug(_chat_id, f"why-popup error: {type(_e).__name__}: {_e}")
-        except Exception:
-            pass
-        try:
-            tg_answer_callback(TELEGRAM_TOKEN, (_cq or {}).get("id"), "error", logger=app.logger)  # type: ignore
-        except Exception:
-            pass
-        return ("ok", 200)
-# === /Why helper ===
-# === Send-time LP filter ===
+        return True
+    except Exception:
+        return False
+
 def _is_lp_mini_only(text: str) -> bool:
     try:
         if not isinstance(text, str): return False
@@ -4022,59 +4013,54 @@ def admin_diag():
 # ========================
 # Telegram webhook & callbacks
 # ========================
+
 def _answer_why_quickly(cq, addr_hint=None):
     try:
         msg_obj = cq.get("message", {}) or {}
-        text = msg_obj.get("text") or ""
-            # Prefer addr from callback data
-        data = str(cq.get('data') or '')
-        maddr = ADDR_RE.search(data) if hasattr(ADDR_RE, 'search') else None
-                # Extract addr from callback_data first; then fall back to hints/cache/text
+        text = (msg_obj.get("text") or msg_obj.get("caption") or "")
+        # Prefer addr from callback data
         data = str(cq.get('data') or '')
         maddr = ADDR_RE.search(data) if hasattr(ADDR_RE, 'search') else None
         addr = (
             (maddr.group(0) if maddr else None)
-            or (
-                (addr_hint or msg2addr.get(str(msg_obj.get('message_id'))) or _extract_addr_from_text(text) or '')
-            ).lower()
+            or ((addr_hint or msg2addr.get(str(msg_obj.get('message_id'))) or _extract_addr_from_text(text) or '')).lower()
         )
 
-        # Use cached canonical risk if available to keep WHY consistent with Summary
+        # Try cached structured WHY (if pipeline filled it)
+        info = None
         try:
-            key = (addr or '').lower()
-            info = (RISK_CACHE.get(key) if (key and ADDR_RE.fullmatch(key)) else None)
-            if isinstance(info, dict) and 'score' in info and 'label' in info:
-                pairs_neg = list(zip(info.get('neg') or [], info.get('w_neg') or []))
-                pairs_pos = list(zip(info.get('pos') or [], info.get('w_pos') or []))
-                neg_s = '; '.join([f"{t} (−{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ''
-                pos_s = '; '.join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ''
-                body = f"{info['label']} ({int(info['score'])}/100)"
-                if neg_s: body += f" — ⚠️ {neg_s}"
-                if pos_s: body += f" — ✅ {pos_s}"
-                if len(body) > 190: body = body[:187] + '…'
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), body, logger=app.logger)
-                return
+            info = risk_cache.get(addr) if 'risk_cache' in globals() else None
         except Exception:
-            pass
+            info = None
 
-        info = RISK_CACHE.get(addr) if addr else None
-        if not info:
-            score, label, rs = _risk_verdict(addr or "", text or "")
-            info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
-        pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
-        pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
-        pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-        pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-        neg_s = "; ".join([f"{t} (+{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
-        pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
-        body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
-        if neg_s:
-            body += f" — ⚠️ {neg_s}"
-        if pos_s:
-            body += f" — ✅ {pos_s}"
-        if len(body) > 190:
-            body = body[:187] + "…"
-        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+        # If we have structured reasons, compose compact body
+        if isinstance(info, dict) and info.get("why"):
+            neg = info["why"].get("neg", []) or []
+            pos = info["why"].get("pos", []) or []
+            wneg = info["why"].get("wneg", []) or []
+            wpos = info["why"].get("wpos", []) or []
+            pairs_neg = list(zip([n for n in neg if n], wneg))[:2]
+            pairs_pos = list(zip([p for p in pos if p], wpos))[:2]
+            neg_s = "; ".join([f"{t} (−{w})" for t, w in pairs_neg if t]) if pairs_neg else ""
+            pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos if t]) if pairs_pos else ""
+            label = info.get('label','Risk')
+            score = info.get('score',0)
+            body = f"{label} ({score}/100)"
+            if neg_s:
+                body += f" — ⚠️ {neg_s}"
+            if pos_s:
+                body += f" — ✅ {pos_s}"
+            if len(body) > 190:
+                body = body[:187] + "…"
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+            return
+
+        # Contextual fallback from the visible message (Summary / On-chain / LP-lock)
+        why_text = _extract_why_contextual(text) or _extract_why_block_from_message(text) or "Why++ factors: n/a"
+        short = why_text.strip()
+        if len(short) > 190:
+            short = short[:187] + "…"
+        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), short, logger=app.logger)
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
 
@@ -4212,6 +4198,14 @@ def webhook(secret):
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
         msg_obj = cq.get("message", {})
+        # Inflate hashed callback payloads early (before any startswith checks)
+        if isinstance(data, str) and data.startswith("cb:"):
+            try:
+                orig = cb_cache.get(data)
+                if orig:
+                    data = orig
+            except Exception:
+                pass
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
 
@@ -4219,7 +4213,8 @@ def webhook(secret):
 
         # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
         if isinstance(data, str) and (data.startswith("why") or data.startswith("why2")):
-            return _handle_why_popup(cq, chat_id)
+            _handle_why_popup(cq, chat_id)
+            return ("ok", 200)
         # === /Mobile Why ===
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
@@ -5493,7 +5488,7 @@ def _collect_chain_rpc_candidates():
 def _try_with_urls(addr_l: str, urls: list):
     """Temporarily override RPC set and check for contract code presence."""
     if not urls:
-        return False
+        return ("ok", 200)
     _set_chain_rpc_override(urls)
     try:
         try:
@@ -5504,7 +5499,7 @@ def _try_with_urls(addr_l: str, urls: list):
         code = _eth_getCode(addr_l)
         return bool(code and code != "0x")
     except Exception:
-        return False
+        return ("ok", 200)
     finally:
         _clear_chain_rpc_override()
 
@@ -6035,8 +6030,7 @@ def _is_swap_url(u: str) -> bool:
             "quickswap.exchange/#/swap", "jumper.exchange", "matcha.xyz", "1inch.io"
         ])
     except Exception:
-        return False
-
+        return ("ok", 200)
 try:
     # Wrap tg_send_message (again, overwrite prior wrapper if present)
     if 'tg_send_message' in globals():
@@ -6769,17 +6763,16 @@ try:
         try:
             o = (req.headers.get("Origin") or "").strip()
             if not o:
-                return True
+        return ("ok", 200)
             for allowed in (_ALLOWED_ORIGINS or []):
                 a = (allowed or "").strip()
                 if not a: 
                     continue
                 if a == "*" or o.startswith(a):
-                    return True
+        return ("ok", 200)
         except Exception:
-            return False
-        return False
-
+        return ("ok", 200)
+        return ("ok", 200)
     def _with_cors(resp):
         try:
             o = (request.headers.get("Origin") or "")
@@ -6794,7 +6787,7 @@ try:
 
     def _send_email(to_addr: str, subject: str, body: str) -> bool:
         if not (_SMTP_HOST and to_addr):
-            return False
+        return ("ok", 200)
         try:
             s = smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=12)
             try:
@@ -6808,7 +6801,7 @@ try:
                 msg["To"] = to_addr
                 msg.set_content(body)
                 s.send_message(msg)
-                return True
+        return ("ok", 200)
             finally:
                 try: s.quit()
                 except Exception: pass
@@ -6817,21 +6810,19 @@ try:
                 app.logger.exception("feedback: SMTP failed")
             except Exception:
                 pass
-            return False
-
+        return ("ok", 200)
     def _send_telegram(text: str) -> bool:
         try:
             if not (_tg_send and _TG_CHAT and _TG_TOKEN):
-                return False
+        return ("ok", 200)
             _tg_send(_TG_TOKEN, _TG_CHAT, text, logger=app.logger)
-            return True
+        return ("ok", 200)
         except Exception:
             try:
                 app.logger.exception("feedback: telegram failed")
             except Exception:
                 pass
-            return False
-
+        return ("ok", 200)
     @app.route("/api/feedback", methods=["POST","OPTIONS"])
     def feedback_api():
         # Preflight
