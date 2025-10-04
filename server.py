@@ -4212,25 +4212,26 @@ def webhook(secret):
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
 
-        # === Precise WHY/LP routing (fixed) ===
-        if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
-            return _answer_why_deep(cq)
-        if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:") or data.startswith("lpmore")):
-            try:
-                _lp_send_deep(cq)
-            finally:
-                try:
-                    tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "Sent details", logger=app.logger)
-                except Exception:
-                    pass
-            return ("ok", 200)
-        # === /Precise routing ===
 
         msg_obj = cq.get("message", {})
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
 
         # Inflate hashed payloads early
+        # === Precise WHY/LP routing (fixed, post-cb inflate) ===
+        dl = (data or '').lower() if isinstance(data, str) else ''
+        if dl.startswith('why++') or dl.startswith('why2') or dl.startswith('whypp'):
+            return _answer_why_deep(cq)
+        if dl.startswith('lp') or dl.startswith('lp:') or dl.startswith('lpmore') or dl.startswith('lp_'):
+            try:
+                _lp_send_deep(cq)
+            finally:
+                try:
+                    tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), 'Sent details', logger=app.logger)
+                except Exception:
+                    pass
+            return ('ok', 200)
+        # === /Precise routing ===
 
         # === Mobile Why?/Why++ routing (fixed) ===
 
