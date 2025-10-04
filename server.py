@@ -76,7 +76,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+rc3c-minpatch4")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+rc3c-minpatch4+hotfix-a")
 
 
 # --- Feature flags (ENV) ---
@@ -94,7 +94,9 @@ ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
 LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
 
 # === LP/lock verdict post-processor (safe, feature-flagged) ===
-LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "1") or "1")def _soften_lp_verdict_html(html: str) -> str:
+LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "1") or "1")
+
+def _soften_lp_verdict_html(html: str) -> str:
     # If lockers are 'unknown' but holders/topHolder signals exist, replace wording.
     try:
         if not LPLOCK_VERDICT_SOFTEN or not isinstance(html, str):
