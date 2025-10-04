@@ -7698,8 +7698,7 @@ def _mdx_pre_router():
                 if orig:
                     data = orig
                     cq["data"] = orig
-                data = cq.get('data', data)
-except Exception:
+        except Exception:
             pass
         if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
             _answer_why_deep(cq)
