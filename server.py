@@ -7541,3 +7541,57 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         # As a fallback, still return a valid response
         return ("ok", 200)
 # === /MDX WHY handlers ===
+
+
+# === MDX WHY popup (final override with robust fallback) ===
+def _handle_why_popup(_cq: dict, _chat_id: int):
+    try:
+        msg_obj = _cq.get('message') or {}
+        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
+        cb_id = _cq.get('id')
+        data = _cq.get('data') or ''
+        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
+        short = (why or '—').strip()
+        is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
+        sent = False
+        # If deep or long text, try to send full message first
+        if is_deep or len(short) > 140:
+            try:
+                _tg_send_message(_chat_id, why)
+                sent = True
+            except Exception:
+                sent = False
+        # Deep: prefer chat message; popup shows confirmation or content if sending failed
+        if is_deep:
+            try:
+                if sent:
+                    tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
+                else:
+                    show = short if len(short) <= 190 else (short[:187] + '…')
+                    tg_answer_callback(TELEGRAM_TOKEN, cb_id, show or '—', logger=app.logger)
+            except Exception:
+                pass
+            return ('ok', 200)
+        # Why? popup route
+        if len(short) <= 190:
+            try:
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
+            except Exception:
+                pass
+            return ('ok', 200)
+        # Long WHY? → if message failed, show truncated in popup; else just confirm
+        try:
+            if sent:
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
+            else:
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, (short[:187] + '…') if len(short) > 190 else short, logger=app.logger)
+        except Exception:
+            pass
+        return ('ok', 200)
+    except Exception:
+        try:
+            tg_answer_callback(TELEGRAM_TOKEN, _cq.get('id'), 'Why: unavailable', logger=app.logger)
+        except Exception:
+            pass
+        return ('ok', 200)
+# === /MDX WHY popup final ===
