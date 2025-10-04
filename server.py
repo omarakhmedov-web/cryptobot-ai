@@ -5606,42 +5606,12 @@ try:
     @app.route("/", methods=["GET","HEAD"])
     def root_ok():
 
-# --- dedup guard: avoid repeated processing of same update (Telegram retries/timeouts) ---
-try:
-    data = request.get_json(force=True, silent=True) or {}
-except Exception:
-    data = {}
-upd_key = str(data.get("update_id") or data.get("callback_query", {}).get("id") or data.get("message", {}).get("message_id") or time.time())
-if _seen_update_dedup(f"upd:{upd_key}"):
-    return "OK", 200
-# -------------------------------------------------------------------------
-
-        if request.method == "HEAD":
-            return Response(status=200)
-        return "OK", 200
-except Exception as _e:
-    # If Flask app not yet defined here, ignore — main app likely declares routes elsewhere.
-    pass
-
-# Optionally disable noisy polydebug via env (without failing init)
-try:
-    if os.environ.get("POLYDEBUG","0") in ("0","false","False",""):
-        os.environ.pop("POLYDEBUG_ADDR", None)
-        os.environ.pop("POLYDEBUG_TX", None)
-except Exception:
-    pass
-# === /PATCH: uptime & polydebug guard ===
-
-
-# --- Health route for uptime monitors (GET/HEAD /) ---
-try:
-    from flask import request, Response
-    if 'app' in globals():
-        @app.route("/", methods=["GET","HEAD"])
-        def __root_health__():
-            if request.method == "HEAD":
-                return Response(status=200)
-            return "OK", 200
+        try:
+            if request.method == 'HEAD':
+                return '', 200
+        except Exception:
+            pass
+        return 'OK', 200
 except Exception:
     pass
 # --- /Health route ---
