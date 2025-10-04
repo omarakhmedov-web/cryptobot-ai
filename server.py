@@ -8163,3 +8163,155 @@ try:
 except Exception:
     pass
 # === /EOF overrides ===
+
+
+
+# === MDX HARD OVERRIDE ROUTER (2025-10-04D) ===
+from flask import request
+
+def _mdx_build_why_from_text(_t: str) -> str:
+    try:
+        t = _t or ""
+        # Try explicit
+        try:
+            w = _extract_why_block_from_message(t)
+            if w: return w
+        except Exception:
+            pass
+        try:
+            w = _extract_why_contextual(t)
+            if w: return w
+        except Exception:
+            pass
+        # Fallback: Signals/Positives
+        s = _mdx_extract_signals_or_positives(t)
+        if s:
+            return "Why (summary)\n" + s
+        # Fallback: Verdict/Score
+        ver, sc = _mdx_pick_verdict_and_score(t)
+        bits = []
+        if ver: bits.append(ver)
+        if sc: bits.append(f"Risk score {sc}")
+        if bits:
+            return "Why (summary)\n" + " • ".join(bits)
+        return ""
+    except Exception:
+        return ""
+
+def tg_answer_callback(token, cb_id, text=None, logger=None):
+    # Safe answer (no raise), silently ignore if missing token
+    try:
+        import requests as _requests
+        if not token or not cb_id: 
+            return
+        payload = {"callback_query_id": cb_id}
+        if text is not None:
+            payload["text"] = str(text)
+            payload["show_alert"] = (len(str(text)) > 170)
+        _requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", json=payload, timeout=6)
+    except Exception:
+        pass
+
+@app.before_request
+def _mdx_override_router():
+    try:
+        # Only intercept webhook requests
+        p = request.path or ""
+        if "/webhook" not in p:
+            return None
+        data = request.get_json(silent=True, force=True) or {}
+        cq = data.get("callback_query")
+        if not cq:
+            return None
+
+        # Dedup by callback id
+        try:
+            cb_id = cq.get("id")
+            if cb_id and _seen_update_dedup(f"cb:{cb_id}"):
+                return ("OK", 200)
+        except Exception:
+            pass
+
+        raw_data = (cq.get("data") or "").strip()
+        key = raw_data.split(":")[0].lower()
+        msg_obj = cq.get("message") or {}
+        txt = (msg_obj.get("text") or msg_obj.get("caption") or "")
+        chat_id = (msg_obj.get("chat") or {}).get("id") or cq.get("from",{}).get("id")
+
+        # WHY? (short) and WHY++ (deep)
+        if key in ("why?", "why", "w"):
+            why = _mdx_build_why_from_text(txt)
+            if not why:
+                # try cache
+                cached = (globals().get("_MDX_LAST_WHY").get(f"{chat_id}") if globals().get("_MDX_LAST_WHY") else None) or \
+                         (globals().get("_MDX_LAST_DETAILS").get(f"{chat_id}") if globals().get("_MDX_LAST_DETAILS") else None) or ""
+                if cached:
+                    why = _mdx_build_why_from_text(cached)
+            short = (why or "—").strip()
+            if len(short) > 190 and why:
+                # long -> send full to chat, popup brief
+                try: _safe_tg_send(chat_id, why)
+                except Exception: pass
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
+            else:
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or "—", logger=app.logger)
+            return ("OK", 200)
+
+        if key in ("why++","why2","whypp","wd"):
+            why = _mdx_build_why_from_text(txt)
+            if not why:
+                cached = (globals().get("_MDX_LAST_WHY").get(f"{chat_id}") if globals().get("_MDX_LAST_WHY") else None) or \
+                         (globals().get("_MDX_LAST_DETAILS").get(f"{chat_id}") if globals().get("_MDX_LAST_DETAILS") else None) or ""
+                if cached:
+                    why = _mdx_build_why_from_text(cached)
+            if why:
+                try: _safe_tg_send(chat_id, why)
+                except Exception: pass
+            tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
+            return ("OK", 200)
+
+        # LP
+        if key in ("lp","lpmore","lp:","lp_block"):
+            payload = ""
+            try:
+                payload = _extract_lp_block(txt)
+            except Exception:
+                payload = ""
+            if not payload and globals().get("_MDX_LAST_LP"):
+                try:
+                    cached = globals()["_MDX_LAST_LP"].get(f"{chat_id}") or ""
+                    if cached:
+                        payload = _extract_lp_block(cached) or cached
+                except Exception:
+                    pass
+            if not payload and globals().get("_MDX_LAST_DETAILS"):
+                try:
+                    cached = globals()["_MDX_LAST_DETAILS"].get(f"{chat_id}") or ""
+                    if cached:
+                        payload = _extract_lp_block(cached) or ""
+                except Exception:
+                    pass
+            if not payload:
+                # Heuristic build
+                try:
+                    payload = _mdx_lp_build_from_text(txt)
+                except Exception:
+                    payload = ""
+
+            if payload and chat_id:
+                try:
+                    _safe_tg_send(chat_id, payload)
+                except Exception:
+                    pass
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
+                return ("OK", 200)
+            else:
+                # still send minimal
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
+                return ("OK", 200)
+
+        # else: don't intercept
+        return None
+    except Exception:
+        return None
+# === /HARD OVERRIDE ROUTER ===
