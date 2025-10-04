@@ -7064,13 +7064,43 @@ try:
     # Wrap _send_text if used internally
     if '_send_text' in globals() and callable(_send_text):
         _ORIG_SEND_TEXT = _send_text
-        def _send_text(chat_id, text, *args, **kwargs):
-            text = mdx_postprocess_text(text, chat_id)
-            try:
-                text = _mdx_chat_sanitize(text, chat_id)
-            except Exception:
-                pass
-            return _ORIG_SEND_TEXT(chat_id, text, *args, **kwargs)
+        def _send_text(*args, **kwargs):
+            # Try to extract chat_id and text from kwargs or positional args
+            chat_id = kwargs.get('chat_id')
+            text_val = kwargs.get('text')
+            a = list(args)
+
+            # Heuristics for positional extraction
+            if chat_id is None and len(a) >= 1:
+                chat_id = a[0]
+            if text_val is None:
+                if len(a) >= 2 and isinstance(a[1], str):
+                    text_val = a[1]
+                elif len(a) >= 1 and isinstance(a[0], str):
+                    text_val = a[0]
+
+            # Post-process if we have both
+            if isinstance(text_val, str) and chat_id is not None:
+                try:
+                    text_val = mdx_postprocess_text(text_val, chat_id)
+                except Exception:
+                    pass
+                try:
+                    text_val = _mdx_chat_sanitize(text_val, chat_id)
+                except Exception:
+                    pass
+
+                # Put updated text back to the right place
+                if 'text' in kwargs:
+                    kwargs['text'] = text_val
+                elif len(a) >= 2 and isinstance(a[1], str):
+                    a[1] = text_val
+                elif len(a) >= 1 and isinstance(a[0], str):
+                    a[0] = text_val
+                else:
+                    kwargs['text'] = text_val
+
+            return _ORIG_SEND_TEXT(*tuple(a), **kwargs)
 
     # Wrap tg_answer_callback for WHY popups
     if 'tg_answer_callback' in globals() and callable(tg_answer_callback):
