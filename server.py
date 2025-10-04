@@ -6,6 +6,47 @@ import time
 import socket
 import tempfile
 import hashlib
+
+# ===== Metridex anti-spam & dedup guards (2025-10-04 v2) =====
+try:
+    SafeCache  # type: ignore
+except NameError:
+    class SafeCache:
+        def __init__(self, ttl=30):
+            self.ttl = ttl
+            self._d = {}
+        def get(self, k, default=None):
+            import time
+            v = self._d.get(k)
+            if not v: 
+                return default
+            ts, val = v
+            if time.time() - ts > self.ttl:
+                self._d.pop(k, None)
+                return default
+            return val
+        def set(self, k, v):
+            import time
+            self._d[k] = (time.time(), v)
+            return v
+
+_update_dedup = SafeCache(ttl=35)
+_send_dedup = SafeCache(ttl=20)
+
+def _seen_update_dedup(key: str) -> bool:
+    if _update_dedup.get(key, None) is not None:
+        return True
+    _update_dedup.set(key, True)
+    return False
+
+def _should_send_text(chat_id: int, text: str) -> bool:
+    key = f"{chat_id}:{hashlib.sha1(text.strip().encode('utf-8')).hexdigest()}"
+    if _send_dedup.get(key, None) is not None:
+        return False
+    _send_dedup.set(key, True)
+    return True
+# ===== end guards =====
+
 import threading
 import unicodedata
 from datetime import datetime
@@ -1932,7 +1973,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         msg_obj = _cq.get("message") or {}
         txt = (msg_obj.get("text") or "")
         cb_id = _cq.get("id")
-        why_block = _extract_why_block_from_message(txt) or "Why++ factors: n/a"
+        why_block = _extract_why_block_from_message(txt) or "Why++: no factors yet — run On‑chain or More details first."
         # Telegram alert limit is ~200 chars; keep it safe around 190
         short = why_block.strip()
         limit = 190
@@ -1997,6 +2038,10 @@ def _is_compact_qs(text: str) -> bool:
         if "Metridex QuickScan (MVP+)" not in t:
             return False
         if ("Trust verdict:" in t) or ("Why++ factors" in t) or ("On-chain" in t):
+            origin_id = (callback.get('message') or {}).get('message_id') or 0
+            chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
+            if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
+                return _answer_ok('Sent details')
             return False
         return True
     except Exception:
@@ -2143,6 +2188,10 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
 
 def _sanitize_owner_privileges(text: str, chat_id) -> str:
     """If owner is renounced (0x000..), suppress 'Owner privileges present' in Why++/Signals."""
+        origin_id = (callback.get('message') or {}).get('message_id') or 0
+        chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
+        if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
+            return _answer_ok('Sent details')
     try:
         ren = _LAST_OWNER_RENOUNCED.get(chat_id, False)
         if not ren:
@@ -2259,6 +2308,9 @@ def _sanitize_lp_claims(text: str) -> str:
 
 
 def _send_text(chat_id, text, **kwargs):
+    # anti-duplicate guard
+    if not _should_send_text(int(chat_id), str(text)):
+        return None
     text = mdx_postprocess_text(text, chat_id)
     text = mdx_postprocess_text(text, chat_id)
 
@@ -5559,6 +5611,17 @@ try:
     # Root OK for UptimeRobot (HEAD/GET)
     @app.route("/", methods=["GET","HEAD"])
     def root_ok():
+
+# --- dedup guard: avoid repeated processing of same update (Telegram retries/timeouts) ---
+try:
+    data = request.get_json(force=True, silent=True) or {}
+except Exception:
+    data = {}
+upd_key = str(data.get("update_id") or data.get("callback_query", {}).get("id") or data.get("message", {}).get("message_id") or time.time())
+if _seen_update_dedup(f"upd:{upd_key}"):
+    return "OK", 200
+# -------------------------------------------------------------------------
+
         if request.method == "HEAD":
             return Response(status=200)
         return "OK", 200
@@ -7481,10 +7544,10 @@ def _answer_why_deep(cq, addr_hint=None):
         msg_obj = cq.get('message', {}) or {}
         text = (msg_obj.get('text') or msg_obj.get('caption') or '')
         chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
-        why_long = _extract_why_contextual(text) or _extract_why_block_from_message(text) or 'Why++ factors: n/a'
+        why_long = _extract_why_contextual(text) or _extract_why_block_from_message(text) or 'Why++: no factors yet — run On‑chain or More details first.'
         if chat_id:
             try:
-                _send_text(chat_id, why_long)
+                _tg_send_message(chat_id, why_long)
             except Exception:
                 pass
         try:
@@ -7493,6 +7556,10 @@ def _answer_why_deep(cq, addr_hint=None):
                 _dl_raw = cq.get('data') if isinstance(cq, dict) else None
                 dl = (_dl_raw or '').lower() if isinstance(_dl_raw, str) else ''
                 if (('why' in dl and '++' in dl) or dl.startswith('why2') or 'whypp' in dl):
+                    origin_id = (callback.get('message') or {}).get('message_id') or 0
+                    chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
+                    if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
+                        return _answer_ok('Sent details')
                     _answer_why_deep(cq)
                 elif (dl.startswith('lp') or dl.startswith('lp:') or 'lpmore' in dl or dl.startswith('lp_')):
                     _lp_send_deep(cq)
@@ -7509,6 +7576,10 @@ def _answer_why_deep(cq, addr_hint=None):
 def _handle_why_popup(_cq: dict, _chat_id: int):
     """
     - If payload is 'why++' or the built text is long → send a full message (and only confirm via popup).
+        origin_id = (callback.get('message') or {}).get('message_id') or 0
+        chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
+        if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
+            return _answer_ok('Sent details')
     - Else → show a short popup.
     Always return ('ok', 200) so Flask gets a valid response when this return is bubbled up.
     """
@@ -7518,14 +7589,14 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         cb_id = _cq.get('id')
         data = _cq.get('data') or ''  # might be raw or inflated by router
 
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
+        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++: no factors yet — run On‑chain or More details first.'
         longish = (len(why) > 140) or ("Why++" in why.splitlines()[0] if why else False)
         is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
 
         if is_deep or longish:
             # Deep route → post full message, popup only confirms
             try:
-                _send_text(_chat_id, why)
+                _tg_send_message(_chat_id, why)
             except Exception:
                 pass
             try:
@@ -7539,7 +7610,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         if len(short) > 190:
             short = short[:187] + '…'
             try:
-                _send_text(_chat_id, why)
+                _tg_send_message(_chat_id, why)
             except Exception:
                 pass
         try:
@@ -7560,14 +7631,14 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
         cb_id = _cq.get('id')
         data = _cq.get('data') or ''
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
+        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++: no factors yet — run On‑chain or More details first.'
         short = (why or '—').strip()
         is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
         sent = False
         # If deep or long text, try to send full message first
         if is_deep or len(short) > 140:
             try:
-                _send_text(_chat_id, why)
+                _tg_send_message(_chat_id, why)
                 sent = True
             except Exception:
                 sent = False
@@ -7645,7 +7716,7 @@ def _lp_send_deep(cq):
         cb_id = cq.get('id')
         payload = _extract_lp_block(text) or "LP: n/a"
         if chat_id:
-            try: _send_text(chat_id, payload)
+            try: _tg_send_message(chat_id, payload)
             except Exception: pass
         try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
         except Exception: pass
@@ -7664,7 +7735,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
         # Deep → send message, popup confirm; Short → show popup, else fallback to chat + confirm
         if is_deep or len(why) > 140:
-            try: _send_text(_chat_id, why)
+            try: _tg_send_message(_chat_id, why)
             except Exception: pass
             try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
             except Exception: pass
@@ -7672,7 +7743,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         short = why.strip()
         if len(short) > 190:
             short = short[:187] + '…'
-            try: _send_text(_chat_id, why)
+            try: _tg_send_message(_chat_id, why)
             except Exception: pass
         try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
         except Exception: pass
@@ -7708,25 +7779,19 @@ def _mdx_pre_router():
                     cq["data"] = orig
         except Exception:
             pass
-        
-        d = (data.lower() if isinstance(data, str) else "")
-        if isinstance(data, str) and (d.startswith("why++") or d.startswith("why2") or "whypp" in d):
-            try:
-                _answer_why_deep(cq)
-            except Exception:
-                pass
-            try:
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "Sent details", logger=app.logger)
-            except Exception:
-                pass
+        if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
+            origin_id = (callback.get('message') or {}).get('message_id') or 0
+            chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
+            if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
+                return _answer_ok('Sent details')
+            _answer_why_deep(cq)
             return ("ok", 200)
-        if isinstance(data, str) and d.startswith("why"):
+        if isinstance(data, str) and data.startswith("why"):
             _handle_why_popup(cq, chat_id)
             return ("ok", 200)
-        if isinstance(data, str) and (d.startswith("lp") or d.startswith("lp:") or "lpmore" in d or d.startswith("lp_")):
+        if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:")):
             _lp_send_deep(cq)
             return ("ok", 200)
-
         return None
     except Exception:
         return None
