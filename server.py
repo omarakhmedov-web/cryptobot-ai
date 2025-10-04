@@ -7751,25 +7751,26 @@ def _hotfix_md(txt):
     # Telegram-safe minimal
     return str(txt or "").replace("<", "‹").replace(">", "›")
 
+
 def _hotfix_send(chat_id, text):
+    """ raw Telegram send to avoid wrapper recursion """
     try:
-        # Prefer project's senders if present
-        if 'tg_send_text' in globals() and callable(globals()['tg_send_text']):
-            return globals()['tg_send_text'](chat_id, text)
-        if '_send_text' in globals() and callable(globals()['_send_text']):
-            return globals()['_send_text'](chat_id, text)
-    except Exception:
-        pass
-    # Fallback raw
-    try:
-        import requests as _rq
-        token = globals().get('TELEGRAM_TOKEN') or os.getenv('TELEGRAM_TOKEN') or ''
-        if not token: return None
+        import requests as _rq, os as _os
+        token = globals().get('TELEGRAM_TOKEN') or _os.getenv('TELEGRAM_TOKEN') or ''
+        if not token:
+            try:
+                if 'bot' in globals():
+                    return globals()['bot'].send_message(chat_id, text)
+            except Exception:
+                return None
+            return None
         _rq.post(f"https://api.telegram.org/bot{token}/sendMessage",
                  json={"chat_id": int(chat_id), "text": _hotfix_md(text), "parse_mode": "HTML"},
                  timeout=8)
+        return True
     except Exception:
         return None
+
 
 def _hotfix_answer(cb_id, text=None):
     try:
@@ -7807,31 +7808,31 @@ def _hotfix_key(raw):
     if lo.startswith("lp") or lo == "lp" or "lp_block" in lo: return "lp"
     return ""
 
+
 def _hotfix_build_why(txt):
     t = txt or ""
-    # explicit 'Why++ factors:' block
     m = re.search(r"(?si)(Why\+\+\s*factors?:.*?)(?:\n\n|$)", t)
-    if m: return m.group(1).strip()
-    # contextual lines: Positives / Signals
+    if m:
+        blk = m.group(1).strip()
+        blk = re.sub(r"(?i)\bn/?a\b", "—", blk)
+        return blk
     lines = []
-    m = re.search(r"(?mi)^\s*✅\s*Positives\s*:\s*(.+)$", t)
-    if m and m.group(1).strip() and m.group(1).strip() != "—":
-        lines.append("✅ Positives: " + m.group(1).strip())
-    m = re.search(r"(?mi)^\s*⚠️\s*Signals\s*:\s*(.+)$", t)
-    if m and m.group(1).strip() and m.group(1).strip() != "—":
-        lines.append("⚠️ Signals: " + m.group(1).strip())
-    # Verdict / Risk (EN + possible RU keys)
+    for lab, rx in [
+        ("✅ Positives", r"(?mi)^\s*(✅\s*Positives|✅\s*Плюсы)\s*:\s*(.+)$"),
+        ("⚠️ Signals",  r"(?mi)^\s*(⚠️\s*Signals|⚠️\s*Сигналы)\s*:\s*(.+)$"),
+    ]:
+        m = re.search(rx, t)
+        if m and m.group(2).strip() and m.group(2).strip().lower() not in ("—","n/a","n\a"):
+            lines.append(f"{lab}: " + m.group(2).strip())
     m = re.search(r"(?mi)^\s*(Trust verdict|Overall risk|Итоговый риск|Вердикт)\s*:\s*([^\n]+)", t)
     ver = m.group(2).strip() if m else ""
     m = re.search(r"(?mi)Risk\s*score\s*:\s*([0-9]{1,3}\s*/\s*100|[0-9]{1,3})", t)
     sc = m.group(1).replace(" ", "") if m else ""
-    bits = []
-    if ver: bits.append(ver)
-    bits += lines
-    if sc: bits.append(f"Risk score {sc}")
+    bits = [b for b in ([ver] + lines + ([f"Risk score {sc}"] if sc else [])) if b]
     if bits:
         return "Why (summary)\n" + "\n".join(bits)
     return ""
+
 
 def _hotfix_lp_from_text(txt):
     t = txt or ""
@@ -7880,67 +7881,72 @@ def _hotfix_lp_from_text(txt):
     return "\n".join(block)
 
 @app.before_request
+
+@app.before_request
 def _mdx_mini_hotfix_router():
     try:
-        # Cache latest details text from inbound messages (so buttons can use it)
-        if request.path and "/webhook" in request.path:
-            upd = request.get_json(silent=True, force=True) or {}
-            if "message" in upd:
-                msg = upd.get("message") or {}
-                txt = msg.get("text") or msg.get("caption") or ""
-                # naive indicator of details/on-chain responses
-                if ("QuickScan" in txt) or ("More details" in txt) or ("On-chain" in txt):
-                    chat_id = (msg.get("chat") or {}).get("id")
-                    if chat_id: _HOTFIX_LAST_DETAILS.set(str(chat_id), txt)
+        if not request.path or "/webhook" not in request.path:
+            return None
+        upd = request.get_json(silent=True, force=True) or {}
+        # Cache latest details
+        msg = upd.get("message") or {}
+        if msg:
+            txt_in = msg.get("text") or msg.get("caption") or ""
+            if any(k in txt_in for k in ("QuickScan","More details","On-chain","Why++ factors","🔒 LP lock (lite)")):
+                cid = (msg.get("chat") or {}).get("id")
+                if cid: _HOTFIX_LAST_DETAILS.set(str(cid), txt_in)
 
-            cq = upd.get("callback_query")
-            if not cq: return None
-            cb_id = cq.get("id")
-            if cb_id and _HOTFIX_DEDUP.get(cb_id):
-                return ("OK", 200)
-            if cb_id: _HOTFIX_DEDUP.set(cb_id, True)
+        cq = upd.get("callback_query")
+        if not cq:
+            return None
 
-            data = cq.get("data") or ""
-            key = _hotfix_key(data)
-            if not key: return None
+        cb_id = cq.get("id")
+        if cb_id and _HOTFIX_DEDUP.get(cb_id):
+            return ("OK", 200)
+        if cb_id: _HOTFIX_DEDUP.set(cb_id, True)
 
-            msg = cq.get("message") or {}
-            txt = msg.get("text") or msg.get("caption") or ""
-            chat_id = (msg.get("chat") or {}).get("id") or (cq.get("from") or {}).get("id")
+        data = cq.get("data") or ""
+        key = _hotfix_key(data)
+        if not key:
+            return None
 
-            if key == "why":
-                why = _hotfix_build_why(txt)
-                if not why:
-                    cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
-                    if cached: why = _hotfix_build_why(cached)
-                if why and len(why) > 190:
-                    _hotfix_send(chat_id, why)
-                    _hotfix_answer(cb_id, "Sent details")
-                else:
-                    _hotfix_answer(cb_id, (why or "—"))
-                return ("OK", 200)
+        mobj = cq.get("message") or {}
+        txt = (mobj.get("text") or mobj.get("caption") or "")
+        chat_id = (mobj.get("chat") or {}).get("id") or (cq.get("from") or {}).get("id")
 
-            if key == "whypp":
-                why = _hotfix_build_why(txt)
-                if not why:
-                    cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
-                    if cached: why = _hotfix_build_why(cached)
-                if why:
-                    _hotfix_send(chat_id, why)
+        if key == "why":
+            why = _hotfix_build_why(txt)
+            if not why:
+                cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
+                if cached:
+                    why = _hotfix_build_why(cached)
+            if why and len(why) > 180:
+                _hotfix_send(chat_id, why)
                 _hotfix_answer(cb_id, "Sent details")
-                return ("OK", 200)
+            else:
+                _hotfix_answer(cb_id, (why or "No signals found."))
+            return ("OK", 200)
 
-            if key == "lp":
-                payload = _hotfix_lp_from_text(txt)
-                if (not payload) and chat_id:
-                    cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
-                    if cached: payload = _hotfix_lp_from_text(cached)
-                if payload:
-                    _hotfix_send(chat_id, payload)
-                _hotfix_answer(cb_id, "Sent details")
-                return ("OK", 200)
+        if key == "whypp":
+            cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
+            why = _hotfix_build_why(txt) or _hotfix_build_why(cached)
+            if not why:
+                msc = re.search(r"(?mi)Risk\s*score\s*:\s*([0-9]{1,3}\s*/\s*100|[0-9]{1,3})", (txt or "") + "\n" + cached)
+                sc = msc.group(1).replace(" ", "") if msc else ""
+                why = "Why (summary)\n" + (f"Risk score {sc}" if sc else "No extra signals available.")
+            _hotfix_send(chat_id, why)
+            _hotfix_answer(cb_id, "Sent details")
+            return ("OK", 200)
+
+        if key == "lp":
+            cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
+            payload = _hotfix_lp_from_text(txt) or _hotfix_lp_from_text(cached)
+            if not payload:
+                payload = "🔒 LP lock (lite)\nVerdict: ⚪ unknown\n(Need More details to analyze LP.)"
+            _hotfix_send(chat_id, payload)
+            _hotfix_answer(cb_id, "Sent details")
+            return ("OK", 200)
 
         return None
     except Exception:
         return None
-# ==== /MDX MINI HOTFIX ====
