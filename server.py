@@ -76,7 +76,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+rc3c-minpatch4+hotfix-a+hotfix-b+hotfix-c")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+rc3c-minpatch4+hotfix-a+hotfix-b+hotfix-c+hotfix-d")
 
 
 # --- Feature flags (ENV) ---
@@ -4426,7 +4426,7 @@ def webhook(secret):
                     ans = "Δ: n/a (no data from source)"
                 
                 if lab in {"24","24h","h24"} and ADDR_RE.fullmatch(addr_l or ""):
-                    try:
+                        try:
                         url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
                         r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
                         if r.status_code == 200:
@@ -7415,3 +7415,48 @@ def _mdx_sanitize_text_min(text: str) -> str:
 # =====================
 # /Metridex SAFE MINPATCH RC3c (text-only, WHOIS/RDAP refined)
 # =====================
+
+
+# --- Re-declare sanitizer to ensure correct indentation wins (last definition prevails)
+def mdx_postprocess_text(text: str, chat_id=None, is_details: bool=False) -> str:
+    """Apply all safe sanitizers to outgoing bot text in one place (stable indentation)."""
+    try:
+        import re
+        if not text or not isinstance(text, str):
+            return text
+        t = text
+
+        # 2.7 Harmonize WHOIS/RDAP 'Created' using Wayback when RDAP is missing
+        try:
+            wb = re.search(r"Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})", t)
+            if wb and re.search(r"WHOIS/RDAP:\s*(no data|registry response unavailable)", t, re.I):
+                created = wb.group(1)
+                t = re.sub(
+                    r"WHOIS/RDAP:.*?(?=\n)",
+                    f"WHOIS/RDAP: registry response unavailable | Created: ~{created} (Wayback) | Registrar: —",
+                    t, flags=re.I
+                )
+        except Exception:
+            pass
+
+        # 2.8 Drop 'Owner privileges present' when Owner is 0x000… and no 'Proxy: yes'
+        try:
+            if re.search(r"Owner:\s*0x0+\b", t) and not re.search(r"Proxy:\s*yes", t, re.I):
+                t = re.sub(r"(?m)^⚠️\s*Signals:.*?Owner privileges present;?\s*", "⚠️ Signals: ", t)
+                t = t.replace("Owner privileges present; ", "")
+                t = t.replace("Owner privileges present", "")
+                t = re.sub(r"(?m)^−\s*?20\s+Owner privileges present\n", "", t)
+            t = re.sub(r"(?m)^⚠️\s*Signals:\s*$", "⚠️ Signals:", t)
+            t = re.sub(r";\s*;+", "; ", t)
+        except Exception:
+            pass
+
+        # 2.9 Compact excessive blank lines
+        try:
+            t = re.sub(r"\n{3,}", "\n\n", t)
+        except Exception:
+            pass
+
+        return t
+    except Exception:
+        return text
