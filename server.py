@@ -7898,3 +7898,148 @@ def _lp_send_deep(cq):
     except Exception:
         return False
 # ==== /FINAL OVERRIDES ====
+
+
+
+# ==== MDX FINAL-FINAL OVERRIDES (2025-10-04B) ====
+def _mdx_pick_verdict_and_score(_txt: str):
+    try:
+        import re as _re
+        t = _txt or ""
+        ver = ""
+        sc = ""
+        m = _re.search(r"(?mi)^\s*(Trust verdict|Overall risk)\s*:\s*([^\n]+)", t)
+        if m:
+            ver = m.group(2).strip()
+        m = _re.search(r"(?mi)Risk\s*score\s*:\s*([0-9]{1,3}\s*/\s*100)", t)
+        if m:
+            sc = m.group(1).replace(" ", "")
+        return ver, sc
+    except Exception:
+        return "", ""
+
+def _mdx_extract_signals_or_positives(_txt: str):
+    try:
+        import re as _re
+        t = _txt or ""
+        m_neg = _re.search(r"(?mi)^\s*⚠️\s*Signals\s*:\s*(.+)$", t)
+        m_pos = _re.search(r"(?mi)^\s*✅\s*Positives\s*:\s*(.+)$", t)
+        out = []
+        if m_neg and m_neg.group(1).strip() and m_neg.group(1).strip() != "—":
+            out += [ "- " + x.strip() for x in _re.split(r";|•|-", m_neg.group(1)) if x.strip()]
+        if m_pos and m_pos.group(1).strip() and m_pos.group(1).strip() != "—":
+            out += [ "+ " + x.strip() for x in _re.split(r";|•|-", m_pos.group(1)) if x.strip()]
+        return "\n".join(out)
+    except Exception:
+        return ""
+
+def _mdx_lp_build_from_text(_txt: str) -> str:
+    """Heuristic LP-lite builder from Summary/On-chain lines if full block is absent."""
+    try:
+        import re as _re
+        t = _txt or ""
+        ch = _mdx_infer_chain_from_text(t)
+        ca = _mdx_extract_ca_any(t)
+        # picks
+        pct = None
+        m = _re.search(r"(?i)topHolder\s*=\s*([0-9.]+)%", t)
+        if m: pct = float(m.group(1))
+        th_label = ""
+        m = _re.search(r"(?i)Top holder type\s*:\s*(EOA|contract|custodian)", t)
+        if m: th_label = m.group(1).lower()
+        ren = ""
+        m = _re.search(r"(?i)Renounced\s*:\s*(yes|no|n/a)", t)
+        if m: ren = m.group(1).lower()
+        proxy = ""
+        m = _re.search(r"(?i)Proxy\s*:\s*(yes|no|n/a)", t)
+        if m: proxy = m.group(1).lower()
+        holders = ""
+        m = _re.search(r"(?i)Holders\s*\(LP token\)\s*:\s*([0-9,]+)", t)
+        if m: holders = m.group(1)
+
+        # verdict
+        verdict = "⚪ unknown"
+        if pct is not None and th_label:
+            if th_label == "eoa" and pct >= 30:
+                verdict = "🔴 high risk (EOA holds LP)"
+            elif th_label in ("contract", "custodian"):
+                verdict = "🟡 mixed (contract/custodian holds LP)"
+        block = [f"🔒 LP lock (lite) — chain: {ch}",
+                 f"Verdict: {verdict}"]
+        if ren: block.append(f"• Renounced: {ren}")
+        if proxy: block.append(f"• Proxy: {proxy}")
+        if holders: block.append(f"• Holders (LP token): {holders}")
+        if pct is not None and th_label:
+            block.append(f"• Top holder type: {th_label}")
+            block.append(f"• LP concentration (top holder): {pct:.2f}%")
+        if ca:
+            block.append(f"Scan token: https://{EXPLORER_BY_CHAIN.get(ch,'etherscan.io')}/token/{ca}")
+        return "\n".join(block)
+    except Exception:
+        return ""
+
+def _handle_why_popup(_cq: dict, _chat_id: int):
+    try:
+        msg_obj = _cq.get('message') or {}
+        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
+        cb_id = _cq.get('id')
+        data = (_cq.get('data') or '').lower()
+
+        # 1) Build WHY (explicit block -> contextual -> signals/positives -> verdict/score)
+        why = ""
+        try: why = _extract_why_block_from_message(txt)
+        except Exception: why = ""
+        if not why:
+            try: why = _extract_why_contextual(txt)
+            except Exception: why = ""
+        if not why:
+            why = _mdx_extract_signals_or_positives(txt) or ""
+            if why: why = "Why (summary)\n" + why
+        if not why:
+            ver, sc = _mdx_pick_verdict_and_score(txt)
+            if ver or sc:
+                why = "Why (summary)\n" + " • ".join([x for x in [ver, (f"Risk score {sc}" if sc else "")] if x])
+
+        # 2) Deep?
+        is_deep = data.startswith('why++') or data.startswith('why2') or data.startswith('whypp')
+        if is_deep or (why and len(why) > 140):
+            if why:
+                try: _safe_tg_send(_chat_id, why)
+                except Exception: pass
+            try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
+            except Exception: pass
+            return ("ok", 200)
+
+        short = (why or '—').strip()
+        if len(short) > 190 and why:
+            short = short[:187] + '…'
+            try: _safe_tg_send(_chat_id, why)
+            except Exception: pass
+        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
+        except Exception: pass
+        return ("ok", 200)
+    except Exception:
+        return ("ok", 200)
+
+def _lp_send_deep(cq):
+    try:
+        msg_obj = cq.get('message', {}) or {}
+        text = (msg_obj.get('text') or msg_obj.get('caption') or '')
+        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
+        cb_id = cq.get('id')
+        payload = ""
+        # Try full block from message
+        try: payload = _extract_lp_block(text)
+        except Exception: payload = ""
+        # If absent, build heuristically
+        if not payload:
+            payload = _mdx_lp_build_from_text(text)
+        if chat_id and payload:
+            try: _safe_tg_send(chat_id, payload)
+            except Exception: pass
+        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
+        except Exception: pass
+        return True
+    except Exception:
+        return False
+# ==== /FINAL-FINAL OVERRIDES ====
