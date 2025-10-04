@@ -4216,26 +4216,14 @@ def webhook(secret):
             return ("ok", 200)
 
         # Inflate hashed payloads early
-        # === Summary router (robust; after cb inflate) ===
-        dl = (data or '').lower() if isinstance(data, str) else ''
-        # Why++ / deep
-        if ('why' in dl and ('++' in dl or dl.startswith('why2') or 'whypp' in dl)):
-            return _answer_why_deep(cq)
-        # Why? / short (popup; long → chat handled inside handler)
-        if dl.startswith('why'):
-            return _handle_why_popup(cq, chat_id)
-        # LP lock block to chat
-        if dl.startswith('lp') or dl.startswith('lp:') or 'lpmore' in dl or dl.startswith('lp_'):
-            try:
-                _lp_send_deep(cq)
-            finally:
-                try:
-                    tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), 'Sent details', logger=app.logger)
-                except Exception:
-                    pass
-            return ('ok', 200)
-        # === /Summary router ===
 
+        res = _summary_router(cq, chat_id, data)
+        if res:
+            return res
+        # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
+        if isinstance(data, str) and (data.startswith("why") or data.startswith("why2")):
+            return _handle_why_popup(cq, chat_id)
+        # === /Mobile Why ===
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
             if orig:
@@ -7713,18 +7701,6 @@ def _mdx_pre_router():
                     cq["data"] = orig
         except Exception:
             pass
-        # === Summary router (pre-router; robust) ===
-        dl = (data or '').lower() if isinstance(data, str) else ''
-        if ('why' in dl and ('++' in dl or dl.startswith('why2') or 'whypp' in dl)):
-            _answer_why_deep(cq)
-            return ('ok', 200)
-        if dl.startswith('why'):
-            _handle_why_popup(cq, chat_id)
-            return ('ok', 200)
-        if dl.startswith('lp') or dl.startswith('lp:') or 'lpmore' in dl or dl.startswith('lp_'):
-            _lp_send_deep(cq)
-            return ('ok', 200)
-        # === /Summary router ===
         if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
             _answer_why_deep(cq)
             return ("ok", 200)
@@ -7737,3 +7713,40 @@ def _mdx_pre_router():
         return None
     except Exception:
         return None
+
+
+# === Summary router helper (centralized) ===
+def _summary_router(cq: dict, chat_id: int, data: str):
+    """Route Why?/Why++/LP callback data to the correct senders and return ('ok', 200) when handled."""
+    try:
+        dl = (data or "").lower() if isinstance(data, str) else ""
+        # Why++ deep: explicit tokens or 'why' + '++'
+        if dl.startswith("why++") or dl.startswith("why2") or "whypp" in dl or ("why" in dl and "++" in dl):
+            try:
+                _answer_why_deep(cq)
+            except Exception:
+                pass
+            return ("ok", 200)
+        # Why? short (popup handler already falls back to chat if long)
+        if dl.startswith("why"):
+            try:
+                _handle_why_popup(cq, chat_id)
+            except Exception:
+                pass
+            return ("ok", 200)
+        # LP: send full LP lock (lite) block to chat
+        if dl.startswith("lp") or dl.startswith("lp:") or dl.startswith("lp_") or "lpmore" in dl:
+            try:
+                _lp_send_deep(cq)
+            except Exception:
+                pass
+            try:
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "Sent details", logger=app.logger)
+            except Exception:
+                pass
+            return ("ok", 200)
+    except Exception:
+        pass
+    return None
+# === /Summary router helper ===
+
