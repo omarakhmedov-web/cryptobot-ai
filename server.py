@@ -2038,9 +2038,7 @@ def _is_compact_qs(text: str) -> bool:
         if "Metridex QuickScan (MVP+)" not in t:
             return False
         if ("Trust verdict:" in t) or ("Why++ factors" in t) or ("On-chain" in t):
-            origin_id = (callback.get('message') or {}).get('message_id') or 0
-            chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
-            if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
+            if _guard_callback_once('whypp', callback):
                 return _answer_ok('Sent details')
             return False
         return True
@@ -2188,10 +2186,6 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
 
 def _sanitize_owner_privileges(text: str, chat_id) -> str:
     """If owner is renounced (0x000..), suppress 'Owner privileges present' in Why++/Signals."""
-        origin_id = (callback.get('message') or {}).get('message_id') or 0
-        chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
-        if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
-            return _answer_ok('Sent details')
     try:
         ren = _LAST_OWNER_RENOUNCED.get(chat_id, False)
         if not ren:
@@ -7556,9 +7550,7 @@ def _answer_why_deep(cq, addr_hint=None):
                 _dl_raw = cq.get('data') if isinstance(cq, dict) else None
                 dl = (_dl_raw or '').lower() if isinstance(_dl_raw, str) else ''
                 if (('why' in dl and '++' in dl) or dl.startswith('why2') or 'whypp' in dl):
-                    origin_id = (callback.get('message') or {}).get('message_id') or 0
-                    chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
-                    if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
+                    if _guard_callback_once('whypp', callback):
                         return _answer_ok('Sent details')
                     _answer_why_deep(cq)
                 elif (dl.startswith('lp') or dl.startswith('lp:') or 'lpmore' in dl or dl.startswith('lp_')):
@@ -7576,10 +7568,6 @@ def _answer_why_deep(cq, addr_hint=None):
 def _handle_why_popup(_cq: dict, _chat_id: int):
     """
     - If payload is 'why++' or the built text is long → send a full message (and only confirm via popup).
-        origin_id = (callback.get('message') or {}).get('message_id') or 0
-        chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
-        if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
-            return _answer_ok('Sent details')
     - Else → show a short popup.
     Always return ('ok', 200) so Flask gets a valid response when this return is bubbled up.
     """
@@ -7780,9 +7768,7 @@ def _mdx_pre_router():
         except Exception:
             pass
         if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
-            origin_id = (callback.get('message') or {}).get('message_id') or 0
-            chat_id = ((callback.get('message') or {}).get('chat') or {}).get('id') or 0
-            if _seen_update_dedup(f'whypp:{chat_id}:{origin_id}'):
+            if _guard_callback_once('whypp', callback):
                 return _answer_ok('Sent details')
             _answer_why_deep(cq)
             return ("ok", 200)
@@ -7795,3 +7781,16 @@ def _mdx_pre_router():
         return None
     except Exception:
         return None
+
+
+def _guard_callback_once(kind: str, callback):
+    try:
+        msg = (callback.get('message') or {})
+        origin_id = msg.get('message_id') or 0
+        chat_id = (msg.get('chat') or {}).get('id') or 0
+        key = f"{kind}:{chat_id}:{origin_id}"
+        if _seen_update_dedup(key):
+            return True
+    except Exception:
+        pass
+    return False
