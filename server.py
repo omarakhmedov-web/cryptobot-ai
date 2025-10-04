@@ -76,7 +76,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+rc3c-minpatch4+hotfix-a+hotfix-b")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+rc3c-minpatch4+hotfix-a+hotfix-b+hotfix-c")
 
 
 # --- Feature flags (ENV) ---
@@ -4966,7 +4966,7 @@ def webhook(secret):
             else:
                 lines.append("RPC providers: none configured")
             try:
-                _ = _qs_call_safe(quickscan_entrypoint, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+                __ = _qs_call_safe(quickscan_entrypoint, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
                 lines.append("QuickScan: OK")
             except Exception as e:
                 lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
@@ -5742,7 +5742,7 @@ def _onchain_inspect(addr: str):
 # === PATCH: uptime & polydebug guard ===
 try:
     from flask import request, Response
-    _ = request  # silence linters
+    __ = request  # silence linters
     # Root OK for UptimeRobot (HEAD/GET)
     @app.route("/", methods=["GET","HEAD"])
     def root_ok():
