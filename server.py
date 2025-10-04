@@ -1927,25 +1927,53 @@ def _extract_why_block_from_message(_txt: str) -> str:
         return ""
 
 def _handle_why_popup(_cq: dict, _chat_id: int):
+    """Show Why text as a modal alert (doesn't auto-dismiss). If too long, send full text as a message."""
     try:
-        msg_obj = _cq.get('message') or {}
-        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        cb_id = _cq.get('id')
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
-        short = (why or '—').strip()
-        if len(short) > 190:
-            short = short[:187] + '…'
+        msg_obj = _cq.get("message") or {}
+        txt = (msg_obj.get("text") or "")
+        cb_id = _cq.get("id")
+        why_block = _extract_why_block_from_message(txt) or "Why++ factors: n/a"
+        # Telegram alert limit is ~200 chars; keep it safe around 190
+        short = why_block.strip()
+        limit = 190
+        truncated = False
+        if len(short) > limit:
+            short = short[:limit-1].rstrip() + "…"
+            truncated = True
+        # Use Telegram API directly to guarantee show_alert=True
+        try:
+            import requests as _rq
+            _rq.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                json={"callback_query_id": cb_id, "text": short, "show_alert": True},
+                timeout=6,
+                headers={"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
+            )
+        except Exception:
+            # Silent fallback
             try:
-                _tg_send_message(_chat_id, why)
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short, show_alert=True, logger=app.logger)  # type: ignore
             except Exception:
                 pass
+        # If truncated, send the full block into chat so it can be fully read and scrolled
+        if truncated:
+            try:
+                _send_text(_chat_id, why_block, logger=app.logger)
+            except Exception:
+                pass
+        return ("ok", 200)
+    except Exception as _e:
         try:
-            tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
+            _admin_debug(_chat_id, f"why-popup error: {type(_e).__name__}: {_e}")
         except Exception:
             pass
-        return True
-    except Exception:
-        return False
+        try:
+            tg_answer_callback(TELEGRAM_TOKEN, (_cq or {}).get("id"), "error", logger=app.logger)  # type: ignore
+        except Exception:
+            pass
+        return ("ok", 200)
+# === /Why helper ===
+# === Send-time LP filter ===
 def _is_lp_mini_only(text: str) -> bool:
     try:
         if not isinstance(text, str): return False
@@ -4183,13 +4211,6 @@ def webhook(secret):
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
-        if isinstance(data, str) and data.startswith('cb:'):
-            try:
-                orig = cb_cache.get(data)
-                if orig:
-                    data = orig
-            except Exception:
-                pass
         msg_obj = cq.get("message", {})
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
@@ -4197,9 +4218,8 @@ def webhook(secret):
         # Inflate hashed payloads early
 
         # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
-        if isinstance(data, str) and (data.startswith('why') or data.startswith('why2')):
-            _handle_why_popup(cq, chat_id)
-            return ('ok', 200)
+        if isinstance(data, str) and (data.startswith("why") or data.startswith("why2")):
+            return _handle_why_popup(cq, chat_id)
         # === /Mobile Why ===
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
@@ -7373,71 +7393,139 @@ def _send_text(*args, **kwargs):
 # ==== END SAFE DISPATCHER ====
 
 
-# === MDX WHY CONTEXTUAL (safe, minimal) ===
+
+# === MDX WHY CONTEXTUAL (append) ===
 def _extract_why_contextual(msg_text: str) -> str:
+    """Context-aware WHY builder from visible message/caption (Summary / On-chain / LP-lock)."""
     try:
         t = (msg_text or "").strip()
         if not t:
             return ""
         import re as _re
+        # LP lock (lite)
         if "🔒 LP lock (lite)" in t:
-            out=[]; m=_re.search(r"\btopHolder\s*=\s*([0-9.]+)%", t, _re.I)
+            out = []
+            m = _re.search(r"\btopHolder\s*=\s*([0-9.]+)%", t, _re.I)
             if m:
-                pct=float(m.group(1)); out.append(f"- LP tokens concentrated in a single holder: {pct:.2f}%" if pct>=50 else f"- LP concentration: {pct:.2f}%")
-            def _pct(k): m=_re.search(rf"\b{k}\s*[:=]\s*([0-9.]+)%", t, _re.I); return float(m.group(1)) if m else 0.0
-            burned=_pct("burned"); uncx=_pct("UNCX"); tf=_pct("TeamFinance")
-            if burned==0 and (uncx==0 and tf==0): out.append("- No public LP lock via UNCX/TeamFinance")
-            if burned>0: out.append(f"- Burned LP share: {burned:.2f}%")
-            if uncx>0 or tf>0:
-                bits=[]; 
-                if uncx>0: bits.append(f"UNCX {uncx:.2f}%")
-                if tf>0: bits.append(f"TeamFinance {tf:.2f}%")
+                pct = float(m.group(1))
+                out.append(f"- LP tokens concentrated in a single holder: {pct:.2f}%" if pct >= 50 else f"- LP concentration: {pct:.2f}%")
+            def _pct(k):
+                m = _re.search(rf"\b{k}\s*[:=]\s*([0-9.]+)%", t, _re.I)
+                return float(m.group(1)) if m else 0.0
+            burned = _pct("burned"); uncx = _pct("UNCX"); tf = _pct("TeamFinance")
+            if burned == 0 and (uncx == 0 and tf == 0):
+                out.append("- No public LP lock via UNCX/TeamFinance")
+            if burned > 0:
+                out.append(f"- Burned LP share: {burned:.2f}%")
+            if uncx > 0 or tf > 0:
+                bits = []
+                if uncx > 0: bits.append(f"UNCX {uncx:.2f}%")
+                if tf   > 0: bits.append(f"TeamFinance {tf:.2f}%")
                 out.append("- Locks: " + ", ".join(bits))
-            mht=_re.search(r"Top holder type:\s*(\w+)", t, _re.I)
+            mht = _re.search(r"Top holder type:\s*(\w+)", t, _re.I)
             if mht:
-                ht=mht.group(1).lower()
-                if ht in ("contract","custodian"): out.append("- Top holder type: contract/custodian")
-                elif ht=="eoa": out.append("- Top holder type: EOA")
-            if _re.search(r"Renounced:\s*yes", t, _re.I): out.append("- Ownership renounced")
-            elif _re.search(r"Renounced:\s*no", t, _re.I): out.append("- Ownership NOT renounced")
-            return "Why++ (LP)\n" + "\n".join(out) if out else ""
+                ht = mht.group(1).lower()
+                if ht in ("contract","custodian"):
+                    out.append("- Top holder type: contract/custodian")
+                elif ht == "eoa":
+                    out.append("- Top holder type: EOA")
+            if _re.search(r"Renounced:\s*yes", t, _re.I):
+                out.append("- Ownership renounced")
+            elif _re.search(r"Renounced:\s*no", t, _re.I):
+                out.append("- Ownership NOT renounced")
+            return ("Why++ (LP)\n" + "\n".join([x for x in out if x])) if out else ""
+        # On-chain
         if "On-chain" in t:
-            out=[]; m=_re.search(r"Honeypot\.is:\s*simulation\s*=\s*(\w+)\s*\|\s*risk\s*=\s*(\w+)\s*\|\s*level\s*=\s*(\d+)", t, _re.I)
-            if m: out.append(f"- Honeypot simulation: {m.group(1).upper()} (risk={m.group(2).lower()}, level={m.group(3)})")
-            m=_re.search(r"Taxes:\s*buy\s*=\s*([0-9.]+)%\s*\|\s*sell\s*=\s*([0-9.]+)%\s*\|\s*transfer\s*=\s*([0-9.]+)%", t, _re.I)
-            if m: out.append(f"- Taxes: buy {m.group(1)}%, sell {m.group(2)}%, transfer {m.group(3)}%")
-            if _re.search(r"Owner:\s*0x0+(\b|…)", t): out.append("- Owner: 0x000…000 (renounced/burn)")
+            out = []
+            m = _re.search(r"Honeypot\.is:\s*simulation\s*=\s*(\w+)\s*\|\s*risk\s*=\s*(\w+)\s*\|\s*level\s*=\s*(\d+)", t, _re.I)
+            if m:
+                out.append(f"- Honeypot simulation: {m.group(1).upper()} (risk={m.group(2).lower()}, level={m.group(3)})")
+            m = _re.search(r"Taxes:\s*buy\s*=\s*([0-9.]+)%\s*\|\s*sell\s*=\s*([0-9.]+)%\s*\|\s*transfer\s*=\s*([0-9.]+)%", t, _re.I)
+            if m:
+                out.append(f"- Taxes: buy {m.group(1)}%, sell {m.group(2)}%, transfer {m.group(3)}%")
+            if _re.search(r"Owner:\s*0x0+(\b|…)", t):
+                out.append("- Owner: 0x000…000 (renounced/burn)")
             else:
-                m=_re.search(r"Owner:\s*(0x[0-9a-fA-F]{6,40}|n/a)", t); 
-                if m: out.append(f"- Owner: {m.group(1)}")
-            if _re.search(r"Proxy:\s*yes", t, _re.I): out.append("- Proxy contract detected")
-            elif _re.search(r"Proxy:\s*no", t, _re.I): out.append("- Proxy: no")
-            m=_re.search(r"Holders:\s*top20 own\s*([0-9.]+)%", t, _re.I)
-            if m: out.append(f"- Top20 holders own {m.group(1)}%")
-            m=_re.search(r"\bLP:\s.*?topHolder\s*=\s*([0-9.]+)%", t, _re.I)
-            if m: out.append(f"- LP concentration (top holder): {m.group(1)}%")
-            return "Why++ (On-chain)\n" + "\n".join(out) if out else ""
-        m=_re.search(r"(?mi)⚠️\s*Signals:\s*(.+)$", t); p=_re.search(r"(?mi)✅\s*Positives:\s*(.+)$", t)
-        out=[]
-        if m and m.group(1).strip() and m.group(1).strip()!="—":
-            out += ["- " + x.strip() for x in re.split(r";|•|-", m.group(1)) if x.strip()]
-        if p and p.group(1).strip() and p.group(1).strip()!="—":
-            out += ["+ " + x.strip() for x in re.split(r";|•|\+", p.group(1)) if x.strip()]
-        return "Why++\n" + "\n".join(out) if out else ""
+                m_owner = _re.search(r"Owner:\s*(0x[0-9a-fA-F]{6,40}|n/a)", t)
+                if m_owner:
+                    out.append(f"- Owner: {m_owner.group(1)}")
+            if _re.search(r"Proxy:\s*yes", t, _re.I):
+                out.append("- Proxy contract detected")
+            elif _re.search(r"Proxy:\s*no", t, _re.I):
+                out.append("- Proxy: no")
+            m = _re.search(r"Holders:\s*top20 own\s*([0-9.]+)%", t, _re.I)
+            if m:
+                out.append(f"- Top20 holders own {m.group(1)}%")
+            m = _re.search(r"\bLP:\s.*?topHolder\s*=\s*([0-9.]+)%", t, _re.I)
+            if m:
+                out.append(f"- LP concentration (top holder): {m.group(1)}%")
+            return ("Why++ (On-chain)\n" + "\n".join(out)) if out else ""
+        # Summary fallback
+        m_neg = _re.search(r"(?mi)⚠️\s*Signals:\s*(.+)$", t)
+        m_pos = _re.search(r"(?mi)✅\s*Positives:\s*(.+)$", t)
+        out = []
+        if m_neg and m_neg.group(1).strip() and m_neg.group(1).strip() != "—":
+            out += [ "- " + x.strip() for x in re.split(r";|•|-", m_neg.group(1)) if x.strip() ]
+        if m_pos and m_pos.group(1).strip() and m_pos.group(1).strip() != "—":
+            out += [ "+ " + x.strip() for x in re.split(r";|•|\+", m_pos.group(1)) if x.strip() ]
+        if out:
+            return "Why++\n" + "\n".join(out)
+        return ""
     except Exception:
         return ""
-# === /MDX WHY CONTEXTUAL ===
 
+# === WHY++ full message (helper) ===
+def _answer_why_deep(cq, addr_hint=None):
+    """Send a full WHY text as a chat message and acknowledge the callback."""
+    try:
+        msg_obj = cq.get('message', {}) or {}
+        text = (msg_obj.get('text') or msg_obj.get('caption') or '')
+        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
+        why_long = _extract_why_contextual(text) or _extract_why_block_from_message(text) or 'Why++ factors: n/a'
+        if chat_id:
+            try:
+                _tg_send_message(chat_id, why_long)
+            except Exception:
+                pass
+        try:
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), 'Sent details', logger=app.logger)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
 
-
-# === MDX WHY handler (clean redefine) ===
+# === WHY? popup (override) with smart routing ===
 def _handle_why_popup(_cq: dict, _chat_id: int):
+    """
+    - If payload is 'why++' or the built text is long → send a full message (and only confirm via popup).
+    - Else → show a short popup.
+    Always return ('ok', 200) so Flask gets a valid response when this return is bubbled up.
+    """
     try:
         msg_obj = _cq.get('message') or {}
         txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
         cb_id = _cq.get('id')
+        data = _cq.get('data') or ''  # might be raw or inflated by router
+
         why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
-        short = (why or '—').strip()
+        longish = (len(why) > 140) or ("Why++" in why.splitlines()[0] if why else False)
+        is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
+
+        if is_deep or longish:
+            # Deep route → post full message, popup only confirms
+            try:
+                _tg_send_message(_chat_id, why)
+            except Exception:
+                pass
+            try:
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
+            except Exception:
+                pass
+            return ("ok", 200)
+
+        # Short popup route
+        short = why.strip()
         if len(short) > 190:
             short = short[:187] + '…'
             try:
@@ -7448,6 +7536,8 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
             tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
         except Exception:
             pass
-        return True
+        return ("ok", 200)
     except Exception:
-        return False
+        # As a fallback, still return a valid response
+        return ("ok", 200)
+# === /MDX WHY handlers ===
