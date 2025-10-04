@@ -4207,6 +4207,14 @@ def webhook(secret):
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
         msg_obj = cq.get("message", {})
+        # Inflate hashed callback payloads early (before any startswith checks)
+        if isinstance(data, str) and data.startswith("cb:"):
+            try:
+                orig = cb_cache.get(data)
+                if orig:
+                    data = orig
+            except Exception:
+                pass
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
 
