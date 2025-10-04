@@ -1,9 +1,10 @@
+# MDX-QUICKSCAN SAFE8 RC4 hotfix-B
 import os
 import re
 import time
 from urllib.parse import urlparse, quote_plus
 
-from utils import http_get_json, http_post_json, rdap_domain, wayback_first_capture, ssl_certificate_info, format_kv, locale_text as _, get_known_domain_for_address
+from utils import http_get_json, http_post_json, rdap_domain, wayback_first_capture, ssl_certificate_info, format_kv, locale_text as _tt, get_known_domain_for_address
 
 DEX_BASE = os.environ.get("DEX_BASE", "https://api.dexscreener.com").rstrip("/")
 
@@ -259,7 +260,7 @@ def domain_from_pairs(pairs):
 def quickscan_contract(user_input, lang="en", window=None):
     pairs = run_dexscreener(user_input)
     if not pairs:
-        return _("en","no_pairs"), None, None
+        return _t("en","no_pairs"), None, None
 
     bp = best_pair(pairs)
     text = summarize_pair(bp, window=window or "24h")
@@ -366,7 +367,7 @@ def quickscan_pair_entrypoint(chain: str, pair_addr: str, window: str = "h24"):
     data = http_get_json(DEX_API_PAIR(chain, pair_addr))
     pairs = (data or {}).get("pairs") or []
     if not pairs:
-        return _("en","no_pairs"), {"inline_keyboard": []}
+        return _t("en","no_pairs"), {"inline_keyboard": []}
     bp = best_pair(pairs)
     main_text = summarize_pair(bp, window=window or "h24")
     lines = ["Metridex QuickScan (MVP+)", main_text]
