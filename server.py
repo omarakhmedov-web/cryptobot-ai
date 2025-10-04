@@ -7065,7 +7065,7 @@ try:
     if '_send_text' in globals() and callable(_send_text):
         _ORIG_SEND_TEXT = _send_text
         def _send_text(chat_id, text, *args, **kwargs):
-    text = mdx_postprocess_text(text, chat_id)
+            text = mdx_postprocess_text(text, chat_id)
             try:
                 text = _mdx_chat_sanitize(text, chat_id)
             except Exception:
