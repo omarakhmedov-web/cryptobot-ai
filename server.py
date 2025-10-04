@@ -76,7 +76,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+rc3c-minpatch4+hotfix-a")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+rc3c-minpatch4+hotfix-a+hotfix-b")
 
 
 # --- Feature flags (ENV) ---
@@ -369,7 +369,39 @@ def mdx_postprocess_text(text: str, chat_id=None, is_details: bool=False) -> str
     """Apply all safe sanitizers to outgoing bot text in one place."""
     try:
         if not text or not isinstance(text, str):
-            return text
+            
+# 2.7 Harmonize WHOIS/RDAP 'Created' using Wayback when RDAP is missing
+try:
+    # If we see 'WHOIS/RDAP: no data' or 'registry response unavailable'
+    # and also have 'Wayback: first YYYY-MM-DD', rewrite the WHOIS line.
+    wb = re.search(r"Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})", t)
+    if wb and re.search(r"WHOIS/RDAP:\s*(no data|registry response unavailable)", t, re.I):
+        created = wb.group(1)
+        t = re.sub(
+            r"WHOIS/RDAP:.*?(?=\n)",
+            f"WHOIS/RDAP: registry response unavailable | Created: ~{created} (Wayback) | Registrar: —",
+            t, flags=re.I
+        )
+except Exception:
+    pass
+
+# 2.8 Drop 'Owner privileges present' when Owner is 0x000… and no 'Proxy: yes'
+try:
+    if re.search(r"Owner:\s*0x0+\b", t) and not re.search(r"Proxy:\s*yes", t, re.I):
+        # Remove the signal line
+        t = re.sub(r"(?m)^⚠️\s*Signals:.*?Owner privileges present;?\s*", "⚠️ Signals: ", t)
+        t = t.replace("Owner privileges present; ", "")
+        t = t.replace("Owner privileges present", "")
+        # Remove from Why++ if present
+        t = re.sub(r"(?m)^−\s*?20\s+Owner privileges present\n", "", t)
+    # Clean duplicated separators
+    t = re.sub(r"(?m)^⚠️\s*Signals:\s*$", "⚠️ Signals:", t)
+    t = re.sub(r";\s*;+", "; ", t)
+except Exception:
+    pass
+
+return t
+
         t = text
         # 2.1 Ensure WHOIS/RDAP line is present + normalized where Domain exists
         try:
@@ -403,7 +435,39 @@ def mdx_postprocess_text(text: str, chat_id=None, is_details: bool=False) -> str
             pass
         return t
     except Exception:
-        return text
+        
+# 2.7 Harmonize WHOIS/RDAP 'Created' using Wayback when RDAP is missing
+try:
+    # If we see 'WHOIS/RDAP: no data' or 'registry response unavailable'
+    # and also have 'Wayback: first YYYY-MM-DD', rewrite the WHOIS line.
+    wb = re.search(r"Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})", t)
+    if wb and re.search(r"WHOIS/RDAP:\s*(no data|registry response unavailable)", t, re.I):
+        created = wb.group(1)
+        t = re.sub(
+            r"WHOIS/RDAP:.*?(?=\n)",
+            f"WHOIS/RDAP: registry response unavailable | Created: ~{created} (Wayback) | Registrar: —",
+            t, flags=re.I
+        )
+except Exception:
+    pass
+
+# 2.8 Drop 'Owner privileges present' when Owner is 0x000… and no 'Proxy: yes'
+try:
+    if re.search(r"Owner:\s*0x0+\b", t) and not re.search(r"Proxy:\s*yes", t, re.I):
+        # Remove the signal line
+        t = re.sub(r"(?m)^⚠️\s*Signals:.*?Owner privileges present;?\s*", "⚠️ Signals: ", t)
+        t = t.replace("Owner privileges present; ", "")
+        t = t.replace("Owner privileges present", "")
+        # Remove from Why++ if present
+        t = re.sub(r"(?m)^−\s*?20\s+Owner privileges present\n", "", t)
+    # Clean duplicated separators
+    t = re.sub(r"(?m)^⚠️\s*Signals:\s*$", "⚠️ Signals:", t)
+    t = re.sub(r";\s*;+", "; ", t)
+except Exception:
+    pass
+
+return t
+
 # === /sanitizers (finalfix3) ===
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
@@ -2044,14 +2108,110 @@ def _is_compact_qs(text: str) -> bool:
 
 def _strip_compact_meta(text: str) -> str:
     try:
-        if not isinstance(text, str): return text
+        if not isinstance(text, str): 
+# 2.7 Harmonize WHOIS/RDAP 'Created' using Wayback when RDAP is missing
+try:
+    # If we see 'WHOIS/RDAP: no data' or 'registry response unavailable'
+    # and also have 'Wayback: first YYYY-MM-DD', rewrite the WHOIS line.
+    wb = re.search(r"Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})", t)
+    if wb and re.search(r"WHOIS/RDAP:\s*(no data|registry response unavailable)", t, re.I):
+        created = wb.group(1)
+        t = re.sub(
+            r"WHOIS/RDAP:.*?(?=\n)",
+            f"WHOIS/RDAP: registry response unavailable | Created: ~{created} (Wayback) | Registrar: —",
+            t, flags=re.I
+        )
+except Exception:
+    pass
+
+# 2.8 Drop 'Owner privileges present' when Owner is 0x000… and no 'Proxy: yes'
+try:
+    if re.search(r"Owner:\s*0x0+\b", t) and not re.search(r"Proxy:\s*yes", t, re.I):
+        # Remove the signal line
+        t = re.sub(r"(?m)^⚠️\s*Signals:.*?Owner privileges present;?\s*", "⚠️ Signals: ", t)
+        t = t.replace("Owner privileges present; ", "")
+        t = t.replace("Owner privileges present", "")
+        # Remove from Why++ if present
+        t = re.sub(r"(?m)^−\s*?20\s+Owner privileges present\n", "", t)
+    # Clean duplicated separators
+    t = re.sub(r"(?m)^⚠️\s*Signals:\s*$", "⚠️ Signals:", t)
+    t = re.sub(r";\s*;+", "; ", t)
+except Exception:
+    pass
+
+return t
+
         import re as _re
         text = _re.sub(r"(?m)^\s*Domain:.*\n", "", text)
         text = _re.sub(r"(?m)^\s*SSL:.*\n", "", text)
         text = _re.sub(r"(?m)^\s*Wayback:.*\n", "", text)
-        return text
+        
+# 2.7 Harmonize WHOIS/RDAP 'Created' using Wayback when RDAP is missing
+try:
+    # If we see 'WHOIS/RDAP: no data' or 'registry response unavailable'
+    # and also have 'Wayback: first YYYY-MM-DD', rewrite the WHOIS line.
+    wb = re.search(r"Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})", t)
+    if wb and re.search(r"WHOIS/RDAP:\s*(no data|registry response unavailable)", t, re.I):
+        created = wb.group(1)
+        t = re.sub(
+            r"WHOIS/RDAP:.*?(?=\n)",
+            f"WHOIS/RDAP: registry response unavailable | Created: ~{created} (Wayback) | Registrar: —",
+            t, flags=re.I
+        )
+except Exception:
+    pass
+
+# 2.8 Drop 'Owner privileges present' when Owner is 0x000… and no 'Proxy: yes'
+try:
+    if re.search(r"Owner:\s*0x0+\b", t) and not re.search(r"Proxy:\s*yes", t, re.I):
+        # Remove the signal line
+        t = re.sub(r"(?m)^⚠️\s*Signals:.*?Owner privileges present;?\s*", "⚠️ Signals: ", t)
+        t = t.replace("Owner privileges present; ", "")
+        t = t.replace("Owner privileges present", "")
+        # Remove from Why++ if present
+        t = re.sub(r"(?m)^−\s*?20\s+Owner privileges present\n", "", t)
+    # Clean duplicated separators
+    t = re.sub(r"(?m)^⚠️\s*Signals:\s*$", "⚠️ Signals:", t)
+    t = re.sub(r";\s*;+", "; ", t)
+except Exception:
+    pass
+
+return t
+
     except Exception:
-        return text
+        
+# 2.7 Harmonize WHOIS/RDAP 'Created' using Wayback when RDAP is missing
+try:
+    # If we see 'WHOIS/RDAP: no data' or 'registry response unavailable'
+    # and also have 'Wayback: first YYYY-MM-DD', rewrite the WHOIS line.
+    wb = re.search(r"Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})", t)
+    if wb and re.search(r"WHOIS/RDAP:\s*(no data|registry response unavailable)", t, re.I):
+        created = wb.group(1)
+        t = re.sub(
+            r"WHOIS/RDAP:.*?(?=\n)",
+            f"WHOIS/RDAP: registry response unavailable | Created: ~{created} (Wayback) | Registrar: —",
+            t, flags=re.I
+        )
+except Exception:
+    pass
+
+# 2.8 Drop 'Owner privileges present' when Owner is 0x000… and no 'Proxy: yes'
+try:
+    if re.search(r"Owner:\s*0x0+\b", t) and not re.search(r"Proxy:\s*yes", t, re.I):
+        # Remove the signal line
+        t = re.sub(r"(?m)^⚠️\s*Signals:.*?Owner privileges present;?\s*", "⚠️ Signals: ", t)
+        t = t.replace("Owner privileges present; ", "")
+        t = t.replace("Owner privileges present", "")
+        # Remove from Why++ if present
+        t = re.sub(r"(?m)^−\s*?20\s+Owner privileges present\n", "", t)
+    # Clean duplicated separators
+    t = re.sub(r"(?m)^⚠️\s*Signals:\s*$", "⚠️ Signals:", t)
+    t = re.sub(r";\s*;+", "; ", t)
+except Exception:
+    pass
+
+return t
+
 # === /Compact sanitizer ===
 
 # === Stronger QuickScan sanitizer (prevents Wayback/Domain/SSL in compact blocks) ===
