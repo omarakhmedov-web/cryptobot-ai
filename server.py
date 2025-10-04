@@ -76,17 +76,17 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+rc3c-minpatch4")
 
 
 # --- Feature flags (ENV) ---
-DEX_STRICT_CHAIN      = int(os.getenv("DEX_STRICT_CHAIN", "0") or "0")      # 1: forbid cross-chain/search fallbacks for pair links
-DS_ALLOW_FALLBACK     = int(os.getenv("DS_ALLOW_FALLBACK", "1") or "1")     # 0: no 'search?q=' fallback; show base link only
+DEX_STRICT_CHAIN = int(os.getenv("DEX_STRICT_CHAIN", "1") or "1")# 1: forbid cross-chain/search fallbacks for pair links
+DS_ALLOW_FALLBACK = int(os.getenv("DS_ALLOW_FALLBACK", "0") or "0")# 0: no 'search?q=' fallback; show base link only
 MDX_ENABLE_POSTPROCESS= int(os.getenv("MDX_ENABLE_POSTPROCESS", "1") or "1")# 1: run post-processors (_sanitize/*)
 MDX_BYPASS_SANITIZERS = int(os.getenv("MDX_BYPASS_SANITIZERS","0") or "0")  # 1: skip sanitizers even if postprocess enabled
-DETAILS_ENFORCE_DOMAIN= int(os.getenv("DETAILS_ENFORCE_DOMAIN","0") or "0") # 1: enforce domain matches current token/site, else strip
+DETAILS_ENFORCE_DOMAIN = int(os.getenv("DETAILS_ENFORCE_DOMAIN", "1") or "1")# 1: enforce domain matches current token/site, else strip
 MDX_LAST_SITE_SCOPE   = (os.getenv("MDX_LAST_SITE_SCOPE","chat") or "chat").strip().lower()  # 'chat' | 'message'
-DOMAIN_META_STRICT    = int(os.getenv("DOMAIN_META_STRICT","0") or "0")     # 1: if domain cannot be verified for current token/site — hide meta
+DOMAIN_META_STRICT = int(os.getenv("DOMAIN_META_STRICT", "1") or "1")# 1: if domain cannot be verified for current token/site — hide meta
 
 
 ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
@@ -94,9 +94,7 @@ ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
 LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
 
 # === LP/lock verdict post-processor (safe, feature-flagged) ===
-LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "0") or "0")
-
-def _soften_lp_verdict_html(html: str) -> str:
+LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "1") or "1")def _soften_lp_verdict_html(html: str) -> str:
     # If lockers are 'unknown' but holders/topHolder signals exist, replace wording.
     try:
         if not LPLOCK_VERDICT_SOFTEN or not isinstance(html, str):
@@ -364,6 +362,46 @@ def _normalize_whois_rdap(text: str) -> str:
         return text
 
 
+
+def mdx_postprocess_text(text: str, chat_id=None, is_details: bool=False) -> str:
+    """Apply all safe sanitizers to outgoing bot text in one place."""
+    try:
+        if not text or not isinstance(text, str):
+            return text
+        t = text
+        # 2.1 Ensure WHOIS/RDAP line is present + normalized where Domain exists
+        try:
+            t = _normalize_whois_rdap(t)
+        except Exception:
+            pass
+        # 2.2 Remove 'Owner privileges present' if owner is renounced and no proxy
+        try:
+            t = _sanitize_owner_privileges(t, chat_id)
+        except Exception:
+            pass
+        # 2.3 Fix LP claims wording (token CA must not appear as LP top holder; contract vs EOA phrasing)
+        try:
+            t = _sanitize_lp_claims(t)
+        except Exception:
+            pass
+        # 2.4 Enforce consistent Domain/WHOIS/RDAP across Details if enabled
+        try:
+            t = _enforce_details_host(t, chat_id)
+        except Exception:
+            pass
+        # 2.5 Optionally hide compact domain block in short (non-details) answers
+        try:
+            t = _sanitize_compact_domains(t, is_details)
+        except Exception:
+            pass
+        # 2.6 Tidy excess blank lines
+        try:
+            t = re.sub(r"\n{{3,}}", "\n\n", t)
+        except Exception:
+            pass
+        return t
+    except Exception:
+        return text
 # === /sanitizers (finalfix3) ===
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
@@ -2259,6 +2297,10 @@ def _sanitize_lp_claims(text: str) -> str:
 
 
 def _send_text(chat_id, text, **kwargs):
+        text = mdx_postprocess_text(text, chat_id)
+def _send_text(chat_id, text, **kwargs):
+    # Auto-sanitize outgoing text
+    import inspect
     try:
         text = _mdx_sanitize_text_min(text)
     except Exception:
