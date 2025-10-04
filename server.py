@@ -2259,6 +2259,10 @@ def _sanitize_lp_claims(text: str) -> str:
 
 
 def _send_text(chat_id, text, **kwargs):
+    try:
+        text = _mdx_sanitize_text_min(text)
+    except Exception:
+        pass
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     is_details_flag = bool(kwargs.pop('is_details', False))
     # Normalize keyboard (remove DexScreener, put DEX+Scan on top)
@@ -7125,3 +7129,68 @@ try:
 except Exception:
     pass
 # ==== END: OUTBOUND TELEGRAM SANITIZER (requests.post wrapper) ====
+
+
+
+# =====================
+# Metridex SAFE MINPATCH RC3 (text-only)
+# =====================
+try:
+    APP_VERSION = (APP_VERSION + "+rc3-minpatch") if "APP_VERSION" in globals() else "0.3.114-onepass-safe8+rc3-minpatch"
+except Exception:
+    APP_VERSION = "0.3.114-onepass-safe8+rc3-minpatch"
+
+import re as _re
+
+def _mdx_sanitize_text_min(text: str) -> str:
+    if not isinstance(text, str) or not text.strip():
+        return text
+    t = text
+
+    # --- 1) Owner=0x0 vs "Owner privileges present"
+    try:
+        has_owner_zero = bool(_re.search(r'(?mi)^Owner:\s*0x0{6,}', t))
+        if has_owner_zero:
+            # remove any "Owner privileges present" lines in Signals/Why++
+            t = _re.sub(r'(?mi)^\s*[–-]\s*\d+\s*Owner privileges present\s*\n?', '', t)
+            t = _re.sub(r'(?mi)^\s*Owner privileges present\s*\n?', '', t)
+    except Exception:
+        pass
+
+    # --- 2) RDAP wording normalize (avoid "registry has no RDAP" claims)
+    try:
+        t = _re.sub(r'(?mi)RDAP unavailable for .* registry', 'RDAP: registry response unavailable', t)
+    except Exception:
+        pass
+
+    # --- 3) LP top holder should not equal token address
+    try:
+        m_token = _re.search(r'(?mi)^Scan token:\s*https?://\S+/(?:token|address)/(?P<ca>0x[0-9a-fA-F]{40})', t)
+        m_top = _re.search(r'(?mi)^•\s*Top holder:\s*(?P<addr>0x[0-9a-fA-F]{40})\b', t)
+        if m_token and m_top and m_token.group('ca').lower() == m_top.group('addr').lower():
+            # replace suspicious top-holder line
+            t = _re.sub(
+                r'(?mi)^•\s*Top holder:\s*0x[0-9a-fA-F]{40}.*\n?',
+                '• Top holder: n/a — (contract/custodian holds LP)\n',
+                t
+            )
+    except Exception:
+        pass
+
+    # --- 4) Wayback unify: keep earliest "Wayback: first YYYY-MM-DD" if multiples exist
+    try:
+        dates = _re.findall(r'(?mi)Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})', t)
+        if len(dates) > 1:
+            dates_sorted = sorted(dates)
+            # remove all lines, then write one with the earliest date
+            t = _re.sub(r'(?mi)^Wayback:\s*first\s*\d{4}-\d{2}-\d{2}\s*\n?', '', t)
+            t = t.rstrip() + f"\nWayback: first {dates_sorted[0]}\n"
+    except Exception:
+        pass
+
+    # Collapse triple newlines
+    t = _re.sub(r"\n{3,}", "\n\n", t)
+    return t
+# =====================
+# /Metridex SAFE MINPATCH RC3 (text-only)
+# =====================
