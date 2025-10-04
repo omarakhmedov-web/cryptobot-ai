@@ -4211,6 +4211,33 @@ def webhook(secret):
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
+
+        # Inflate hashed payloads early
+        if isinstance(data, str) and data.startswith("cb:"):
+            try:
+                orig = cb_cache.get(data)
+                if orig:
+                    data = orig
+            except Exception:
+                pass
+
+        # WHY++ (long) -> full chat message
+        if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
+            _answer_why_deep(cq)
+            return ("ok", 200)
+
+        # WHY? (short) -> popup
+        if isinstance(data, str) and data.startswith("why"):
+            _handle_why_popup(cq, chat_id)
+            return ("ok", 200)
+
+        # LP popup route (supports 'lp' or 'lp:'), with robust fallback
+        if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:")):
+            try:
+                _lp_popup_fallback(cq, chat_id)
+            except Exception:
+                _lp_popup_fallback(cq, chat_id)
+            return ("ok", 200)
         msg_obj = cq.get("message", {})
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
@@ -4218,8 +4245,8 @@ def webhook(secret):
         # Inflate hashed payloads early
 
         # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
-        if isinstance(data, str) and (data.startswith("why") or data.startswith("why2")):
-            return _handle_why_popup(cq, chat_id)
+    # replaced by unified router above
+
         # === /Mobile Why ===
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
@@ -7394,204 +7421,87 @@ def _send_text(*args, **kwargs):
 
 
 
-# === MDX WHY CONTEXTUAL (append) ===
 def _extract_why_contextual(msg_text: str) -> str:
-    """Context-aware WHY builder from visible message/caption (Summary / On-chain / LP-lock)."""
     try:
         t = (msg_text or "").strip()
-        if not t:
-            return ""
+        if not t: return ""
         import re as _re
-        # LP lock (lite)
         if "🔒 LP lock (lite)" in t:
-            out = []
-            m = _re.search(r"\btopHolder\s*=\s*([0-9.]+)%", t, _re.I)
+            out=[]; m=_re.search(r"\btopHolder\s*=\s*([0-9.]+)%", t, _re.I)
             if m:
-                pct = float(m.group(1))
-                out.append(f"- LP tokens concentrated in a single holder: {pct:.2f}%" if pct >= 50 else f"- LP concentration: {pct:.2f}%")
-            def _pct(k):
-                m = _re.search(rf"\b{k}\s*[:=]\s*([0-9.]+)%", t, _re.I)
-                return float(m.group(1)) if m else 0.0
-            burned = _pct("burned"); uncx = _pct("UNCX"); tf = _pct("TeamFinance")
-            if burned == 0 and (uncx == 0 and tf == 0):
-                out.append("- No public LP lock via UNCX/TeamFinance")
-            if burned > 0:
-                out.append(f"- Burned LP share: {burned:.2f}%")
-            if uncx > 0 or tf > 0:
-                bits = []
-                if uncx > 0: bits.append(f"UNCX {uncx:.2f}%")
-                if tf   > 0: bits.append(f"TeamFinance {tf:.2f}%")
+                pct=float(m.group(1)); out.append(f"- LP tokens concentrated in a single holder: {pct:.2f}%" if pct>=50 else f"- LP concentration: {pct:.2f}%")
+            def _pct(k): m=_re.search(rf"\b{k}\s*[:=]\s*([0-9.]+)%", t, _re.I); return float(m.group(1)) if m else 0.0
+            burned=_pct("burned"); uncx=_pct("UNCX"); tf=_pct("TeamFinance")
+            if burned==0 and (uncx==0 and tf==0): out.append("- No public LP lock via UNCX/TeamFinance")
+            if burned>0: out.append(f"- Burned LP share: {burned:.2f}%")
+            if uncx>0 or tf>0:
+                bits=[]; 
+                if uncx>0: bits.append(f"UNCX {uncx:.2f}%")
+                if tf>0: bits.append(f"TeamFinance {tf:.2f}%")
                 out.append("- Locks: " + ", ".join(bits))
-            mht = _re.search(r"Top holder type:\s*(\w+)", t, _re.I)
+            mht=_re.search(r"Top holder type:\s*(\w+)", t, _re.I)
             if mht:
-                ht = mht.group(1).lower()
-                if ht in ("contract","custodian"):
-                    out.append("- Top holder type: contract/custodian")
-                elif ht == "eoa":
-                    out.append("- Top holder type: EOA")
-            if _re.search(r"Renounced:\s*yes", t, _re.I):
-                out.append("- Ownership renounced")
-            elif _re.search(r"Renounced:\s*no", t, _re.I):
-                out.append("- Ownership NOT renounced")
-            return ("Why++ (LP)\n" + "\n".join([x for x in out if x])) if out else ""
-        # On-chain
+                ht=mht.group(1).lower()
+                if ht in ("contract","custodian"): out.append("- Top holder type: contract/custodian")
+                elif ht=="eoa": out.append("- Top holder type: EOA")
+            if _re.search(r"Renounced:\s*yes", t, _re.I): out.append("- Ownership renounced")
+            elif _re.search(r"Renounced:\s*no", t, _re.I): out.append("- Ownership NOT renounced")
+            return "Why++ (LP)\n" + "\n".join(out) if out else ""
         if "On-chain" in t:
-            out = []
-            m = _re.search(r"Honeypot\.is:\s*simulation\s*=\s*(\w+)\s*\|\s*risk\s*=\s*(\w+)\s*\|\s*level\s*=\s*(\d+)", t, _re.I)
-            if m:
-                out.append(f"- Honeypot simulation: {m.group(1).upper()} (risk={m.group(2).lower()}, level={m.group(3)})")
-            m = _re.search(r"Taxes:\s*buy\s*=\s*([0-9.]+)%\s*\|\s*sell\s*=\s*([0-9.]+)%\s*\|\s*transfer\s*=\s*([0-9.]+)%", t, _re.I)
-            if m:
-                out.append(f"- Taxes: buy {m.group(1)}%, sell {m.group(2)}%, transfer {m.group(3)}%")
-            if _re.search(r"Owner:\s*0x0+(\b|…)", t):
-                out.append("- Owner: 0x000…000 (renounced/burn)")
+            out=[]; m=_re.search(r"Honeypot\.is:\s*simulation\s*=\s*(\w+)\s*\|\s*risk\s*=\s*(\w+)\s*\|\s*level\s*=\s*(\d+)", t, _re.I)
+            if m: out.append(f"- Honeypot simulation: {m.group(1).upper()} (risk={m.group(2).lower()}, level={m.group(3)})")
+            m=_re.search(r"Taxes:\s*buy\s*=\s*([0-9.]+)%\s*\|\s*sell\s*=\s*([0-9.]+)%\s*\|\s*transfer\s*=\s*([0-9.]+)%", t, _re.I)
+            if m: out.append(f"- Taxes: buy {m.group(1)}%, sell {m.group(2)}%, transfer {m.group(3)}%")
+            if _re.search(r"Owner:\s*0x0+(\b|…)", t): out.append("- Owner: 0x000…000 (renounced/burn)")
             else:
-                m_owner = _re.search(r"Owner:\s*(0x[0-9a-fA-F]{6,40}|n/a)", t)
-                if m_owner:
-                    out.append(f"- Owner: {m_owner.group(1)}")
-            if _re.search(r"Proxy:\s*yes", t, _re.I):
-                out.append("- Proxy contract detected")
-            elif _re.search(r"Proxy:\s*no", t, _re.I):
-                out.append("- Proxy: no")
-            m = _re.search(r"Holders:\s*top20 own\s*([0-9.]+)%", t, _re.I)
-            if m:
-                out.append(f"- Top20 holders own {m.group(1)}%")
-            m = _re.search(r"\bLP:\s.*?topHolder\s*=\s*([0-9.]+)%", t, _re.I)
-            if m:
-                out.append(f"- LP concentration (top holder): {m.group(1)}%")
-            return ("Why++ (On-chain)\n" + "\n".join(out)) if out else ""
-        # Summary fallback
-        m_neg = _re.search(r"(?mi)⚠️\s*Signals:\s*(.+)$", t)
-        m_pos = _re.search(r"(?mi)✅\s*Positives:\s*(.+)$", t)
-        out = []
-        if m_neg and m_neg.group(1).strip() and m_neg.group(1).strip() != "—":
-            out += [ "- " + x.strip() for x in re.split(r";|•|-", m_neg.group(1)) if x.strip() ]
-        if m_pos and m_pos.group(1).strip() and m_pos.group(1).strip() != "—":
-            out += [ "+ " + x.strip() for x in re.split(r";|•|\+", m_pos.group(1)) if x.strip() ]
-        if out:
-            return "Why++\n" + "\n".join(out)
-        return ""
+                mo=_re.search(r"Owner:\s*(0x[0-9a-fA-F]{6,40}|n/a)", t); 
+                if mo: out.append(f"- Owner: {mo.group(1)}")
+            if _re.search(r"Proxy:\s*yes", t, _re.I): out.append("- Proxy contract detected")
+            elif _re.search(r"Proxy:\s*no", t, _re.I): out.append("- Proxy: no")
+            m=_re.search(r"Holders:\s*top20 own\s*([0-9.]+)%", t, _re.I)
+            if m: out.append(f"- Top20 holders own {m.group(1)}%")
+            m=_re.search(r"\bLP:\s.*?topHolder\s*=\s*([0-9.]+)%", t, _re.I)
+            if m: out.append(f"- LP concentration (top holder): {m.group(1)}%")
+            return "Why++ (On-chain)\n" + "\n".join(out) if out else ""
+        m=_re.search(r"(?mi)⚠️\s*Signals:\s*(.+)$", t); p=_re.search(r"(?mi)✅\s*Positives:\s*(.+)$", t)
+        out=[]
+        if m and m.group(1).strip() and m.group(1).strip()!="—":
+            out += ["- " + x.strip() for x in re.split(r";|•|-", m.group(1)) if x.strip()]
+        if p and p.group(1).strip() and p.group(1).strip()!="—":
+            out += ["+ " + x.strip() for x in re.split(r";|•|\+", p.group(1)) if x.strip()]
+        return "Why++\n" + "\n".join(out) if out else ""
     except Exception:
         return ""
 
-# === WHY++ full message (helper) ===
-def _answer_why_deep(cq, addr_hint=None):
-    """Send a full WHY text as a chat message and acknowledge the callback."""
+
+def _extract_lp_popup_text(msg_text: str) -> str:
+    try:
+        t = (msg_text or "").strip()
+        if not t: return "LP: n/a"
+        import re as _re
+        # Grab block starting at LP lock (lite)
+        m = _re.search(r"(🔒 LP lock \(lite\)[\s\S]+?)(?:\n{2,}|\Z)", t)
+        if m:
+            block = m.group(1).strip()
+            # Prefer the line with 'Verdict:' if present
+            v = _re.search(r"Verdict:\s*([^\n]+)", block)
+            if v:
+                return "LP lock — " + v.group(1).strip()
+            return block[:2000]
+        return "LP: n/a"
+    except Exception:
+        return "LP: n/a"
+
+def _lp_popup_fallback(cq, chat_id: int):
     try:
         msg_obj = cq.get('message', {}) or {}
         text = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
-        why_long = _extract_why_contextual(text) or _extract_why_block_from_message(text) or 'Why++ factors: n/a'
-        if chat_id:
-            try:
-                _tg_send_message(chat_id, why_long)
-            except Exception:
-                pass
-        try:
-            tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), 'Sent details', logger=app.logger)
-        except Exception:
-            pass
+        cb_id = cq.get('id')
+        out = _extract_lp_popup_text(text)
+        # Trim for popup
+        short = out if len(out) <= 190 else (out[:187] + '…')
+        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
+        except Exception: pass
         return True
     except Exception:
         return False
-
-# === WHY? popup (override) with smart routing ===
-def _handle_why_popup(_cq: dict, _chat_id: int):
-    """
-    - If payload is 'why++' or the built text is long → send a full message (and only confirm via popup).
-    - Else → show a short popup.
-    Always return ('ok', 200) so Flask gets a valid response when this return is bubbled up.
-    """
-    try:
-        msg_obj = _cq.get('message') or {}
-        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        cb_id = _cq.get('id')
-        data = _cq.get('data') or ''  # might be raw or inflated by router
-
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
-        longish = (len(why) > 140) or ("Why++" in why.splitlines()[0] if why else False)
-        is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
-
-        if is_deep or longish:
-            # Deep route → post full message, popup only confirms
-            try:
-                _tg_send_message(_chat_id, why)
-            except Exception:
-                pass
-            try:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-            except Exception:
-                pass
-            return ("ok", 200)
-
-        # Short popup route
-        short = why.strip()
-        if len(short) > 190:
-            short = short[:187] + '…'
-            try:
-                _tg_send_message(_chat_id, why)
-            except Exception:
-                pass
-        try:
-            tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
-        except Exception:
-            pass
-        return ("ok", 200)
-    except Exception:
-        # As a fallback, still return a valid response
-        return ("ok", 200)
-# === /MDX WHY handlers ===
-
-
-# === MDX WHY popup (final override with robust fallback) ===
-def _handle_why_popup(_cq: dict, _chat_id: int):
-    try:
-        msg_obj = _cq.get('message') or {}
-        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        cb_id = _cq.get('id')
-        data = _cq.get('data') or ''
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
-        short = (why or '—').strip()
-        is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
-        sent = False
-        # If deep or long text, try to send full message first
-        if is_deep or len(short) > 140:
-            try:
-                _tg_send_message(_chat_id, why)
-                sent = True
-            except Exception:
-                sent = False
-        # Deep: prefer chat message; popup shows confirmation or content if sending failed
-        if is_deep:
-            try:
-                if sent:
-                    tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-                else:
-                    show = short if len(short) <= 190 else (short[:187] + '…')
-                    tg_answer_callback(TELEGRAM_TOKEN, cb_id, show or '—', logger=app.logger)
-            except Exception:
-                pass
-            return ('ok', 200)
-        # Why? popup route
-        if len(short) <= 190:
-            try:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
-            except Exception:
-                pass
-            return ('ok', 200)
-        # Long WHY? → if message failed, show truncated in popup; else just confirm
-        try:
-            if sent:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-            else:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, (short[:187] + '…') if len(short) > 190 else short, logger=app.logger)
-        except Exception:
-            pass
-        return ('ok', 200)
-    except Exception:
-        try:
-            tg_answer_callback(TELEGRAM_TOKEN, _cq.get('id'), 'Why: unavailable', logger=app.logger)
-        except Exception:
-            pass
-        return ('ok', 200)
-# === /MDX WHY popup final ===
