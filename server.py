@@ -7133,58 +7133,75 @@ except Exception:
 
 
 # =====================
-# Metridex SAFE MINPATCH RC3 (text-only)
+# Metridex SAFE MINPATCH RC3c (text-only, WHOIS/RDAP refined)
 # =====================
 try:
-    APP_VERSION = (APP_VERSION + "+rc3-minpatch") if "APP_VERSION" in globals() else "0.3.114-onepass-safe8+rc3-minpatch"
+    APP_VERSION = (APP_VERSION + "+rc3c-minpatch3") if "APP_VERSION" in globals() else "0.3.114-onepass-safe8+rc3c-minpatch3"
 except Exception:
-    APP_VERSION = "0.3.114-onepass-safe8+rc3-minpatch"
+    APP_VERSION = "0.3.114-onepass-safe8+rc3c-minpatch3"
 
 import re as _re
+from datetime import datetime as _dt
 
 def _mdx_sanitize_text_min(text: str) -> str:
     if not isinstance(text, str) or not text.strip():
         return text
     t = text
 
-    # --- 1) Owner=0x0 vs "Owner privileges present"
+    # --- 0) Extract Wayback dates to use later for Created: ~YYYY-MM-DD (Wayback)
+    wb_dates = _re.findall(r'(?mi)Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})', t)
+    wb_dates_sorted = sorted(wb_dates) if wb_dates else []
+    wb_earliest = wb_dates_sorted[0] if wb_dates_sorted else None
+
+    # --- 1) Owner=0x0 -> remove "Owner privileges present"
     try:
-        has_owner_zero = bool(_re.search(r'(?mi)^Owner:\s*0x0{6,}', t))
-        if has_owner_zero:
-            # remove any "Owner privileges present" lines in Signals/Why++
-            t = _re.sub(r'(?mi)^\s*[–-]\s*\d+\s*Owner privileges present\s*\n?', '', t)
-            t = _re.sub(r'(?mi)^\s*Owner privileges present\s*\n?', '', t)
+        owner_zero = bool(_re.search(r'(?mi)^\s*Owner:\s*0x0+(?:[.…]{1}0+)?\b', t))
+        if owner_zero:
+            t = _re.sub(r'(?mi)^.*Owner privileges present.*\n?', '', t)
     except Exception:
         pass
 
-    # --- 2) RDAP wording normalize (avoid "registry has no RDAP" claims)
+    # --- 2) RDAP wording normalize
     try:
-        t = _re.sub(r'(?mi)RDAP unavailable for .* registry', 'RDAP: registry response unavailable', t)
+        # Normalize any phrase "RDAP unavailable for ... registry"
+        t = _re.sub(r'(?mi)RDAP unavailable for .* registry', 'registry response unavailable', t)
+        # If after normalization we have "WHOIS/RDAP: RDAP: ...", collapse duplicate label
+        t = _re.sub(r'(?mi)WHOIS/RDAP:\s*RDAP:\s*', 'WHOIS/RDAP: ', t)
+        # If "WHOIS/RDAP: —" -> "WHOIS/RDAP: no data"
+        t = _re.sub(r'(?mi)WHOIS/RDAP:\s*—', 'WHOIS/RDAP: no data', t)
     except Exception:
         pass
 
-    # --- 3) LP top holder should not equal token address
+    # --- 3) LP top holder must not equal token address
     try:
         m_token = _re.search(r'(?mi)^Scan token:\s*https?://\S+/(?:token|address)/(?P<ca>0x[0-9a-fA-F]{40})', t)
         m_top = _re.search(r'(?mi)^•\s*Top holder:\s*(?P<addr>0x[0-9a-fA-F]{40})\b', t)
+        top_fixed = False
         if m_token and m_top and m_token.group('ca').lower() == m_top.group('addr').lower():
-            # replace suspicious top-holder line
             t = _re.sub(
                 r'(?mi)^•\s*Top holder:\s*0x[0-9a-fA-F]{40}.*\n?',
                 '• Top holder: n/a — (contract/custodian holds LP)\n',
                 t
             )
+            top_fixed = True
+        if top_fixed or _re.search(r'(?mi)^•\s*Top holder:\s*n/a', t):
+            t = _re.sub(r'(?mi)^.*LP concentrated in a single holder:.*\n?', '', t)
     except Exception:
         pass
 
-    # --- 4) Wayback unify: keep earliest "Wayback: first YYYY-MM-DD" if multiples exist
+    # --- 4) Wayback unify inside one message: keep earliest only
     try:
-        dates = _re.findall(r'(?mi)Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})', t)
-        if len(dates) > 1:
-            dates_sorted = sorted(dates)
-            # remove all lines, then write one with the earliest date
+        if len(wb_dates_sorted) > 1:
             t = _re.sub(r'(?mi)^Wayback:\s*first\s*\d{4}-\d{2}-\d{2}\s*\n?', '', t)
-            t = t.rstrip() + f"\nWayback: first {dates_sorted[0]}\n"
+            t = t.rstrip() + f"\nWayback: first {wb_earliest}\n"
+    except Exception:
+        pass
+
+    # --- 5) If Created is blank and we have Wayback earliest, fill with "~YYYY-MM-DD (Wayback)"
+    try:
+        if wb_earliest:
+            # Replace only patterns with Created: —
+            t = _re.sub(r'(?mi)Created:\s*—', f'Created: ~{wb_earliest} (Wayback)', t)
     except Exception:
         pass
 
@@ -7192,5 +7209,5 @@ def _mdx_sanitize_text_min(text: str) -> str:
     t = _re.sub(r"\n{3,}", "\n\n", t)
     return t
 # =====================
-# /Metridex SAFE MINPATCH RC3 (text-only)
+# /Metridex SAFE MINPATCH RC3c (text-only, WHOIS/RDAP refined)
 # =====================
