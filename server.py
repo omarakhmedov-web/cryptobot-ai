@@ -7064,3 +7064,64 @@ try:
 except Exception:
     pass
 # ==== END: CHAT SANITIZER PATCH (final) ====
+
+# ==== BEGIN: OUTBOUND TELEGRAM SANITIZER (requests.post wrapper) ====
+try:
+    import re as _re
+    import requests as _requests
+
+    _ORIG_POST = _requests.post
+
+    def _mdx_text_sanitize_core(text: str) -> str:
+        try:
+            t = str(text or "")
+            if not t.strip():
+                return t
+
+            # LP-lite: contract holder => not EOA wording
+            if _re.search(r'(?mi)Top holder type:\s*contract', t):
+                t = _re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', t)
+
+            # Wayback: if no Domain present in same message, remove "No Wayback snapshots"
+            has_domain = bool(_re.search(r'(?mi)^\s*Domain\s*:\s*\S+', t))
+            if not has_domain:
+                t = _re.sub(r'(?mi)(;?\s*)No\s+Wayback\s+snapshots', '', t)
+                t = _re.sub(r'\s*;\s*(\n|$)', r'\1', t)
+
+            # WHY popup: if bare "Risk score: XX/100" line is present with no context,
+            # and message mentions "No pools|NOT TRADABLE|No liquidity", force 80/100; otherwise drop the line to avoid contradictions.
+            if _re.search(r'(?m)^Risk score:\s*\d{1,3}/100\s*$', t):
+                if _re.search(r'(?mi)NOT\s+TRADABLE|No\s+active\s+pools|No\s+liquidity|No\s+pools\s+found', t):
+                    t = _re.sub(r'(?m)^Risk score:\s*\d{1,3}/100\s*$', 'Risk score: 80/100', t)
+                else:
+                    # drop ambiguous local score
+                    t = _re.sub(r'(?m)^Risk score:\s*\d{1,3}/100\s*$', '', t)
+                    t = _re.sub(r'\n{3,}', '\n\n', t).strip()
+
+            return t
+        except Exception:
+            return text
+
+    def _mdx_patch_payload(payload):
+        if isinstance(payload, dict):
+            for key in ('text', 'caption'):
+                if key in payload and isinstance(payload[key], str):
+                    payload[key] = _mdx_text_sanitize_core(payload[key])
+        return payload
+
+    def post(url, *args, **kwargs):
+        try:
+            if isinstance(url, str) and 'api.telegram.org' in url:
+                # sanitize for sendMessage / answerCallbackQuery / sendDocument (caption)
+                if 'data' in kwargs:
+                    kwargs['data'] = _mdx_patch_payload(kwargs['data'])
+                if 'json' in kwargs:
+                    kwargs['json'] = _mdx_patch_payload(kwargs['json'])
+        except Exception:
+            pass
+        return _ORIG_POST(url, *args, **kwargs)
+
+    _requests.post = post
+except Exception:
+    pass
+# ==== END: OUTBOUND TELEGRAM SANITIZER (requests.post wrapper) ====
