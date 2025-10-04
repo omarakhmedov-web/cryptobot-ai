@@ -4,7 +4,7 @@ import re
 import time
 from urllib.parse import urlparse, quote_plus
 
-from utils import http_get_json, http_post_json, rdap_domain, wayback_first_capture, ssl_certificate_info, format_kv, locale_text as _tt, get_known_domain_for_address
+from utils import http_get_json, http_post_json, rdap_domain, wayback_first_capture, ssl_certificate_info, format_kv, locale_text as _t, get_known_domain_for_address
 
 DEX_BASE = os.environ.get("DEX_BASE", "https://api.dexscreener.com").rstrip("/")
 
