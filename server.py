@@ -76,7 +76,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+cleanfixed")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+cleanfixed+release-g")
 
 
 # --- Feature flags (ENV) ---
@@ -2260,6 +2260,7 @@ def _sanitize_lp_claims(text: str) -> str:
 
 def _send_text(chat_id, text, **kwargs):
     text = mdx_postprocess_text(text, chat_id)
+    text = mdx_postprocess_text(text, chat_id)
 
     try:
         text = _mdx_sanitize_text_min(text)
@@ -3167,7 +3168,9 @@ def _wrap_kv_line(prefix: str, items, width: int = 96, indent: int = 2) -> str:
 def _append_verdict_block(addr, text):
     score, label, rs = _risk_verdict(addr, text)
     try:
-        RISK_CACHE[(addr or "").lower()] = {
+        key = (addr or '').lower()
+        if ADDR_RE.fullmatch(key or ''):
+            RISK_CACHE[key] = {
             "score": score, "label": label,
             "neg": rs.get("neg", []), "pos": rs.get("pos", []),
             "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])
@@ -4023,11 +4026,14 @@ def _answer_why_quickly(cq, addr_hint=None):
     try:
         msg_obj = cq.get("message", {}) or {}
         text = msg_obj.get("text") or ""
-        addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
+            # Prefer addr from callback data
+        data = str(cq.get('data') or '')
+        maddr = ADDR_RE.search(data) if hasattr(ADDR_RE, 'search') else None
+        addr = ((maddr.group(0) if maddr else None) or (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
         # Use cached canonical risk if available to keep WHY consistent with Summary
         try:
             key = (addr or '').lower()
-            info = RISK_CACHE.get(key) if key else None
+            info = (RISK_CACHE.get(key) if (key and ADDR_RE.fullmatch(key)) else None)
             if isinstance(info, dict) and 'score' in info and 'label' in info:
                 pairs_neg = list(zip(info.get('neg') or [], info.get('w_neg') or []))
                 pairs_pos = list(zip(info.get('pos') or [], info.get('w_pos') or []))
@@ -6973,6 +6979,10 @@ try:
     if callable(_SEND_TEXT_PREV):
         def tg_send_text(token, chat_id, text, **kw):
             try:
+                try:
+                    text = mdx_postprocess_text(text, chat_id)
+                except Exception:
+                    pass
                 if ("LP lock (lite)" in str(text) and
                     "Top holder type: contract" in str(text) and
                     "Verdict:" in str(text) and
@@ -7046,6 +7056,7 @@ try:
     if '_send_text' in globals() and callable(_send_text):
         _ORIG_SEND_TEXT = _send_text
         def _send_text(chat_id, text, *args, **kwargs):
+    text = mdx_postprocess_text(text, chat_id)
             try:
                 text = _mdx_chat_sanitize(text, chat_id)
             except Exception:
