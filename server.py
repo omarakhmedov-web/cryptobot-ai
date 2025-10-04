@@ -4221,13 +4221,28 @@ def webhook(secret):
 
         if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
 
-            return _answer_why_deep(cq)
+            _answer_why_deep(cq)
+
+            return ("ok", 200)
 
         if isinstance(data, str) and (data.startswith("why?") or data == "why" or data.startswith("why")):
 
-            return _handle_why_popup(cq, chat_id)
+            _handle_why_popup(cq, chat_id)
+
+            return ("ok", 200)
 
         # === /Mobile Why ===
+
+        # === Mobile LP routing (fixed) ===
+
+        if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:") or data.startswith("lpmore")):
+
+            _lp_send_deep(cq)
+
+            return ("ok", 200)
+
+        # === /Mobile LP ===
+
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
             if orig:
@@ -5694,9 +5709,6 @@ def _handle_kbforce(chat_id, bot=None):
             bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
     except Exception as e:
         print("KBFORCE_SEND_ERROR", e)
-
-def _btn_url(text, url):
-    return {"text": text, "url": url}
 
 def build_buy_keyboard_priced():
     links = {
