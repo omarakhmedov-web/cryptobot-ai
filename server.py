@@ -76,7 +76,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+cleanfixed+release-g")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+cleanfixed+release-g+fixparen")
 
 
 # --- Feature flags (ENV) ---
@@ -4029,7 +4029,16 @@ def _answer_why_quickly(cq, addr_hint=None):
             # Prefer addr from callback data
         data = str(cq.get('data') or '')
         maddr = ADDR_RE.search(data) if hasattr(ADDR_RE, 'search') else None
-        addr = ((maddr.group(0) if maddr else None) or (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
+                # Extract addr from callback_data first; then fall back to hints/cache/text
+        data = str(cq.get('data') or '')
+        maddr = ADDR_RE.search(data) if hasattr(ADDR_RE, 'search') else None
+        addr = (
+            (maddr.group(0) if maddr else None)
+            or (
+                (addr_hint or msg2addr.get(str(msg_obj.get('message_id'))) or _extract_addr_from_text(text) or '')
+            ).lower()
+        )
+
         # Use cached canonical risk if available to keep WHY consistent with Summary
         try:
             key = (addr or '').lower()
