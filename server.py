@@ -4211,6 +4211,33 @@ def webhook(secret):
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
+
+            # === Precise WHY/LP routing (fixed) ===
+
+            if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
+
+                return _answer_why_deep(cq)
+
+            if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:") or data.startswith("lpmore")):
+
+                try:
+
+                    _lp_send_deep(cq)
+
+                finally:
+
+                    try:
+
+                        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "Sent details", logger=app.logger)
+
+                    except Exception:
+
+                        pass
+
+                return ("ok", 200)
+
+            # === /Precise routing ===
+
         msg_obj = cq.get("message", {})
         if ALLOWED_CHAT_IDS and str(chat_id) not in ALLOWED_CHAT_IDS:
             return ("ok", 200)
@@ -5630,9 +5657,6 @@ except Exception:
     pass
 
 # --- injected buttonsfix: build URL inline keyboard for /buy ---
-def _btn_url(text, url):
-    return {"text": text, "url": url}
-
 def build_buy_keyboard(links: dict):
     # links keys: deep, daypass, pro, teams (values must be full https URLs)
     rows = []
@@ -5709,6 +5733,9 @@ def _handle_kbforce(chat_id, bot=None):
             bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
     except Exception as e:
         print("KBFORCE_SEND_ERROR", e)
+
+def _btn_url(text, url):
+    return {"text": text, "url": url}
 
 def build_buy_keyboard_priced():
     links = {
