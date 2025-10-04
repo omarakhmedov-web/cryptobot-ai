@@ -1926,54 +1926,45 @@ def _extract_why_block_from_message(_txt: str) -> str:
     except Exception:
         return ""
 
+
 def _handle_why_popup(_cq: dict, _chat_id: int):
-    """Show Why text as a modal alert (doesn't auto-dismiss). If too long, send full text as a message."""
+    """Show Why text as a modal alert (doesn't auto-dismiss). If too long, also send full text as a message."""
     try:
         msg_obj = _cq.get("message") or {}
-        txt = (msg_obj.get("text") or "")
+        txt = (msg_obj.get("text") or msg_obj.get("caption") or "")
         cb_id = _cq.get("id")
-        why_block = _extract_why_block_from_message(txt) or "Why++ factors: n/a"
-        # Telegram alert limit is ~200 chars; keep it safe around 190
-        short = why_block.strip()
+        # 1) Prefer contextual reasons per block; fallback to legacy Why++ extractor
+        why_block = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or "Why++ factors: n/a"
+        short = (why_block or "—").strip()
         limit = 190
         truncated = False
         if len(short) > limit:
             short = short[:limit-1].rstrip() + "…"
             truncated = True
-        # Use Telegram API directly to guarantee show_alert=True
+        # 2) Answer as non-disappearing alert
         try:
             import requests as _rq
             _rq.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
-                json={"callback_query_id": cb_id, "text": short, "show_alert": True},
+                json={"callback_query_id": cb_id, "text": short or "—", "show_alert": True},
                 timeout=6,
-                headers={"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
             )
         except Exception:
-            # Silent fallback
+            # fallback to helper if available
             try:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short, show_alert=True, logger=app.logger)  # type: ignore
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or "—", logger=app.logger)
             except Exception:
                 pass
-        # If truncated, send the full block into chat so it can be fully read and scrolled
-        if truncated:
+        # 3) If truncated, also send the full Why text into chat
+        if truncated and why_block:
             try:
-                _send_text(_chat_id, why_block, logger=app.logger)
+                _tg_send_message(_chat_id, why_block)
             except Exception:
                 pass
-        return ("ok", 200)
-    except Exception as _e:
-        try:
-            _admin_debug(_chat_id, f"why-popup error: {type(_e).__name__}: {_e}")
-        except Exception:
-            pass
-        try:
-            tg_answer_callback(TELEGRAM_TOKEN, (_cq or {}).get("id"), "error", logger=app.logger)  # type: ignore
-        except Exception:
-            pass
-        return ("ok", 200)
-# === /Why helper ===
-# === Send-time LP filter ===
+        return True
+    except Exception:
+        return False
+
 def _is_lp_mini_only(text: str) -> bool:
     try:
         if not isinstance(text, str): return False
