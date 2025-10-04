@@ -5601,6 +5601,32 @@ def _onchain_inspect(addr: str):
 # === PATCH: uptime & polydebug guard ===
 try:
     from flask import request, Response
+
+    # === Metridex: safe Telegram sender (callbacks) ===
+    try:
+        import requests as _requests
+    except Exception:
+        _requests = None
+
+    def _safe_tg_send(chat_id, text, reply_markup=None):
+        try:
+            t = str(text or "")
+            try:
+                t = _mdx_chat_sanitize(t, chat_id) if ' _mdx_chat_sanitize' in globals() else t
+            except Exception:
+                pass
+            token = (globals().get('TELEGRAM_TOKEN') or os.getenv('TELEGRAM_TOKEN') or '')
+            if not token or _requests is None:
+                return None
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            payload = {"chat_id": int(chat_id), "text": t, "parse_mode": "HTML"}
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            _requests.post(url, json=payload, timeout=8)
+        except Exception:
+            return None
+        return True
+    # === /safe sender ===
     __ = request  # silence linters
     # Root OK for UptimeRobot (HEAD/GET)
     @app.route("/", methods=["GET","HEAD"])
@@ -7511,7 +7537,7 @@ def _answer_why_deep(cq, addr_hint=None):
         why_long = _extract_why_contextual(text) or _extract_why_block_from_message(text) or 'Why++: no factors yet — run On‑chain or More details first.'
         if chat_id:
             try:
-                _tg_send_message(chat_id, why_long)
+                _safe_tg_send(chat_id, why_long)
             except Exception:
                 pass
         try:
@@ -7554,7 +7580,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         if is_deep or longish:
             # Deep route → post full message, popup only confirms
             try:
-                _tg_send_message(_chat_id, why)
+                _safe_tg_send(_chat_id, why)
             except Exception:
                 pass
             try:
@@ -7568,7 +7594,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         if len(short) > 190:
             short = short[:187] + '…'
             try:
-                _tg_send_message(_chat_id, why)
+                _safe_tg_send(_chat_id, why)
             except Exception:
                 pass
         try:
@@ -7596,7 +7622,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         # If deep or long text, try to send full message first
         if is_deep or len(short) > 140:
             try:
-                _tg_send_message(_chat_id, why)
+                _safe_tg_send(_chat_id, why)
                 sent = True
             except Exception:
                 sent = False
@@ -7674,7 +7700,7 @@ def _lp_send_deep(cq):
         cb_id = cq.get('id')
         payload = _extract_lp_block(text) or "LP: n/a"
         if chat_id:
-            try: _tg_send_message(chat_id, payload)
+            try: _safe_tg_send(chat_id, payload)
             except Exception: pass
         try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
         except Exception: pass
@@ -7693,7 +7719,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
         # Deep → send message, popup confirm; Short → show popup, else fallback to chat + confirm
         if is_deep or len(why) > 140:
-            try: _tg_send_message(_chat_id, why)
+            try: _safe_tg_send(_chat_id, why)
             except Exception: pass
             try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
             except Exception: pass
@@ -7701,7 +7727,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         short = why.strip()
         if len(short) > 190:
             short = short[:187] + '…'
-            try: _tg_send_message(_chat_id, why)
+            try: _safe_tg_send(_chat_id, why)
             except Exception: pass
         try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
         except Exception: pass
