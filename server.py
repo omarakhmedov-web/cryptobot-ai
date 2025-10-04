@@ -4218,9 +4218,7 @@ def webhook(secret):
         # Inflate hashed payloads early
 
         # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
-        if isinstance(data, str) and (data.startswith('why++') or data.startswith('why2')):
-            return _answer_why_deep(cq)
-        if isinstance(data, str) and (data.startswith('why?') or data == 'why' or data.startswith('why')):
+        if isinstance(data, str) and (data.startswith("why") or data.startswith("why2")):
             return _handle_why_popup(cq, chat_id)
         # === /Mobile Why ===
         if data.startswith("cb:"):
@@ -7490,6 +7488,16 @@ def _answer_why_deep(cq, addr_hint=None):
             except Exception:
                 pass
         try:
+            # AUTOFIX: send deep details to chat before showing popup
+            try:
+                _dl_raw = cq.get('data') if isinstance(cq, dict) else None
+                dl = (_dl_raw or '').lower() if isinstance(_dl_raw, str) else ''
+                if (('why' in dl and '++' in dl) or dl.startswith('why2') or 'whypp' in dl):
+                    _answer_why_deep(cq)
+                elif (dl.startswith('lp') or dl.startswith('lp:') or 'lpmore' in dl or dl.startswith('lp_')):
+                    _lp_send_deep(cq)
+            except Exception:
+                pass
             tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), 'Sent details', logger=app.logger)
         except Exception:
             pass
