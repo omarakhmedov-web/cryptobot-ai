@@ -6,47 +6,6 @@ import time
 import socket
 import tempfile
 import hashlib
-
-# ===== Metridex anti-spam & dedup guards (2025-10-04 v2) =====
-try:
-    SafeCache  # type: ignore
-except NameError:
-    class SafeCache:
-        def __init__(self, ttl=30):
-            self.ttl = ttl
-            self._d = {}
-        def get(self, k, default=None):
-            import time
-            v = self._d.get(k)
-            if not v: 
-                return default
-            ts, val = v
-            if time.time() - ts > self.ttl:
-                self._d.pop(k, None)
-                return default
-            return val
-        def set(self, k, v):
-            import time
-            self._d[k] = (time.time(), v)
-            return v
-
-_update_dedup = SafeCache(ttl=35)
-_send_dedup = SafeCache(ttl=20)
-
-def _seen_update_dedup(key: str) -> bool:
-    if _update_dedup.get(key, None) is not None:
-        return True
-    _update_dedup.set(key, True)
-    return False
-
-def _should_send_text(chat_id: int, text: str) -> bool:
-    key = f"{chat_id}:{hashlib.sha1(text.strip().encode('utf-8')).hexdigest()}"
-    if _send_dedup.get(key, None) is not None:
-        return False
-    _send_dedup.set(key, True)
-    return True
-# ===== end guards =====
-
 import threading
 import unicodedata
 from datetime import datetime
@@ -1973,7 +1932,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         msg_obj = _cq.get("message") or {}
         txt = (msg_obj.get("text") or "")
         cb_id = _cq.get("id")
-        why_block = _extract_why_block_from_message(txt) or "Why++: no factors yet — run On‑chain or More details first."
+        why_block = _extract_why_block_from_message(txt) or "Why++ factors: n/a"
         # Telegram alert limit is ~200 chars; keep it safe around 190
         short = why_block.strip()
         limit = 190
@@ -2038,8 +1997,6 @@ def _is_compact_qs(text: str) -> bool:
         if "Metridex QuickScan (MVP+)" not in t:
             return False
         if ("Trust verdict:" in t) or ("Why++ factors" in t) or ("On-chain" in t):
-            if _guard_callback_once('whypp', callback):
-                return _answer_ok('Sent details')
             return False
         return True
     except Exception:
@@ -2302,9 +2259,6 @@ def _sanitize_lp_claims(text: str) -> str:
 
 
 def _send_text(chat_id, text, **kwargs):
-    # anti-duplicate guard
-    if not _should_send_text(int(chat_id), str(text)):
-        return None
     text = mdx_postprocess_text(text, chat_id)
     text = mdx_postprocess_text(text, chat_id)
 
@@ -5601,43 +5555,36 @@ def _onchain_inspect(addr: str):
 # === PATCH: uptime & polydebug guard ===
 try:
     from flask import request, Response
-
-    # === Metridex: safe Telegram sender (callbacks) ===
-    try:
-        import requests as _requests
-    except Exception:
-        _requests = None
-
-    def _safe_tg_send(chat_id, text, reply_markup=None):
-        try:
-            t = str(text or "")
-            try:
-                t = _mdx_chat_sanitize(t, chat_id) if ' _mdx_chat_sanitize' in globals() else t
-            except Exception:
-                pass
-            token = (globals().get('TELEGRAM_TOKEN') or os.getenv('TELEGRAM_TOKEN') or '')
-            if not token or _requests is None:
-                return None
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            payload = {"chat_id": int(chat_id), "text": t, "parse_mode": "HTML"}
-            if reply_markup:
-                payload["reply_markup"] = reply_markup
-            _requests.post(url, json=payload, timeout=8)
-        except Exception:
-            return None
-        return True
-    # === /safe sender ===
     __ = request  # silence linters
     # Root OK for UptimeRobot (HEAD/GET)
     @app.route("/", methods=["GET","HEAD"])
     def root_ok():
+        if request.method == "HEAD":
+            return Response(status=200)
+        return "OK", 200
+except Exception as _e:
+    # If Flask app not yet defined here, ignore — main app likely declares routes elsewhere.
+    pass
 
-        try:
-            if request.method == 'HEAD':
-                return '', 200
-        except Exception:
-            pass
-        return 'OK', 200
+# Optionally disable noisy polydebug via env (without failing init)
+try:
+    if os.environ.get("POLYDEBUG","0") in ("0","false","False",""):
+        os.environ.pop("POLYDEBUG_ADDR", None)
+        os.environ.pop("POLYDEBUG_TX", None)
+except Exception:
+    pass
+# === /PATCH: uptime & polydebug guard ===
+
+
+# --- Health route for uptime monitors (GET/HEAD /) ---
+try:
+    from flask import request, Response
+    if 'app' in globals():
+        @app.route("/", methods=["GET","HEAD"])
+        def __root_health__():
+            if request.method == "HEAD":
+                return Response(status=200)
+            return "OK", 200
 except Exception:
     pass
 # --- /Health route ---
@@ -7534,10 +7481,10 @@ def _answer_why_deep(cq, addr_hint=None):
         msg_obj = cq.get('message', {}) or {}
         text = (msg_obj.get('text') or msg_obj.get('caption') or '')
         chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
-        why_long = _extract_why_contextual(text) or _extract_why_block_from_message(text) or 'Why++: no factors yet — run On‑chain or More details first.'
+        why_long = _extract_why_contextual(text) or _extract_why_block_from_message(text) or 'Why++ factors: n/a'
         if chat_id:
             try:
-                _safe_tg_send(chat_id, why_long)
+                _tg_send_message(chat_id, why_long)
             except Exception:
                 pass
         try:
@@ -7546,8 +7493,6 @@ def _answer_why_deep(cq, addr_hint=None):
                 _dl_raw = cq.get('data') if isinstance(cq, dict) else None
                 dl = (_dl_raw or '').lower() if isinstance(_dl_raw, str) else ''
                 if (('why' in dl and '++' in dl) or dl.startswith('why2') or 'whypp' in dl):
-                    if _guard_callback_once('whypp', callback):
-                        return _answer_ok('Sent details')
                     _answer_why_deep(cq)
                 elif (dl.startswith('lp') or dl.startswith('lp:') or 'lpmore' in dl or dl.startswith('lp_')):
                     _lp_send_deep(cq)
@@ -7573,14 +7518,14 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         cb_id = _cq.get('id')
         data = _cq.get('data') or ''  # might be raw or inflated by router
 
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++: no factors yet — run On‑chain or More details first.'
+        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
         longish = (len(why) > 140) or ("Why++" in why.splitlines()[0] if why else False)
         is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
 
         if is_deep or longish:
             # Deep route → post full message, popup only confirms
             try:
-                _safe_tg_send(_chat_id, why)
+                _tg_send_message(_chat_id, why)
             except Exception:
                 pass
             try:
@@ -7594,7 +7539,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         if len(short) > 190:
             short = short[:187] + '…'
             try:
-                _safe_tg_send(_chat_id, why)
+                _tg_send_message(_chat_id, why)
             except Exception:
                 pass
         try:
@@ -7615,14 +7560,14 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
         cb_id = _cq.get('id')
         data = _cq.get('data') or ''
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++: no factors yet — run On‑chain or More details first.'
+        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
         short = (why or '—').strip()
         is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
         sent = False
         # If deep or long text, try to send full message first
         if is_deep or len(short) > 140:
             try:
-                _safe_tg_send(_chat_id, why)
+                _tg_send_message(_chat_id, why)
                 sent = True
             except Exception:
                 sent = False
@@ -7700,7 +7645,7 @@ def _lp_send_deep(cq):
         cb_id = cq.get('id')
         payload = _extract_lp_block(text) or "LP: n/a"
         if chat_id:
-            try: _safe_tg_send(chat_id, payload)
+            try: _tg_send_message(chat_id, payload)
             except Exception: pass
         try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
         except Exception: pass
@@ -7719,7 +7664,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
         # Deep → send message, popup confirm; Short → show popup, else fallback to chat + confirm
         if is_deep or len(why) > 140:
-            try: _safe_tg_send(_chat_id, why)
+            try: _tg_send_message(_chat_id, why)
             except Exception: pass
             try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
             except Exception: pass
@@ -7727,7 +7672,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         short = why.strip()
         if len(short) > 190:
             short = short[:187] + '…'
-            try: _safe_tg_send(_chat_id, why)
+            try: _tg_send_message(_chat_id, why)
             except Exception: pass
         try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
         except Exception: pass
@@ -7764,8 +7709,6 @@ def _mdx_pre_router():
         except Exception:
             pass
         if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
-            if _guard_callback_once('whypp', callback):
-                return _answer_ok('Sent details')
             _answer_why_deep(cq)
             return ("ok", 200)
         if isinstance(data, str) and data.startswith("why"):
@@ -7779,706 +7722,225 @@ def _mdx_pre_router():
         return None
 
 
-def _guard_callback_once(kind: str, callback):
-    try:
-        msg = (callback.get('message') or {})
-        origin_id = msg.get('message_id') or 0
-        chat_id = (msg.get('chat') or {}).get('id') or 0
-        key = f"{kind}:{chat_id}:{origin_id}"
-        if _seen_update_dedup(key):
-            return True
-    except Exception:
-        pass
-    return False
 
-
-# ==== MDX FINAL OVERRIDES (2025-10-04) ====
-# Robust WHY popup and LP deep sender. Placed at EOF to override earlier defs.
-
-def _mdx_infer_chain_from_text(_txt: str) -> str:
-    try:
-        t = (_txt or "").lower()
-        for ch, host in EXPLORER_BY_CHAIN.items():
-            if host in t:
-                return ch
-        # Header hint: "on uniswap (ethereum)" or "(bsc)"
-        import re as _re
-        m = _re.search(r"\((ethereum|bsc|polygon|arbitrum|optimism|base|avalanche|fantom)\)", t)
-        if m:
-            return m.group(1).lower()
-    except Exception:
-        pass
-    return "ethereum"
-
-def _mdx_extract_ca_any(_txt: str) -> str:
-    try:
-        # Prefer token link
-        ca = _extract_token_addr(_txt)
-        if ca: return ca
-        import re as _re
-        m = _re.search(r"(0x[a-fA-F0-9]{40})", _txt or "")
-        return m.group(1).lower() if m else ""
-    except Exception:
-        return ""
-
-def _handle_why_popup(_cq: dict, _chat_id: int):
-    """WHY? + WHY++ handler with contextual extraction and safe fallbacks."""
-    try:
-        msg_obj = _cq.get('message') or {}
-        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        cb_id = _cq.get('id')
-        data = _cq.get('data') or ''
-
-        # Build WHY text: prefer explicit Why++ block, else contextual
-        why = ""
-        try:
-            why = _extract_why_block_from_message(txt) or _extract_why_contextual(txt)
-        except Exception:
-            pass
-        if not why:
-            import re as _re
-            m = _re.search(r"(?mi)Trust verdict:\s*([^\n]+)", txt or "")
-            if m:
-                why = "Why (summary)\n" + m.group(1).strip()
-
-        # Deep?
-        is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
-        if is_deep or (why and len(why) > 140):
-            if why:
-                try: _safe_tg_send(_chat_id, why)
-                except Exception: pass
-            try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-            except Exception: pass
-            return ("ok", 200)
-
-        short = (why or '—').strip()
-        if len(short) > 190 and why:
-            short = short[:187] + '…'
-            try: _safe_tg_send(_chat_id, why)
-            except Exception: pass
-        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
-        except Exception: pass
-        return ("ok", 200)
-    except Exception:
-        return ("ok", 200)
-
-def _lp_send_deep(cq):
-    """LP button → send full '🔒 LP lock (lite)' block to chat. If absent, craft minimal block."""
-    try:
-        msg_obj = cq.get('message', {}) or {}
-        text = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
-        cb_id = cq.get('id')
-        payload = ""
-        try:
-            payload = _extract_lp_block(text)
-        except Exception:
-            payload = ""
-
-        if not payload:
-            chain = _mdx_infer_chain_from_text(text)
-            ca = _mdx_extract_ca_any(text)
-            if ca:
-                try:
-                    payload = _replace_lp_with_unknown(text, chain, ca)
-                except Exception:
-                    payload = (f"🔒 LP lock (lite) — chain: {chain}\n"
-                               f"Verdict: ⚪ unknown (no LP data)\n"
-                               f"Scan token: https://{EXPLORER_BY_CHAIN.get(chain,'etherscan.io')}/token/{ca}")
-            else:
-                payload = ("🔒 LP lock (lite)\nNo LP data in this message. "
-                           "Tap ‘More details’ first.")
-
-        if chat_id and payload:
-            try: _safe_tg_send(chat_id, payload)
-            except Exception: pass
-        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-        except Exception: pass
-        return True
-    except Exception:
-        return False
-# ==== /FINAL OVERRIDES ====
-
-
-
-# ==== MDX FINAL-FINAL OVERRIDES (2025-10-04B) ====
-def _mdx_pick_verdict_and_score(_txt: str):
-    try:
-        import re as _re
-        t = _txt or ""
-        ver = ""
-        sc = ""
-        m = _re.search(r"(?mi)^\s*(Trust verdict|Overall risk)\s*:\s*([^\n]+)", t)
-        if m:
-            ver = m.group(2).strip()
-        m = _re.search(r"(?mi)Risk\s*score\s*:\s*([0-9]{1,3}\s*/\s*100)", t)
-        if m:
-            sc = m.group(1).replace(" ", "")
-        return ver, sc
-    except Exception:
-        return "", ""
-
-def _mdx_extract_signals_or_positives(_txt: str):
-    try:
-        import re as _re
-        t = _txt or ""
-        m_neg = _re.search(r"(?mi)^\s*⚠️\s*Signals\s*:\s*(.+)$", t)
-        m_pos = _re.search(r"(?mi)^\s*✅\s*Positives\s*:\s*(.+)$", t)
-        out = []
-        if m_neg and m_neg.group(1).strip() and m_neg.group(1).strip() != "—":
-            out += [ "- " + x.strip() for x in _re.split(r";|•|-", m_neg.group(1)) if x.strip()]
-        if m_pos and m_pos.group(1).strip() and m_pos.group(1).strip() != "—":
-            out += [ "+ " + x.strip() for x in _re.split(r";|•|-", m_pos.group(1)) if x.strip()]
-        return "\n".join(out)
-    except Exception:
-        return ""
-
-def _mdx_lp_build_from_text(_txt: str) -> str:
-    """Heuristic LP-lite builder from Summary/On-chain lines if full block is absent."""
-    try:
-        import re as _re
-        t = _txt or ""
-        ch = _mdx_infer_chain_from_text(t)
-        ca = _mdx_extract_ca_any(t)
-        # picks
-        pct = None
-        m = _re.search(r"(?i)topHolder\s*=\s*([0-9.]+)%", t)
-        if m: pct = float(m.group(1))
-        th_label = ""
-        m = _re.search(r"(?i)Top holder type\s*:\s*(EOA|contract|custodian)", t)
-        if m: th_label = m.group(1).lower()
-        ren = ""
-        m = _re.search(r"(?i)Renounced\s*:\s*(yes|no|n/a)", t)
-        if m: ren = m.group(1).lower()
-        proxy = ""
-        m = _re.search(r"(?i)Proxy\s*:\s*(yes|no|n/a)", t)
-        if m: proxy = m.group(1).lower()
-        holders = ""
-        m = _re.search(r"(?i)Holders\s*\(LP token\)\s*:\s*([0-9,]+)", t)
-        if m: holders = m.group(1)
-
-        # verdict
-        verdict = "⚪ unknown"
-        if pct is not None and th_label:
-            if th_label == "eoa" and pct >= 30:
-                verdict = "🔴 high risk (EOA holds LP)"
-            elif th_label in ("contract", "custodian"):
-                verdict = "🟡 mixed (contract/custodian holds LP)"
-        block = [f"🔒 LP lock (lite) — chain: {ch}",
-                 f"Verdict: {verdict}"]
-        if ren: block.append(f"• Renounced: {ren}")
-        if proxy: block.append(f"• Proxy: {proxy}")
-        if holders: block.append(f"• Holders (LP token): {holders}")
-        if pct is not None and th_label:
-            block.append(f"• Top holder type: {th_label}")
-            block.append(f"• LP concentration (top holder): {pct:.2f}%")
-        if ca:
-            block.append(f"Scan token: https://{EXPLORER_BY_CHAIN.get(ch,'etherscan.io')}/token/{ca}")
-        return "\n".join(block)
-    except Exception:
-        return ""
-
-def _handle_why_popup(_cq: dict, _chat_id: int):
-    try:
-        msg_obj = _cq.get('message') or {}
-        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        cb_id = _cq.get('id')
-        data = (_cq.get('data') or '').lower()
-
-        # 1) Build WHY (explicit block -> contextual -> signals/positives -> verdict/score)
-        why = ""
-        try: why = _extract_why_block_from_message(txt)
-        except Exception: why = ""
-        if not why:
-            try: why = _extract_why_contextual(txt)
-            except Exception: why = ""
-        if not why:
-            why = _mdx_extract_signals_or_positives(txt) or ""
-            if why: why = "Why (summary)\n" + why
-        if not why:
-            ver, sc = _mdx_pick_verdict_and_score(txt)
-            if ver or sc:
-                why = "Why (summary)\n" + " • ".join([x for x in [ver, (f"Risk score {sc}" if sc else "")] if x])
-
-        # 2) Deep?
-        is_deep = data.startswith('why++') or data.startswith('why2') or data.startswith('whypp')
-        if is_deep or (why and len(why) > 140):
-            if why:
-                try: _safe_tg_send(_chat_id, why)
-                except Exception: pass
-            try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-            except Exception: pass
-            return ("ok", 200)
-
-        short = (why or '—').strip()
-        if len(short) > 190 and why:
-            short = short[:187] + '…'
-            try: _safe_tg_send(_chat_id, why)
-            except Exception: pass
-        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
-        except Exception: pass
-        return ("ok", 200)
-    except Exception:
-        return ("ok", 200)
-
-def _lp_send_deep(cq):
-    try:
-        msg_obj = cq.get('message', {}) or {}
-        text = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
-        cb_id = cq.get('id')
-        payload = ""
-        # Try full block from message
-        try: payload = _extract_lp_block(text)
-        except Exception: payload = ""
-        # If absent, build heuristically
-        if not payload:
-            payload = _mdx_lp_build_from_text(text)
-        if chat_id and payload:
-            try: _safe_tg_send(chat_id, payload)
-            except Exception: pass
-        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-        except Exception: pass
-        return True
-    except Exception:
-        return False
-# ==== /FINAL-FINAL OVERRIDES ====
-
-
-
-# === MDX per-chat caches (EOF safe) ===
-try:
-    _MDX_LAST_DETAILS
-except NameError:
-    _MDX_LAST_DETAILS = SafeCache(ttl=7200)
-try:
-    _MDX_LAST_WHY
-except NameError:
-    _MDX_LAST_WHY = SafeCache(ttl=7200)
-try:
-    _MDX_LAST_LP
-except NameError:
-    _MDX_LAST_LP = SafeCache(ttl=7200)
-
-# === Cache-aware overrides ===
-def _handle_why_popup(_cq: dict, _chat_id: int):
-    try:
-        msg_obj = _cq.get('message') or {}
-        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        cb_id = _cq.get('id')
-        data = (_cq.get('data') or '').lower()
-
-        why = ""
-        try:
-            why = _extract_why_block_from_message(txt) or _extract_why_contextual(txt)
-        except Exception:
-            why = ""
-
-        if not why:
-            try:
-                cached = (_MDX_LAST_WHY.get(f"{_chat_id}") or _MDX_LAST_DETAILS.get(f"{_chat_id}") or "")
-                if cached:
-                    why = _extract_why_block_from_message(cached) or _extract_why_contextual(cached) or ""
-            except Exception:
-                pass
-
-        if not why:
-            s = _mdx_extract_signals_or_positives(txt) or ""
-            if s:
-                why = "Why (summary)\n" + s
-            else:
-                ver, sc = _mdx_pick_verdict_and_score(txt)
-                if ver or sc:
-                    why = "Why (summary)\n" + " • ".join([x for x in [ver, (f"Risk score {sc}" if sc else "")] if x])
-
-        is_deep = data.startswith('why++') or data.startswith('why2') or data.startswith('whypp')
-        if is_deep or (why and len(why) > 140):
-            if why:
-                try: _safe_tg_send(_chat_id, why)
-                except Exception: pass
-            try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-            except Exception: pass
-            return ("ok", 200)
-
-        short = (why or '—').strip()
-        if len(short) > 190 and why:
-            short = short[:187] + '…'
-            try: _safe_tg_send(_chat_id, why)
-            except Exception: pass
-        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
-        except Exception: pass
-        return ("ok", 200)
-    except Exception:
-        return ("ok", 200)
-
-def _lp_send_deep(cq):
-    try:
-        msg_obj = cq.get('message', {}) or {}
-        text = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
-        cb_id = cq.get('id')
-        payload = ""
-        try: payload = _extract_lp_block(text)
-        except Exception: payload = ""
-        if not payload and chat_id:
-            try:
-                cached = _MDX_LAST_LP.get(f"{chat_id}") or _MDX_LAST_DETAILS.get(f"{chat_id}") or ""
-                if cached:
-                    payload = _extract_lp_block(cached) or ""
-            except Exception:
-                pass
-        if not payload:
-            payload = _mdx_lp_build_from_text(text)
-
-        if chat_id and payload:
-            try: _safe_tg_send(chat_id, payload)
-            except Exception: pass
-        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-        except Exception: pass
-        return True
-    except Exception:
-        return False
-
-# Hook caches via _send_text wrapper if available
-try:
-    _SEND_TEXT_PREV = globals().get('tg_send_text')
-    def tg_send_text(chat_id, text, **kwargs):
-        try:
-            t = str(text or "")
-            if "Why++ factors" in t:
-                try:
-                    _MDX_LAST_WHY.set(f"{chat_id}", _extract_why_block_from_message(t) or t)
-                except Exception:
-                    pass
-            if "🔒 LP lock (lite)" in t:
-                try:
-                    _MDX_LAST_LP.set(f"{chat_id}", _extract_lp_block(t) or t)
-                except Exception:
-                    pass
-            if ("More details" in t) or ("On-chain" in t):
-                _MDX_LAST_DETAILS.set(f"{chat_id}", t)
-        except Exception:
-            pass
-        return _SEND_TEXT_PREV(chat_id, text, **kwargs)
-except Exception:
-    pass
-# === /EOF overrides ===
-
-
-
-# === MDX HARD OVERRIDE ROUTER (2025-10-04D) ===
+# ==== MDX MINI HOTFIX (2025-10-05) ====
+# Purpose: make Why?/Why++/LP buttons behave consistently *without* touching existing handlers.
+# Strategy: a tiny before_request hook that intercepts /webhook callback_query and handles 3 keys.
+import re, json, time
 from flask import request
 
-def _mdx_build_why_from_text(_t: str) -> str:
-    try:
-        t = _t or ""
-        # Try explicit
-        try:
-            w = _extract_why_block_from_message(t)
-            if w: return w
-        except Exception:
-            pass
-        try:
-            w = _extract_why_contextual(t)
-            if w: return w
-        except Exception:
-            pass
-        # Fallback: Signals/Positives
-        s = _mdx_extract_signals_or_positives(t)
-        if s:
-            return "Why (summary)\n" + s
-        # Fallback: Verdict/Score
-        ver, sc = _mdx_pick_verdict_and_score(t)
-        bits = []
-        if ver: bits.append(ver)
-        if sc: bits.append(f"Risk score {sc}")
-        if bits:
-            return "Why (summary)\n" + " • ".join(bits)
-        return ""
-    except Exception:
-        return ""
+class _HotfixCache:
+    def __init__(self, ttl=7200):
+        self.ttl = ttl
+        self._d = {}
+    def get(self, k, default=None):
+        v = self._d.get(k)
+        if not v: return default
+        ts, val = v
+        if time.time() - ts > self.ttl:
+            self._d.pop(k, None)
+            return default
+        return val
+    def set(self, k, v):
+        self._d[k] = (time.time(), v)
 
-def tg_answer_callback(token, cb_id, text=None, logger=None):
-    # Safe answer (no raise), silently ignore if missing token
+_HOTFIX_LAST_DETAILS = _HotfixCache(ttl=7200)
+_HOTFIX_DEDUP = _HotfixCache(ttl=35)
+
+def _hotfix_md(txt):
+    # Telegram-safe minimal
+    return str(txt or "").replace("<", "‹").replace(">", "›")
+
+def _hotfix_send(chat_id, text):
     try:
-        import requests as _requests
-        if not token or not cb_id: 
-            return
+        # Prefer project's senders if present
+        if 'tg_send_text' in globals() and callable(globals()['tg_send_text']):
+            return globals()['tg_send_text'](chat_id, text)
+        if '_send_text' in globals() and callable(globals()['_send_text']):
+            return globals()['_send_text'](chat_id, text)
+    except Exception:
+        pass
+    # Fallback raw
+    try:
+        import requests as _rq
+        token = globals().get('TELEGRAM_TOKEN') or os.getenv('TELEGRAM_TOKEN') or ''
+        if not token: return None
+        _rq.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                 json={"chat_id": int(chat_id), "text": _hotfix_md(text), "parse_mode": "HTML"},
+                 timeout=8)
+    except Exception:
+        return None
+
+def _hotfix_answer(cb_id, text=None):
+    try:
+        import requests as _rq
+        token = globals().get('TELEGRAM_TOKEN') or os.getenv('TELEGRAM_TOKEN') or ''
+        if not token or not cb_id: return None
         payload = {"callback_query_id": cb_id}
         if text is not None:
             payload["text"] = str(text)
             payload["show_alert"] = (len(str(text)) > 170)
-        _requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", json=payload, timeout=6)
-    except Exception:
-        pass
-
-@app.before_request
-def _mdx_override_router():
-    try:
-        # Only intercept webhook requests
-        p = request.path or ""
-        if "/webhook" not in p:
-            return None
-        data = request.get_json(silent=True, force=True) or {}
-        cq = data.get("callback_query")
-        if not cq:
-            return None
-
-        # Dedup by callback id
-        try:
-            cb_id = cq.get("id")
-            if cb_id and _seen_update_dedup(f"cb:{cb_id}"):
-                return ("OK", 200)
-        except Exception:
-            pass
-
-        raw_data = (cq.get("data") or "").strip()
-        key = raw_data.split(":")[0].lower()
-        msg_obj = cq.get("message") or {}
-        txt = (msg_obj.get("text") or msg_obj.get("caption") or "")
-        chat_id = (msg_obj.get("chat") or {}).get("id") or cq.get("from",{}).get("id")
-
-        # WHY? (short) and WHY++ (deep)
-        if key in ("why?", "why", "w"):
-            why = _mdx_build_why_from_text(txt)
-            if not why:
-                # try cache
-                cached = (globals().get("_MDX_LAST_WHY").get(f"{chat_id}") if globals().get("_MDX_LAST_WHY") else None) or \
-                         (globals().get("_MDX_LAST_DETAILS").get(f"{chat_id}") if globals().get("_MDX_LAST_DETAILS") else None) or ""
-                if cached:
-                    why = _mdx_build_why_from_text(cached)
-            short = (why or "—").strip()
-            if len(short) > 190 and why:
-                # long -> send full to chat, popup brief
-                try: _safe_tg_send(chat_id, why)
-                except Exception: pass
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
-            else:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or "—", logger=app.logger)
-            return ("OK", 200)
-
-        if key in ("why++","why2","whypp","wd"):
-            why = _mdx_build_why_from_text(txt)
-            if not why:
-                cached = (globals().get("_MDX_LAST_WHY").get(f"{chat_id}") if globals().get("_MDX_LAST_WHY") else None) or \
-                         (globals().get("_MDX_LAST_DETAILS").get(f"{chat_id}") if globals().get("_MDX_LAST_DETAILS") else None) or ""
-                if cached:
-                    why = _mdx_build_why_from_text(cached)
-            if why:
-                try: _safe_tg_send(chat_id, why)
-                except Exception: pass
-            tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
-            return ("OK", 200)
-
-        # LP
-        if key in ("lp","lpmore","lp:","lp_block"):
-            payload = ""
-            try:
-                payload = _extract_lp_block(txt)
-            except Exception:
-                payload = ""
-            if not payload and globals().get("_MDX_LAST_LP"):
-                try:
-                    cached = globals()["_MDX_LAST_LP"].get(f"{chat_id}") or ""
-                    if cached:
-                        payload = _extract_lp_block(cached) or cached
-                except Exception:
-                    pass
-            if not payload and globals().get("_MDX_LAST_DETAILS"):
-                try:
-                    cached = globals()["_MDX_LAST_DETAILS"].get(f"{chat_id}") or ""
-                    if cached:
-                        payload = _extract_lp_block(cached) or ""
-                except Exception:
-                    pass
-            if not payload:
-                # Heuristic build
-                try:
-                    payload = _mdx_lp_build_from_text(txt)
-                except Exception:
-                    payload = ""
-
-            if payload and chat_id:
-                try:
-                    _safe_tg_send(chat_id, payload)
-                except Exception:
-                    pass
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
-                return ("OK", 200)
-            else:
-                # still send minimal
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
-                return ("OK", 200)
-
-        # else: don't intercept
-        return None
+        _rq.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", json=payload, timeout=6)
     except Exception:
         return None
-# === /HARD OVERRIDE ROUTER ===
 
-
-
-# === MDX ULTRA OVERRIDE (2025-10-04E) ===
-from flask import request
-
-def _mdx_key_of(raw):
+def _hotfix_key(raw):
     s = str(raw or "")
     lo = s.lower()
-    # Try JSON
+    # JSON
     try:
-        j = json.loads(s) if (s.startswith("{") or s.startswith("[")) else None
+        j = json.loads(s) if s[:1] in "{[" else None
         if isinstance(j, dict):
             val = (j.get("cmd") or j.get("action") or j.get("k") or j.get("type") or "").lower()
             if val: lo = val
     except Exception:
         pass
-    # Try key=value
+    # key=value
     if "=" in lo and not lo.strip().startswith("{"):
         try:
             parts = dict(p.split("=",1) for p in lo.split("&") if "=" in p)
             lo = (parts.get("cmd") or parts.get("action") or parts.get("k") or lo)
         except Exception:
             pass
-    if "why++" in lo or "whypp" in lo or "why2" in lo:
-        return "whypp"
-    if "why?" in lo or lo.strip() in ("why","w"):
-        return "why"
-    if lo.startswith("lp") or lo == "lp" or "lp_block" in lo:
-        return "lp"
+    if "why++" in lo or "whypp" in lo or "why2" in lo: return "whypp"
+    if "why?" in lo or lo.strip() in ("why","w"): return "why"
+    if lo.startswith("lp") or lo == "lp" or "lp_block" in lo: return "lp"
     return ""
 
-def _mdx_build_why_full(t: str) -> str:
-    try:
-        txt = t or ""
-        # explicit blocks
-        try:
-            w = _extract_why_block_from_message(txt)
-            if w: return w
-        except Exception: pass
-        try:
-            w = _extract_why_contextual(txt)
-            if w: return w
-        except Exception: pass
-        # Signals / Positives lines
-        out = []
-        for lab in ("✅ Positives:", "⚠️ Signals:"):
-            m = re.search(rf"(?mi)^{re.escape(lab)}\s*(.+)$", txt)
-            if m and m.group(1).strip() and m.group(1).strip() != "—":
-                out.append(f"{lab} {m.group(1).strip()}")
-        # Verdict / Risk
-        m = re.search(r"(?mi)^\s*(Trust verdict|Overall risk)\s*:\s*([^\n]+)", txt)
-        ver = m.group(2).strip() if m else ""
-        m = re.search(r"(?mi)Risk\s*score\s*:\s*([0-9]{1,3}\s*/\s*100)", txt)
-        sc = m.group(1).replace(" ", "") if m else ""
-        hdr = "Why (summary)"
-        bits = [ver] + out + ([f"Risk score {sc}"] if sc else [])
-        return hdr + ("\n" + "\n".join(bits) if any(bits) else "")
-    except Exception:
-        return ""
+def _hotfix_build_why(txt):
+    t = txt or ""
+    # explicit 'Why++ factors:' block
+    m = re.search(r"(?si)(Why\+\+\s*factors?:.*?)(?:\n\n|$)", t)
+    if m: return m.group(1).strip()
+    # contextual lines: Positives / Signals
+    lines = []
+    m = re.search(r"(?mi)^\s*✅\s*Positives\s*:\s*(.+)$", t)
+    if m and m.group(1).strip() and m.group(1).strip() != "—":
+        lines.append("✅ Positives: " + m.group(1).strip())
+    m = re.search(r"(?mi)^\s*⚠️\s*Signals\s*:\s*(.+)$", t)
+    if m and m.group(1).strip() and m.group(1).strip() != "—":
+        lines.append("⚠️ Signals: " + m.group(1).strip())
+    # Verdict / Risk (EN + possible RU keys)
+    m = re.search(r"(?mi)^\s*(Trust verdict|Overall risk|Итоговый риск|Вердикт)\s*:\s*([^\n]+)", t)
+    ver = m.group(2).strip() if m else ""
+    m = re.search(r"(?mi)Risk\s*score\s*:\s*([0-9]{1,3}\s*/\s*100|[0-9]{1,3})", t)
+    sc = m.group(1).replace(" ", "") if m else ""
+    bits = []
+    if ver: bits.append(ver)
+    bits += lines
+    if sc: bits.append(f"Risk score {sc}")
+    if bits:
+        return "Why (summary)\n" + "\n".join(bits)
+    return ""
 
-def _mdx_lp_from_any(text: str) -> str:
-    # 1) in-message LP block
-    try:
-        p = _extract_lp_block(text)
-        if p: return p
-    except Exception:
-        pass
-    # 2) heuristic minimal
-    try:
-        t = text or ""
-        ch = _mdx_infer_chain_from_text(t) if ' _mdx_infer_chain_from_text' in globals() else 'ethereum'
-        ca = _mdx_extract_ca_any(t) if ' _mdx_extract_ca_any' in globals() else ''
-        # Top holder type / percent
-        m = re.search(r"(?mi)Top holder type\s*:\s*([A-Za-z]+)", t)
-        th = m.group(1).lower() if m else ""
-        m = re.search(r"(?mi)(LP concentration|Top holder).*?([0-9]{1,2}(?:\.[0-9]+)?)\s*%", t)
-        pct = float(m.group(2)) if m else None
-        m = re.search(r"(?mi)Renounced\s*:\s*(yes|no|n/a)", t)
-        ren = (m.group(1).lower() if m else "")
-        m = re.search(r"(?mi)Proxy\s*:\s*(yes|no|n/a)", t)
-        proxy = (m.group(1).lower() if m else "")
-        m = re.search(r"(?mi)Holders\s*\(LP token\)\s*:\s*([0-9,]+)", t)
-        holders = (m.group(1) if m else "")
-        expl = EXPLORER_BY_CHAIN.get(ch, "etherscan.io")
-        verdict = "⚪ unknown"
-        if th and pct is not None:
-            if th == "eoa" and pct >= 30: verdict = "🔴 high risk (EOA holds LP)"
-            elif th in ("contract","custodian"): verdict = "🟡 mixed (contract/custodian holds LP)"
-        block = [f"🔒 LP lock (lite) — chain: {ch}", f"Verdict: {verdict}"]
-        if ren: block.append(f"• Renounced: {ren}")
-        if proxy: block.append(f"• Proxy: {proxy}")
-        if holders: block.append(f"• Holders (LP token): {holders}")
-        if th: block.append(f"• Top holder type: {th}")
-        if pct is not None: block.append(f"• LP concentration (top holder): {pct:.2f}%")
-        if ca: block.append(f"Scan token: https://{expl}/token/{ca}")
-        return "\n".join(block)
-    except Exception:
-        return ""
+def _hotfix_lp_from_text(txt):
+    t = txt or ""
+    # Existing block in message
+    m = re.search(r"(?s)(🔒\s*LP lock\s*\(lite\).*?)(?:\n\n|$)", t)
+    if m: return m.group(1).strip()
+    # Heuristic minimal
+    # chain hint
+    ch = "ethereum"
+    m = re.search(r"\((ethereum|bsc|polygon|arbitrum|optimism|base|avalanche|fantom)\)", t, re.I)
+    if m: ch = m.group(1).lower()
+    # contract
+    m = re.search(r"(0x[a-fA-F0-9]{40})", t)
+    ca = m.group(1).lower() if m else ""
+    # top holder type / percent
+    th = ""
+    m = re.search(r"(?mi)Top holder type\s*:\s*(EOA|contract|custodian)", t)
+    if m: th = m.group(1).lower()
+    pct = None
+    m = re.search(r"(?mi)(LP concentration|Top holder).*?([0-9]{1,2}(?:\.[0-9]+)?)\s*%", t)
+    if m: 
+        try: pct = float(m.group(2))
+        except: pct = None
+    ren = ""
+    m = re.search(r"(?mi)Renounced\s*:\s*(yes|no|n/a)", t)
+    if m: ren = m.group(1).lower()
+    proxy = ""
+    m = re.search(r"(?mi)Proxy\s*:\s*(yes|no|n/a)", t)
+    if m: proxy = m.group(1).lower()
+
+    verdict = "⚪ unknown"
+    if th and pct is not None:
+        if th == "eoa" and pct >= 30: verdict = "🔴 high risk (EOA holds LP)"
+        elif th in ("contract","custodian"): verdict = "🟡 mixed (contract/custodian holds LP)"
+    block = [f"🔒 LP lock (lite) — chain: {ch}", f"Verdict: {verdict}"]
+    if ren: block.append(f"• Renounced: {ren}")
+    if proxy: block.append(f"• Proxy: {proxy}")
+    if th: block.append(f"• Top holder type: {th}")
+    if pct is not None: block.append(f"• LP concentration (top holder): {pct:.2f}%")
+    if ca:
+        try:
+            expl = EXPLORER_BY_CHAIN.get(ch, "etherscan.io")
+            block.append(f"Scan token: https://{expl}/token/{ca}")
+        except Exception:
+            block.append(f"Scan token: https://etherscan.io/token/{ca}")
+    return "\n".join(block)
 
 @app.before_request
-def _mdx_ultra_override():
+def _mdx_mini_hotfix_router():
     try:
-        p = request.path or ""
-        if "/webhook" not in p: return None
-        data = request.get_json(silent=True, force=True) or {}
-        cq = data.get("callback_query")
-        if not cq: return None
+        # Cache latest details text from inbound messages (so buttons can use it)
+        if request.path and "/webhook" in request.path:
+            upd = request.get_json(silent=True, force=True) or {}
+            if "message" in upd:
+                msg = upd.get("message") or {}
+                txt = msg.get("text") or msg.get("caption") or ""
+                # naive indicator of details/on-chain responses
+                if ("QuickScan" in txt) or ("More details" in txt) or ("On-chain" in txt):
+                    chat_id = (msg.get("chat") or {}).get("id")
+                    if chat_id: _HOTFIX_LAST_DETAILS.set(str(chat_id), txt)
 
-        # dedup
-        try:
+            cq = upd.get("callback_query")
+            if not cq: return None
             cb_id = cq.get("id")
-            if cb_id and _seen_update_dedup(f"ultra:{cb_id}"):
+            if cb_id and _HOTFIX_DEDUP.get(cb_id):
                 return ("OK", 200)
-        except Exception: pass
+            if cb_id: _HOTFIX_DEDUP.set(cb_id, True)
 
-        k = _mdx_key_of(cq.get("data"))
-        if not k: return None
+            data = cq.get("data") or ""
+            key = _hotfix_key(data)
+            if not key: return None
 
-        msg_obj = cq.get("message") or {}
-        txt = (msg_obj.get("text") or msg_obj.get("caption") or "")
-        chat_id = (msg_obj.get("chat") or {}).get("id") or cq.get("from",{}).get("id")
-        cb_id = cq.get("id")
+            msg = cq.get("message") or {}
+            txt = msg.get("text") or msg.get("caption") or ""
+            chat_id = (msg.get("chat") or {}).get("id") or (cq.get("from") or {}).get("id")
 
-        if k == "why":
-            why = _mdx_build_why_full(txt)
-            if not why and globals().get("_MDX_LAST_DETAILS"):
-                cached = globals()["_MDX_LAST_DETAILS"].get(f"{chat_id}") or ""
-                if cached:
-                    why = _mdx_build_why_full(cached)
-            short = (why or "—").strip()
-            if len(short) > 190 and why and chat_id:
-                try: _safe_tg_send(chat_id, why)
-                except Exception: pass
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
-            else:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or "—", logger=app.logger)
-            return ("OK", 200)
+            if key == "why":
+                why = _hotfix_build_why(txt)
+                if not why:
+                    cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
+                    if cached: why = _hotfix_build_why(cached)
+                if why and len(why) > 190:
+                    _hotfix_send(chat_id, why)
+                    _hotfix_answer(cb_id, "Sent details")
+                else:
+                    _hotfix_answer(cb_id, (why or "—"))
+                return ("OK", 200)
 
-        if k == "whypp":
-            why = _mdx_build_why_full(txt)
-            if not why and globals().get("_MDX_LAST_DETAILS"):
-                cached = globals()["_MDX_LAST_DETAILS"].get(f"{chat_id}") or ""
-                if cached:
-                    why = _mdx_build_why_full(cached)
-            if why and chat_id:
-                try: _safe_tg_send(chat_id, why)
-                except Exception: pass
-            tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
-            return ("OK", 200)
+            if key == "whypp":
+                why = _hotfix_build_why(txt)
+                if not why:
+                    cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
+                    if cached: why = _hotfix_build_why(cached)
+                if why:
+                    _hotfix_send(chat_id, why)
+                _hotfix_answer(cb_id, "Sent details")
+                return ("OK", 200)
 
-        if k == "lp":
-            payload = _mdx_lp_from_any(txt)
-            if not payload and globals().get("_MDX_LAST_DETAILS"):
-                cached = globals()["_MDX_LAST_DETAILS"].get(f"{chat_id}") or ""
-                if cached:
-                    payload = _mdx_lp_from_any(cached)
-            if payload and chat_id:
-                try: _safe_tg_send(chat_id, payload)
-                except Exception: pass
-            tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
-            return ("OK", 200)
+            if key == "lp":
+                payload = _hotfix_lp_from_text(txt)
+                if (not payload) and chat_id:
+                    cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
+                    if cached: payload = _hotfix_lp_from_text(cached)
+                if payload:
+                    _hotfix_send(chat_id, payload)
+                _hotfix_answer(cb_id, "Sent details")
+                return ("OK", 200)
 
         return None
     except Exception:
         return None
-# === /MDX ULTRA OVERRIDE ===
+# ==== /MDX MINI HOTFIX ====
