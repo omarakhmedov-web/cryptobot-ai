@@ -8315,3 +8315,170 @@ def _mdx_override_router():
     except Exception:
         return None
 # === /HARD OVERRIDE ROUTER ===
+
+
+
+# === MDX ULTRA OVERRIDE (2025-10-04E) ===
+from flask import request
+
+def _mdx_key_of(raw):
+    s = str(raw or "")
+    lo = s.lower()
+    # Try JSON
+    try:
+        j = json.loads(s) if (s.startswith("{") or s.startswith("[")) else None
+        if isinstance(j, dict):
+            val = (j.get("cmd") or j.get("action") or j.get("k") or j.get("type") or "").lower()
+            if val: lo = val
+    except Exception:
+        pass
+    # Try key=value
+    if "=" in lo and not lo.strip().startswith("{"):
+        try:
+            parts = dict(p.split("=",1) for p in lo.split("&") if "=" in p)
+            lo = (parts.get("cmd") or parts.get("action") or parts.get("k") or lo)
+        except Exception:
+            pass
+    if "why++" in lo or "whypp" in lo or "why2" in lo:
+        return "whypp"
+    if "why?" in lo or lo.strip() in ("why","w"):
+        return "why"
+    if lo.startswith("lp") or lo == "lp" or "lp_block" in lo:
+        return "lp"
+    return ""
+
+def _mdx_build_why_full(t: str) -> str:
+    try:
+        txt = t or ""
+        # explicit blocks
+        try:
+            w = _extract_why_block_from_message(txt)
+            if w: return w
+        except Exception: pass
+        try:
+            w = _extract_why_contextual(txt)
+            if w: return w
+        except Exception: pass
+        # Signals / Positives lines
+        out = []
+        for lab in ("✅ Positives:", "⚠️ Signals:"):
+            m = re.search(rf"(?mi)^{re.escape(lab)}\s*(.+)$", txt)
+            if m and m.group(1).strip() and m.group(1).strip() != "—":
+                out.append(f"{lab} {m.group(1).strip()}")
+        # Verdict / Risk
+        m = re.search(r"(?mi)^\s*(Trust verdict|Overall risk)\s*:\s*([^\n]+)", txt)
+        ver = m.group(2).strip() if m else ""
+        m = re.search(r"(?mi)Risk\s*score\s*:\s*([0-9]{1,3}\s*/\s*100)", txt)
+        sc = m.group(1).replace(" ", "") if m else ""
+        hdr = "Why (summary)"
+        bits = [ver] + out + ([f"Risk score {sc}"] if sc else [])
+        return hdr + ("\n" + "\n".join(bits) if any(bits) else "")
+    except Exception:
+        return ""
+
+def _mdx_lp_from_any(text: str) -> str:
+    # 1) in-message LP block
+    try:
+        p = _extract_lp_block(text)
+        if p: return p
+    except Exception:
+        pass
+    # 2) heuristic minimal
+    try:
+        t = text or ""
+        ch = _mdx_infer_chain_from_text(t) if ' _mdx_infer_chain_from_text' in globals() else 'ethereum'
+        ca = _mdx_extract_ca_any(t) if ' _mdx_extract_ca_any' in globals() else ''
+        # Top holder type / percent
+        m = re.search(r"(?mi)Top holder type\s*:\s*([A-Za-z]+)", t)
+        th = m.group(1).lower() if m else ""
+        m = re.search(r"(?mi)(LP concentration|Top holder).*?([0-9]{1,2}(?:\.[0-9]+)?)\s*%", t)
+        pct = float(m.group(2)) if m else None
+        m = re.search(r"(?mi)Renounced\s*:\s*(yes|no|n/a)", t)
+        ren = (m.group(1).lower() if m else "")
+        m = re.search(r"(?mi)Proxy\s*:\s*(yes|no|n/a)", t)
+        proxy = (m.group(1).lower() if m else "")
+        m = re.search(r"(?mi)Holders\s*\(LP token\)\s*:\s*([0-9,]+)", t)
+        holders = (m.group(1) if m else "")
+        expl = EXPLORER_BY_CHAIN.get(ch, "etherscan.io")
+        verdict = "⚪ unknown"
+        if th and pct is not None:
+            if th == "eoa" and pct >= 30: verdict = "🔴 high risk (EOA holds LP)"
+            elif th in ("contract","custodian"): verdict = "🟡 mixed (contract/custodian holds LP)"
+        block = [f"🔒 LP lock (lite) — chain: {ch}", f"Verdict: {verdict}"]
+        if ren: block.append(f"• Renounced: {ren}")
+        if proxy: block.append(f"• Proxy: {proxy}")
+        if holders: block.append(f"• Holders (LP token): {holders}")
+        if th: block.append(f"• Top holder type: {th}")
+        if pct is not None: block.append(f"• LP concentration (top holder): {pct:.2f}%")
+        if ca: block.append(f"Scan token: https://{expl}/token/{ca}")
+        return "\n".join(block)
+    except Exception:
+        return ""
+
+@app.before_request
+def _mdx_ultra_override():
+    try:
+        p = request.path or ""
+        if "/webhook" not in p: return None
+        data = request.get_json(silent=True, force=True) or {}
+        cq = data.get("callback_query")
+        if not cq: return None
+
+        # dedup
+        try:
+            cb_id = cq.get("id")
+            if cb_id and _seen_update_dedup(f"ultra:{cb_id}"):
+                return ("OK", 200)
+        except Exception: pass
+
+        k = _mdx_key_of(cq.get("data"))
+        if not k: return None
+
+        msg_obj = cq.get("message") or {}
+        txt = (msg_obj.get("text") or msg_obj.get("caption") or "")
+        chat_id = (msg_obj.get("chat") or {}).get("id") or cq.get("from",{}).get("id")
+        cb_id = cq.get("id")
+
+        if k == "why":
+            why = _mdx_build_why_full(txt)
+            if not why and globals().get("_MDX_LAST_DETAILS"):
+                cached = globals()["_MDX_LAST_DETAILS"].get(f"{chat_id}") or ""
+                if cached:
+                    why = _mdx_build_why_full(cached)
+            short = (why or "—").strip()
+            if len(short) > 190 and why and chat_id:
+                try: _safe_tg_send(chat_id, why)
+                except Exception: pass
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
+            else:
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or "—", logger=app.logger)
+            return ("OK", 200)
+
+        if k == "whypp":
+            why = _mdx_build_why_full(txt)
+            if not why and globals().get("_MDX_LAST_DETAILS"):
+                cached = globals()["_MDX_LAST_DETAILS"].get(f"{chat_id}") or ""
+                if cached:
+                    why = _mdx_build_why_full(cached)
+            if why and chat_id:
+                try: _safe_tg_send(chat_id, why)
+                except Exception: pass
+            tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
+            return ("OK", 200)
+
+        if k == "lp":
+            payload = _mdx_lp_from_any(txt)
+            if not payload and globals().get("_MDX_LAST_DETAILS"):
+                cached = globals()["_MDX_LAST_DETAILS"].get(f"{chat_id}") or ""
+                if cached:
+                    payload = _mdx_lp_from_any(cached)
+            if payload and chat_id:
+                try: _safe_tg_send(chat_id, payload)
+                except Exception: pass
+            tg_answer_callback(TELEGRAM_TOKEN, cb_id, "Sent details", logger=app.logger)
+            return ("OK", 200)
+
+        return None
+    except Exception:
+        return None
+# === /MDX ULTRA OVERRIDE ===
