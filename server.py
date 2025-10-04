@@ -8043,3 +8043,123 @@ def _lp_send_deep(cq):
     except Exception:
         return False
 # ==== /FINAL-FINAL OVERRIDES ====
+
+
+
+# === MDX per-chat caches (EOF safe) ===
+try:
+    _MDX_LAST_DETAILS
+except NameError:
+    _MDX_LAST_DETAILS = SafeCache(ttl=7200)
+try:
+    _MDX_LAST_WHY
+except NameError:
+    _MDX_LAST_WHY = SafeCache(ttl=7200)
+try:
+    _MDX_LAST_LP
+except NameError:
+    _MDX_LAST_LP = SafeCache(ttl=7200)
+
+# === Cache-aware overrides ===
+def _handle_why_popup(_cq: dict, _chat_id: int):
+    try:
+        msg_obj = _cq.get('message') or {}
+        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
+        cb_id = _cq.get('id')
+        data = (_cq.get('data') or '').lower()
+
+        why = ""
+        try:
+            why = _extract_why_block_from_message(txt) or _extract_why_contextual(txt)
+        except Exception:
+            why = ""
+
+        if not why:
+            try:
+                cached = (_MDX_LAST_WHY.get(f"{_chat_id}") or _MDX_LAST_DETAILS.get(f"{_chat_id}") or "")
+                if cached:
+                    why = _extract_why_block_from_message(cached) or _extract_why_contextual(cached) or ""
+            except Exception:
+                pass
+
+        if not why:
+            s = _mdx_extract_signals_or_positives(txt) or ""
+            if s:
+                why = "Why (summary)\n" + s
+            else:
+                ver, sc = _mdx_pick_verdict_and_score(txt)
+                if ver or sc:
+                    why = "Why (summary)\n" + " • ".join([x for x in [ver, (f"Risk score {sc}" if sc else "")] if x])
+
+        is_deep = data.startswith('why++') or data.startswith('why2') or data.startswith('whypp')
+        if is_deep or (why and len(why) > 140):
+            if why:
+                try: _safe_tg_send(_chat_id, why)
+                except Exception: pass
+            try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
+            except Exception: pass
+            return ("ok", 200)
+
+        short = (why or '—').strip()
+        if len(short) > 190 and why:
+            short = short[:187] + '…'
+            try: _safe_tg_send(_chat_id, why)
+            except Exception: pass
+        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
+        except Exception: pass
+        return ("ok", 200)
+    except Exception:
+        return ("ok", 200)
+
+def _lp_send_deep(cq):
+    try:
+        msg_obj = cq.get('message', {}) or {}
+        text = (msg_obj.get('text') or msg_obj.get('caption') or '')
+        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
+        cb_id = cq.get('id')
+        payload = ""
+        try: payload = _extract_lp_block(text)
+        except Exception: payload = ""
+        if not payload and chat_id:
+            try:
+                cached = _MDX_LAST_LP.get(f"{chat_id}") or _MDX_LAST_DETAILS.get(f"{chat_id}") or ""
+                if cached:
+                    payload = _extract_lp_block(cached) or ""
+            except Exception:
+                pass
+        if not payload:
+            payload = _mdx_lp_build_from_text(text)
+
+        if chat_id and payload:
+            try: _safe_tg_send(chat_id, payload)
+            except Exception: pass
+        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
+        except Exception: pass
+        return True
+    except Exception:
+        return False
+
+# Hook caches via _send_text wrapper if available
+try:
+    _SEND_TEXT_PREV = globals().get('tg_send_text')
+    def tg_send_text(chat_id, text, **kwargs):
+        try:
+            t = str(text or "")
+            if "Why++ factors" in t:
+                try:
+                    _MDX_LAST_WHY.set(f"{chat_id}", _extract_why_block_from_message(t) or t)
+                except Exception:
+                    pass
+            if "🔒 LP lock (lite)" in t:
+                try:
+                    _MDX_LAST_LP.set(f"{chat_id}", _extract_lp_block(t) or t)
+                except Exception:
+                    pass
+            if ("More details" in t) or ("On-chain" in t):
+                _MDX_LAST_DETAILS.set(f"{chat_id}", t)
+        except Exception:
+            pass
+        return _SEND_TEXT_PREV(chat_id, text, **kwargs)
+except Exception:
+    pass
+# === /EOF overrides ===
