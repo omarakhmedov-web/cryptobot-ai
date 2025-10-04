@@ -3,7 +3,7 @@ import re
 import time
 from urllib.parse import urlparse, quote_plus
 
-from utils import http_get_json, http_post_json, rdap_domain, wayback_first_capture, ssl_certificate_info, format_kv, locale_text as _
+from utils import http_get_json, http_post_json, rdap_domain, wayback_first_capture, ssl_certificate_info, format_kv, locale_text as _, get_known_domain_for_address
 
 DEX_BASE = os.environ.get("DEX_BASE", "https://api.dexscreener.com").rstrip("/")
 
@@ -264,6 +264,16 @@ def quickscan_contract(user_input, lang="en", window=None):
     bp = best_pair(pairs)
     text = summarize_pair(bp, window=window or "24h")
     dom = domain_from_pairs(pairs)
+
+    # Prefer repository-known domain mapping (stable for well-known tokens)
+    try:
+        _, token_addr, _ = extract_contract_and_chain(user_input)
+        mapped = get_known_domain_for_address(token_addr or "")
+        if mapped:
+            dom = mapped
+    except Exception:
+        pass
+
     return text, bp, dom
 
 def enrich_domain(domain):
