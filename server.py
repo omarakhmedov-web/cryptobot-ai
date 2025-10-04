@@ -7484,7 +7484,7 @@ def _answer_why_deep(cq, addr_hint=None):
         why_long = _extract_why_contextual(text) or _extract_why_block_from_message(text) or 'Why++ factors: n/a'
         if chat_id:
             try:
-                _tg_send_message(chat_id, why_long)
+                _send_text(chat_id, why_long)
             except Exception:
                 pass
         try:
@@ -7525,7 +7525,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         if is_deep or longish:
             # Deep route → post full message, popup only confirms
             try:
-                _tg_send_message(_chat_id, why)
+                _send_text(_chat_id, why)
             except Exception:
                 pass
             try:
@@ -7539,7 +7539,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         if len(short) > 190:
             short = short[:187] + '…'
             try:
-                _tg_send_message(_chat_id, why)
+                _send_text(_chat_id, why)
             except Exception:
                 pass
         try:
@@ -7567,7 +7567,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         # If deep or long text, try to send full message first
         if is_deep or len(short) > 140:
             try:
-                _tg_send_message(_chat_id, why)
+                _send_text(_chat_id, why)
                 sent = True
             except Exception:
                 sent = False
@@ -7645,7 +7645,7 @@ def _lp_send_deep(cq):
         cb_id = cq.get('id')
         payload = _extract_lp_block(text) or "LP: n/a"
         if chat_id:
-            try: _tg_send_message(chat_id, payload)
+            try: _send_text(chat_id, payload)
             except Exception: pass
         try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
         except Exception: pass
@@ -7664,7 +7664,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
         # Deep → send message, popup confirm; Short → show popup, else fallback to chat + confirm
         if is_deep or len(why) > 140:
-            try: _tg_send_message(_chat_id, why)
+            try: _send_text(_chat_id, why)
             except Exception: pass
             try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
             except Exception: pass
@@ -7672,7 +7672,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         short = why.strip()
         if len(short) > 190:
             short = short[:187] + '…'
-            try: _tg_send_message(_chat_id, why)
+            try: _send_text(_chat_id, why)
             except Exception: pass
         try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
         except Exception: pass
@@ -7708,15 +7708,25 @@ def _mdx_pre_router():
                     cq["data"] = orig
         except Exception:
             pass
-        if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
-            _answer_why_deep(cq)
+        
+        d = (data.lower() if isinstance(data, str) else "")
+        if isinstance(data, str) and (d.startswith("why++") or d.startswith("why2") or "whypp" in d):
+            try:
+                _answer_why_deep(cq)
+            except Exception:
+                pass
+            try:
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "Sent details", logger=app.logger)
+            except Exception:
+                pass
             return ("ok", 200)
-        if isinstance(data, str) and data.startswith("why"):
+        if isinstance(data, str) and d.startswith("why"):
             _handle_why_popup(cq, chat_id)
             return ("ok", 200)
-        if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:")):
+        if isinstance(data, str) and (d.startswith("lp") or d.startswith("lp:") or "lpmore" in d or d.startswith("lp_")):
             _lp_send_deep(cq)
             return ("ok", 200)
+
         return None
     except Exception:
         return None
