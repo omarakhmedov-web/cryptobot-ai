@@ -4213,7 +4213,8 @@ def webhook(secret):
 
         # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
         if isinstance(data, str) and (data.startswith("why") or data.startswith("why2")):
-            return _handle_why_popup(cq, chat_id)
+            _handle_why_popup(cq, chat_id)
+            return ("ok", 200)
         # === /Mobile Why ===
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
@@ -5487,7 +5488,7 @@ def _collect_chain_rpc_candidates():
 def _try_with_urls(addr_l: str, urls: list):
     """Temporarily override RPC set and check for contract code presence."""
     if not urls:
-        return False
+        return ("ok", 200)
     _set_chain_rpc_override(urls)
     try:
         try:
@@ -5498,7 +5499,7 @@ def _try_with_urls(addr_l: str, urls: list):
         code = _eth_getCode(addr_l)
         return bool(code and code != "0x")
     except Exception:
-        return False
+        return ("ok", 200)
     finally:
         _clear_chain_rpc_override()
 
@@ -6029,8 +6030,7 @@ def _is_swap_url(u: str) -> bool:
             "quickswap.exchange/#/swap", "jumper.exchange", "matcha.xyz", "1inch.io"
         ])
     except Exception:
-        return False
-
+        return ("ok", 200)
 try:
     # Wrap tg_send_message (again, overwrite prior wrapper if present)
     if 'tg_send_message' in globals():
@@ -6763,17 +6763,16 @@ try:
         try:
             o = (req.headers.get("Origin") or "").strip()
             if not o:
-                return True
+        return ("ok", 200)
             for allowed in (_ALLOWED_ORIGINS or []):
                 a = (allowed or "").strip()
                 if not a: 
                     continue
                 if a == "*" or o.startswith(a):
-                    return True
+        return ("ok", 200)
         except Exception:
-            return False
-        return False
-
+        return ("ok", 200)
+        return ("ok", 200)
     def _with_cors(resp):
         try:
             o = (request.headers.get("Origin") or "")
@@ -6788,7 +6787,7 @@ try:
 
     def _send_email(to_addr: str, subject: str, body: str) -> bool:
         if not (_SMTP_HOST and to_addr):
-            return False
+        return ("ok", 200)
         try:
             s = smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=12)
             try:
@@ -6802,7 +6801,7 @@ try:
                 msg["To"] = to_addr
                 msg.set_content(body)
                 s.send_message(msg)
-                return True
+        return ("ok", 200)
             finally:
                 try: s.quit()
                 except Exception: pass
@@ -6811,21 +6810,19 @@ try:
                 app.logger.exception("feedback: SMTP failed")
             except Exception:
                 pass
-            return False
-
+        return ("ok", 200)
     def _send_telegram(text: str) -> bool:
         try:
             if not (_tg_send and _TG_CHAT and _TG_TOKEN):
-                return False
+        return ("ok", 200)
             _tg_send(_TG_TOKEN, _TG_CHAT, text, logger=app.logger)
-            return True
+        return ("ok", 200)
         except Exception:
             try:
                 app.logger.exception("feedback: telegram failed")
             except Exception:
                 pass
-            return False
-
+        return ("ok", 200)
     @app.route("/api/feedback", methods=["POST","OPTIONS"])
     def feedback_api():
         # Preflight
