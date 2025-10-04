@@ -11,23 +11,6 @@ import unicodedata
 from datetime import datetime
 from urllib.parse import urlparse
 
-from urllib.parse import urlparse as _urlparse
-
-def _chain_from_scan_url(scan_url: str) -> str:
-    try:
-        host = (_urlparse(scan_url).hostname or "").lower()
-        if "bscscan" in host: return "bsc"
-        if "etherscan" in host: return "ethereum"
-        if "arbiscan" in host: return "arbitrum"
-        if "basescan" in host: return "base"
-        if "polygonscan" in host: return "polygon"
-        if "optimistic" in host or "optimism" in host: return "optimism"
-        if "snowtrace" in host or "avax" in host: return "avalanche"
-    except Exception:
-        pass
-    return ""
-
-
 import requests
 from flask import Flask, request, jsonify
 
@@ -39,33 +22,6 @@ from metri_domain_rdap import _rdap as __rdap_impl  # injected
 from flask import Flask
 import sqlite3
 import hmac
-
-def _mdx_inject_logo_into_html(html: str) -> str:
-    # Insert right-aligned Metridex logo at the top of the report HTML.
-    # Non-destructive: if id="mdx-report-logo" or 'metridex_logo_header.png' already present, return unchanged.
-    try:
-        if not isinstance(html, str) or not html.strip():
-            return html
-        if 'id="mdx-report-logo"' in html or 'metridex_logo_header.png' in html:
-            return html
-        block = (
-            '<div id="mdx-report-logo" style="width:100%;display:block;text-align:right;'
-            'margin:0;padding:4px 0 8px;">'
-            '<a href="https://metridex.com" target="_blank" rel="noopener">'
-            '<img src="https://metridex.com/logo/metridex_logo_header.png" alt="Metridex" '
-            'style="height:108px;max-width:100%;width:auto;vertical-align:middle" />'
-            '</a></div>'
-        )
-        m = re.search(r'(?i)<body[^>]*>', html)
-        if m:
-            i = m.end()
-            return html[:i] + block + html[i:]
-        m2 = re.search(r'(?is)<h1[^>]*>', html)
-        if m2:
-            return html[:m2.start()] + block + html[m2.start():]
-        return block + html
-    except Exception:
-        return html
 from datetime import datetime, timedelta
 try:
     from polydebug_rpc import init_polydebug
@@ -76,7 +32,7 @@ except Exception as e:
 # ========================
 # Environment & constants
 # ========================
-APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8+cleanfixed+release-g+fixparen+release-h")
+APP_VERSION = os.environ.get("APP_VERSION", "0.3.114-onepass-safe8")
 
 
 # --- Feature flags (ENV) ---
@@ -115,7 +71,8 @@ def _soften_lp_verdict_html(html: str) -> str:
 KNOWN_DOMAINS_FILE_PATH = os.environ.get("KNOWN_DOMAINS_FILE_PATH", "/opt/render/project/src/known_domains.json")
 KNOWN_DOMAINS_DEFAULT = {
     "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": "pancakeswap.finance",
-    "0x831753dd7087cac61ab5644b308642cc1c33dc13": "quickswap.exchange"}
+    "0x831753dd7087cac61ab5644b308642cc1c33dc13": "quickswap.exchange",
+}
 def _load_known_domains() -> dict:
     try:
         p = KNOWN_DOMAINS_FILE_PATH
@@ -143,7 +100,7 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
             return text
         patt = re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
         text = patt.sub("", text)
-        text = re.sub(r"\n{3}", "\n\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
         return text
     except Exception:
         return text
@@ -153,7 +110,7 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
     """If owner is renounced (0x000… or 'renounced') and no proxy, suppress 'Owner privileges present' everywhere
     and adjust Risk score accordingly, removing the corresponding Why++ penalty if present."""
     try:
-        zeros_pattern = r'Owner:\s*(0x0{4}|0x0{3}[\.…]+0+)'  # full zeros or truncated with ellipsis
+        zeros_pattern = r'Owner:\s*(0x0{4,}|0x0{3,}[\.…]+0+)'  # full zeros or truncated with ellipsis
         renounced_word = r'Owner:\s*renounced'
         proxy_present = re.search(r'Proxy:\s*(yes|true|1)', text, re.I)
         is_renounced = bool(re.search(zeros_pattern, text, re.I) or re.search(renounced_word, text, re.I))
@@ -192,7 +149,7 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
             text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present.*$', '', text)
 
             # 4) Tidy blank lines
-            text = re.sub(r'\n{3}', "\n\n", text)
+            text = re.sub(r'\n{3,}', "\n\n", text)
         return text
     except Exception:
         return text
@@ -233,7 +190,7 @@ def _enforce_details_host(text: str, chat_id) -> str:
         if not host and DOMAIN_META_STRICT:
             patt = _re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', _re.M)
             text = patt.sub("", text or "")
-            text = _re.sub(r'\n{3}', "\n\n", text)
+            text = _re.sub(r'\n{3,}', "\n\n", text)
             return text
 
         if not host:
@@ -358,7 +315,7 @@ def _normalize_whois_rdap(text: str) -> str:
         # Rewrite the line in text
         norm = norm[:m_wr.start()] + fixed + norm[m_wr.end():]
         # Collapse extra blank lines
-        norm = re.sub(r'\n{3}', '\n\n', norm)
+        norm = re.sub(r'\n{3,}', '\n\n', norm)
         return norm
     except Exception:
         return text
@@ -541,11 +498,13 @@ def should_send_alert(chat_id: int, chain: str, ca: str, atype: str) -> bool:
 UNCX_LINKS = {
     "ethereum": "https://app.uncx.network/lockers/uniswap-v2/pair/{pair}",
     "bsc": "https://app.uncx.network/lockers/pancakeswap-v2/pair/{pair}",
-    "polygon": "https://app.uncx.network/lockers/quickswap-v2/pair/{pair}"}
+    "polygon": "https://app.uncx.network/lockers/quickswap-v2/pair/{pair}",
+}
 TEAMFINANCE_LINKS = {
     "ethereum": "https://app.team.finance/uniswap/{pair}",
     "bsc": "https://app.team.finance/pancakeswap/{pair}",
-    "polygon": "https://app.team.finance/quickswap/{pair}"}
+    "polygon": "https://app.team.finance/quickswap/{pair}",
+}
 
 def _fmt_pct(v):
     try:
@@ -962,7 +921,8 @@ def _pay_links() -> dict:
         "pro": os.getenv("CRYPTO_LINK_PRO") or "",
         "daypass": os.getenv("CRYPTO_LINK_DAYPASS") or "",
         "deep": os.getenv("CRYPTO_LINK_DEEP") or "",
-        "teams": os.getenv("CRYPTO_LINK_TEAMS") or ""}
+        "teams": os.getenv("CRYPTO_LINK_TEAMS") or "",
+    }
 
 def _upsell_enabled() -> bool:
     return str(os.getenv("UPSALE_CALLBACKS_ENABLED","")).lower() in ("1","true","yes","on")
@@ -972,7 +932,8 @@ def _upsell_text(kind: str) -> str:
         "pro":   "Upgrade to Pro — $29/mo",
         "daypass":"Day‑Pass — $9 for 24h Pro",
         "deep":  "Deep report — $3 one‑off",
-        "teams": "Teams — from $99/mo"}
+        "teams": "Teams — from $99/mo",
+    }
     return m.get(kind, "Upgrade")
 
 def _send_upsell_link(chat_id, kind: str, logger=None):
@@ -992,7 +953,8 @@ def _ux_welcome_keyboard() -> dict:
         "deep": links.get("deep"),
         "daypass": links.get("daypass"),
         "pro": links.get("pro"),
-        "teams": links.get("teams")})
+        "teams": links.get("teams"),
+    })
     # append How it works? button
     try:
         help_url = (os.getenv('HELP_URL', '').strip() or 'https://metridex.com/help')
@@ -1046,12 +1008,14 @@ def _ux_upgrade_keyboard(lang: str = "en") -> dict:
             [{"text": f"Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
              {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
             [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
-             {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}]]}
+             {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
+        ]}
     return {"inline_keyboard": [
         [{"text": f"Upgrade to Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
          {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
         [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
-         {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}]]}
+         {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
+    ]}
 
 def _ux_welcome_text(lang: str = "en") -> str:
     if str(lang).lower().startswith("ru"):
@@ -1264,26 +1228,18 @@ def maybe_slow_lane(user_id: int):
 # Optional helper texts (can be used by upstream webhook server)
 UPSELL_TEXT_EN = {
     "after_first": "You have 1 free QuickScan left. Unlock Deep, export and fast lane: Pro $29/mo or Day‑Pass $9.",
-    "exhausted": "Free checks are over. Choose access:\n• Pro $29/mo – 300 scans + Deep + export\n• Day‑Pass $9 – 24h of Pro\n• Deep Report $3 – one detailed report"}
+    "exhausted": "Free checks are over. Choose access:\n• Pro $29/mo – 300 scans + Deep + export\n• Day‑Pass $9 – 24h of Pro\n• Deep Report $3 – one detailed report",
+}
 UPSELL_TEXT_RU = {
     "after_first": "Осталась 1 бесплатная проверка. Открой Deep, экспорт и быстрый доступ: Pro $29/мес или Day‑Pass $9.",
-    "exhausted": "Бесплатные проверки закончились. Доступ:\n• Pro $29/мес — 300 проверок + Deep + экспорт\n• Day‑Pass $9 — сутки Pro\n• Deep Report $3 — разовый отчёт"}
+    "exhausted": "Бесплатные проверки закончились. Доступ:\n• Pro $29/мес — 300 проверок + Deep + экспорт\n• Day‑Pass $9 — сутки Pro\n• Deep Report $3 — разовый отчёт",
+}
 
 
 
 
 def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
     """Send a short upsell message (EN/RU). Non‑blocking; safe to call anywhere."""
-    # Hide upsell texts in competition/demo mode without touching limits
-    try:
-        hide = str(os.getenv('HIDE_UPSELL','')).lower() in ('1','true','yes')
-        comp = str(os.getenv('COMPETITION_MODE','')).lower() in ('1','true','yes')
-        dev  = str(os.getenv('DEV_FREE','')).lower() in ('1','true','yes') or str(os.getenv('DEV_FREE_FORCE','')).lower() in ('1','true','yes')
-        if hide or comp or dev:
-            return
-    except Exception:
-        pass
-
     try:
         txt = (UPSELL_TEXT_RU if (str(lang).lower().startswith("ru")) else UPSELL_TEXT_EN).get(key)
     except Exception:
@@ -1317,24 +1273,29 @@ _TOPH_TTL = int(os.environ.get("TOPH_TTL", "1200"))
 DEAD_ADDRS = {
     "0x0000000000000000000000000000000000000000",
     "0x000000000000000000000000000000000000dEaD",
-    "0xdead000000000000000042069420694206942069"}
+    "0xdead000000000000000042069420694206942069",
+}
 
 UNCX_LOCKERS = {
     "ethereum": {"v2":"0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214", "v3":"0x7f5c649856f900d15c83741f45ae46f5c6858234"},
     "bsc":      {"v2":"0xc765bddb93b0d1c1a88282ba0fa6b2d00e3e0c83", "v3":"0x0d29598ec01fa03665feead91d4fb423f393886c"},
     "polygon":  {"v2":"0xadb2437e6f65682b85f814fbc12fec0508a7b1d0", "v3":"0xc22218406983bf88bb634bb4bf15fa4e0a1a8c84"},
     "arbitrum": {"v2":"0x275720567e5955f5f2d53a7a1ab8a0fc643de50e", "v3":"0xfa104eb3925a27e6263e05acc88f2e983a890637"},
-    "base":     {"v2":"0xc4e637d37113192f4f1f060daebd7758de7f4131", "v3":"0x231278edd38b00b07fbd52120cef685b9baebcc1"}}
+    "base":     {"v2":"0xc4e637d37113192f4f1f060daebd7758de7f4131", "v3":"0x231278edd38b00b07fbd52120cef685b9baebcc1"},
+}
 
 TEAMFINANCE_LOCKERS = {
-    "ethereum": ["0xe2fe530c047f2d85298b07d9333c05737f1435fb"]}
+    "ethereum": ["0xe2fe530c047f2d85298b07d9333c05737f1435fb"],
+}
 
 # Known custodial/staking contracts that may legitimately hold LP
 KNOWN_CUSTODIANS = {
     "bsc": {
-        "0xa5f8c5dbd5f286960b9d90548680ae5ebff07652": "PancakeSwap MasterChef/Pool"},
+        "0xa5f8c5dbd5f286960b9d90548680ae5ebff07652": "PancakeSwap MasterChef/Pool",
+    },
     "eth": {},
-    "polygon": {}}
+    "polygon": {},
+}
 
 # Optional external override/extend for KNOWN_CUSTODIANS
 KNOWN_CUSTODIANS_FILE_PATH = os.environ.get("KNOWN_CUSTODIANS_FILE_PATH", "/opt/render/project/src/known_custodians.json")
@@ -1371,7 +1332,8 @@ CHAIN_NAME_TO_ID = {
     "bsc": 56, "bnb":56,
     "polygon": 137, "matic":137,
     "arbitrum": 42161, "arb":42161,
-    "base": 8453}
+    "base": 8453,
+}
 
 
 def _explorer_base_for(chain: str) -> str:
@@ -1385,7 +1347,8 @@ def _explorer_base_for(chain: str) -> str:
         "matic": "https://polygonscan.com",
         "arbitrum": "https://arbiscan.io",
         "arb": "https://arbiscan.io",
-        "base": "https://basescan.org"}.get(c, "https://etherscan.io")
+        "base": "https://basescan.org",
+    }.get(c, "https://etherscan.io")
 
 
 
@@ -1397,7 +1360,8 @@ BLUECHIP_ADDRS = {
     "0xdac17f958d2ee523a2206206994597c13d831ec7",
     "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-    "0x6b175474e89094c44da98b954eedeac495271d0f"}
+    "0x6b175474e89094c44da98b954eedeac495271d0f",
+}
 
 def _is_bluechip_addr(addr: str) -> bool:
     try:
@@ -1867,7 +1831,8 @@ KNOWN_HOMEPAGES = {
     "0xdac17f958d2ee523a2206206994597c13d831ec7": "tether.to",
     "0x6b175474e89094c44da98b954eedeac495271d0f": "makerdao.com",
     "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "ethereum.org",
-    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org"}
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "bitcoin.org",
+}
 
 # Domain metadata cache
 DOMAIN_META_CACHE = {}  # domain -> {t, h, created, reg, exp, issuer, wb}
@@ -1889,7 +1854,8 @@ WL_ADDRESSES_DEFAULT = {
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
     "0x6b175474e89094c44da98b954eedeac495271d0f",
     "0x853d955acef822db058eb8505911ed77f175b99e",
-    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"}
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+}
 def _env_set(name: str):
     try:
         v = os.getenv(name, "")
@@ -1902,77 +1868,6 @@ WL_ADDRESSES = set([a.lower() for a in WL_ADDRESSES_DEFAULT]) | _env_set("WL_ADD
 # ========================
 # Helpers
 # ========================
-
-# === Why?/Why++ mobile popup helper (modal alert + full message fallback) ===
-def _extract_why_block_from_message(_txt: str) -> str:
-    """Extract the 'Why++ factors' block from a QuickScan message text."""
-    try:
-        if not isinstance(_txt, str):
-            return ""
-        txt = _txt or ""
-        # Find the 'Why++ factors' header
-        m = re.search(r'(?mi)^\\s*Why\\+\\+\\s*factors\\s*$', txt)
-        if not m:
-            return ""
-        tail = txt[m.end():]
-        # Stop at the next section marker
-        m_end = re.search(r'(?mi)^\\s*(On-chain|ℹ️|🔒|Scan token:|$)', tail)
-        block = tail[:m_end.start()] if (m_end and m_end.start() >= 0) else tail
-        block = block.strip()
-        # Keep the header for clarity
-        if block:
-            block = "Why++ factors\\n" + block
-        return block.strip()
-    except Exception:
-        return ""
-
-def _handle_why_popup(_cq: dict, _chat_id: int):
-    """Show Why text as a modal alert (doesn't auto-dismiss). If too long, send full text as a message."""
-    try:
-        msg_obj = _cq.get("message") or {}
-        txt = (msg_obj.get("text") or "")
-        cb_id = _cq.get("id")
-        why_block = _extract_why_block_from_message(txt) or "Why++ factors: n/a"
-        # Telegram alert limit is ~200 chars; keep it safe around 190
-        short = why_block.strip()
-        limit = 190
-        truncated = False
-        if len(short) > limit:
-            short = short[:limit-1].rstrip() + "…"
-            truncated = True
-        # Use Telegram API directly to guarantee show_alert=True
-        try:
-            import requests as _rq
-            _rq.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
-                json={"callback_query_id": cb_id, "text": short, "show_alert": True},
-                timeout=6,
-                headers={"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
-            )
-        except Exception:
-            # Silent fallback
-            try:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short, show_alert=True, logger=app.logger)  # type: ignore
-            except Exception:
-                pass
-        # If truncated, send the full block into chat so it can be fully read and scrolled
-        if truncated:
-            try:
-                _send_text(_chat_id, why_block, logger=app.logger)
-            except Exception:
-                pass
-        return ("ok", 200)
-    except Exception as _e:
-        try:
-            _admin_debug(_chat_id, f"why-popup error: {type(_e).__name__}: {_e}")
-        except Exception:
-            pass
-        try:
-            tg_answer_callback(TELEGRAM_TOKEN, (_cq or {}).get("id"), "error", logger=app.logger)  # type: ignore
-        except Exception:
-            pass
-        return ("ok", 200)
-# === /Why helper ===
 # === Send-time LP filter ===
 def _is_lp_mini_only(text: str) -> bool:
     try:
@@ -2038,7 +1933,8 @@ EXPLORER_BY_CHAIN = {
     "optimism": "optimistic.etherscan.io",
     "base": "basescan.org",
     "avalanche": "snowtrace.io",
-    "fantom": "ftmscan.com"}
+    "fantom": "ftmscan.com",
+}
 def _extract_token_addr(text: str) -> str:
     import re as _re
     m = _re.search(r"/token/(0x[a-fA-F0-9]{40})", text)
@@ -2102,11 +1998,12 @@ def _sanitize_onchain_zeros(text: str) -> str:
         # Drop lines that are clearly zeroed placeholders
         patterns = [
             r"(?m)^\s*LP:\s*burned=0\.0%.*topHolder=0\.0%.*\n",
-            r"(?m)^\s*Holders:\s*top0\s*own\s*0%.*\n"]
+            r"(?m)^\s*Holders:\s*top0\s*own\s*0%.*\n",
+        ]
         for pat in patterns:
             text = _re.sub(pat, "", text)
         # Collapse extra blank lines after removals
-        text = _re.sub(r"\n{3}", "\n\n", text)
+        text = _re.sub(r"\n{3,}", "\n\n", text)
         return text
     except Exception:
         return text
@@ -2136,7 +2033,7 @@ def _sanitize_compact_domains(text: str, is_details: bool) -> str:
         patt = re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', re.M)
         text = patt.sub("", text)
         # Also collapse extra blanks
-        text = re.sub(r"\n{3}", "\n\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
         return text
     except Exception:
         return text
@@ -2147,7 +2044,7 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
         ren = _LAST_OWNER_RENOUNCED.get(chat_id, False)
         if not ren:
             # detect renounce inside same message
-            if re.search(r'Owner:\s*0x0{4}', text, re.I) and not re.search(r'Proxy:\s*(yes|true|1)', text, re.I):
+            if re.search(r'Owner:\s*0x0{4,}', text, re.I) and not re.search(r'Proxy:\s*(yes|true|1)', text, re.I):
                 ren = True
                 _LAST_OWNER_RENOUNCED[chat_id] = True
         if ren:
@@ -2157,7 +2054,7 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
             # cleanup multiple separators or leftover punctuation
             text = re.sub(r';\s*;', '; ', text)
             text = re.sub(r'⚠️\s*Signals:\s*$', '', text, flags=re.M)
-            text = re.sub(r'\n{3}', "\n\n", text)
+            text = re.sub(r'\n{3,}', "\n\n", text)
         return text
     except Exception:
         return text
@@ -2215,7 +2112,7 @@ def _enforce_details_host(text: str, chat_id) -> str:
         if not host and DOMAIN_META_STRICT:
             patt = _re.compile(r'^(Domain:.*|WHOIS.*|RDAP.*|SSL:.*|Wayback:.*)\s*$', _re.M)
             text = patt.sub("", text or "")
-            text = _re.sub(r'\n{3}', "\n\n", text)
+            text = _re.sub(r'\n{3,}', "\n\n", text)
             return text
 
         if not host:
@@ -2259,22 +2156,8 @@ def _sanitize_lp_claims(text: str) -> str:
 
 
 def _send_text(chat_id, text, **kwargs):
-    text = mdx_postprocess_text(text, chat_id)
-    text = mdx_postprocess_text(text, chat_id)
-
-    try:
-        text = _mdx_sanitize_text_min(text)
-    except Exception:
-        pass
     text = NEWLINE_ESC_RE.sub("\n", text or "")
     is_details_flag = bool(kwargs.pop('is_details', False))
-    # Normalize keyboard (remove DexScreener, put DEX+Scan on top)
-    try:
-        kb = kwargs.get('reply_markup')
-        if kb:
-            kwargs['reply_markup'] = _normalize_action_row(kb)
-    except Exception:
-        pass
     try:
         _track_site_host(text, chat_id)
     except Exception:
@@ -2538,23 +2421,14 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
             ds_url = f"https://dexscreener.com/search?q={addr}"
         # Swap link
         dex_url = _swap_url_for(ch, addr)
-        if not dex_url:
-            ch_low = (str(ch) or "ethereum").lower()
-            if ch_low == "bsc":
-                dex_url = f"https://pancakeswap.finance/swap?outputCurrency={addr}"
-            elif ch_low in ("ethereum","arbitrum","optimism","base","polygon"):
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}&chain={ch_low if ch_low!='ethereum' else 'ethereum'}"
-            elif ch_low == "avalanche":
-                dex_url = f"https://traderjoexyz.com/trade?outputCurrency={addr}"
-            if not dex_url:
-                dex_url = f"https://app.uniswap.org/swap?outputCurrency={addr}"
         # Explorer link
         scan_url = f"{_explorer_base_for(_resolve_chain_for_scan(addr))}/token/{addr}"
-        ch_from_scan = _chain_from_scan_url(scan_url)
-        if ch_from_scan:
-            ch = ch_from_scan
         # Add buttons (single row for DS/DEX, next row for Scan)
-        ik.append([{"text": "🟢 Open in DEX", "url": dex_url}, {"text": "🔍 Open in Scan", "url": scan_url}])
+        ik.append([
+            {"text": "🔎 Open on DexScreener", "url": ds_url},
+            {"text": "🟢 Open in DEX", "url": dex_url}
+        ])
+        ik.append([{"text": "🔍 Open in Scan", "url": scan_url}])
         ik.append([{"text": "📋 Copy CA", "callback_data": f"copyca:{addr}"}])
         ik.append([{"text": "🔒 LP lock (lite)", "callback_data": f"lp:{addr}"}])
         
@@ -2564,7 +2438,8 @@ def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report
         {"text": "Δ 5m",  "callback_data": "tf:5"},
         {"text": "Δ 1h",  "callback_data": "tf:1"},
         {"text": "Δ 6h",  "callback_data": "tf:6"},
-        {"text": "Δ 24h", "callback_data": "tf:24"}])
+        {"text": "Δ 24h", "callback_data": "tf:24"},
+    ])
     return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _extract_addrs_from_pair_payload(data: str):
@@ -2937,7 +2812,8 @@ def _symbol_homepage_hint(text: str):
         ("LUSD", "liquity.org"),
         ("SUSD", "synthetix.io"),
         ("CRVUSD", "curve.fi"),
-        ("USDE", "ether.fi")]
+        ("USDE", "ether.fi"),
+    ]
     for sym, dom in hints:
         if sym in t:
             return dom
@@ -3052,11 +2928,11 @@ def _risk_verdict(addr, text):
     vol = _parse_metric_from_dexline(text, "Vol24h")
     if liq is not None:
         if liq < RISK_LIQ_LOW:
-            w = (8 if whitelisted else 25); score += w; neg.append("Low liquidity (<${:})".format(int(RISK_LIQ_LOW))); weights_neg.append(w)
+            w = (8 if whitelisted else 25); score += w; neg.append("Low liquidity (<${:,})".format(int(RISK_LIQ_LOW))); weights_neg.append(w)
         elif liq < RISK_LIQ_MED:
-            w = (3 if whitelisted else 10); score += w; neg.append("Moderate liquidity (<${:})".format(int(RISK_LIQ_MED))); weights_neg.append(w)
+            w = (3 if whitelisted else 10); score += w; neg.append("Moderate liquidity (<${:,})".format(int(RISK_LIQ_MED))); weights_neg.append(w)
         elif liq >= RISK_POSITIVE_LIQ:
-            w = 15; pos.append("High liquidity (≥${:})".format(int(RISK_POSITIVE_LIQ))); weights_pos.append(w)
+            w = 15; pos.append("High liquidity (≥${:,})".format(int(RISK_POSITIVE_LIQ))); weights_pos.append(w)
     if vol is not None and vol < RISK_VOL_LOW:
         w = 10; score += w; neg.append("Very low 24h volume (<$5k)"); weights_neg.append(w)
 
@@ -3168,9 +3044,7 @@ def _wrap_kv_line(prefix: str, items, width: int = 96, indent: int = 2) -> str:
 def _append_verdict_block(addr, text):
     score, label, rs = _risk_verdict(addr, text)
     try:
-        key = (addr or '').lower()
-        if ADDR_RE.fullmatch(key or ''):
-            RISK_CACHE[key] = {
+        RISK_CACHE[(addr or "").lower()] = {
             "score": score, "label": label,
             "neg": rs.get("neg", []), "pos": rs.get("pos", []),
             "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])
@@ -3543,7 +3417,7 @@ EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a71785
 def _fmt_int(v):
     try:
         n = int(v)
-        return f"{n:}"
+        return f"{n:,}"
     except Exception:
         try:
             f = float(v)
@@ -3868,8 +3742,6 @@ def _render_report(addr: str, text: str):
 <h3>Signals</h3><pre>""" + lines(neg, wn) + """</pre><h3>Positives</h3><pre>""" + lines(pos, wp) + """</pre></div>
 <footer><small>Generated by Metridex</small></footer>
 </body></html>"""
-    html = _mdx_inject_logo_into_html(html)
-
     try:
         tsf = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         safe_addr = (addr or "unknown")[:10]
@@ -4026,37 +3898,7 @@ def _answer_why_quickly(cq, addr_hint=None):
     try:
         msg_obj = cq.get("message", {}) or {}
         text = msg_obj.get("text") or ""
-            # Prefer addr from callback data
-        data = str(cq.get('data') or '')
-        maddr = ADDR_RE.search(data) if hasattr(ADDR_RE, 'search') else None
-                # Extract addr from callback_data first; then fall back to hints/cache/text
-        data = str(cq.get('data') or '')
-        maddr = ADDR_RE.search(data) if hasattr(ADDR_RE, 'search') else None
-        addr = (
-            (maddr.group(0) if maddr else None)
-            or (
-                (addr_hint or msg2addr.get(str(msg_obj.get('message_id'))) or _extract_addr_from_text(text) or '')
-            ).lower()
-        )
-
-        # Use cached canonical risk if available to keep WHY consistent with Summary
-        try:
-            key = (addr or '').lower()
-            info = (RISK_CACHE.get(key) if (key and ADDR_RE.fullmatch(key)) else None)
-            if isinstance(info, dict) and 'score' in info and 'label' in info:
-                pairs_neg = list(zip(info.get('neg') or [], info.get('w_neg') or []))
-                pairs_pos = list(zip(info.get('pos') or [], info.get('w_pos') or []))
-                neg_s = '; '.join([f"{t} (−{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ''
-                pos_s = '; '.join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ''
-                body = f"{info['label']} ({int(info['score'])}/100)"
-                if neg_s: body += f" — ⚠️ {neg_s}"
-                if pos_s: body += f" — ✅ {pos_s}"
-                if len(body) > 190: body = body[:187] + '…'
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), body, logger=app.logger)
-                return
-        except Exception:
-            pass
-
+        addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
         info = RISK_CACHE.get(addr) if addr else None
         if not info:
             score, label, rs = _risk_verdict(addr or "", text or "")
@@ -4216,11 +4058,6 @@ def webhook(secret):
             return ("ok", 200)
 
         # Inflate hashed payloads early
-
-        # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
-        if isinstance(data, str) and (data.startswith("why") or data.startswith("why2")):
-            return _handle_why_popup(cq, chat_id)
-        # === /Mobile Why ===
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
             if orig:
@@ -4250,7 +4087,7 @@ def webhook(secret):
                                 tx = (p.get("txns") or {}).get("h24") or {}
                                 buys = tx.get("buys"); sells = tx.get("sells")
                                 add = []
-                                if liq is not None: add.append(f"liq≈${int(liq):}")
+                                if liq is not None: add.append(f"liq≈${int(liq):,}")
                                 if buys is not None and sells is not None: add.append(f"buys:sells={buys}:{sells}")
                                 if add:
                                     ans = ans + " | " + " • ".join(add)
@@ -4622,7 +4459,8 @@ def webhook(secret):
                     (f"• Owner: {owner_addr}" if owner_addr else "• Owner: n/a"),
                     f"• Renounced: {'yes' if renounced else 'no'}",
                     f"• Proxy: {'yes, impl: ' + impl_addr if is_proxy else 'no'}",
-                    ("• Multiple lockers detected" if multi_lockers else None)]
+                    ("• Multiple lockers detected" if multi_lockers else None),
+                ]
                 link_lines = []
                 link_lines.extend(lock_lines)
                 if ds_link: link_lines.append(f"DEX pair: {ds_link}")
@@ -4779,7 +4617,7 @@ def webhook(secret):
             else:
                 lines.append("RPC providers: none configured")
             try:
-                __ = _qs_call_safe(quickscan_entrypoint, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+                _ = _qs_call_safe(quickscan_entrypoint, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
                 lines.append("QuickScan: OK")
             except Exception as e:
                 lines.append(f"QuickScan: ERROR {type(e).__name__}: {e}")
@@ -4986,7 +4824,7 @@ def _qs_finalize_details(text: str) -> str:
                     pass
 
         # 7) Clean extra blank lines
-        text = _re.sub(r"\n{3}", "\n\n", text).strip()
+        text = _re.sub(r"\n{3,}", "\n\n", text).strip()
 
         return text
     except Exception:
@@ -5058,7 +4896,8 @@ def _enrich_full(addr: str, base_text: str) -> str:
         FALLBACK_BRANDS = {
             "0x6982508145454ce325ddbe47a25d4ec3d2311933": "www.pepe.vip",
             "0x831753dd7087cac61ab5644b308642cc1c33dc13": "quickswap.exchange",
-            "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": "pancakeswap.finance"}
+            "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": "pancakeswap.finance",
+        }
         try:
             dom = _extract_domain_from_text(text)
         except Exception:
@@ -5555,7 +5394,7 @@ def _onchain_inspect(addr: str):
 # === PATCH: uptime & polydebug guard ===
 try:
     from flask import request, Response
-    __ = request  # silence linters
+    _ = request  # silence linters
     # Root OK for UptimeRobot (HEAD/GET)
     @app.route("/", methods=["GET","HEAD"])
     def root_ok():
@@ -5618,7 +5457,8 @@ def build_buy_keyboard(links: dict):
         ("🔎 Deep report — $3", links.get("deep")),
         ("⏱ Day Pass — $9", links.get("daypass")),
         ("⚙️ Pro — $29", links.get("pro")),
-        ("👥 Teams — from $99", links.get("teams"))]
+        ("👥 Teams — from $99", links.get("teams")),
+    ]
     row = []
     for label, url in mapping:
         if url and isinstance(url, str) and url.startswith("http"):
@@ -5638,7 +5478,8 @@ def _get_pay_links():
         "deep": os.getenv("CRYPTO_LINK_DEEP", "").strip(),
         "daypass": os.getenv("CRYPTO_LINK_DAYPASS", "").strip(),
         "pro": os.getenv("CRYPTO_LINK_PRO", "").strip(),
-        "teams": os.getenv("CRYPTO_LINK_TEAMS", "").strip()}
+        "teams": os.getenv("CRYPTO_LINK_TEAMS", "").strip(),
+    }
 
 
 
@@ -5696,13 +5537,15 @@ def build_buy_keyboard_priced():
         "deep": _os.getenv("CRYPTO_LINK_DEEP", "").strip(),
         "daypass": _os.getenv("CRYPTO_LINK_DAYPASS", "").strip(),
         "pro": _os.getenv("CRYPTO_LINK_PRO", "").strip(),
-        "teams": _os.getenv("CRYPTO_LINK_TEAMS", "").strip()}
+        "teams": _os.getenv("CRYPTO_LINK_TEAMS", "").strip(),
+    }
     # Hard labels:
     labels = {
         "deep":   "🔎 Deep report — $3",
         "daypass":"⏱ Day Pass — $9",
         "pro":    "⚙️ Pro — $29",
-        "teams":  "👥 Teams — from $99"}
+        "teams":  "👥 Teams — from $99",
+    }
     rows, row = [], []
     for key in ["deep","daypass","pro","teams"]:
         url = links.get(key)
@@ -5809,7 +5652,7 @@ def _qs_strip_summary_meta(text: str) -> str:
         head = text[i0:m_next]
         tail = text[m_next:]
         head = _re.sub(r"(?m)^\s*(Domain:.*\n|SSL:.*\n)", "", head)
-        head = _re.sub(r"\n{3}", "\n\n", head)
+        head = _re.sub(r"\n{3,}", "\n\n", head)
         return text[:i0] + head + tail
     except Exception:
         return text
@@ -5849,7 +5692,7 @@ def _postprocess_report(text: str, chat_id) -> str:
     except Exception:
         pass
     text = re.sub(r'(?mi)^\s*[+\-−]?\s*(?:\d+)?\s*Owner\s+privileges\s+present(?:\s*\(\+\d+\))?\s*$', "", text)
-    text = re.sub(r'\n{3}', "\n\n", text)
+    text = re.sub(r'\n{3,}', "\n\n", text)
     return text
 
 # === Fallback mapping for well-known tokens → domains (used if KNOWN_DOMAINS file not provided) ===
@@ -5953,7 +5796,7 @@ except Exception:
 # Toggle via ENV: DEX_BUTTONS_ENABLED=1 to show.
 # ========================
 try:
-    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "1") == "1")
+    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "0") == "1")
 except Exception:
     _DEX_BTN_ENABLED = False
 
@@ -5984,7 +5827,7 @@ try:
                         for btn in (row or []):
                             try:
                                 txt = btn.get("text", "")
-                                if (not _DEX_BTN_ENABLED) and isinstance(txt, str) and "Open in DEX" in txt:
+                                if isinstance(txt, str) and "Open in DEX" in txt:
                                     continue
                             except Exception:
                                 pass
@@ -6012,7 +5855,7 @@ except Exception:
 # - Hide any swap/DEX link by default
 # ========================
 try:
-    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "1") == "1")
+    _DEX_BTN_ENABLED = (os.environ.get("DEX_BUTTONS_ENABLED", "0") == "1")
 except Exception:
     _DEX_BTN_ENABLED = False
 
@@ -6022,7 +5865,7 @@ def _strip_backref_artifacts(s: str) -> str:
         # Remove '\n\1' or standalone '\1' that might appear from regex backrefs
         s = _re.sub(r'(\\n)?\\1', '', s)
         # Also collapse accidental double newlines around verdict
-        s = _re.sub(r'\n{3}', '\n\n', s)
+        s = _re.sub(r'\n{3,}', '\n\n', s)
         return s
     except Exception:
         return s
@@ -6068,7 +5911,7 @@ try:
                             try:
                                 txt = btn.get("text", "")
                                 url = btn.get("url", "")
-                                if (not _DEX_BTN_ENABLED) and isinstance(txt, str) and "Open in DEX" in txt:
+                                if isinstance(txt, str) and "Open in DEX" in txt:
                                     continue
                                 if _is_swap_url(url):
                                     continue
@@ -6131,7 +5974,7 @@ def _dedupe_verdict_and_risk(s: str) -> str:
             out.append(ln)
         # Collapse 3+ blank lines
         s2 = "\n".join(out)
-        s2 = _re.sub(r'\n{3}', '\n\n', s2)
+        s2 = _re.sub(r'\n{3,}', '\n\n', s2)
         return s2
     except Exception:
         return s
@@ -6248,7 +6091,7 @@ def _dedupe_verdict_and_risk_strict(s: str) -> str:
         s2 = "\n".join(out)
         # Remove any repeated identical verdict lines that slipped in one paragraph
         s2 = _re.sub(r'(?mi)^(Trust\s+verdict:.*\n)(?:\1)+', r'\1', s2)
-        s2 = _re.sub(r'\n{3}', '\n\n', s2)
+        s2 = _re.sub(r'\n{3,}', '\n\n', s2)
         return s2
     except Exception:
         return s
@@ -6571,7 +6414,7 @@ def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
             insert_after_verdict, txt, flags=re.I|re.S
         )
         txt = txt.replace(r'\1', '')
-        txt = re.sub(r'\n{3}', '\n\n', txt)
+        txt = re.sub(r'\n{3,}', '\n\n', txt)
         return txt.encode("utf-8", errors="ignore")
     except Exception:
         try:
@@ -6624,1329 +6467,3 @@ try:
 except Exception:
     pass
 # ==== /MDX Report Normalizer ====
-
-
-
-def _normalize_action_row(kb: dict) -> dict:
-    """Remove DexScreener; put [Open in DEX | Open in Scan] on top; rebuild DEX URL from Scan URL & CA."""
-    try:
-        ik = (kb or {}).get("inline_keyboard") or []
-        dex_btn = None
-        scan_btn = None
-        cleaned_rows = []
-        # 1) Sweep rows: strip DexScreener, capture DEX & Scan (drop them from in-place rows)
-        for row in ik:
-            new_row = []
-            for btn in (row or []):
-                t = str((btn or {}).get("text") or "")
-                u = str((btn or {}).get("url") or "")
-                if "DexScreener" in t or "dexscreener." in u.lower():
-                    continue
-                if t.strip() in {"🟢 Open in DEX", "Open in DEX"} and u:
-                    dex_btn = {"text": "🟢 Open in DEX", "url": u}
-                    continue
-                if t.strip() in {"🔍 Open in Scan", "Open in Scan"} and u:
-                    scan_btn = {"text": "🔍 Open in Scan", "url": u}
-                    continue
-                new_row.append(btn)
-            if new_row:
-                cleaned_rows.append(new_row)
-
-        # 2) If we have Scan URL, infer chain and CA, then rebuild DEX URL accordingly
-        import re as _re
-        from urllib.parse import urlparse as _urlparse
-
-        if scan_btn:
-            scan_url = str(scan_btn.get("url") or "")
-            try:
-                ca = (_re.search(r"(0x[a-fA-F0-9]{40})", scan_url) or [None, ""])[1]
-            except Exception:
-                ca = ""
-
-            # Prefer chain from DexScreener resolver (if available)
-            ch = ""
-            try:
-                _pair, _ds_chain = _ds_resolve_pair_and_chain(ca) or (None, None)
-                if _ds_chain:
-                    ch = _ds_chain
-            except Exception:
-                ch = ch or ""
-
-            # Fallback 1: derive from scan URL host
-            if not ch:
-                try:
-                    host = (_urlparse(scan_url).hostname or "").lower()
-                    if "bscscan" in host: ch = "bsc"
-                    elif "etherscan" in host: ch = "ethereum"
-                    elif "arbiscan" in host: ch = "arbitrum"
-                    elif "basescan" in host: ch = "base"
-                    elif "polygonscan" in host: ch = "polygon"
-                    elif "optimistic" in host or "optimism" in host: ch = "optimism"
-                    elif "snowtrace" in host or "avax" in host: ch = "avalanche"
-                except Exception:
-                    pass
-
-            # Fallback 2: internal resolver used by scan_url
-            if not ch:
-                try:
-                    ch = (_resolve_chain_for_scan(ca) or "") or ch
-                except Exception:
-                    pass
-
-            
-            # If we can rebuild, do it
-            # Change: prefer DexScreener PAIR URL exactly; fallback to DexScreener search.
-            if ca:
-                new_dex = ""
-                try:
-                    pair_info, ch2 = _ds_resolve_pair_and_chain(ca)
-                except Exception:
-                    pair_info, ch2 = None, (ch or "")
-                try:
-                    if isinstance(pair_info, dict):
-                        paddr = pair_info.get("pairAddress") or pair_info.get("pair")
-                        if paddr and (ch2 or ch):
-                            new_dex = _dexscreener_pair_url((ch2 or ch), paddr)
-                except Exception:
-                    new_dex = ""
-                if not new_dex:
-                    # Strict mode: no search fallback
-                    try:
-                        strict = bool(int(os.getenv("DEX_STRICT_CHAIN", "0") or "0")) and not bool(int(os.getenv("DS_ALLOW_FALLBACK", "1") or "1"))
-                    except Exception:
-                        strict = False
-                    if strict:
-                        new_dex = "https://dexscreener.com"
-                    else:
-                        query = ca
-                        new_dex = f"https://dexscreener.com/search?q={query}"
-                # Replace/insert DEX button
-                dex_btn = {"text": "🟢 Open in DEX", "url": new_dex}
-
-        # 3) Build top row and return
-        top = []
-        if dex_btn:
-            top.append(dex_btn)
-        if scan_btn:
-            top.append(scan_btn)
-        if top:
-            cleaned_rows.insert(0, top)
-        return {"inline_keyboard": cleaned_rows}
-    except Exception:
-        return kb or {}
-
-
-# ========================
-# Feedback API (Help page → /api/feedback)
-# ========================
-try:
-    import os, time, smtplib, socket, json as _json
-    from email.message import EmailMessage
-    from flask import request, jsonify, Response
-    # Reuse existing Telegram sender if available
-    try:
-        _tg_send = tg_send_message
-    except Exception:
-        _tg_send = None
-
-    # ENV (documented for deployment)
-    _ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://metridex.com,https://www.metridex.com,https://metridex.vercel.app").split(",")
-    _SMTP_HOST   = os.getenv("SMTP_HOST", "").strip()
-    _SMTP_PORT   = int(os.getenv("SMTP_PORT", "587") or "587")
-    _SMTP_USER   = os.getenv("SMTP_USER", "").strip()
-    _SMTP_PASS   = os.getenv("SMTP_PASS", "").strip()
-    _SMTP_FROM   = os.getenv("SMTP_FROM", (_SMTP_USER or "no-reply@metridex.com")).strip()
-    _SMTP_STARTTLS = (os.getenv("SMTP_STARTTLS", "1") or "1").lower() not in ("0","false","no")
-    _FEEDBACK_TO = os.getenv("FEEDBACK_TO", os.getenv("CONTACT_EMAIL", "contact@metridex.com")).strip()
-    _FEEDBACK_SUBJ = os.getenv("FEEDBACK_SUBJECT_PREFIX", "[Metridex.Help] ").strip()
-    _RATE_TTL = int(os.getenv("FEEDBACK_RATE_LIMIT_SEC","60") or "60")
-    _TG_CHAT  = os.getenv("TELEGRAM_FEEDBACK_CHAT_ID", os.getenv("ADMIN_CHAT_ID","")).strip()
-    _TG_TOKEN = os.getenv("TELEGRAM_TOKEN","").strip()  # tg_send_message already knows token
-
-    _FEED_RL = {}  # ip->ts
-
-    def _origin_allowed(req):
-        try:
-            o = (req.headers.get("Origin") or "").strip()
-            if not o:
-                return True
-            for allowed in (_ALLOWED_ORIGINS or []):
-                a = (allowed or "").strip()
-                if not a: 
-                    continue
-                if a == "*" or o.startswith(a):
-                    return True
-        except Exception:
-            return False
-        return False
-
-    def _with_cors(resp):
-        try:
-            o = (request.headers.get("Origin") or "")
-            if _origin_allowed(request):
-                resp.headers["Access-Control-Allow-Origin"] = o or "*"
-                resp.headers["Vary"] = "Origin"
-                resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-                resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        except Exception:
-            pass
-        return resp
-
-    def _send_email(to_addr: str, subject: str, body: str) -> bool:
-        if not (_SMTP_HOST and to_addr):
-            return False
-        try:
-            s = smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=12)
-            try:
-                if _SMTP_STARTTLS:
-                    s.starttls()
-                if _SMTP_USER:
-                    s.login(_SMTP_USER, _SMTP_PASS)
-                msg = EmailMessage()
-                msg["Subject"] = subject
-                msg["From"] = _SMTP_FROM
-                msg["To"] = to_addr
-                msg.set_content(body)
-                s.send_message(msg)
-                return True
-            finally:
-                try: s.quit()
-                except Exception: pass
-        except Exception:
-            try:
-                app.logger.exception("feedback: SMTP failed")
-            except Exception:
-                pass
-            return False
-
-    def _send_telegram(text: str) -> bool:
-        try:
-            if not (_tg_send and _TG_CHAT and _TG_TOKEN):
-                return False
-            _tg_send(_TG_TOKEN, _TG_CHAT, text, logger=app.logger)
-            return True
-        except Exception:
-            try:
-                app.logger.exception("feedback: telegram failed")
-            except Exception:
-                pass
-            return False
-
-    @app.route("/api/feedback", methods=["POST","OPTIONS"])
-    def feedback_api():
-        # Preflight
-        if request.method == "OPTIONS":
-            return _with_cors(Response(status=204))
-
-        # CORS check
-        if not _origin_allowed(request):
-            return _with_cors(jsonify(ok=False, error="origin_forbidden")), 403
-
-        # Basic rate-limit by IP
-        ip = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Real-IP") or request.remote_addr or "0.0.0.0"
-        now = time.time()
-        ts = _FEED_RL.get(ip, 0)
-        if now - ts < _RATE_TTL:
-            return _with_cors(jsonify(ok=False, error="rate_limited")), 429
-        _FEED_RL[ip] = now
-
-        data = request.get_json(silent=True) or {}
-        email = (data.get("email") or "").strip()[:200]
-        subj  = (data.get("subject") or "").strip()[:200]
-        msg   = (data.get("message") or "").strip()[:4000]
-
-        if not msg:
-            return _with_cors(jsonify(ok=False, error="message_required")), 400
-
-        # Compose
-        site = request.headers.get("Origin") or request.headers.get("Referer") or ""
-        ua = request.headers.get("User-Agent") or ""
-        s = f"{_FEEDBACK_SUBJ}{subj or 'New message'}"
-        b = f"From: {email or 'anonymous'}\nIP: {ip}\nSite: {site}\nUA: {ua}\n\n{msg}"
-
-        sent_email = _send_email(_FEEDBACK_TO, s, b)
-        sent_tg = _send_telegram(f"✉️ Feedback\n{subj or 'New message'}\nfrom: {email or 'anonymous'}\nIP: {ip}\n\n{msg[:1800]}")
-
-        return _with_cors(jsonify(ok=True, email=bool(sent_email), telegram=bool(sent_tg)))
-
-    # Simple ping for healthchecks
-    @app.get("/api/feedback/ping")
-    def feedback_ping():
-        return jsonify(ok=True, ts=int(time.time()))
-
-except Exception as _e_fb:
-    try:
-        app.logger.exception("feedback api init failed")
-    except Exception:
-        pass
-# ===== /Feedback API =====
-
-# ===== BEGIN FINAL2 PATCH: report & lp-lite harmonization =====
-try:
-    import re as _re
-
-    # --- HTML report postprocess override (idempotent) ---
-    _MDX_FIX_PREV = globals().get("_mdx_fix_report_html_bytes")
-
-    def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
-        """
-        Stronger normalizer:
-        - Align <Risk verdict> with Summary (verdict+score)
-        - Fill <Signals>/<Positives> blocks from parsed lists
-        - Remove Wayback negatives when Domain is absent
-        - Floor NOT TRADABLE/no-liquidity to 80 + unified wording
-        """
-        try:
-            txt = raw.decode("utf-8", errors="ignore")
-        except Exception:
-            return _MDX_FIX_PREV(raw) if callable(_MDX_FIX_PREV) else raw
-
-        # Extract Summary content
-        try:
-            # Summary <pre> ... </pre>
-            msum = _re.search(r"(?s)<h2>Summary</h2><pre>(.*?)</pre>", txt)
-            sumtxt = msum.group(1) if msum else ""
-
-            # verdict + score from summary lines
-            mscore = _re.search(r"(?mi)^Risk score:\s*(\d+)\s*/\s*100", sumtxt)
-            mver = _re.search(r"(?mi)^Trust verdict:\s*(.+)$", sumtxt)
-            score = int(mscore.group(1)) if mscore else None
-            verdict = mver.group(1).strip() if mver else None
-        except Exception:
-            score, verdict = None, None
-
-        # Check for NOT TRADABLE / no liquidity markers
-        try:
-            if _re.search(r"(?mi)NOT\s+TRADABLE|No\s+active\s+pools|No\s+liquidity|No\s+pools\s+found", txt) or \
-               _re.search(r"(?mi)NOT\s+TRADABLE|No\s+active\s+pools|No\s+liquidity|No\s+pools\s+found", sumtxt or ""):
-                if score is None or score < 80:
-                    score = 80
-                verdict = "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)"
-        except Exception:
-            pass
-
-        # Domain present?
-        has_domain = bool(_re.search(r"(?mi)<b>Domain:</b>\s*(?!—|—|-|n/?a|none)\S+", txt))
-
-        # Remove Wayback negatives when domain is absent - in Summary lines
-        if not has_domain and sumtxt:
-            sumtxt2 = _re.sub(r"(?mi)^\s*⚠️\s*Signals:\s*No Wayback snapshots\s*$", "⚠️ Signals: —", sumtxt)
-            if sumtxt2 != sumtxt:
-                txt = txt.replace(sumtxt, sumtxt2)
-                sumtxt = sumtxt2
-
-        # Extract lists of negatives/positives from Summary (fallback)
-        neg_list = []
-        pos_list = []
-        # Try to parse "⚠️ Signals: a; b; c" line
-        mneg = _re.search(r"(?mi)⚠️\s*Signals:\s*(.+)$", sumtxt)
-        if mneg:
-            raw_neg = mneg.group(1).strip()
-            if raw_neg != "—":
-                neg_list = [x.strip() for x in raw_neg.split(";") if x.strip()]
-        # Try to parse "✅ Positives: d; e" line
-        mpos = _re.search(r"(?mi)✅\s*Positives:\s*(.+)$", sumtxt)
-        if mpos:
-            raw_pos = mpos.group(1).strip()
-            if raw_pos != "—":
-                pos_list = [x.strip() for x in raw_pos.split(";") if x.strip()]
-
-        # Fill Signals/Positives blocks
-        def _fill_block(title, items, prefix):
-            block = "—"
-            if items:
-                block = "\n".join([f"{prefix} {t}" for t in items])
-            # Replace content inside the section
-            def rep(m):
-                return f"{m.group(1)}{block}{m.group(3)}"
-            pattern = rf"(<h3>{title}</h3><pre>)(.*?)(</pre>)"
-            return _re.sub(pattern, rep, txt, 1, flags=_re.S)
-
-        txt = _fill_block("Signals", neg_list, "-")
-        txt = _fill_block("Positives", pos_list, "-")
-
-        # Rewrite Risk verdict box <p><b>...</b></p> to match canonical verdict/score
-        if verdict and score is not None:
-            # Replace anything like <p><b>... (N/100)</b></p> with verdict + (score/100)
-            def rep_rv(m):
-                return f"<p><b>{verdict.splitlines()[0]} ({int(score)}/100)</b></p>"
-            txt = _re.sub(r"(<h2>Risk verdict</h2>\s*<p><b>)(.*?)(</b></p>)",
-                          lambda m: f"{m.group(1)}{verdict.splitlines()[0]} ({int(score)}/100){m.group(3)}",
-                          txt, 1, flags=_re.S)
-
-        # LP-lite contradiction fix in HTML
-        if _re.search(r"🔒\s*LP lock \(lite\)", txt) and \
-           _re.search(r"Top holder type:\s*contract", txt) and \
-           _re.search(r"Verdict:\s*🔴\s*high risk \(EOA holds LP\)", txt):
-            txt = _re.sub(r"(Verdict:\s*)🔴\s*high risk \(EOA holds LP\)",
-                          r"\1🟡 mixed (contract/custodian holds LP)", txt)
-
-        return txt.encode("utf-8", errors="ignore")
-
-    # --- Outbound text filter for LP-lite in chat (idempotent) ---
-    _SEND_TEXT_PREV = globals().get("tg_send_text")
-    if callable(_SEND_TEXT_PREV):
-        def tg_send_text(token, chat_id, text, **kw):
-            try:
-                try:
-                    text = mdx_postprocess_text(text, chat_id)
-                except Exception:
-                    pass
-                if ("LP lock (lite)" in str(text) and
-                    "Top holder type: contract" in str(text) and
-                    "Verdict:" in str(text) and
-                    "EOA holds LP" in str(text)):
-                    text = text.replace("Verdict: 🔴 high risk (EOA holds LP)",
-                                        "Verdict: 🟡 mixed (contract/custodian holds LP)")
-            except Exception:
-                pass
-            return _SEND_TEXT_PREV(token, chat_id, text, **kw)
-except Exception:
-    pass
-# ===== END FINAL2 PATCH =====
-
-# ==== BEGIN: CHAT SANITIZER PATCH (final) ====
-try:
-    import re as _re
-    import unicodedata as _uni
-
-    def _mdx_chat_sanitize(text: str, chat_id=None) -> str:
-        try:
-            t = str(text or "")
-            if not t.strip():
-                return t
-
-            # 1) LP-lite contradiction fixes (re-use existing sanitizer if present)
-            try:
-                if '_sanitize_lp_claims' in globals() and callable(_sanitize_lp_claims):
-                    t = _sanitize_lp_claims(t)
-                else:
-                    # Minimal wording fix
-                    if _re.search(r'(Top holder type:\s*)contract', t, _re.I):
-                        t = _re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', t)
-            except Exception:
-                pass
-
-            # 2) Wayback: suppress when Domain is absent in the same message
-            try:
-                has_domain = bool(_re.search(r'(?mi)^\s*Domain\s*:\s*\S+', t))
-                if not has_domain:
-                    t = _re.sub(r'(?mi)(;?\s*)No\s+Wayback\s+snapshots', '', t)
-                    # Clean possible trailing punctuation/spaces after removal
-                    t = _re.sub(r'\s*;\s*(\n|$)', r'\1', t)
-            except Exception:
-                pass
-
-            # 3) Optional host enforcement if helper exists
-            try:
-                if '_enforce_details_host' in globals() and callable(_enforce_details_host):
-                    t = _enforce_details_host(t, chat_id)
-            except Exception:
-                pass
-
-            # 4) Collapse duplicate blank lines and stray semicolons
-            t = _re.sub(r'\n{3,}', '\n\n', t)
-            t = _re.sub(r';\s*;', ';', t)
-            return t
-        except Exception:
-            return text
-
-    # Wrap tg_send_message
-    if 'tg_send_message' in globals() and callable(tg_send_message):
-        _ORIG_TG_SEND = tg_send_message
-        def tg_send_message(chat_id, text, *args, **kwargs):
-            try:
-                text = _mdx_chat_sanitize(text, chat_id)
-            except Exception:
-                pass
-            return _ORIG_TG_SEND(chat_id, text, *args, **kwargs)
-
-    # Wrap _send_text if used internally
-    if '_send_text' in globals() and callable(_send_text):
-        _ORIG_SEND_TEXT = _send_text
-        def _send_text(*args, **kwargs):
-            # Try to extract chat_id and text from kwargs or positional args
-            chat_id = kwargs.get('chat_id')
-            text_val = kwargs.get('text')
-            a = list(args)
-
-            # Heuristics for positional extraction
-            if chat_id is None and len(a) >= 1:
-                chat_id = a[0]
-            if text_val is None:
-                if len(a) >= 2 and isinstance(a[1], str):
-                    text_val = a[1]
-                elif len(a) >= 1 and isinstance(a[0], str):
-                    text_val = a[0]
-
-            # Post-process if we have both
-            if isinstance(text_val, str) and chat_id is not None:
-                try:
-                    text_val = mdx_postprocess_text(text_val, chat_id)
-                except Exception:
-                    pass
-                try:
-                    text_val = _mdx_chat_sanitize(text_val, chat_id)
-                except Exception:
-                    pass
-
-                # Put updated text back to the right place
-                if 'text' in kwargs:
-                    kwargs['text'] = text_val
-                elif len(a) >= 2 and isinstance(a[1], str):
-                    a[1] = text_val
-                elif len(a) >= 1 and isinstance(a[0], str):
-                    a[0] = text_val
-                else:
-                    kwargs['text'] = text_val
-
-            return _ORIG_SEND_TEXT(*tuple(a), **kwargs)
-
-    # Wrap tg_answer_callback for WHY popups
-    if 'tg_answer_callback' in globals() and callable(tg_answer_callback):
-        _ORIG_TG_ANS = tg_answer_callback
-        def tg_answer_callback(*args, **kwargs):
-            # Heuristic: 3rd positional arg is the text per typical signature (token, cq_id, text, ...)
-            try:
-                if len(args) >= 3 and isinstance(args[2], str):
-                    lst = list(args)
-                    lst[2] = _mdx_chat_sanitize(lst[2], kwargs.get('chat_id'))
-                    args = tuple(lst)
-                elif 'text' in kwargs and isinstance(kwargs.get('text'), str):
-                    kwargs['text'] = _mdx_chat_sanitize(kwargs['text'], kwargs.get('chat_id'))
-            except Exception:
-                pass
-            return _ORIG_TG_ANS(*args, **kwargs)
-except Exception:
-    pass
-# ==== END: CHAT SANITIZER PATCH (final) ====
-
-# ==== BEGIN: OUTBOUND TELEGRAM SANITIZER (requests.post wrapper) ====
-try:
-    import re as _re
-    import requests as _requests
-
-    _ORIG_POST = _requests.post
-
-    def _mdx_text_sanitize_core(text: str) -> str:
-        try:
-            t = str(text or "")
-            if not t.strip():
-                return t
-
-            # LP-lite: contract holder => not EOA wording
-            if _re.search(r'(?mi)Top holder type:\s*contract', t):
-                t = _re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', t)
-
-            # Wayback: if no Domain present in same message, remove "No Wayback snapshots"
-            has_domain = bool(_re.search(r'(?mi)^\s*Domain\s*:\s*\S+', t))
-            if not has_domain:
-                t = _re.sub(r'(?mi)(;?\s*)No\s+Wayback\s+snapshots', '', t)
-                t = _re.sub(r'\s*;\s*(\n|$)', r'\1', t)
-
-            # WHY popup: if bare "Risk score: XX/100" line is present with no context,
-            # and message mentions "No pools|NOT TRADABLE|No liquidity", force 80/100; otherwise drop the line to avoid contradictions.
-            if _re.search(r'(?m)^Risk score:\s*\d{1,3}/100\s*$', t):
-                if _re.search(r'(?mi)NOT\s+TRADABLE|No\s+active\s+pools|No\s+liquidity|No\s+pools\s+found', t):
-                    t = _re.sub(r'(?m)^Risk score:\s*\d{1,3}/100\s*$', 'Risk score: 80/100', t)
-                else:
-                    # drop ambiguous local score
-                    t = _re.sub(r'(?m)^Risk score:\s*\d{1,3}/100\s*$', '', t)
-                    t = _re.sub(r'\n{3,}', '\n\n', t).strip()
-
-            return t
-        except Exception:
-            return text
-
-    def _mdx_patch_payload(payload):
-        if isinstance(payload, dict):
-            for key in ('text', 'caption'):
-                if key in payload and isinstance(payload[key], str):
-                    payload[key] = _mdx_text_sanitize_core(payload[key])
-        return payload
-
-    def post(url, *args, **kwargs):
-        try:
-            if isinstance(url, str) and 'api.telegram.org' in url:
-                # sanitize for sendMessage / answerCallbackQuery / sendDocument (caption)
-                if 'data' in kwargs:
-                    kwargs['data'] = _mdx_patch_payload(kwargs['data'])
-                if 'json' in kwargs:
-                    kwargs['json'] = _mdx_patch_payload(kwargs['json'])
-        except Exception:
-            pass
-        return _ORIG_POST(url, *args, **kwargs)
-
-    _requests.post = post
-except Exception:
-    pass
-# ==== END: OUTBOUND TELEGRAM SANITIZER (requests.post wrapper) ====
-
-
-
-# =====================
-# Metridex SAFE MINPATCH RC3c (text-only, WHOIS/RDAP refined)
-# =====================
-try:
-    APP_VERSION = (APP_VERSION + "+rc3c-minpatch3") if "APP_VERSION" in globals() else "0.3.114-onepass-safe8+rc3c-minpatch3"
-except Exception:
-    APP_VERSION = "0.3.114-onepass-safe8+rc3c-minpatch3"
-
-import re as _re
-from datetime import datetime as _dt
-
-def _mdx_sanitize_text_min(text: str) -> str:
-    if not isinstance(text, str) or not text.strip():
-        return text
-    t = text
-
-    # --- 0) Extract Wayback dates to use later for Created: ~YYYY-MM-DD (Wayback)
-    wb_dates = _re.findall(r'(?mi)Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})', t)
-    wb_dates_sorted = sorted(wb_dates) if wb_dates else []
-    wb_earliest = wb_dates_sorted[0] if wb_dates_sorted else None
-
-    # --- 1) Owner=0x0 -> remove "Owner privileges present"
-    try:
-        owner_zero = bool(_re.search(r'(?mi)^\s*Owner:\s*0x0+(?:[.…]{1}0+)?\b', t))
-        if owner_zero:
-            t = _re.sub(r'(?mi)^.*Owner privileges present.*\n?', '', t)
-    except Exception:
-        pass
-
-    # --- 2) RDAP wording normalize
-    try:
-        # Normalize any phrase "RDAP unavailable for ... registry"
-        t = _re.sub(r'(?mi)RDAP unavailable for .* registry', 'registry response unavailable', t)
-        # If after normalization we have "WHOIS/RDAP: RDAP: ...", collapse duplicate label
-        t = _re.sub(r'(?mi)WHOIS/RDAP:\s*RDAP:\s*', 'WHOIS/RDAP: ', t)
-        # If "WHOIS/RDAP: —" -> "WHOIS/RDAP: no data"
-        t = _re.sub(r'(?mi)WHOIS/RDAP:\s*—', 'WHOIS/RDAP: no data', t)
-    except Exception:
-        pass
-
-    # --- 3) LP top holder must not equal token address
-    try:
-        m_token = _re.search(r'(?mi)^Scan token:\s*https?://\S+/(?:token|address)/(?P<ca>0x[0-9a-fA-F]{40})', t)
-        m_top = _re.search(r'(?mi)^•\s*Top holder:\s*(?P<addr>0x[0-9a-fA-F]{40})\b', t)
-        top_fixed = False
-        if m_token and m_top and m_token.group('ca').lower() == m_top.group('addr').lower():
-            t = _re.sub(
-                r'(?mi)^•\s*Top holder:\s*0x[0-9a-fA-F]{40}.*\n?',
-                '• Top holder: n/a — (contract/custodian holds LP)\n',
-                t
-            )
-            top_fixed = True
-        if top_fixed or _re.search(r'(?mi)^•\s*Top holder:\s*n/a', t):
-            t = _re.sub(r'(?mi)^.*LP concentrated in a single holder:.*\n?', '', t)
-    except Exception:
-        pass
-
-    # --- 4) Wayback unify inside one message: keep earliest only
-    try:
-        if len(wb_dates_sorted) > 1:
-            t = _re.sub(r'(?mi)^Wayback:\s*first\s*\d{4}-\d{2}-\d{2}\s*\n?', '', t)
-            t = t.rstrip() + f"\nWayback: first {wb_earliest}\n"
-    except Exception:
-        pass
-
-    # --- 5) If Created is blank and we have Wayback earliest, fill with "~YYYY-MM-DD (Wayback)"
-    try:
-        if wb_earliest:
-            # Replace only patterns with Created: —
-            t = _re.sub(r'(?mi)Created:\s*—', f'Created: ~{wb_earliest} (Wayback)', t)
-    except Exception:
-        pass
-
-    # Collapse triple newlines
-    t = _re.sub(r"\n{3,}", "\n\n", t)
-    return t
-# =====================
-# /Metridex SAFE MINPATCH RC3c (text-only, WHOIS/RDAP refined)
-# =====================
-
-# === MDX postprocess (stable) ===
-def mdx_postprocess_text(text: str, chat_id=None, is_details: bool=False) -> str:
-    """Apply safe sanitizers to outgoing bot text (WHOIS harmonization, owner/LP wording, compacting)."""
-    try:
-        import re
-        if not isinstance(text, str) or not text:
-            return text
-        t = text
-
-        # WHOIS/RDAP Created <- Wayback when RDAP missing
-        try:
-            wb = re.search(r"Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})", t)
-            if wb and re.search(r"WHOIS/RDAP:\s*(no data|registry response unavailable)", t, re.I):
-                created = wb.group(1)
-                t = re.sub(
-                    r"WHOIS/RDAP:.*?(?=\n)",
-                    f"WHOIS/RDAP: registry response unavailable | Created: ~{created} (Wayback) | Registrar: —",
-                    t, flags=re.I
-                )
-        except Exception:
-            pass
-
-        # Remove 'Owner privileges present' if renounced and not proxied
-        try:
-            if re.search(r"Owner:\s*0x0+\b", t) and not re.search(r"Proxy:\s*yes", t, re.I):
-                t = re.sub(r"(?m)^⚠️\s*Signals:.*?Owner privileges present;?\s*", "⚠️ Signals: ", t)
-                t = t.replace("Owner privileges present; ", "").replace("Owner privileges present", "")
-                t = re.sub(r"(?m)^−\s*?20\s+Owner privileges present\n", "", t)
-            t = re.sub(r"(?m)^⚠️\s*Signals:\s*$", "⚠️ Signals:", t)
-        except Exception:
-            pass
-
-        # Compact double blank lines
-        try:
-            t = re.sub(r"\n{3,}", "\n\n", t)
-        except Exception:
-            pass
-        return t
-    except Exception:
-        return text
-
-def _send_text(token, chat_id, text, **kw):
-    """Unified sender: ALWAYS postprocess before sending."""
-    try:
-        text = mdx_postprocess_text(text, chat_id)
-    except Exception:
-        pass
-    return tg_send_text(token, chat_id, text, **kw)
-# ==== SAFE DISPATCHER: unify _send_text signatures (chat_id,text) vs (token,chat_id,text) ====
-try:
-    _MDX_BASIC_SEND = _ORIG_SEND_TEXT   # captured earlier before token-first override
-except NameError:
-    _MDX_BASIC_SEND = None
-
-_MDX_TOKEN_FIRST_SEND = _send_text  # current definition at this point
-
-def _send_text(*args, **kwargs):
-    """
-    Flexible wrapper that supports both call styles:
-      1) _send_text(chat_id, text, **kwargs)
-      2) _send_text(token, chat_id, text, **kwargs)
-    It also applies mdx_postprocess_text and _mdx_chat_sanitize when chat_id & text are available.
-    """
-    a = list(args)
-
-    # Try to detect if first arg looks like a token (long string with ':'), and count of args
-    looks_like_token = (len(a) >= 1 and isinstance(a[0], str) and ':' in a[0] and len(a) >= 3)
-
-    # If caller passed explicit 'token' kwarg, route to token-first
-    has_kw_token = 'token' in kwargs
-
-    if looks_like_token or has_kw_token or len(a) >= 3:
-        # token-first path
-        token = kwargs.pop('token', a[0] if len(a) >= 1 else None)
-        chat_id = kwargs.pop('chat_id', a[1] if len(a) >= 2 else None)
-        text = kwargs.pop('text',  a[2] if len(a) >= 3 else None)
-
-        if isinstance(text, str) and chat_id is not None:
-            try:
-                text = mdx_postprocess_text(text, chat_id)
-            except Exception:
-                pass
-            try:
-                text = _mdx_chat_sanitize(text, chat_id)
-            except Exception:
-                pass
-
-        # rebuild args: token, chat_id, text, rest...
-        rest = a[3:] if len(a) > 3 else []
-        new_args = []
-        if token is not None: new_args.append(token)
-        if chat_id is not None: new_args.append(chat_id)
-        if text is not None: new_args.append(text)
-        new_args.extend(rest)
-        return _MDX_TOKEN_FIRST_SEND(*tuple(new_args), **kwargs)
-
-    # basic path (chat_id, text)
-    chat_id = kwargs.pop('chat_id', a[0] if len(a) >= 1 else None)
-    text = kwargs.pop('text',  a[1] if len(a) >= 2 else None)
-
-    if isinstance(text, str) and chat_id is not None:
-        try:
-            text = mdx_postprocess_text(text, chat_id)
-        except Exception:
-            pass
-        try:
-            text = _mdx_chat_sanitize(text, chat_id)
-        except Exception:
-            pass
-
-    if _MDX_BASIC_SEND is not None:
-        rest = a[2:] if len(a) > 2 else []
-        new_args = []
-        if chat_id is not None: new_args.append(chat_id)
-        if text is not None: new_args.append(text)
-        new_args.extend(rest)
-        return _MDX_BASIC_SEND(*tuple(new_args), **kwargs)
-
-    # Fallback: call token-first with empty token (shouldn't happen in normal flow)
-    rest = a[2:] if len(a) > 2 else []
-    new_args = [None]
-    if chat_id is not None: new_args.append(chat_id)
-    if text is not None: new_args.append(text)
-    new_args.extend(rest)
-    return _MDX_TOKEN_FIRST_SEND(*tuple(new_args), **kwargs)
-
-# ==== END SAFE DISPATCHER ====
-
-
-
-# === MDX WHY CONTEXTUAL (append) ===
-def _extract_why_contextual(msg_text: str) -> str:
-    """Context-aware WHY builder from visible message/caption (Summary / On-chain / LP-lock)."""
-    try:
-        t = (msg_text or "").strip()
-        if not t:
-            return ""
-        import re as _re
-        # LP lock (lite)
-        if "🔒 LP lock (lite)" in t:
-            out = []
-            m = _re.search(r"\btopHolder\s*=\s*([0-9.]+)%", t, _re.I)
-            if m:
-                pct = float(m.group(1))
-                out.append(f"- LP tokens concentrated in a single holder: {pct:.2f}%" if pct >= 50 else f"- LP concentration: {pct:.2f}%")
-            def _pct(k):
-                m = _re.search(rf"\b{k}\s*[:=]\s*([0-9.]+)%", t, _re.I)
-                return float(m.group(1)) if m else 0.0
-            burned = _pct("burned"); uncx = _pct("UNCX"); tf = _pct("TeamFinance")
-            if burned == 0 and (uncx == 0 and tf == 0):
-                out.append("- No public LP lock via UNCX/TeamFinance")
-            if burned > 0:
-                out.append(f"- Burned LP share: {burned:.2f}%")
-            if uncx > 0 or tf > 0:
-                bits = []
-                if uncx > 0: bits.append(f"UNCX {uncx:.2f}%")
-                if tf   > 0: bits.append(f"TeamFinance {tf:.2f}%")
-                out.append("- Locks: " + ", ".join(bits))
-            mht = _re.search(r"Top holder type:\s*(\w+)", t, _re.I)
-            if mht:
-                ht = mht.group(1).lower()
-                if ht in ("contract","custodian"):
-                    out.append("- Top holder type: contract/custodian")
-                elif ht == "eoa":
-                    out.append("- Top holder type: EOA")
-            if _re.search(r"Renounced:\s*yes", t, _re.I):
-                out.append("- Ownership renounced")
-            elif _re.search(r"Renounced:\s*no", t, _re.I):
-                out.append("- Ownership NOT renounced")
-            return ("Why++ (LP)\n" + "\n".join([x for x in out if x])) if out else ""
-        # On-chain
-        if "On-chain" in t:
-            out = []
-            m = _re.search(r"Honeypot\.is:\s*simulation\s*=\s*(\w+)\s*\|\s*risk\s*=\s*(\w+)\s*\|\s*level\s*=\s*(\d+)", t, _re.I)
-            if m:
-                out.append(f"- Honeypot simulation: {m.group(1).upper()} (risk={m.group(2).lower()}, level={m.group(3)})")
-            m = _re.search(r"Taxes:\s*buy\s*=\s*([0-9.]+)%\s*\|\s*sell\s*=\s*([0-9.]+)%\s*\|\s*transfer\s*=\s*([0-9.]+)%", t, _re.I)
-            if m:
-                out.append(f"- Taxes: buy {m.group(1)}%, sell {m.group(2)}%, transfer {m.group(3)}%")
-            if _re.search(r"Owner:\s*0x0+(\b|…)", t):
-                out.append("- Owner: 0x000…000 (renounced/burn)")
-            else:
-                m_owner = _re.search(r"Owner:\s*(0x[0-9a-fA-F]{6,40}|n/a)", t)
-                if m_owner:
-                    out.append(f"- Owner: {m_owner.group(1)}")
-            if _re.search(r"Proxy:\s*yes", t, _re.I):
-                out.append("- Proxy contract detected")
-            elif _re.search(r"Proxy:\s*no", t, _re.I):
-                out.append("- Proxy: no")
-            m = _re.search(r"Holders:\s*top20 own\s*([0-9.]+)%", t, _re.I)
-            if m:
-                out.append(f"- Top20 holders own {m.group(1)}%")
-            m = _re.search(r"\bLP:\s.*?topHolder\s*=\s*([0-9.]+)%", t, _re.I)
-            if m:
-                out.append(f"- LP concentration (top holder): {m.group(1)}%")
-            return ("Why++ (On-chain)\n" + "\n".join(out)) if out else ""
-        # Summary fallback
-        m_neg = _re.search(r"(?mi)⚠️\s*Signals:\s*(.+)$", t)
-        m_pos = _re.search(r"(?mi)✅\s*Positives:\s*(.+)$", t)
-        out = []
-        if m_neg and m_neg.group(1).strip() and m_neg.group(1).strip() != "—":
-            out += [ "- " + x.strip() for x in re.split(r";|•|-", m_neg.group(1)) if x.strip() ]
-        if m_pos and m_pos.group(1).strip() and m_pos.group(1).strip() != "—":
-            out += [ "+ " + x.strip() for x in re.split(r";|•|\+", m_pos.group(1)) if x.strip() ]
-        if out:
-            return "Why++\n" + "\n".join(out)
-        return ""
-    except Exception:
-        return ""
-
-# === WHY++ full message (helper) ===
-def _answer_why_deep(cq, addr_hint=None):
-    """Send a full WHY text as a chat message and acknowledge the callback."""
-    try:
-        msg_obj = cq.get('message', {}) or {}
-        text = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
-        why_long = _extract_why_contextual(text) or _extract_why_block_from_message(text) or 'Why++ factors: n/a'
-        if chat_id:
-            try:
-                _tg_send_message(chat_id, why_long)
-            except Exception:
-                pass
-        try:
-            # AUTOFIX: send deep details to chat before showing popup
-            try:
-                _dl_raw = cq.get('data') if isinstance(cq, dict) else None
-                dl = (_dl_raw or '').lower() if isinstance(_dl_raw, str) else ''
-                if (('why' in dl and '++' in dl) or dl.startswith('why2') or 'whypp' in dl):
-                    _answer_why_deep(cq)
-                elif (dl.startswith('lp') or dl.startswith('lp:') or 'lpmore' in dl or dl.startswith('lp_')):
-                    _lp_send_deep(cq)
-            except Exception:
-                pass
-            tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), 'Sent details', logger=app.logger)
-        except Exception:
-            pass
-        return True
-    except Exception:
-        return False
-
-# === WHY? popup (override) with smart routing ===
-def _handle_why_popup(_cq: dict, _chat_id: int):
-    """
-    - If payload is 'why++' or the built text is long → send a full message (and only confirm via popup).
-    - Else → show a short popup.
-    Always return ('ok', 200) so Flask gets a valid response when this return is bubbled up.
-    """
-    try:
-        msg_obj = _cq.get('message') or {}
-        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        cb_id = _cq.get('id')
-        data = _cq.get('data') or ''  # might be raw or inflated by router
-
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
-        longish = (len(why) > 140) or ("Why++" in why.splitlines()[0] if why else False)
-        is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
-
-        if is_deep or longish:
-            # Deep route → post full message, popup only confirms
-            try:
-                _tg_send_message(_chat_id, why)
-            except Exception:
-                pass
-            try:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-            except Exception:
-                pass
-            return ("ok", 200)
-
-        # Short popup route
-        short = why.strip()
-        if len(short) > 190:
-            short = short[:187] + '…'
-            try:
-                _tg_send_message(_chat_id, why)
-            except Exception:
-                pass
-        try:
-            tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
-        except Exception:
-            pass
-        return ("ok", 200)
-    except Exception:
-        # As a fallback, still return a valid response
-        return ("ok", 200)
-# === /MDX WHY handlers ===
-
-
-# === MDX WHY popup (final override with robust fallback) ===
-def _handle_why_popup(_cq: dict, _chat_id: int):
-    try:
-        msg_obj = _cq.get('message') or {}
-        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        cb_id = _cq.get('id')
-        data = _cq.get('data') or ''
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why++ factors: n/a'
-        short = (why or '—').strip()
-        is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
-        sent = False
-        # If deep or long text, try to send full message first
-        if is_deep or len(short) > 140:
-            try:
-                _tg_send_message(_chat_id, why)
-                sent = True
-            except Exception:
-                sent = False
-        # Deep: prefer chat message; popup shows confirmation or content if sending failed
-        if is_deep:
-            try:
-                if sent:
-                    tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-                else:
-                    show = short if len(short) <= 190 else (short[:187] + '…')
-                    tg_answer_callback(TELEGRAM_TOKEN, cb_id, show or '—', logger=app.logger)
-            except Exception:
-                pass
-            return ('ok', 200)
-        # Why? popup route
-        if len(short) <= 190:
-            try:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
-            except Exception:
-                pass
-            return ('ok', 200)
-        # Long WHY? → if message failed, show truncated in popup; else just confirm
-        try:
-            if sent:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-            else:
-                tg_answer_callback(TELEGRAM_TOKEN, cb_id, (short[:187] + '…') if len(short) > 190 else short, logger=app.logger)
-        except Exception:
-            pass
-        return ('ok', 200)
-    except Exception:
-        try:
-            tg_answer_callback(TELEGRAM_TOKEN, _cq.get('id'), 'Why: unavailable', logger=app.logger)
-        except Exception:
-            pass
-        return ('ok', 200)
-# === /MDX WHY popup final ===
-
-
-
-# === MDX: Clean WHY block extractor (override) ===
-def _extract_why_block_from_message(msg_text: str) -> str:
-    try:
-        t = (msg_text or "").strip()
-        if not t: return ""
-        import re as _re
-        m = _re.search(r"(?mi)^Why\+\+\s*factors\s*\n([\s\S]+?)(?:\n{2,}|$)", t)
-        if m:
-            return m.group(1).strip()[:2000]
-        m = _re.search(r"(?mi)Trust verdict:\s*([^\n]+)", t)
-        if m:
-            return "Why (summary)\n" + m.group(1).strip()
-        return ""
-    except Exception:
-        return ""
-
-# === LP deep sender ===
-def _extract_lp_block(msg_text: str) -> str:
-    try:
-        t = (msg_text or "").strip()
-        if not t: return ""
-        import re as _re
-        m = _re.search(r"(🔒 LP lock \(lite\)[\s\S]+?)(?:\n{2,}|$)", t)
-        if m:
-            return m.group(1).strip()[:3500]
-        return ""
-    except Exception:
-        return ""
-
-def _lp_send_deep(cq):
-    try:
-        msg_obj = cq.get('message', {}) or {}
-        text = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        chat_id = msg_obj.get('chat',{}).get('id') or cq.get('from',{}).get('id')
-        cb_id = cq.get('id')
-        payload = _extract_lp_block(text) or "LP: n/a"
-        if chat_id:
-            try: _tg_send_message(chat_id, payload)
-            except Exception: pass
-        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-        except Exception: pass
-        return True
-    except Exception:
-        return False
-
-# === WHY popup override (no bogus fallback) ===
-def _handle_why_popup(_cq: dict, _chat_id: int):
-    try:
-        msg_obj = _cq.get('message') or {}
-        txt = (msg_obj.get('text') or msg_obj.get('caption') or '')
-        cb_id = _cq.get('id')
-        data = _cq.get('data') or ''
-        why = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or 'Why: n/a'
-        is_deep = isinstance(data, str) and (data.startswith('why++') or data.startswith('why2'))
-        # Deep → send message, popup confirm; Short → show popup, else fallback to chat + confirm
-        if is_deep or len(why) > 140:
-            try: _tg_send_message(_chat_id, why)
-            except Exception: pass
-            try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, 'Sent details', logger=app.logger)
-            except Exception: pass
-            return ("ok", 200)
-        short = why.strip()
-        if len(short) > 190:
-            short = short[:187] + '…'
-            try: _tg_send_message(_chat_id, why)
-            except Exception: pass
-        try: tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or '—', logger=app.logger)
-        except Exception: pass
-        return ("ok", 200)
-    except Exception:
-        try: tg_answer_callback(TELEGRAM_TOKEN, _cq.get('id'), 'Why: unavailable', logger=app.logger)
-        except Exception: pass
-        return ("ok", 200)
-
-# === Pre-router: intercept callbacks early and handle WHY/LP ===
-from flask import request
-
-@app.before_request
-def _mdx_pre_router():
-    try:
-        if not request.path or "/webhook/" not in request.path:
-            return None
-        if request.method != "POST":
-            return None
-        upd = request.get_json(silent=True) or {}
-        if "callback_query" not in upd:
-            return None
-        cq = upd["callback_query"]
-        msg = cq.get("message") or {}
-        chat_id = msg.get("chat",{}).get("id")
-        data = cq.get("data","")
-        # Inflate cb: if possible
-        try:
-            if isinstance(data, str) and data.startswith("cb:") and "cb_cache" in globals():
-                orig = cb_cache.get(data)
-                if orig:
-                    data = orig
-                    cq["data"] = orig
-        except Exception:
-            pass
-        if isinstance(data, str) and (data.startswith("why++") or data.startswith("why2")):
-            _answer_why_deep(cq)
-            return ("ok", 200)
-        if isinstance(data, str) and data.startswith("why"):
-            _handle_why_popup(cq, chat_id)
-            return ("ok", 200)
-        if isinstance(data, str) and (data.startswith("lp") or data.startswith("lp:")):
-            _lp_send_deep(cq)
-            return ("ok", 200)
-        return None
-    except Exception:
-        return None
-
-
-
-# ==== MDX MINI HOTFIX (2025-10-05) ====
-# Purpose: make Why?/Why++/LP buttons behave consistently *without* touching existing handlers.
-# Strategy: a tiny before_request hook that intercepts /webhook callback_query and handles 3 keys.
-import re, json, time
-from flask import request
-
-class _HotfixCache:
-    def __init__(self, ttl=7200):
-        self.ttl = ttl
-        self._d = {}
-    def get(self, k, default=None):
-        v = self._d.get(k)
-        if not v: return default
-        ts, val = v
-        if time.time() - ts > self.ttl:
-            self._d.pop(k, None)
-            return default
-        return val
-    def set(self, k, v):
-        self._d[k] = (time.time(), v)
-
-_HOTFIX_LAST_DETAILS = _HotfixCache(ttl=7200)
-_HOTFIX_DEDUP = _HotfixCache(ttl=35)
-
-def _hotfix_md(txt):
-    # Telegram-safe minimal
-    return str(txt or "").replace("<", "‹").replace(">", "›")
-
-
-def _hotfix_send(chat_id, text):
-    """ raw Telegram send to avoid wrapper recursion """
-    try:
-        import requests as _rq, os as _os
-        token = globals().get('TELEGRAM_TOKEN') or _os.getenv('TELEGRAM_TOKEN') or ''
-        if not token:
-            try:
-                if 'bot' in globals():
-                    return globals()['bot'].send_message(chat_id, text)
-            except Exception:
-                return None
-            return None
-        _rq.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                 json={"chat_id": int(chat_id), "text": _hotfix_md(text), "parse_mode": "HTML"},
-                 timeout=8)
-        return True
-    except Exception:
-        return None
-
-
-def _hotfix_answer(cb_id, text=None):
-    try:
-        import requests as _rq
-        token = globals().get('TELEGRAM_TOKEN') or os.getenv('TELEGRAM_TOKEN') or ''
-        if not token or not cb_id: return None
-        payload = {"callback_query_id": cb_id}
-        if text is not None:
-            payload["text"] = str(text)
-            payload["show_alert"] = (len(str(text)) > 170)
-        _rq.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", json=payload, timeout=6)
-    except Exception:
-        return None
-
-def _hotfix_key(raw):
-    s = str(raw or "")
-    lo = s.lower()
-    # JSON
-    try:
-        j = json.loads(s) if s[:1] in "{[" else None
-        if isinstance(j, dict):
-            val = (j.get("cmd") or j.get("action") or j.get("k") or j.get("type") or "").lower()
-            if val: lo = val
-    except Exception:
-        pass
-    # key=value
-    if "=" in lo and not lo.strip().startswith("{"):
-        try:
-            parts = dict(p.split("=",1) for p in lo.split("&") if "=" in p)
-            lo = (parts.get("cmd") or parts.get("action") or parts.get("k") or lo)
-        except Exception:
-            pass
-    if "why++" in lo or "whypp" in lo or "why2" in lo: return "whypp"
-    if "why?" in lo or lo.strip() in ("why","w"): return "why"
-    if lo.startswith("lp") or lo == "lp" or "lp_block" in lo: return "lp"
-    return ""
-
-
-def _hotfix_build_why(txt):
-    t = txt or ""
-    m = re.search(r"(?si)(Why\+\+\s*factors?:.*?)(?:\n\n|$)", t)
-    if m:
-        blk = m.group(1).strip()
-        blk = re.sub(r"(?i)\bn/?a\b", "—", blk)
-        return blk
-    lines = []
-    for lab, rx in [
-        ("✅ Positives", r"(?mi)^\s*(✅\s*Positives|✅\s*Плюсы)\s*:\s*(.+)$"),
-        ("⚠️ Signals",  r"(?mi)^\s*(⚠️\s*Signals|⚠️\s*Сигналы)\s*:\s*(.+)$"),
-    ]:
-        m = re.search(rx, t)
-        if m and m.group(2).strip() and m.group(2).strip().lower() not in ("—","n/a","n\a"):
-            lines.append(f"{lab}: " + m.group(2).strip())
-    m = re.search(r"(?mi)^\s*(Trust verdict|Overall risk|Итоговый риск|Вердикт)\s*:\s*([^\n]+)", t)
-    ver = m.group(2).strip() if m else ""
-    m = re.search(r"(?mi)Risk\s*score\s*:\s*([0-9]{1,3}\s*/\s*100|[0-9]{1,3})", t)
-    sc = m.group(1).replace(" ", "") if m else ""
-    bits = [b for b in ([ver] + lines + ([f"Risk score {sc}"] if sc else [])) if b]
-    if bits:
-        return "Why (summary)\n" + "\n".join(bits)
-    return ""
-
-
-def _hotfix_lp_from_text(txt):
-    t = txt or ""
-    # Existing block in message
-    m = re.search(r"(?s)(🔒\s*LP lock\s*\(lite\).*?)(?:\n\n|$)", t)
-    if m: return m.group(1).strip()
-    # Heuristic minimal
-    # chain hint
-    ch = "ethereum"
-    m = re.search(r"\((ethereum|bsc|polygon|arbitrum|optimism|base|avalanche|fantom)\)", t, re.I)
-    if m: ch = m.group(1).lower()
-    # contract
-    m = re.search(r"(0x[a-fA-F0-9]{40})", t)
-    ca = m.group(1).lower() if m else ""
-    # top holder type / percent
-    th = ""
-    m = re.search(r"(?mi)Top holder type\s*:\s*(EOA|contract|custodian)", t)
-    if m: th = m.group(1).lower()
-    pct = None
-    m = re.search(r"(?mi)(LP concentration|Top holder).*?([0-9]{1,2}(?:\.[0-9]+)?)\s*%", t)
-    if m: 
-        try: pct = float(m.group(2))
-        except: pct = None
-    ren = ""
-    m = re.search(r"(?mi)Renounced\s*:\s*(yes|no|n/a)", t)
-    if m: ren = m.group(1).lower()
-    proxy = ""
-    m = re.search(r"(?mi)Proxy\s*:\s*(yes|no|n/a)", t)
-    if m: proxy = m.group(1).lower()
-
-    verdict = "⚪ unknown"
-    if th and pct is not None:
-        if th == "eoa" and pct >= 30: verdict = "🔴 high risk (EOA holds LP)"
-        elif th in ("contract","custodian"): verdict = "🟡 mixed (contract/custodian holds LP)"
-    block = [f"🔒 LP lock (lite) — chain: {ch}", f"Verdict: {verdict}"]
-    if ren: block.append(f"• Renounced: {ren}")
-    if proxy: block.append(f"• Proxy: {proxy}")
-    if th: block.append(f"• Top holder type: {th}")
-    if pct is not None: block.append(f"• LP concentration (top holder): {pct:.2f}%")
-    if ca:
-        try:
-            expl = EXPLORER_BY_CHAIN.get(ch, "etherscan.io")
-            block.append(f"Scan token: https://{expl}/token/{ca}")
-        except Exception:
-            block.append(f"Scan token: https://etherscan.io/token/{ca}")
-    return "\n".join(block)
-
-@app.before_request
-
-@app.before_request
-def _mdx_mini_hotfix_router():
-    try:
-        if not request.path or "/webhook" not in request.path:
-            return None
-        upd = request.get_json(silent=True, force=True) or {}
-        # Cache latest details
-        msg = upd.get("message") or {}
-        if msg:
-            txt_in = msg.get("text") or msg.get("caption") or ""
-            if any(k in txt_in for k in ("QuickScan","More details","On-chain","Why++ factors","🔒 LP lock (lite)")):
-                cid = (msg.get("chat") or {}).get("id")
-                if cid: _HOTFIX_LAST_DETAILS.set(str(cid), txt_in)
-
-        cq = upd.get("callback_query")
-        if not cq:
-            return None
-
-        cb_id = cq.get("id")
-        if cb_id and _HOTFIX_DEDUP.get(cb_id):
-            return ("OK", 200)
-        if cb_id: _HOTFIX_DEDUP.set(cb_id, True)
-
-        data = cq.get("data") or ""
-        key = _hotfix_key(data)
-        if not key:
-            return None
-
-        mobj = cq.get("message") or {}
-        txt = (mobj.get("text") or mobj.get("caption") or "")
-        chat_id = (mobj.get("chat") or {}).get("id") or (cq.get("from") or {}).get("id")
-
-        if key == "why":
-            why = _hotfix_build_why(txt)
-            if not why:
-                cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
-                if cached:
-                    why = _hotfix_build_why(cached)
-            if why and len(why) > 180:
-                _hotfix_send(chat_id, why)
-                _hotfix_answer(cb_id, "Sent details")
-            else:
-                _hotfix_answer(cb_id, (why or "No signals found."))
-            return ("OK", 200)
-
-        if key == "whypp":
-            cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
-            why = _hotfix_build_why(txt) or _hotfix_build_why(cached)
-            if not why:
-                msc = re.search(r"(?mi)Risk\s*score\s*:\s*([0-9]{1,3}\s*/\s*100|[0-9]{1,3})", (txt or "") + "\n" + cached)
-                sc = msc.group(1).replace(" ", "") if msc else ""
-                why = "Why (summary)\n" + (f"Risk score {sc}" if sc else "No extra signals available.")
-            _hotfix_send(chat_id, why)
-            _hotfix_answer(cb_id, "Sent details")
-            return ("OK", 200)
-
-        if key == "lp":
-            cached = _HOTFIX_LAST_DETAILS.get(str(chat_id)) or ""
-            payload = _hotfix_lp_from_text(txt) or _hotfix_lp_from_text(cached)
-            if not payload:
-                payload = "🔒 LP lock (lite)\nVerdict: ⚪ unknown\n(Need More details to analyze LP.)"
-            _hotfix_send(chat_id, payload)
-            _hotfix_answer(cb_id, "Sent details")
-            return ("OK", 200)
-
-        return None
-    except Exception:
-        return None
