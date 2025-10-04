@@ -7128,14 +7128,24 @@ except Exception:
 
 
 # =====================
-# Metridex FINAL post‑processors & hooks (SAFE8 RC2)
+# Metridex FINAL post-processors & hooks (SAFE8 RC2b HOTFIX)
 # =====================
-try:
-    APP_VERSION = (APP_VERSION + "+rc2-final") if "APP_VERSION" in globals() else "0.3.114-onepass-safe8+rc2-final"
-except Exception:
-    APP_VERSION = "0.3.114-onepass-safe8+rc2-final"
+import os as _os, re as _re
 
-# Remember last seen site host per chat for Details enforcement
+try:
+    APP_VERSION = (APP_VERSION + "+rc2b-hotfix") if "APP_VERSION" in globals() else "0.3.114-onepass-safe8+rc2b-hotfix"
+except Exception:
+    APP_VERSION = "0.3.114-onepass-safe8+rc2b-hotfix"
+
+def _mdx_enabled():
+    """Disabled by default. Enable only if MDX_ENABLE_POSTPROCESS=1 and MDX_BYPASS_SANITIZERS!=1."""
+    try:
+        if str(_os.environ.get("MDX_BYPASS_SANITIZERS","0")).strip() in ("1","true","yes"):
+            return False
+        return str(_os.environ.get("MDX_ENABLE_POSTPROCESS","0")).strip() in ("1","true","yes")
+    except Exception:
+        return False
+
 try:
     _LAST_SITE_HOST
 except NameError:
@@ -7143,15 +7153,17 @@ except NameError:
 
 def _is_details_blob(txt: str) -> bool:
     t = str(txt or "")
-    return bool(re.search(r"(Trust verdict|WHOIS|RDAP|Wayback|SSL:)", t))
+    return bool(_re.search(r"(Trust verdict|WHOIS|RDAP|Wayback|SSL:)", t))
 
 def _postprocess_outgoing_text(text: str, chat_id=None) -> str:
+    # If disabled, return original text untouched.
+    if not _mdx_enabled():
+        return text
     try:
         if not isinstance(text, str) or not text.strip():
             return text
-        # Update last site host snapshot if present in current text
         try:
-            m_site = re.search(r'(?mi)^Site:\s*(https?://\S+)', text)
+            m_site = _re.search(r'(?mi)^Site:\s*(https?://\S+)', text)
             if m_site:
                 from urllib.parse import urlparse as _up
                 host = (_up(m_site.group(1)).netloc or "").lower()
@@ -7160,64 +7172,48 @@ def _postprocess_outgoing_text(text: str, chat_id=None) -> str:
         except Exception:
             pass
 
-        enabled = True
-        try:
-            enabled = bool(int(str(MDX_ENABLE_POSTPROCESS))) and not bool(int(str(MDX_BYPASS_SANITIZERS)))
-        except Exception:
-            pass
-        if not enabled:
-            return text
-
-        # Apply text-level sanitizers (order matters)
         t = text
-        try:
-            t = _sanitize_owner_privileges(t, chat_id)
-        except Exception:
-            pass
-        try:
-            t = _sanitize_lp_claims(t)
-        except Exception:
-            pass
-        try:
-            t = _enforce_details_host(t, chat_id)
-        except Exception:
-            pass
-        try:
-            t = _normalize_whois_rdap(t)
-        except Exception:
-            pass
-        try:
-            t = _sanitize_compact_domains(t, is_details=_is_details_blob(t))
-        except Exception:
-            pass
-        # Collapse triple newlines if any
-        t = re.sub(r"\n{3,}", "\n\n", t)
+        # The following helpers are optional; if absent, we keep text as-is.
+        for fn_name in ("_sanitize_owner_privileges",
+                        "_sanitize_lp_claims",
+                        "_enforce_details_host",
+                        "_normalize_whois_rdap",
+                        "_sanitize_compact_domains"):
+            try:
+                if fn_name in globals() and callable(globals()[fn_name]):
+                    t = globals()[fn_name](t, chat_id) if fn_name != "_sanitize_compact_domains" else globals()[fn_name](t, is_details=_is_details_blob(t))
+            except Exception:
+                pass
+
+        t = _re.sub(r"\n{3,}", "\n\n", t)
         return t
     except Exception:
         return text
 
 def _postprocess_report_html(html: str) -> str:
+    if not _mdx_enabled():
+        return html
     try:
         if not isinstance(html, str) or not html.strip():
             return html
-        try:
-            html = _mdx_inject_logo_into_html(html)
-        except Exception:
-            pass
-        try:
-            html = _soften_lp_verdict_html(html)
-        except Exception:
-            pass
+        for fn_name in ("_mdx_inject_logo_into_html", "_soften_lp_verdict_html"):
+            try:
+                if fn_name in globals() and callable(globals()[fn_name]):
+                    html = globals()[fn_name](html)
+            except Exception:
+                pass
         return html
     except Exception:
         return html
 
-# --- Hook installers (idempotent) ---
 _ORIG_SEND_TEXT = None
 _ORIG_SEND_HTML = None
 _ORIG_SEND_DOCUMENT = None
 
 def _install_text_sanitizer_hooks():
+    # Install wrappers only if feature enabled.
+    if not _mdx_enabled():
+        return
     global _ORIG_SEND_TEXT, _ORIG_SEND_HTML, _ORIG_SEND_DOCUMENT
     try:
         if _ORIG_SEND_TEXT is None and '_send_text' in globals() and callable(globals()['_send_text']):
@@ -7231,7 +7227,6 @@ def _install_text_sanitizer_hooks():
             globals()['_send_text'] = __wrapped_send_text
     except Exception:
         pass
-    # Try optional HTML wrappers if present in this server
     try:
         if _ORIG_SEND_HTML is None and '_send_html' in globals() and callable(globals()['_send_html']):
             _ORIG_SEND_HTML = globals()['_send_html']
@@ -7244,44 +7239,15 @@ def _install_text_sanitizer_hooks():
             globals()['_send_html'] = __wrapped_send_html
     except Exception:
         pass
-    try:
-        if _ORIG_SEND_DOCUMENT is None and '_send_document' in globals() and callable(globals()['_send_document']):
-            _ORIG_SEND_DOCUMENT = globals()['_send_document']
-            def __wrapped_send_document(chat_id, filename, *args, **kwargs):
-                # If it's an HTML report, try to postprocess its contents before sending
-                try:
-                    if isinstance(filename, str) and filename.lower().endswith((".html", ".htm")):
-                        try:
-                            with open(filename, "r", encoding="utf-8") as fh:
-                                h = fh.read()
-                            h2 = _postprocess_report_html(h)
-                            if h2 != h:
-                                tmp = filename  # overwrite in place (safe temp files are also fine)
-                                with open(tmp, "w", encoding="utf-8") as fh:
-                                    fh.write(h2)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                return _ORIG_SEND_DOCUMENT(chat_id, filename, *args, **kwargs)
-            globals()['_send_document'] = __wrapped_send_document
-    except Exception:
-        pass
+    # For maximum safety in HOTFIX, do NOT wrap _send_document by default.
 
-# Install immediately (safe if some functions are defined later — we retry lazily on first send)
-_install_text_sanitizer_hooks()
-
-# If _send_text appears later (defined after this block), lazily re-check on first call sites:
 def _mdx_try_install_hooks_once():
+    if not _mdx_enabled():
+        return
     if globals().get('_ORIG_SEND_TEXT', None) is None and '_send_text' in globals() and callable(globals()['_send_text']):
         _install_text_sanitizer_hooks()
 
-# Optional public helpers to run from other parts of server
-def mdx_fix_text_for_send(text: str, chat_id=None) -> str:
-    return _postprocess_outgoing_text(text, chat_id)
-
-def mdx_fix_html_for_send(html: str) -> str:
-    return _postprocess_report_html(html)
+# In HOTFIX build, do not auto-install. Hooks will activate only if MDX_ENABLE_POSTPROCESS=1 is set.
 # =====================
-# /Metridex FINAL post‑processors & hooks
+# /Metridex FINAL post-processors & hooks
 # =====================
