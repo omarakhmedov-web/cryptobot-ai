@@ -1930,27 +1930,53 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
     """Show Why text as a modal alert (doesn't auto-dismiss). If too long, send full text as a message."""
     try:
         msg_obj = _cq.get("message") or {}
-        txt = (msg_obj.get("text") or msg_obj.get("caption") or "")
+        txt = (msg_obj.get("text") or "")
         cb_id = _cq.get("id")
-        why_block = _extract_why_contextual(txt) or _extract_why_block_from_message(txt) or "Why++ factors: n/a"
+        why_block = _extract_why_block_from_message(txt) or "Why++ factors: n/a"
+        # Telegram alert limit is ~200 chars; keep it safe around 190
         short = why_block.strip()
         limit = 190
         truncated = False
         if len(short) > limit:
             short = short[:limit-1].rstrip() + "…"
             truncated = True
+        # Use Telegram API directly to guarantee show_alert=True
         try:
-            tg_answer_callback(TELEGRAM_TOKEN, cb_id, short or "—", logger=app.logger)
+            import requests as _rq
+            _rq.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                json={"callback_query_id": cb_id, "text": short, "show_alert": True},
+                timeout=6,
+                headers={"User-Agent": os.getenv("USER_AGENT","MetridexBot/1.0")}
+            )
         except Exception:
-            pass
-        if truncated:
+            # Silent fallback
             try:
-                _tg_send_message(_chat_id, why_block)
+                tg_answer_callback(TELEGRAM_TOKEN, cb_id, short, show_alert=True, logger=app.logger)  # type: ignore
             except Exception:
                 pass
-        return True
-    except Exception:
-        return False
+        # If truncated, send the full block into chat so it can be fully read and scrolled
+        if truncated:
+            try:
+                _send_text(_chat_id, why_block, logger=app.logger)
+            except Exception:
+                pass
+        return ("ok", 200)
+    except Exception as _e:
+        try:
+            _admin_debug(_chat_id, f"why-popup error: {type(_e).__name__}: {_e}")
+        except Exception:
+            pass
+        try:
+            tg_answer_callback(TELEGRAM_TOKEN, (_cq or {}).get("id"), "error", logger=app.logger)  # type: ignore
+        except Exception:
+            pass
+        return ("ok", 200)
+# === /Why helper ===
+# === Send-time LP filter ===
+def _is_lp_mini_only(text: str) -> bool:
+    try:
+        if not isinstance(text, str): return False
         t = (text or "").strip()
         if "🔒 LP lock (lite) — chain:" in t:
             return False
@@ -4193,8 +4219,7 @@ def webhook(secret):
 
         # === Mobile Why?/Why++: show as modal alert (non-disappearing); full text goes to chat if too long ===
         if isinstance(data, str) and (data.startswith("why") or data.startswith("why2")):
-            _handle_why_popup(cq, chat_id)
-            return ("ok", 200)
+            return _handle_why_popup(cq, chat_id)
         # === /Mobile Why ===
         if data.startswith("cb:"):
             orig = cb_cache.get(data)
@@ -7039,43 +7064,13 @@ try:
     # Wrap _send_text if used internally
     if '_send_text' in globals() and callable(_send_text):
         _ORIG_SEND_TEXT = _send_text
-        def _send_text(*args, **kwargs):
-            # Try to extract chat_id and text from kwargs or positional args
-            chat_id = kwargs.get('chat_id')
-            text_val = kwargs.get('text')
-            a = list(args)
-
-            # Heuristics for positional extraction
-            if chat_id is None and len(a) >= 1:
-                chat_id = a[0]
-            if text_val is None:
-                if len(a) >= 2 and isinstance(a[1], str):
-                    text_val = a[1]
-                elif len(a) >= 1 and isinstance(a[0], str):
-                    text_val = a[0]
-
-            # Post-process if we have both
-            if isinstance(text_val, str) and chat_id is not None:
-                try:
-                    text_val = mdx_postprocess_text(text_val, chat_id)
-                except Exception:
-                    pass
-                try:
-                    text_val = _mdx_chat_sanitize(text_val, chat_id)
-                except Exception:
-                    pass
-
-                # Put updated text back to the right place
-                if 'text' in kwargs:
-                    kwargs['text'] = text_val
-                elif len(a) >= 2 and isinstance(a[1], str):
-                    a[1] = text_val
-                elif len(a) >= 1 and isinstance(a[0], str):
-                    a[0] = text_val
-                else:
-                    kwargs['text'] = text_val
-
-            return _ORIG_SEND_TEXT(*tuple(a), **kwargs)
+        def _send_text(chat_id, text, *args, **kwargs):
+            text = mdx_postprocess_text(text, chat_id)
+            try:
+                text = _mdx_chat_sanitize(text, chat_id)
+            except Exception:
+                pass
+            return _ORIG_SEND_TEXT(chat_id, text, *args, **kwargs)
 
     # Wrap tg_answer_callback for WHY popups
     if 'tg_answer_callback' in globals() and callable(tg_answer_callback):
@@ -7287,82 +7282,3 @@ def _send_text(token, chat_id, text, **kw):
     except Exception:
         pass
     return tg_send_text(token, chat_id, text, **kw)
-# ==== SAFE DISPATCHER: unify _send_text signatures (chat_id,text) vs (token,chat_id,text) ====
-try:
-    _MDX_BASIC_SEND = _ORIG_SEND_TEXT   # captured earlier before token-first override
-except NameError:
-    _MDX_BASIC_SEND = None
-
-_MDX_TOKEN_FIRST_SEND = _send_text  # current definition at this point
-
-def _send_text(*args, **kwargs):
-    """
-    Flexible wrapper that supports both call styles:
-      1) _send_text(chat_id, text, **kwargs)
-      2) _send_text(token, chat_id, text, **kwargs)
-    It also applies mdx_postprocess_text and _mdx_chat_sanitize when chat_id & text are available.
-    """
-    a = list(args)
-
-    # Try to detect if first arg looks like a token (long string with ':'), and count of args
-    looks_like_token = (len(a) >= 1 and isinstance(a[0], str) and ':' in a[0] and len(a) >= 3)
-
-    # If caller passed explicit 'token' kwarg, route to token-first
-    has_kw_token = 'token' in kwargs
-
-    if looks_like_token or has_kw_token or len(a) >= 3:
-        # token-first path
-        token = kwargs.pop('token', a[0] if len(a) >= 1 else None)
-        chat_id = kwargs.pop('chat_id', a[1] if len(a) >= 2 else None)
-        text = kwargs.pop('text',  a[2] if len(a) >= 3 else None)
-
-        if isinstance(text, str) and chat_id is not None:
-            try:
-                text = mdx_postprocess_text(text, chat_id)
-            except Exception:
-                pass
-            try:
-                text = _mdx_chat_sanitize(text, chat_id)
-            except Exception:
-                pass
-
-        # rebuild args: token, chat_id, text, rest...
-        rest = a[3:] if len(a) > 3 else []
-        new_args = []
-        if token is not None: new_args.append(token)
-        if chat_id is not None: new_args.append(chat_id)
-        if text is not None: new_args.append(text)
-        new_args.extend(rest)
-        return _MDX_TOKEN_FIRST_SEND(*tuple(new_args), **kwargs)
-
-    # basic path (chat_id, text)
-    chat_id = kwargs.pop('chat_id', a[0] if len(a) >= 1 else None)
-    text = kwargs.pop('text',  a[1] if len(a) >= 2 else None)
-
-    if isinstance(text, str) and chat_id is not None:
-        try:
-            text = mdx_postprocess_text(text, chat_id)
-        except Exception:
-            pass
-        try:
-            text = _mdx_chat_sanitize(text, chat_id)
-        except Exception:
-            pass
-
-    if _MDX_BASIC_SEND is not None:
-        rest = a[2:] if len(a) > 2 else []
-        new_args = []
-        if chat_id is not None: new_args.append(chat_id)
-        if text is not None: new_args.append(text)
-        new_args.extend(rest)
-        return _MDX_BASIC_SEND(*tuple(new_args), **kwargs)
-
-    # Fallback: call token-first with empty token (shouldn't happen in normal flow)
-    rest = a[2:] if len(a) > 2 else []
-    new_args = [None]
-    if chat_id is not None: new_args.append(chat_id)
-    if text is not None: new_args.append(text)
-    new_args.extend(rest)
-    return _MDX_TOKEN_FIRST_SEND(*tuple(new_args), **kwargs)
-
-# ==== END SAFE DISPATCHER ====
