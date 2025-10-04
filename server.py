@@ -1932,7 +1932,7 @@ def _handle_why_popup(_cq: dict, _chat_id: int):
         msg_obj = _cq.get("message") or {}
         txt = (msg_obj.get("text") or "")
         cb_id = _cq.get("id")
-        why_block = _extract_why_contextual(txt) or "Why++ factors: n/a"
+        why_block = _extract_why_block_from_message(txt) or "Why++ factors: n/a"
         # Telegram alert limit is ~200 chars; keep it safe around 190
         short = why_block.strip()
         limit = 190
@@ -4022,59 +4022,54 @@ def admin_diag():
 # ========================
 # Telegram webhook & callbacks
 # ========================
+
 def _answer_why_quickly(cq, addr_hint=None):
     try:
         msg_obj = cq.get("message", {}) or {}
-        text = msg_obj.get("text") or ""
-            # Prefer addr from callback data
-        data = str(cq.get('data') or '')
-        maddr = ADDR_RE.search(data) if hasattr(ADDR_RE, 'search') else None
-                # Extract addr from callback_data first; then fall back to hints/cache/text
+        text = (msg_obj.get("text") or msg_obj.get("caption") or "")
+        # Prefer addr from callback data
         data = str(cq.get('data') or '')
         maddr = ADDR_RE.search(data) if hasattr(ADDR_RE, 'search') else None
         addr = (
             (maddr.group(0) if maddr else None)
-            or (
-                (addr_hint or msg2addr.get(str(msg_obj.get('message_id'))) or _extract_addr_from_text(text) or '')
-            ).lower()
+            or ((addr_hint or msg2addr.get(str(msg_obj.get('message_id'))) or _extract_addr_from_text(text) or '')).lower()
         )
 
-        # Use cached canonical risk if available to keep WHY consistent with Summary
+        # Try cached structured WHY (if pipeline filled it)
+        info = None
         try:
-            key = (addr or '').lower()
-            info = (RISK_CACHE.get(key) if (key and ADDR_RE.fullmatch(key)) else None)
-            if isinstance(info, dict) and 'score' in info and 'label' in info:
-                pairs_neg = list(zip(info.get('neg') or [], info.get('w_neg') or []))
-                pairs_pos = list(zip(info.get('pos') or [], info.get('w_pos') or []))
-                neg_s = '; '.join([f"{t} (−{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ''
-                pos_s = '; '.join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ''
-                body = f"{info['label']} ({int(info['score'])}/100)"
-                if neg_s: body += f" — ⚠️ {neg_s}"
-                if pos_s: body += f" — ✅ {pos_s}"
-                if len(body) > 190: body = body[:187] + '…'
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get('id'), body, logger=app.logger)
-                return
+            info = risk_cache.get(addr) if 'risk_cache' in globals() else None
         except Exception:
-            pass
+            info = None
 
-        info = RISK_CACHE.get(addr) if addr else None
-        if not info:
-            score, label, rs = _risk_verdict(addr or "", text or "")
-            info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
-        pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
-        pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
-        pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-        pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-        neg_s = "; ".join([f"{t} (+{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
-        pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
-        body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
-        if neg_s:
-            body += f" — ⚠️ {neg_s}"
-        if pos_s:
-            body += f" — ✅ {pos_s}"
-        if len(body) > 190:
-            body = body[:187] + "…"
-        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+        # If we have structured reasons, compose compact body
+        if isinstance(info, dict) and info.get("why"):
+            neg = info["why"].get("neg", []) or []
+            pos = info["why"].get("pos", []) or []
+            wneg = info["why"].get("wneg", []) or []
+            wpos = info["why"].get("wpos", []) or []
+            pairs_neg = list(zip([n for n in neg if n], wneg))[:2]
+            pairs_pos = list(zip([p for p in pos if p], wpos))[:2]
+            neg_s = "; ".join([f"{t} (−{w})" for t, w in pairs_neg if t]) if pairs_neg else ""
+            pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos if t]) if pairs_pos else ""
+            label = info.get('label','Risk')
+            score = info.get('score',0)
+            body = f"{label} ({score}/100)"
+            if neg_s:
+                body += f" — ⚠️ {neg_s}"
+            if pos_s:
+                body += f" — ✅ {pos_s}"
+            if len(body) > 190:
+                body = body[:187] + "…"
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+            return
+
+        # Contextual fallback from the visible message (Summary / On-chain / LP-lock)
+        why_text = _extract_why_contextual(text) or _extract_why_block_from_message(text) or "Why++ factors: n/a"
+        short = why_text.strip()
+        if len(short) > 190:
+            short = short[:187] + "…"
+        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), short, logger=app.logger)
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
 
@@ -7391,123 +7386,3 @@ def _send_text(*args, **kwargs):
     return _MDX_TOKEN_FIRST_SEND(*tuple(new_args), **kwargs)
 
 # ==== END SAFE DISPATCHER ====
-
-
-def _extract_why_contextual(msg_text: str) -> str:
-    """
-    Build a context‑aware WHY block from the current message text.
-    Cases:
-      • Summary (QuickScan): parse ⚠️ Signals / ✅ Positives
-      • On‑chain: explain honeypot level, taxes, owner/proxy
-      • LP lock (lite): explain lock presence, top holder %, holder type
-    Fallback: existing _extract_why_block_from_message(msg_text).
-    """
-    try:
-        if not isinstance(msg_text, str) or not msg_text.strip():
-            return "—"
-        t = msg_text
-
-        # LP context
-        if "🔒 LP lock (lite)" in t:
-            import re as _re
-            lines = []
-
-            # Top holder % from either LP line or summary On‑chain line
-            m_top = _re.search(r"Top holder:\s*(?:n/a|0x[0-9a-fA-F]{40})\s*—?\s*(?:\((.*?)\))?", t)
-            m_top_pct_in_onchain = _re.search(r"\bLP:\s.*?topHolder\s*=\s*([0-9.]+)%", t, _re.I)
-            top_pct = None
-            if m_top_pct_in_onchain:
-                try: top_pct = float(m_top_pct_in_onchain.group(1))
-                except Exception: top_pct = None
-
-            # Locker presence
-            def _pct(name):
-                m = _re.search(rf"\b{name}[:=]\s*([0-9.]+)%", t, _re.I)
-                return float(m.group(1)) if m else 0.0
-            uncx = _pct("UNCX")
-            tf   = _pct("TeamFinance")
-            burned = _pct("burned")
-
-            # Holder type
-            m_ht = _re.search(r"Top holder type:\s*(\w+)", t, _re.I)
-            holder_type = (m_ht.group(1).lower() if m_ht else "n/a")
-
-            # Build bullets
-            if top_pct is not None:
-                if top_pct >= 50:
-                    lines.append(f"- LP tokens concentrated in a single holder: {top_pct:.2f}%")
-                elif top_pct > 0:
-                    lines.append(f"- LP concentration: {top_pct:.2f}%")
-            # No known lockers
-            if burned == 0.0 and (uncx == 0.0 and tf == 0.0):
-                lines.append("- No public LP lock via UNCX/TeamFinance observed")
-            if burned > 0:
-                lines.append(f"- Burned LP share: {burned:.2f}%")
-            if uncx > 0 or tf > 0:
-                locks = []
-                if uncx > 0: locks.append(f"UNCX {uncx:.2f}%")
-                if tf   > 0: locks.append(f"TeamFinance {tf:.2f}%")
-                lines.append("- Locks: " + ", ".join(locks))
-            if holder_type in ("contract","custodian"):
-                lines.append("- Top holder type: contract/custodian (mixed custody)")
-            elif holder_type == "EOA".lower():
-                lines.append("- Top holder type: EOA (externally‑owned)")
-            # Owner/renounce signals if present
-            if _re.search(r"Renounced:\s*yes", t, _re.I):
-                lines.append("- Ownership renounced")
-            elif _re.search(r"Renounced:\s*no", t, _re.I):
-                lines.append("- Ownership NOT renounced")
-
-            return "Why++ (LP)\n" + ("\n".join(lines) if lines else "—")
-
-        # On‑chain context
-        if "On-chain" in t or "On‑chain" in t:
-            import re as _re
-            lines = []
-            # Honeypot
-            m_hp = _re.search(r"Honeypot\.is:\s*simulation\s*=\s*(\w+)\s*\|\s*risk\s*=\s*(\w+)\s*\|\s*level\s*=\s*(\d+)", t, _re.I)
-            if m_hp:
-                ok, risk, lvl = m_hp.group(1).upper(), m_hp.group(2).lower(), m_hp.group(3)
-                lines.append(f"- Honeypot simulation: {ok} (risk={risk}, level={lvl})")
-            # Taxes
-            m_tax = _re.search(r"Taxes:\s*buy\s*=\s*([0-9.]+)%\s*\|\s*sell\s*=\s*([0-9.]+)%\s*\|\s*transfer\s*=\s*([0-9.]+)%", t, _re.I)
-            if m_tax:
-                b,s,tr = m_tax.groups()
-                lines.append(f"- Taxes: buy {b}%, sell {s}%, transfer {tr}%")
-            # Owner/proxy
-            if _re.search(r"Owner:\s*0x0+(\b|…)", t):
-                lines.append("- Owner: 0x000…000 (renounced/burn)")
-            else:
-                m_owner = _re.search(r"Owner:\s*(0x[0-9a-fA-F]{6,40}|n/a)", t)
-                if m_owner:
-                    lines.append(f"- Owner: {m_owner.group(1)}")
-            if _re.search(r"Proxy:\s*yes", t, _re.I):
-                lines.append("- Proxy contract detected")
-            else:
-                lines.append("- Proxy: no")
-            # Holders
-            m_top20 = _re.search(r"Holders:\s*top20 own\s*([0-9.]+)%", t, _re.I)
-            if m_top20:
-                lines.append(f"- Top20 holders own {m_top20.group(1)}%")
-
-            return "Why++ (On-chain)\n" + ("\n".join(lines) if lines else "—")
-
-        # Default: Summary
-        # Reuse existing summary extractor if present
-        try:
-            return _extract_why_block_from_message(msg_text)
-        except Exception:
-            pass
-
-        # Minimal fallback: parse Signals/Positives lines
-        import re as _re
-        m_neg = _re.search(r"(?mi)⚠️\s*Signals:\s*(.+)$", t)
-        m_pos = _re.search(r"(?mi)✅\s*Positives:\s*(.+)$", t)
-        out = []
-        if m_neg and m_neg.group(1).strip() and m_neg.group(1).strip() != "—":
-            out.append("- " + "\n- ".join([x.strip() for x in m_neg.group(1).split(";") if x.strip()]))
-        if m_pos and m_pos.group(1).strip() and m_pos.group(1).strip() != "—":
-            out.append("+ " + "\n+ ".join([x.strip() for x in m_pos.group(1).split(";") if x.strip()]))
-        return "Why++\n" + ("\n".join(out) if out else "—")
-    except Exception:
-        return "—"
