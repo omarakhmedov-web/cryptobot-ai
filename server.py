@@ -709,6 +709,15 @@ def _send_text_guarded(chat_id: int, chain: str, ca: str, atype: str, text: str,
 
 
 # ===== Entitlements (SQLite) =====
+
+# === Judge pass (ENV) ===
+JUDGE_PASS_CODE = os.getenv("JUDGE_PASS_CODE", "").strip()
+try:
+    JUDGE_PASS_TTL_DAYS = int(os.getenv("JUDGE_PASS_TTL_DAYS", "0") or "0")
+except Exception:
+    JUDGE_PASS_TTL_DAYS = 0
+# === /Judge pass (ENV) ===
+
 DB_PATH = os.getenv("DB_PATH", "/tmp/metridex.db")
 
 def _db():
@@ -1175,6 +1184,29 @@ def _usage_save(data):
     except Exception:
         app.logger.exception("save usage failed")
 
+
+
+def _grant_judge_pass(user_id: int, days: int | None = None) -> int:
+    """Grant temporary Pro via judge pass. Returns expires_at (unix) or 0 if permanent."""
+    try:
+        d = int(days if days is not None else (JUDGE_PASS_TTL_DAYS or 0))
+    except Exception:
+        d = 0
+    try:
+        db = _usage_load()
+        key = str(user_id)
+        rec = db.get(key) or {"plan":"free","free_used":0,"created_at": datetime.utcnow().isoformat()}
+        rec["plan"] = "pro"
+        rec["plan_source"] = "judge_pass"
+        exp = 0
+        if d and d > 0:
+            exp = int(datetime.utcnow().timestamp()) + d*24*3600
+            rec["plan_expires_at"] = exp
+        db[key] = rec
+        _usage_save(db)
+        return int(exp or 0)
+    except Exception:
+        return 0
 def plan_of(user_id: int) -> str:
     # Admin/whitelisted bypass
     try:
@@ -1183,10 +1215,21 @@ def plan_of(user_id: int) -> str:
     except Exception:
         pass
     try:
-        rec = _usage_load().get(str(user_id)) or {}
+        db = _usage_load()
+        key = str(user_id)
+        rec = db.get(key) or {}
+        exp = rec.get("plan_expires_at")
+        if exp and int(exp) <= int(datetime.utcnow().timestamp()):
+            # Expired — downgrade to free and persist
+            rec["plan"] = "free"
+            rec.pop("plan_expires_at", None)
+            rec.pop("plan_source", None)
+            db[key] = rec
+            _usage_save(db)
         return rec.get("plan","free")
     except Exception:
         return "free"
+
 
 def free_left(user_id: int) -> int:
     try:
@@ -3943,7 +3986,30 @@ def webhook(secret):
             pass
         return ("ok", 200)
 
-    # Early /watch routing (robust, minimal)
+    
+    # Early /pass routing (judge pass)
+    if isinstance(_txt, str) and _chat and _txt.startswith("/pass"):
+        try:
+            parts = (_txt_raw or "").strip().split(maxsplit=1)
+            code = (parts[1] if len(parts) > 1 else "").strip()
+        except Exception:
+            code = ""
+        if not JUDGE_PASS_CODE:
+            _send_text(_chat, "Judge pass is not configured.", logger=app.logger); return ("ok", 200)
+        if not code:
+            _send_text(_chat, "Usage: /pass <code>", logger=app.logger); return ("ok", 200)
+        if code.strip().lower() != JUDGE_PASS_CODE.strip().lower():
+            _send_text(_chat, "Invalid code.", logger=app.logger); return ("ok", 200)
+        exp = _grant_judge_pass(int(_chat), JUDGE_PASS_TTL_DAYS)
+        if exp:
+            from datetime import datetime as _dt
+            dt = _dt.utcfromtimestamp(int(exp)).strftime("%Y-%m-%d")
+            _send_text(_chat, f"Judge access activated: Pro until {dt} (UTC).", logger=app.logger)
+        else:
+            _send_text(_chat, "Judge access activated: Pro.", logger=app.logger)
+        return ("ok", 200)
+
+# Early /watch routing (robust, minimal)
     if isinstance(_txt, str) and _chat and _txt.startswith('/watch'):
         _cmd_watch(_chat, _txt_raw); return ('ok', 200)
     if isinstance(_txt, str) and _chat and _txt.startswith('/unwatch'):
