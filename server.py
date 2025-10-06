@@ -361,6 +361,73 @@ def _postprocess_why_text_align(text: str) -> str:
         return text
 
 # === /sanitizers (finalfix3) ===
+
+
+
+def _dedupe_quickscan_sections(text: str) -> str:
+    try:
+        import re as _re
+        # Collapse duplicated QuickScan blocks that repeat verbatim up to 'source: DexScreener'
+        patt = _re.compile(r'(Metridex\s+QuickScan\s*\(MVP\+\)[\s\S]*?source:\s*DexScreener\s*)(?:\n\1)+', _re.I)
+        return patt.sub(lambda m: m.group(1), text or '')
+    except Exception:
+        return text
+
+def _reorder_links_block(text: str) -> str:
+    try:
+        import re as _re
+        # Reorder within the LP-lite section: DEX pair -> Scan token -> Scan LP holders -> UNCX -> TeamFinance
+        def _fix(block: str) -> str:
+            lines = [ln for ln in block.splitlines() if ln.strip()]
+            want = {"DEX pair:":None, "Scan token:":None, "Scan LP holders:":None, "UNCX:":None, "TeamFinance:":None}
+            rest = []
+            for ln in lines:
+                key = None
+                for k in want.keys():
+                    if ln.strip().startswith(k):
+                        key = k; break
+                if key:
+                    want[key] = ln
+                else:
+                    rest.append(ln)
+            ordered = [want[k] for k in ["DEX pair:","Scan token:","Scan LP holders:","UNCX:","TeamFinance:"] if want[k]]
+            return "\n".join(ordered + rest)
+        return _re.sub(r'(?ms)(^🔒\s*LP\s*lock.*?)(?=^\S|\Z)', lambda m: _fix(m.group(1)), text)
+    except Exception:
+        return text
+
+def _why_numeric_cleanup(text: str) -> str:
+    try:
+        import re as _re
+        # Remove Why++ lines without explicit ± number; keep header
+        def _clean(block: str) -> str:
+            out = []
+            for ln in block.splitlines():
+                if _re.search(r'^\s*[+\-−]\s*\d+\s+', ln):
+                    out.append(ln)
+                elif _re.search(r'Why\+\+\s*factors', ln, _re.I):
+                    out.append(ln)
+            return "\n".join(out) + "\n"
+        return _re.sub(r'(?ms)(^Why\+\+\s*factors\s*\n[\s\S]*?)(?=^\S|\Z)', lambda m: _clean(m.group(1)), text)
+    except Exception:
+        return text
+
+def _align_lp_verdict_with_onchain(text: str) -> str:
+    try:
+        import re as _re
+        # If on-chain reports LP topHolder > 0 AND LP-lite verdict is 'unknown', soften the wording
+        m = _re.search(r'(?mi)LP:\s*[\s\S]*?topHolder\s*=\s*([0-9]+(?:\.[0-9]+)?)%', text or '')
+        if not m: 
+            return text
+        top = float(m.group(1) or 0.0)
+        if top <= 0.0:
+            return text
+        text = _re.sub(r'(?mi)^Verdict:\s*⚪\s*unknown.*$', 
+                       'Verdict: ⚠️ concentrated LP (holders-source); lockers: n/a (API limit)',
+                       text)
+        return text
+    except Exception:
+        return text
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
@@ -6811,3 +6878,136 @@ def _sanitize_why_for_untradable(text: str) -> str:
         return norm
     except Exception:
         return text
+
+def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
+    """
+    Compact LP-lock table for the HTML report.
+    SAFE9: cleaned duplicates, added 'Next unlock ≈', works even if lockers=unknown.
+    """
+    if not LP_LOCK_HTML_ENABLED:
+        return ""
+    chain_lc = (chain or "").lower()
+    def _pct(v):
+        try: return f"{float(v):.2f}%"
+        except Exception: return "—"
+    dead_pct = _pct((stats or {}).get("dead_pct"))
+    uncx_pct = _pct((stats or {}).get("uncx_pct") or (stats or {}).get("uncx") or (stats or {}).get("UNCX"))
+    team_pct = _pct((stats or {}).get("team_finance_pct") or (stats or {}).get("team_pct") or (stats or {}).get("TF"))
+    holders_total = (stats or {}).get("holders_count") or (stats or {}).get("holders_total") or "—"
+
+    pair = (pair_address or "").strip()
+    UNCX_LINKS = {
+        "ethereum": "https://app.uncx.network/lockers/uniswap-v2/pair/{pair}",
+        "bsc":      "https://app.uncx.network/lockers/pancakeswap-v2/pair/{pair}",
+        "polygon":  "https://app.uncx.network/lockers/quickswap-v2/pair/{pair}",
+    }
+    TEAMFINANCE_LINKS = {
+        "ethereum": "https://app.team.finance/uniswap/{pair}",
+        "bsc":      "https://app.team.finance/pancakeswap/{pair}",
+        "polygon":  "https://app.team.finance/quickswap/{pair}",
+    }
+    uncx_url = UNCX_LINKS.get(chain_lc, "")
+    team_url = TEAMFINANCE_LINKS.get(chain_lc, "")
+    if pair:
+        if uncx_url: uncx_url = uncx_url.format(pair=pair)
+        if team_url: team_url = team_url.format(pair=pair)
+
+    # Optional unlock badges (best-effort parse of human text)
+    import datetime as _dt, re as _re
+    def _parse_date(s: str):
+        if not s: return None
+        t = str(s)
+        for fmt in ("%Y-%m-%d","%Y/%m/%d","%d-%m-%Y","%d/%m/%Y","%d.%m.%Y","%b %d %Y","%B %d %Y"):
+            try: return _dt.datetime.strptime(t.replace(',', ''), fmt).date()
+            except Exception: pass
+        m = _re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", t)
+        if m:
+            y, mo, d = map(int, m.groups()); 
+            try: return _dt.date(y, mo, d)
+            except Exception: return None
+        return None
+    def _badge(s: str):
+        if not s: return ""
+        s = s.strip()
+        return f' <span style="opacity:.7">(~{s[:40] + ("…" if len(s)>40 else "")})</span>'
+    try:
+        info_u = _locker_locktime("uncx", pair, chain_lc) or {}
+        info_t = _locker_locktime("teamfinance", pair, chain_lc) or {}
+    except Exception:
+        info_u, info_t = {}, {}
+    d1 = _parse_date(info_u.get("unlock") or "")
+    d2 = _parse_date(info_t.get("unlock") or "")
+    next_unlock = min([d for d in (d1,d2) if d], default=None)
+    next_row = ""
+    if next_unlock:
+        try:
+            days = (next_unlock - _dt.date.today()).days
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()} (~{days}d)</td></tr>'
+        except Exception:
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()}</td></tr>'
+
+    rows = [
+        f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>",
+        f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{_badge(info_u.get("unlock") or "")}{(" — <a href=\"%s\" target=\"_blank\" rel=\"noopener\">open</a>"%uncx_url) if uncx_url else ""}</td></tr>',
+        f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{_badge(info_t.get("unlock") or "")}{(" — <a href=\"%s\" target=\"_blank\" rel=\"noopener\">open</a>"%team_url) if team_url else ""}</td></tr>',
+    ]
+    if next_row: rows.append(next_row)
+    rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
+    return (
+        "<div class=\"lp-lock-mini\">"
+        "<h4 style=\"margin:8px 0;\">LP lock details</h4>"
+        "<table style=\"font-size:14px;line-height:1.3;border-collapse:collapse\">"
+        + ''.join(rows) +
+        "</table></div>"
+    )
+
+def mdx_postprocess_text(text: str, chat_id=None) -> str:
+    """
+    SAFE9 text post-processor pipeline.
+    - Normalize WHOIS/RDAP block and Domain host
+    - Suppress 'Owner privileges present' if owner is renounced and no proxy
+    - Align LP-lite verdict with on-chain signals (concentration)
+    - Cleanup Why++ numerics and 'Not tradable' alignment
+    - Dedupe repeated QuickScan sections
+    - Reorder links block for consistency
+    """
+    try:
+        if not MDX_ENABLE_POSTPROCESS or MDX_BYPASS_SANITIZERS:
+            return text
+        t = str(text or "")
+        t = _enforce_details_host(t, chat_id)
+        t = _normalize_whois_rdap(t)
+        t = _sanitize_owner_privileges(t, chat_id)
+        t = _sanitize_lp_claims(t)
+        t = _align_lp_verdict_with_onchain(t)
+        t = _postprocess_why_text_align(t)
+        t = _why_numeric_cleanup(t)
+        t = _dedupe_quickscan_sections(t)
+        t = _reorder_links_block(t)
+        t = _sanitize_compact_domains(t, is_details=True)
+        # Collapse extra blank lines
+        t = re.sub(r'\n{3,}', "\n\n", t)
+        return t
+    except Exception:
+        return text
+
+def mdx_postprocess_html(html: str, chat_id=None) -> str:
+    try:
+        if not MDX_ENABLE_POSTPROCESS or MDX_BYPASS_SANITIZERS:
+            return html
+        return _soften_lp_verdict_html(html)
+    except Exception:
+        return html
+
+
+# === SAFE9 wrapper: enforce postprocess on all outbound text ===
+try:
+    _orig__send_text = _send_text
+    def _send_text(chat_id, text, **kwargs):
+        try:
+            processed = mdx_postprocess_text(text, chat_id)
+        except Exception:
+            processed = text
+        return _orig__send_text(chat_id, processed, **kwargs)
+except Exception:
+    pass
