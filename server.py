@@ -322,6 +322,44 @@ def _normalize_whois_rdap(text: str) -> str:
         return text
 
 
+
+def _postprocess_why_text_align(text: str) -> str:
+    try:
+        if not isinstance(text, str):
+            return text
+        # Try to extract CA/chain from Why? block
+        ca_m = re.search(r'(?mi)^Scan\s+token:\s*\S*/token/(0x[0-9a-fA-F]{40})', text or '')
+        ca_val = (ca_m.group(1).lower() if ca_m else '')
+        ch_m = re.search(r'(?mi)^🔒\s*LP\s+lock.*?—\s*chain:\s*(\w+)', text or '')
+        chain_val = (ch_m.group(1).lower() if ch_m else '')
+        cached = _risk_cache_get(chain_val, ca_val) if (ca_val and chain_val) else None
+
+        # Detect not tradable from text (fallback)
+        not_tradable = bool(re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found)', text))
+
+        # Current score in text
+        m = re.search(r'(?mi)Risk\s*score:\s*(\d+)\s*/\s*100', text)
+        sc_now = int(m.group(1)) if m else 0
+
+        if cached:
+            sc_now = cached.get('score', sc_now)
+            if cached.get('flags', {}).get('not_tradable'):
+                not_tradable = True
+
+        if not_tradable:
+            sc_now = _risk_bump_not_tradable(sc_now)
+
+        # Write back score
+        text = re.sub(r'(?mi)(Risk\s*score:\s*)\d+(\s*/\s*100)', rf'\g<1>{sc_now}\2', text)
+
+        # Ensure Why++ penalty line exists if not tradable
+        if not_tradable and "Why++" in text and not re.search(r'(?mi)Not\s+tradable', text):
+            text = re.sub(r'(?mi)^(Why\+\+\s*factors\s*)$', r"\1\n−80  Not tradable (no pools/liquidity)", text)
+
+        return text
+    except Exception:
+        return text
+
 # === /sanitizers (finalfix3) ===
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
@@ -1351,6 +1389,40 @@ def _send_upsell(chat_id: int, key: str = "exhausted", lang: str = "en"):
         except Exception:
             pass
 # ========================
+
+# === Unified risk cache for overlays (Why?) ===
+try:
+    _RISK_CACHE = SafeCache(ttl=900)  # (chain, ca_l) -> {"score": int, "verdict": str, "flags": dict}
+except Exception:
+    _RISK_CACHE = {}
+
+def _risk_cache_set(chain: str, ca: str, score: int, verdict: str = "", flags: dict | None = None):
+    try:
+        key = f"{(chain or '').lower()}::{(ca or '').lower()}"
+        val = {"score": int(score), "verdict": str(verdict or ""), "flags": dict(flags or {})}
+        try:
+            _RISK_CACHE.set(key, val, ttl=900)
+        except Exception:
+            _RISK_CACHE[key] = val
+    except Exception:
+        pass
+
+def _risk_cache_get(chain: str, ca: str):
+    try:
+        key = f"{(chain or '').lower()}::{(ca or '').lower()}"
+        try:
+            return _RISK_CACHE.get(key)
+        except Exception:
+            return _RISK_CACHE.get(key)
+    except Exception:
+        return None
+
+def _risk_bump_not_tradable(score_now: int) -> int:
+    try:
+        return max(int(score_now or 0), 80)
+    except Exception:
+        return 80
+# === /Unified risk cache ===
 # Caches
 # ========================
 cache = SafeCache(ttl=CACHE_TTL_SECONDS)          # general cache if needed
@@ -2408,7 +2480,21 @@ def _kb_strip_prefixes(kb, prefixes):
 
 
 def _answer_why_deep(cq: dict, addr_hint: str = None):
-    try:
+
+        # Align with NOT TRADABLE / no pools in current message text
+        try:
+            base_txt = (msg.get("text") or "")
+            not_tradable = bool(re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|Contract code:\s*absent|chain:\s*n/?a)', base_txt))
+            if not_tradable:
+                # Prepend factor
+                try:
+                    neg.insert(0, "Not tradable (no pools/liquidity)")
+                    wneg.insert(0, 80)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
         msg = cq.get("message") or {}
         chat_id = int((msg.get("chat") or {}).get("id") or 0)
         if chat_id == 0:
@@ -4050,7 +4136,25 @@ def admin_diag():
 # Telegram webhook & callbacks
 # ========================
 def _answer_why_quickly(cq, addr_hint=None):
-    try:
+
+        # Align with NOT TRADABLE / no pools in current message text
+        try:
+            base_txt = msg_obj.get("text") or ""
+            not_tradable = bool(re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|Contract code:\s*absent|chain:\s*n/?a)', base_txt))
+            if not_tradable:
+                info["score"] = info.get("score",0)
+                if info["score"] < 80: info["score"] = 80
+                lab = info.get("label","") or "HIGH RISK 🔴"
+                if "NOT TRADABLE" not in lab:
+                    lab = "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)"
+                info["label"] = lab
+                if isinstance(info.get("neg"), list):
+                    if not any("Not tradable" in str(x) for x in info["neg"]):
+                        info["neg"].insert(0, "Not tradable (no pools/liquidity)")
+                        info.setdefault("w_neg", []).insert(0, 80)
+        except Exception:
+            pass
+        try:
         msg_obj = cq.get("message", {}) or {}
         text = msg_obj.get("text") or ""
         addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
