@@ -1,3 +1,4 @@
+# Patched on 2025-10-06 21:46:59 UTC
 # Cleaned by auto-fix at 2025-10-06 21:40:29 UTC
 import os
 import re
@@ -1458,10 +1459,15 @@ UNCX_LOCKERS = {
     "base":     {"v2":"0xc4e637d37113192f4f1f060daebd7758de7f4131", "v3":"0x231278edd38b00b07fbd52120cef685b9baebcc1"},
 }
 
+# Pre-seeded with verified lockers (ETH & Polygon). Add BSC via TEAMFINANCE_LOCKERS_JSON env.
 TEAMFINANCE_LOCKERS = {
-    "ethereum": ["0xe2fe530c047f2d85298b07d9333c05737f1435fb"],
+    "ethereum": [
+        "0xe2fe530c047f2d85298b07d9333c05737f1435fb"
+    ],
+    "polygon": [
+        "0x3ef7442df454ba6b7c1deec8ddf29cfb2d6e56c7"
+    ]
 }
-
 # Known custodial/staking contracts that may legitimately hold LP
 KNOWN_CUSTODIANS = {
     "bsc": {
