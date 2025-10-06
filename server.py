@@ -4169,11 +4169,11 @@ def _answer_why_quickly(cq, addr_hint=None):
             pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
             body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
             if neg_s:
-            body += f" — ⚠️ {neg_s}"
+                body += f" — ⚠️ {neg_s}"
             if pos_s:
-            body += f" — ✅ {pos_s}"
+                body += f" — ✅ {pos_s}"
             if len(body) > 190:
-            body = body[:187] + "…"
+                body = body[:187] + "…"
             tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
