@@ -618,73 +618,208 @@ def _fmt_pct(v):
     except Exception:
         return "—"
 
-
-def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
-    if not LP_LOCK_HTML_ENABLED:
+def lp_lock_block(chain, pair_address, stats):
+    """
+    SAFE9a: LP-lock mini table without f-string backslashes inside expressions.
+    Works with unknown lockers; shows 'Next unlock ≈' when available.
+    """
+    try:
+        if not LP_LOCK_HTML_ENABLED:
+            return ""
+    except Exception:
         return ""
+
     chain_lc = (chain or "").lower()
-    dead_pct = _fmt_pct(stats.get("dead_pct"))
-    uncx_pct = _fmt_pct(stats.get("uncx_pct") or stats.get("uncx") or stats.get("UNCX"))
-    team_pct = _fmt_pct(stats.get("team_finance_pct") or stats.get("team_pct") or stats.get("TF"))
-    holders_total = stats.get("holders_count") or stats.get("holders_total") or "—"
+
+    def _pct(v):
+        try:
+            return f"{float(v):.2f}%"
+        except Exception:
+            return "—"
+
+    dead_pct = _pct((stats or {}).get("dead_pct"))
+    uncx_pct = _ct = _pct((stats or {}).get("uncx_pct") or (stats or {}).get("uncx") or (stats or {}).get("UNCX"))
+    team_pct = _pct((stats or {}).get("team_finance_pct") or (stats or {}).get("team_pct") or (stats or {}).get("TF"))
+    holders_total = (stats or {}).get("holders_count") or (stats or {}).get("holders_total") or "—"
 
     pair = (pair_address or "").strip()
-    uncx_url = UNCX_LINKS.get(chain_lc, "").format(pair=pair) if pair else ""
-    team_url = TEAMFINANCE_LINKS.get(chain_lc, "").format(pair=pair) if pair else ""
+    UNCX_LINKS = {
+        "ethereum": "https://app.uncx.network/lockers/uniswap-v2/pair/{pair}",
+        "bsc":      "https://app.uncx.network/lockers/pancakeswap-v2/pair/{pair}",
+        "polygon":  "https://app.uncx.network/lockers/quickswap-v2/pair/{pair}",
+    }
+    TEAMFINANCE_LINKS = {
+        "ethereum": "https://app.team.finance/uniswap/{pair}",
+        "bsc":      "https://app.team.finance/pancakeswap/{pair}",
+        "polygon":  "https://app.team.finance/quickswap/{pair}",
+    }
+    uncx_url = UNCX_LINKS.get(chain_lc, "")
+    team_url = TEAMFINANCE_LINKS.get(chain_lc, "")
+    if pair:
+        if uncx_url:
+            uncx_url = uncx_url.format(pair=pair)
+        if team_url:
+            team_url = team_url.format(pair=pair)
 
-    # --- helpers: date parsing & badges ---
-    import re, datetime as _dt
-
-    def _parse_unlock_date(text: str):
-        """Best-effort parse textual date to date(). Handles many formats & relative forms."""
-        if not text:
+    # Optional unlock badges (best-effort parse of human text)
+    import datetime as _dt, re as _re
+    def _parse_date(s):
+        if not s:
             return None
-        t = str(text).strip()
-        # Try many explicit formats
-        fmts = (
-            "%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y",
-            "%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y",
-            "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
-            "%d %b %Y %H:%M", "%d %B %Y %H:%M",
-        )
-        for fmt in fmts:
+        t = str(s)
+        for fmt in ("%Y-%m-%d","%Y/%m/%d","%d-%m-%Y","%d/%m/%Y","%d.%m.%Y","%b %d %Y","%B %d %Y"):
             try:
-                return _dt.datetime.strptime(t, fmt).date()
+                return _dt.datetime.strptime(t.replace(',', ''), fmt).date()
             except Exception:
                 pass
-        # ISO datetime embedded
-        m = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?", t)
+        m = _re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", t)
         if m:
-            y, mo, d = map(int, m.group(1,2,3))
+            y, mo, d = map(int, m.groups())
             try:
                 return _dt.date(y, mo, d)
             except Exception:
                 return None
-        # English relative: "in N days/hours"
-        m = re.search(r"in\s+(\d+)\s*(day|days)", t, re.I)
-        if m:
+        return None
+
+    def _badge(s):
+        if not s:
+            return ""
+        s = str(s).strip()
+        short = s[:40] + ("…" if len(s) > 40 else "")
+        return f' <span style="opacity:.7">(~{short})</span>'
+
+    try:
+        info_u = _locker_locktime("uncx", pair, chain_lc) or {}
+        info_t = _locker_locktime("teamfinance", pair, chain_lc) or {}
+    except Exception:
+        info_u, info_t = {}, {}
+
+    d1 = _parse_date(info_u.get("unlock") or "")
+    d2 = _parse_date(info_t.get("unlock") or "")
+    next_unlock = min([d for d in (d1, d2) if d], default=None)
+    next_row = ""
+    if next_unlock:
+        try:
+            days = (next_unlock - _dt.date.today()).days
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()} (~{days}d)</td></tr>'
+        except Exception:
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()}</td></tr>'
+
+    # Precompute link snippets to avoid backslashes inside {}
+    uncx_open = f' — <a href="{uncx_url}" target="_blank" rel="noopener">open</a>' if uncx_url else ""
+    team_open = f' — <a href="{team_url}" target="_blank" rel="noopener">open</a>' if team_url else ""
+
+    rows = [
+        f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>",
+        f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{_badge(info_u.get("unlock") or "")}{uncx_open}</td></tr>',
+        f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{_badge(info_t.get("unlock") or "")}{team_open}</td></tr>',
+    ]
+    if next_row:
+        rows.append(next_row)
+    rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
+
+    return (
+        '<div class="lp-lock-mini">'
+        '<h4 style="margin:8px 0;">LP lock details</h4>'
+        '<table style="font-size:14px;line-height:1.3;border-collapse:collapse">'
+        + ''.join(rows) +
+        '</table></div>'
+    )
+
+    def _pct(v):
+        try:
+            return f"{float(v):.2f}%"
+        except Exception:
+            return "—"
+
+    dead_pct = _pct((stats or {}).get("dead_pct"))
+    uncx_pct = _pct((stats or {}).get("uncx_pct") or (stats or {}).get("uncx") or (stats or {}).get("UNCX"))
+    team_pct = _pct((stats or {}).get("team_finance_pct") or (stats or {}).get("team_pct") or (stats or {}).get("TF"))
+    holders_total = (stats or {}).get("holders_count") or (stats or {}).get("holders_total") or "—"
+
+    pair = (pair_address or "").strip()
+    UNCX_LINKS = {
+        "ethereum": "https://app.uncx.network/lockers/uniswap-v2/pair/{pair}",
+        "bsc":      "https://app.uncx.network/lockers/pancakeswap-v2/pair/{pair}",
+        "polygon":  "https://app.uncx.network/lockers/quickswap-v2/pair/{pair}",
+    }
+    TEAMFINANCE_LINKS = {
+        "ethereum": "https://app.team.finance/uniswap/{pair}",
+        "bsc":      "https://app.team.finance/pancakeswap/{pair}",
+        "polygon":  "https://app.team.finance/quickswap/{pair}",
+    }
+    uncx_url = UNCX_LINKS.get(chain_lc, "")
+    team_url = TEAMFINANCE_LINKS.get(chain_lc, "")
+    if pair:
+        if uncx_url:
+            uncx_url = uncx_url.format(pair=pair)
+        if team_url:
+            team_url = team_url.format(pair=pair)
+
+    # Optional unlock badges (best-effort parse of human text)
+    import datetime as _dt, re as _re
+    def _parse_date(s):
+        if not s:
+            return None
+        t = str(s)
+        for fmt in ("%Y-%m-%d","%Y/%m/%d","%d-%m-%Y","%d/%m/%Y","%d.%m.%Y","%b %d %Y","%B %d %Y"):
             try:
-                return _dt.date.today() + _dt.timedelta(days=int(m.group(1)))
-            except Exception:
-                return None
-        # English month name inside
-        m = re.search(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+20\d{2}", t, re.I)
-        if m:
-            try:
-                return _dt.datetime.strptime(m.group(0).replace(',', ''), "%b %d %Y").date()
+                return _dt.datetime.strptime(t.replace(',', ''), fmt).date()
             except Exception:
                 pass
-        # RU-style: "12 октября 2025"
-        m = re.search(r"(\d{1,2})\s*(янв|фев|мар|апр|мая|июн|июл|авг|сен|окт|ноя|дек)\w*\s*(20\d{2})", t, re.I)
+        m = _re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", t)
         if m:
-            dd = int(m.group(1)); yy = int(m.group(3))
-            months = ["янв","фев","мар","апр","мая","июн","июл","авг","сен","окт","ноя","дек"]
+            y, mo, d = map(int, m.groups())
             try:
-                mm = months.index(m.group(2).lower()[:3]) + 1
-                return _dt.date(yy, mm, dd)
+                return _dt.date(y, mo, d)
             except Exception:
                 return None
         return None
+
+    def _badge(s):
+        if not s:
+            return ""
+        s = str(s).strip()
+        short = s[:40] + ("…" if len(s) > 40 else "")
+        return f' <span style="opacity:.7">(~{short})</span>'
+
+    try:
+        info_u = _locker_locktime("uncx", pair, chain_lc) or {}
+        info_t = _locker_locktime("teamfinance", pair, chain_lc) or {}
+    except Exception:
+        info_u, info_t = {}, {}
+
+    d1 = _parse_date(info_u.get("unlock") or "")
+    d2 = _parse_date(info_t.get("unlock") or "")
+    next_unlock = min([d for d in (d1, d2) if d], default=None)
+    next_row = ""
+    if next_unlock:
+        try:
+            days = (next_unlock - _dt.date.today()).days
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()} (~{days}d)</td></tr>'
+        except Exception:
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()}</td></tr>'
+
+    # Precompute link snippets to avoid backslashes inside {}
+    uncx_open = f' — <a href="{uncx_url}" target="_blank" rel="noopener">open</a>' if uncx_url else ""
+    team_open = f' — <a href="{team_url}" target="_blank" rel="noopener">open</a>' if team_url else ""
+
+    rows = [
+        f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>",
+        f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{_badge(info_u.get("unlock") or "")}{uncx_open}</td></tr>',
+        f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{_badge(info_t.get("unlock") or "")}{team_open}</td></tr>',
+    ]
+    if next_row:
+        rows.append(next_row)
+    rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
+
+    return (
+        '<div class="lp-lock-mini">'
+        '<h4 style="margin:8px 0;">LP lock details</h4>'
+        '<table style="font-size:14px;line-height:1.3;border-collapse:collapse">'
+        + ''.join(rows) +
+        '</table></div>'
+    )
 
     def _unlock_badge(txt: str) -> str:
         if not txt:
@@ -6879,17 +7014,120 @@ def _sanitize_why_for_untradable(text: str) -> str:
     except Exception:
         return text
 
-def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
+def lp_lock_block(chain, pair_address, stats):
     """
-    Compact LP-lock table for the HTML report.
-    SAFE9: cleaned duplicates, added 'Next unlock ≈', works even if lockers=unknown.
+    SAFE9a: LP-lock mini table without f-string backslashes inside expressions.
+    Works with unknown lockers; shows 'Next unlock ≈' when available.
     """
-    if not LP_LOCK_HTML_ENABLED:
+    try:
+        if not LP_LOCK_HTML_ENABLED:
+            return ""
+    except Exception:
         return ""
+
     chain_lc = (chain or "").lower()
+
     def _pct(v):
-        try: return f"{float(v):.2f}%"
-        except Exception: return "—"
+        try:
+            return f"{float(v):.2f}%"
+        except Exception:
+            return "—"
+
+    dead_pct = _pct((stats or {}).get("dead_pct"))
+    uncx_pct = _ct = _pct((stats or {}).get("uncx_pct") or (stats or {}).get("uncx") or (stats or {}).get("UNCX"))
+    team_pct = _pct((stats or {}).get("team_finance_pct") or (stats or {}).get("team_pct") or (stats or {}).get("TF"))
+    holders_total = (stats or {}).get("holders_count") or (stats or {}).get("holders_total") or "—"
+
+    pair = (pair_address or "").strip()
+    UNCX_LINKS = {
+        "ethereum": "https://app.uncx.network/lockers/uniswap-v2/pair/{pair}",
+        "bsc":      "https://app.uncx.network/lockers/pancakeswap-v2/pair/{pair}",
+        "polygon":  "https://app.uncx.network/lockers/quickswap-v2/pair/{pair}",
+    }
+    TEAMFINANCE_LINKS = {
+        "ethereum": "https://app.team.finance/uniswap/{pair}",
+        "bsc":      "https://app.team.finance/pancakeswap/{pair}",
+        "polygon":  "https://app.team.finance/quickswap/{pair}",
+    }
+    uncx_url = UNCX_LINKS.get(chain_lc, "")
+    team_url = TEAMFINANCE_LINKS.get(chain_lc, "")
+    if pair:
+        if uncx_url:
+            uncx_url = uncx_url.format(pair=pair)
+        if team_url:
+            team_url = team_url.format(pair=pair)
+
+    # Optional unlock badges (best-effort parse of human text)
+    import datetime as _dt, re as _re
+    def _parse_date(s):
+        if not s:
+            return None
+        t = str(s)
+        for fmt in ("%Y-%m-%d","%Y/%m/%d","%d-%m-%Y","%d/%m/%Y","%d.%m.%Y","%b %d %Y","%B %d %Y"):
+            try:
+                return _dt.datetime.strptime(t.replace(',', ''), fmt).date()
+            except Exception:
+                pass
+        m = _re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", t)
+        if m:
+            y, mo, d = map(int, m.groups())
+            try:
+                return _dt.date(y, mo, d)
+            except Exception:
+                return None
+        return None
+
+    def _badge(s):
+        if not s:
+            return ""
+        s = str(s).strip()
+        short = s[:40] + ("…" if len(s) > 40 else "")
+        return f' <span style="opacity:.7">(~{short})</span>'
+
+    try:
+        info_u = _locker_locktime("uncx", pair, chain_lc) or {}
+        info_t = _locker_locktime("teamfinance", pair, chain_lc) or {}
+    except Exception:
+        info_u, info_t = {}, {}
+
+    d1 = _parse_date(info_u.get("unlock") or "")
+    d2 = _parse_date(info_t.get("unlock") or "")
+    next_unlock = min([d for d in (d1, d2) if d], default=None)
+    next_row = ""
+    if next_unlock:
+        try:
+            days = (next_unlock - _dt.date.today()).days
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()} (~{days}d)</td></tr>'
+        except Exception:
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()}</td></tr>'
+
+    # Precompute link snippets to avoid backslashes inside {}
+    uncx_open = f' — <a href="{uncx_url}" target="_blank" rel="noopener">open</a>' if uncx_url else ""
+    team_open = f' — <a href="{team_url}" target="_blank" rel="noopener">open</a>' if team_url else ""
+
+    rows = [
+        f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>",
+        f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{_badge(info_u.get("unlock") or "")}{uncx_open}</td></tr>',
+        f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{_badge(info_t.get("unlock") or "")}{team_open}</td></tr>',
+    ]
+    if next_row:
+        rows.append(next_row)
+    rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
+
+    return (
+        '<div class="lp-lock-mini">'
+        '<h4 style="margin:8px 0;">LP lock details</h4>'
+        '<table style="font-size:14px;line-height:1.3;border-collapse:collapse">'
+        + ''.join(rows) +
+        '</table></div>'
+    )
+
+    def _pct(v):
+        try:
+            return f"{float(v):.2f}%"
+        except Exception:
+            return "—"
+
     dead_pct = _pct((stats or {}).get("dead_pct"))
     uncx_pct = _pct((stats or {}).get("uncx_pct") or (stats or {}).get("uncx") or (stats or {}).get("UNCX"))
     team_pct = _pct((stats or {}).get("team_finance_pct") or (stats or {}).get("team_pct") or (stats or {}).get("TF"))
@@ -6909,11 +7147,75 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     uncx_url = UNCX_LINKS.get(chain_lc, "")
     team_url = TEAMFINANCE_LINKS.get(chain_lc, "")
     if pair:
-        if uncx_url: uncx_url = uncx_url.format(pair=pair)
-        if team_url: team_url = team_url.format(pair=pair)
+        if uncx_url:
+            uncx_url = uncx_url.format(pair=pair)
+        if team_url:
+            team_url = team_url.format(pair=pair)
 
     # Optional unlock badges (best-effort parse of human text)
     import datetime as _dt, re as _re
+    def _parse_date(s):
+        if not s:
+            return None
+        t = str(s)
+        for fmt in ("%Y-%m-%d","%Y/%m/%d","%d-%m-%Y","%d/%m/%Y","%d.%m.%Y","%b %d %Y","%B %d %Y"):
+            try:
+                return _dt.datetime.strptime(t.replace(',', ''), fmt).date()
+            except Exception:
+                pass
+        m = _re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", t)
+        if m:
+            y, mo, d = map(int, m.groups())
+            try:
+                return _dt.date(y, mo, d)
+            except Exception:
+                return None
+        return None
+
+    def _badge(s):
+        if not s:
+            return ""
+        s = str(s).strip()
+        short = s[:40] + ("…" if len(s) > 40 else "")
+        return f' <span style="opacity:.7">(~{short})</span>'
+
+    try:
+        info_u = _locker_locktime("uncx", pair, chain_lc) or {}
+        info_t = _locker_locktime("teamfinance", pair, chain_lc) or {}
+    except Exception:
+        info_u, info_t = {}, {}
+
+    d1 = _parse_date(info_u.get("unlock") or "")
+    d2 = _parse_date(info_t.get("unlock") or "")
+    next_unlock = min([d for d in (d1, d2) if d], default=None)
+    next_row = ""
+    if next_unlock:
+        try:
+            days = (next_unlock - _dt.date.today()).days
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()} (~{days}d)</td></tr>'
+        except Exception:
+            next_row = f'<tr><td>Next unlock ≈</td><td>{next_unlock.isoformat()}</td></tr>'
+
+    # Precompute link snippets to avoid backslashes inside {}
+    uncx_open = f' — <a href="{uncx_url}" target="_blank" rel="noopener">open</a>' if uncx_url else ""
+    team_open = f' — <a href="{team_url}" target="_blank" rel="noopener">open</a>' if team_url else ""
+
+    rows = [
+        f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>",
+        f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{_badge(info_u.get("unlock") or "")}{uncx_open}</td></tr>',
+        f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{_badge(info_t.get("unlock") or "")}{team_open}</td></tr>',
+    ]
+    if next_row:
+        rows.append(next_row)
+    rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
+
+    return (
+        '<div class="lp-lock-mini">'
+        '<h4 style="margin:8px 0;">LP lock details</h4>'
+        '<table style="font-size:14px;line-height:1.3;border-collapse:collapse">'
+        + ''.join(rows) +
+        '</table></div>'
+    )
     def _parse_date(s: str):
         if not s: return None
         t = str(s)
@@ -6948,8 +7250,8 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
 
     rows = [
         f"<tr><td>Dead / burn</td><td><b>{dead_pct}</b></td></tr>",
-        f'<tr><td>UNCX</td><td><b>{uncx_pct}</b>{_badge(info_u.get("unlock") or "")}{(" — <a href=\"%s\" target=\"_blank\" rel=\"noopener\">open</a>"%uncx_url) if uncx_url else ""}</td></tr>',
-        f'<tr><td>TeamFinance</td><td><b>{team_pct}</b>{_badge(info_t.get("unlock") or "")}{(" — <a href=\"%s\" target=\"_blank\" rel=\"noopener\">open</a>"%team_url) if team_url else ""}</td></tr>',
+        '<tr><td>UNCX</td><td><b>' + str(uncx_pct) + '</b>' + _badge(info_u.get("unlock") or "") + (f' — <a href="{uncx_url}" target="_blank" rel="noopener">open</a>' if uncx_url else '') + '</td></tr>',
+        '<tr><td>TeamFinance</td><td><b>' + str(team_pct) + '</b>' + _badge(info_t.get("unlock") or "") + (f' — <a href="{team_url}" target="_blank" rel="noopener">open</a>' if team_url else '') + '</td></tr>',
     ]
     if next_row: rows.append(next_row)
     rows.append(f"<tr><td>Holders</td><td>{holders_total}</td></tr>")
