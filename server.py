@@ -2379,6 +2379,7 @@ def _compress_keyboard(kb: dict):
             cb_cache.set(token, data)
             btn["callback_data"] = token
 
+    ik = _kb_enforce_pair_row(ik)
     return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _kb_clone(kb):
@@ -2465,6 +2466,59 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         pass
 
 
+# === BEGIN: enforced layout helper (DEX/Scan on 2nd row, remove DexScreener) ===
+def _kb_enforce_pair_row(ik_rows):
+    """
+    Post-process inline keyboard rows (list[list[dict]]) to:
+      1) remove 'Open on DexScreener' button everywhere;
+      2) move '🟢 Open in DEX' and '🔍 Open in Scan' into the 2nd row, side by side;
+      3) keep other buttons and their order as intact as possible.
+    """
+    if not isinstance(ik_rows, list):
+        return ik_rows
+    # 1) strip DexScreener buttons and extract DEX/Scan
+    new_rows = []
+    dex_btn, scan_btn = None, None
+    for row in ik_rows:
+        if not isinstance(row, list):
+            continue
+        keep = []
+        for btn in row:
+            if not isinstance(btn, dict):
+                continue
+            txt = str(btn.get("text", ""))
+            if "DexScreener" in txt:
+                continue  # drop
+            if "Open in DEX" in txt and dex_btn is None:
+                dex_btn = btn
+                continue
+            if "Open in Scan" in txt and scan_btn is None:
+                scan_btn = btn
+                continue
+            keep.append(btn)
+        if keep:
+            new_rows.append(keep)
+    # Flatten empty-row artifacts
+    new_rows = [r for r in new_rows if r]
+
+    # 2) construct: first row stays as-is (if any), second row is [DEX, Scan], rest follow
+    result = []
+    if new_rows:
+        result.append(new_rows[0])
+        tail = new_rows[1:]
+    else:
+        tail = []
+
+    pair = [b for b in (dex_btn, scan_btn) if b]
+    if pair:
+        result.append(pair)
+
+    result.extend(tail)
+
+    # 3) clean up any accidental empty rows
+    result = [r for r in result if r]
+    return result
+# === END: enforced layout helper ===
 def _ensure_action_buttons(addr, kb, want_more=False, want_why=True, want_report=True, want_hp=True):
     base = _kb_strip_prefixes(kb, ("more:", "why", "rep:", "hp:"))
     ik = base.get("inline_keyboard") or []
