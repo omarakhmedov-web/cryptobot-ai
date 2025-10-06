@@ -4043,12 +4043,7 @@ def _render_report(addr: str, text: str):
                     wp = [None]*len(pos)
         except Exception:
             pass
-        def __mdx_fmt_lines(items, weights):
-            out = []
-            for i, t in enumerate(items):
-                w = weights[i] if i < len(weights) else None
-                out.append(f"- {t}" + (f" (+{w})" if isinstance(w, (int, float)) else ""))
-            return "\n".join(out) if out else "—"
+        # (removed local __mdx_fmt_lines redefinition; using global helper)
     dom = _extract_domain_from_text(text) or "—"
 
     # Post-fix wrong domain selection when base token homepage leaks into domain
