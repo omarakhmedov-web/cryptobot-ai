@@ -6662,3 +6662,35 @@ try:
 except Exception:
     pass
 # ==== /MDX Report Normalizer ====
+
+def _strip_dexscreener_links(text: str) -> str:
+    # Strip DexScreener links/mentions from textual outputs (keep data source lines intact).
+    # Removes lines like "DEX pair: https://dexscreener.com/..." and "Open on DexScreener" if present as text.
+    try:
+        norm = str(text or "")
+        norm = re.sub(r'(?mi)^\s*(DEX\s*pair:|Open\s+on\s+DexScreener:?).*$', '', norm)
+        # collapse excessive blank lines
+        norm = re.sub(r'\n{3,}', '\n\n', norm)
+        return norm
+    except Exception:
+        return text
+
+def _sanitize_why_for_untradable(text: str) -> str:
+    # If message indicates NOT TRADABLE / no pools / no contract code, make Why/Why++ neutral (no green %).
+    try:
+        norm = str(text or "")
+        # Trigger conditions: no pools, NOT TRADABLE, chain n/a, or contract code absent
+        trigger = bool(re.search(r'No pools found|NOT TRADABLE|chain:\s*n/?a|Contract code:\s*absent', norm, re.I))
+        if not trigger:
+            return text
+        # Neutralize Why/Why++ sections
+        norm = re.sub(r'(?mi)^\s*Why\+\+\s*factors\s*\n(?:.+\n)*', 'Why++ factors\nn/a — no active pools/liquidity\n', norm)
+        # Some builds may label "Why?" block differently; make a safe neutral replacement
+        norm = re.sub(r'(?mi)^\s*Why\?\s*\n(?:.+\n)*', 'Why?\n n/a — no active pools/liquidity\n', norm)
+        # Remove any positive lines starting with '+' under Why sections
+        norm = re.sub(r'(?mi)^\s*\+\s*[^ \n].*$', '', norm)
+        # Tidy extra blank lines
+        norm = re.sub(r'\n{3,}', '\n\n', norm)
+        return norm
+    except Exception:
+        return text
