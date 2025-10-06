@@ -4135,49 +4135,62 @@ def admin_diag():
 # Telegram webhook & callbacks
 # ========================
 def _answer_why_quickly(cq, addr_hint=None):
-
-        # Align with NOT TRADABLE / no pools in current message text
+    try:
+        msg_obj = cq.get("message", {}) or {}
+        text = msg_obj.get("text") or ""
+        addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
+        info = None
         try:
-            base_txt = msg_obj.get("text") or ""
+            info = _RISK_CACHE.get(addr) if addr else None
+        except Exception:
+            try:
+                info = RISK_CACHE.get(addr) if addr else None
+            except Exception:
+                info = None
+        if not info:
+            score, label, rs = _risk_verdict(addr or "", text or "")
+            info = {
+                "score": score,
+                "label": label,
+                "neg": list(rs.get("neg", []) or []),
+                "pos": list(rs.get("pos", []) or []),
+                "w_neg": list(rs.get("w_neg", []) or []),
+                "w_pos": list(rs.get("w_pos", []) or []),
+            }
+
+        # Align with NOT TRADABLE / no pools signals
+        try:
+            base_txt = text or ""
             not_tradable = bool(re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|Contract code:\s*absent|chain:\s*n/?a)', base_txt))
             if not_tradable:
-                info["score"] = info.get("score",0)
-                if info["score"] < 80: info["score"] = 80
-                lab = info.get("label","") or "HIGH RISK 🔴"
+                if int(info.get("score", 0)) < 80:
+                    info["score"] = 80
+                lab = info.get("label") or "HIGH RISK 🔴"
                 if "NOT TRADABLE" not in lab:
                     lab = "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)"
                 info["label"] = lab
-                if isinstance(info.get("neg"), list):
-                    if not any("Not tradable" in str(x) for x in info["neg"]):
-                        info["neg"].insert(0, "Not tradable (no pools/liquidity)")
-                        info.setdefault("w_neg", []).insert(0, 80)
+                if isinstance(info.get("neg"), list) and not any("Not tradable" in str(x) for x in info["neg"]):
+                    info["neg"].insert(0, "Not tradable (no pools/liquidity)")
+                    info.setdefault("w_neg", []).insert(0, 80)
         except Exception:
             pass
-        try:
-            msg_obj = cq.get("message", {}) or {}
-            text = msg_obj.get("text") or ""
-            addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
-            info = RISK_CACHE.get(addr) if addr else None
-            if not info:
-                score, label, rs = _risk_verdict(addr or "", text or "")
-                info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
-            pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
-            pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
-            pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-            pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-            neg_s = "; ".join([f"{t} (+{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
-            pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
-            body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
-            if neg_s:
-                body += f" — ⚠️ {neg_s}"
-            if pos_s:
-                body += f" — ✅ {pos_s}"
-            if len(body) > 190:
-                body = body[:187] + "…"
-            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+
+        pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
+        pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
+        pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
+        pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
+        neg_s = "; ".join([f"{t} (+{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
+        pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
+        body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
+        if neg_s:
+            body += f" — ⚠️ {neg_s}"
+        if pos_s:
+            body += f" — ✅ {pos_s}"
+        if len(body) > 190:
+            body = body[:187] + "…"
+        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
-
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
@@ -6758,7 +6771,8 @@ try:
                         if raw is not None and pos is not None and hasattr(fobj, "seek"):
                             try: fobj.seek(pos)
                             except Exception: pass
-            except Exception:
+            finally:
+                pass
                 pass
             return _MDX_REQ_POST_REPORT_FIX_v3(url, *args, **kwargs)
         _rq.post = post
