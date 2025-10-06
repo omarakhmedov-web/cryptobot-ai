@@ -3892,7 +3892,7 @@ def _merge_onchain_into_risk(addr: str, info: dict):
         except Exception:
             pass
 
-# Recompute label
+        # Recompute label
         if entry["score"] >= RISK_THRESH_HIGH:
             entry["label"] = "HIGH RISK 🔴"
         elif entry["score"] >= RISK_THRESH_CAUTION:
@@ -4154,27 +4154,27 @@ def _answer_why_quickly(cq, addr_hint=None):
         except Exception:
             pass
         try:
-        msg_obj = cq.get("message", {}) or {}
-        text = msg_obj.get("text") or ""
-        addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
-        info = RISK_CACHE.get(addr) if addr else None
-        if not info:
-            score, label, rs = _risk_verdict(addr or "", text or "")
-            info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
-        pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
-        pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
-        pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-        pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-        neg_s = "; ".join([f"{t} (+{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
-        pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
-        body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
-        if neg_s:
+            msg_obj = cq.get("message", {}) or {}
+            text = msg_obj.get("text") or ""
+            addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
+            info = RISK_CACHE.get(addr) if addr else None
+            if not info:
+                score, label, rs = _risk_verdict(addr or "", text or "")
+                info = {"score": score, "label": label, "neg": rs.get("neg", []), "pos": rs.get("pos", []), "w_neg": rs.get("w_neg", []), "w_pos": rs.get("w_pos", [])}
+            pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
+            pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
+            pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
+            pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
+            neg_s = "; ".join([f"{t} (+{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
+            pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
+            body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
+            if neg_s:
             body += f" — ⚠️ {neg_s}"
-        if pos_s:
+            if pos_s:
             body += f" — ✅ {pos_s}"
-        if len(body) > 190:
+            if len(body) > 190:
             body = body[:187] + "…"
-        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
 
@@ -4627,7 +4627,7 @@ def webhook(secret):
                         _send_text(chat_id, "\n".join(lines), logger=app.logger)
                     except Exception:
                         pass
-# Owner/renounce/proxy (lite) using chain-aware RPC
+            # Owner/renounce/proxy (lite) using chain-aware RPC
                 owner_addr = _get_owner(paddr, chain) if (paddr and chain) else ""
                 renounced = (owner_addr.lower() in DEAD_ADDRS) if owner_addr else False
                 impl_addr = _get_proxy_impl(paddr, chain) if (paddr and chain) else ""
