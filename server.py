@@ -2480,21 +2480,7 @@ def _kb_strip_prefixes(kb, prefixes):
 
 
 def _answer_why_deep(cq: dict, addr_hint: str = None):
-
-        # Align with NOT TRADABLE / no pools in current message text
-        try:
-            base_txt = (msg.get("text") or "")
-            not_tradable = bool(re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|Contract code:\s*absent|chain:\s*n/?a)', base_txt))
-            if not_tradable:
-                # Prepend factor
-                try:
-                    neg.insert(0, "Not tradable (no pools/liquidity)")
-                    wneg.insert(0, 80)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
+    try:
         msg = cq.get("message") or {}
         chat_id = int((msg.get("chat") or {}).get("id") or 0)
         if chat_id == 0:
@@ -2506,6 +2492,19 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
         pos = list(ent.get("pos") or [])
         wneg = list(ent.get("w_neg") or [])
         wpos = list(ent.get("w_pos") or [])
+        # Align with NOT TRADABLE / no pools in current message text
+        try:
+            base_txt = (msg.get("text") or "")
+            not_tradable = bool(re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|Contract code:\s*absent|chain:\s*n/?a)', base_txt))
+            if not_tradable:
+                try:
+                    neg.insert(0, "Not tradable (no pools/liquidity)")
+                    wneg.insert(0, 80)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
 
         if len(wneg) < len(neg):
             wneg = list(wneg) + [10] * (len(neg) - len(wneg))
