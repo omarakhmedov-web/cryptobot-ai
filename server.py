@@ -9,6 +9,7 @@ import hashlib
 import threading
 import unicodedata
 from datetime import datetime
+import datetime as _dt
 from urllib.parse import urlparse
 
 import requests
@@ -1161,6 +1162,106 @@ try:
 except Exception:
     FREE_LIFETIME = 2; PRO_MONTHLY = 29; TEAMS_MONTHLY = 99; DAY_PASS = 9; DEEP_REPORT = 3; PRO_OVERAGE_PER_100 = 5; SLOW_LANE_MS_FREE = 3000; USAGE_PATH = "./usage.json"
 
+# === Judge pass settings ===
+try:
+    JUDGE_PASS_CODE = os.getenv("JUDGE_PASS_CODE", "").strip()
+    JUDGE_PASS_TTL_DAYS = int(os.getenv("JUDGE_PASS_TTL_DAYS", "0") or "0")
+    JUDGE_PASS_UNTIL = os.getenv("JUDGE_PASS_UNTIL", "").strip()  # YYYY-MM-DD; code will add +1 day (00:00 next day UTC)
+    JUDGE_PASS_MAX = int(os.getenv("JUDGE_PASS_MAX", "5") or "5")
+except Exception:
+    JUDGE_PASS_CODE = ""
+    JUDGE_PASS_TTL_DAYS = 0
+    JUDGE_PASS_UNTIL = ""
+    JUDGE_PASS_MAX = 5
+
+def _judge_state_load() -> dict:
+    try:
+        db = _usage_load()
+        st = db.get("__judge__") or {}
+        if not isinstance(st, dict):
+            st = {}
+        return st
+    except Exception:
+        return {}
+
+def _judge_state_save(st: dict):
+    try:
+        db = _usage_load()
+        db["__judge__"] = st or {}
+        _usage_save(db)
+    except Exception:
+        pass
+
+def _judge_expiry_ts() -> int | None:
+    # Priority: fixed date (YYYY-MM-DD) -> TTL in days -> None
+    try:
+        if JUDGE_PASS_UNTIL:
+            try:
+                y, m, d = [int(x) for x in JUDGE_PASS_UNTIL.strip().split("-")]
+                base = _dt.datetime(y, m, d, 0, 0, 0)
+                # +1 day so the date itself is fully included
+                end = base + _dt.timedelta(days=1)
+                return int(end.timestamp())
+            except Exception:
+                pass
+        if JUDGE_PASS_TTL_DAYS and int(JUDGE_PASS_TTL_DAYS) > 0:
+            return int(_dt.datetime.utcnow().timestamp()) + int(JUDGE_PASS_TTL_DAYS) * 86400
+    except Exception:
+        pass
+    return None
+
+def _grant_pro_until(chat_id: int, until_ts: int | None, source: str = "judge") -> bool:
+    try:
+        db = _usage_load()
+        key = str(chat_id)
+        rec = db.get(key) or {"plan": "free", "free_used": 0, "created_at": datetime.utcnow().isoformat()}
+        rec["plan"] = "pro"
+        if until_ts:
+            try:
+                rec["plan_expires_at"] = int(until_ts)
+            except Exception:
+                pass
+        rec["plan_source"] = source
+        db[key] = rec
+        _usage_save(db)
+        return True
+    except Exception:
+        return False
+
+
+def plan_of(user_id: int) -> str:
+    # Admin/whitelisted bypass or DEV_FREE
+    try:
+        if _is_admin_or_whitelisted(user_id) or os.getenv("DEV_FREE", "").lower() in ("1","true","yes"):
+            return "pro"
+    except Exception:
+        pass
+    # Check persisted plan with optional expiry
+    try:
+        key = str(user_id)
+        db = _usage_load()
+        rec = db.get(key) or {}
+        p = rec.get("plan", "free")
+        exp = 0
+        try:
+            exp = int(rec.get("plan_expires_at") or 0)
+        except Exception:
+            exp = 0
+        now_ts = int(datetime.utcnow().timestamp())
+        if p == "pro":
+            if exp and exp <= now_ts:
+                # auto-downgrade
+                rec["plan"] = "free"
+                rec.pop("plan_expires_at", None)
+                db[key] = rec
+                _usage_save(db)
+                return "free"
+            return "pro"
+        return p
+    except Exception:
+        return "free"
+
+
 def _usage_load():
     try:
         with open(USAGE_PATH, "r", encoding="utf-8") as f:
@@ -1175,7 +1276,6 @@ def _usage_save(data):
     except Exception:
         app.logger.exception("save usage failed")
 
-
 def plan_of(user_id: int) -> str:
     # Admin/whitelisted bypass
     try:
@@ -1184,22 +1284,10 @@ def plan_of(user_id: int) -> str:
     except Exception:
         pass
     try:
-        data = _usage_load()
-        rec = data.get(str(user_id)) or {}
-        plan = rec.get("plan", "free")
-        exp = int(rec.get("plan_expires_at", 0) or 0)
-        if plan != "free" and exp:
-            now_ts = int(datetime.utcnow().timestamp())
-            if now_ts >= exp:
-                rec["plan"] = "free"
-                rec["plan_expires_at"] = 0
-                data[str(user_id)] = rec
-                _usage_save(data)
-                return "free"
-        return plan
+        rec = _usage_load().get(str(user_id)) or {}
+        return rec.get("plan","free")
     except Exception:
         return "free"
-
 
 def free_left(user_id: int) -> int:
     try:
@@ -3948,68 +4036,6 @@ def webhook(secret):
     _txt_raw = (msg_like.get("text") or "")
     _txt = (_txt_raw or "").strip().lower()
     _chat = ((msg_like.get("chat") or {}).get("id") if msg_like else None)
-    
-    # --- JUDGE PASS: /pass <code> ---
-    try:
-        if _chat and isinstance(_txt_raw, str) and str(_txt_raw).strip().lower().startswith("/pass"):
-            parts = str(_txt_raw).strip().split(maxsplit=1)
-            provided = (parts[1] if len(parts)>1 else "").strip()
-            expected = (os.getenv("JUDGE_PASS_CODE","") or "").strip()
-            if not expected:
-                _send_text(_chat, "Judge pass is not configured.")
-                return ("ok", 200)
-            # load usage & meta
-            try:
-                data = _usage_load()
-                meta = data.get("__judge_pass__", {})
-                if (meta.get("code") or "") != expected:
-                    meta = {"code": expected, "used": [], "max": int(os.getenv("JUDGE_PASS_MAX","5") or "5")}
-                max_acts = int(meta.get("max") or int(os.getenv("JUDGE_PASS_MAX","5") or "5"))
-                used = list(dict.fromkeys([str(x) for x in (meta.get("used") or [])]))
-            except Exception:
-                data = {}
-                meta = {"code": expected, "used": [], "max": int(os.getenv("JUDGE_PASS_MAX","5") or "5")}
-                max_acts = int(meta["max"])
-                used = []
-            if provided != expected:
-                _send_text(_chat, "Invalid or expired pass code.")
-                return ("ok", 200)
-            # compute expiry
-            now_ts = int(datetime.utcnow().timestamp())
-            until = (os.getenv("JUDGE_PASS_UNTIL","") or "").strip()
-            exp_ts = None
-            if until:
-                try:
-                    y,m,d = map(int, until.split("-"))
-                    from datetime import datetime as _dt, timedelta as _td
-                    exp_ts = int((_dt(y,m,d) + _td(days=1)).timestamp())
-                except Exception:
-                    exp_ts = None
-            ttl_days = int(os.getenv("JUDGE_PASS_TTL_DAYS","60") or "60")
-            if not exp_ts:
-                exp_ts = now_ts + max(1, ttl_days)*24*3600
-            # enforce max activations
-            chat_s = str(_chat)
-            if chat_s not in used and len(used) >= max_acts:
-                _send_text(_chat, "This pass code reached its activation limit.")
-                return ("ok", 200)
-            # grant
-            rec = data.get(chat_s) or {}
-            rec["plan"] = "pro"
-            rec["plan_source"] = "judge-pass"
-            rec["plan_expires_at"] = exp_ts
-            data[chat_s] = rec
-            if chat_s not in used:
-                used.append(chat_s)
-            meta["used"] = used
-            meta["max"] = max_acts
-            data["__judge_pass__"] = meta
-            _usage_save(data)
-            _send_text(_chat, "Judge access activated for your account.")
-            return ("ok", 200)
-    except Exception:
-        pass
-
     if isinstance(_txt, str) and (_txt == "start" or _txt.startswith("/start")) and _chat:
         _kb = _compress_keyboard(_ux_welcome_keyboard())
         try:
@@ -4633,6 +4659,46 @@ def webhook(secret):
         if cl == '/mywatch':
             _cmd_mywatch(chat_id); return ('ok', 200)
         arg = parts[1] if len(parts) > 1 else ""
+
+        if cl == '/pass':
+            # robust parse: /pass CODE | /pass: CODE | /pass=CODE
+            code = (arg or "").strip()
+            if not code:
+                m = re.search(r"(?i)/pass[:=\s]+([A-Za-z0-9_\-]{3,})", text.strip())
+                code = (m.group(1) if m else "").strip()
+            envcode = (os.getenv("JUDGE_PASS_CODE", "") or JUDGE_PASS_CODE).strip()
+            if not envcode:
+                _send_text(chat_id, "Judge code not configured", logger=app.logger)
+                return ("ok", 200)
+            if code.strip().upper() != envcode.strip().upper():
+                _send_text(chat_id, "Invalid code", logger=app.logger)
+                return ("ok", 200)
+            # enforce max activations
+            st = _judge_state_load()
+            used_ids = set([str(x) for x in (st.get("used_ids") or [])])
+            max_acts = int(os.getenv("JUDGE_PASS_MAX", str(JUDGE_PASS_MAX or 5)) or "5")
+            if str(chat_id) not in used_ids and len(used_ids) >= max_acts:
+                _send_text(chat_id, "Judge pass activation limit reached", logger=app.logger)
+                return ("ok", 200)
+            # grant
+            until_ts = _judge_expiry_ts()
+            _grant_pro_until(chat_id, until_ts, source="judge")
+            # update state (idempotent)
+            used_ids.add(str(chat_id))
+            st["used_ids"] = list(used_ids)
+            st["used"] = len(used_ids)
+            st["code"] = envcode
+            _judge_state_save(st)
+            # human date
+            try:
+                exp_str = ""
+                if until_ts:
+                    exp_str = _dt.datetime.utcfromtimestamp(int(until_ts)).strftime("%Y-%m-%d")
+                msg_ok = f"Judge pass activated: Pro until {exp_str}" if exp_str else "Judge pass activated"
+            except Exception:
+                msg_ok = "Judge pass activated"
+            _send_text(chat_id, msg_ok, logger=app.logger)
+            return ("ok", 200)
 
         if cmd in ("/start", "/help"):
             _send_text(chat_id, LOC("en","help").format(bot=BOT_USERNAME), parse_mode="Markdown", logger=app.logger)
