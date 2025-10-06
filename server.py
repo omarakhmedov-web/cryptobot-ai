@@ -46,6 +46,9 @@ def __mdx_fmt_lines(items, weights):
         except Exception:
             return ""
 
+
+# Back-compat alias for older code paths
+_fmt_lines = __mdx_fmt_lines
 from flask import Flask, request, jsonify
 
 # Project-local utilities (must exist in your project)
