@@ -19,6 +19,13 @@ from urllib.parse import urlparse
 
 import requests
 
+
+def _has_access_control_markers(_text: str) -> bool:
+    try:
+        return bool(re.search(r'(AccessControl|DEFAULT_ADMIN_ROLE|Roles?:)', str(_text or ''), re.I))
+    except Exception:
+        return False
+
 def __mdx_fmt_lines(items, weights):
     try:
         items = list(items or [])
@@ -136,6 +143,9 @@ def _sanitize_owner_privileges(text: str, chat_id) -> str:
         proxy_present = re.search(r'Proxy:\s*(yes|true|1)', text, re.I)
         is_renounced = bool(re.search(zeros_pattern, text, re.I) or re.search(renounced_word, text, re.I))
         if is_renounced and not proxy_present:
+            # Skip removal when AccessControl roles/features exist
+            if _has_access_control_markers(text):
+                return text
             # 1) Remove from Signals line
             def _strip_owner_in_signals(m):
                 line = m.group(0)
@@ -457,6 +467,52 @@ def _dexscreener_pair_url(chain: str, pair_addr: str) -> str:
     except Exception:
         return "https://dexscreener.com"
 # === /DS URL helper ===
+
+
+try:
+    import requests as _rq
+    if hasattr(_rq, 'post') and not globals().get('_MDX_TG_SEND_BTN_ORDER_FIX_V1'):
+        _MDX_TG_SEND_BTN_ORDER_FIX_V1 = _rq.post
+        def post(url, *args, **kwargs):
+            try:
+                if isinstance(url, str) and 'api.telegram.org' in url and (url.endswith('/sendMessage') or url.endswith('/editMessageText')):
+                    js = kwargs.get('json') or {}
+                    txt = js.get('text') or js.get('caption') or ''
+                    rm = js.get('reply_markup') or {}
+                    # Inject Retry LP on rate-limit
+                    if isinstance(rm, dict) and re.search(r'LP holders API/rate-limit|Verdict:\s*⚪\s*unknown\s*\(no\s*LP\s*data\)', str(txt), re.I):
+                        m_ca = re.search(r'(0x[0-9a-fA-F]{40})', str(txt))
+                        ca = m_ca.group(1) if m_ca else ''
+                        btn = {'text': '↻ Retry LP', 'callback_data': f'qs:{ca}' if ca else 'qs:retry'}
+                        try:
+                            rows = rm.get('inline_keyboard') or []
+                            if rows and isinstance(rows[-1], list):
+                                rows[-1].append(btn)
+                            else:
+                                rows = [[btn]]
+                            rm['inline_keyboard'] = rows
+                        except Exception:
+                            pass
+                    # Standardize order within each row
+                    order = ['Why++','More','Details','Report','↻ Retry LP','HP','Open in Scan','Open on DexScreener','Open in DEX','Copy CA','Save PDF']
+                    rank = {k:i for i,k in enumerate(order)}
+                    try:
+                        rows = rm.get('inline_keyboard') or []
+                        for r in rows:
+                            if isinstance(r, list):
+                                r.sort(key=lambda b: rank.get(str(b.get('text','')), 999))
+                        rm['inline_keyboard'] = rows
+                    except Exception:
+                        pass
+                    js['reply_markup'] = rm
+                    kwargs['json'] = js
+            except Exception:
+                pass
+            return _MDX_TG_SEND_BTN_ORDER_FIX_V1(url, *args, **kwargs)
+        _rq.post = post
+except Exception:
+    pass
+
 
 # === DEX swap URL helper ===
 def _swap_url_for(chain: str, token_addr: str) -> str:
@@ -6583,6 +6639,44 @@ try:
 except Exception:
     pass
 # ==== /MDX Report Normalizer ====
+
+
+def _mdx_fix_report_html_bytes(raw: bytes) -> bytes:
+    try:
+        txt = raw.decode('utf-8', errors='ignore')
+        # Hide 'Open in DEX' when no pools
+        if re.search(r'No\s+pools\s+found\s+on\s+DexScreener', txt, re.I):
+            txt = re.sub(r'\s*\|\s*<a[^>]*?>🟢\s*Open\s+in\s+DEX</a>\s*', ' | ', txt)
+            txt = re.sub(r'\|\s*\|', ' |', txt)
+        # DATA:ANOMALY for FDV < MC
+        m = re.search(r'FDV\s+([$\d\.\,kKmMbB]+)\s*\|\s*MC\s+([$\d\.\,kKmMbB]+)', txt)
+        if m:
+            def _parse(v):
+                s = v.strip().replace(',', '')
+                mm = re.match(r'^\$?\s*([0-9]*\.?[0-9]+)\s*([kKmMbB])?$', s)
+                if not mm: 
+                    return float('nan')
+                num = float(mm.group(1)); suf = (mm.group(2) or '').lower()
+                mult = {'k':1e3,'m':1e6,'b':1e9}.get(suf,1.0)
+                return num*mult
+            if _parse(m.group(1)) + 1e-6 < _parse(m.group(2)):
+                if 'DATA:ANOMALY — FDV < MC' not in txt:
+                    txt = re.sub(r'(?mi)(source:\s*DexScreener\s*</pre>)', r"\1\n<pre>DATA:ANOMALY — FDV &lt; MC (validate metrics)</pre>", txt)
+        # PRIOR OWNER (history)
+        m_wb = re.search(r'Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})', txt)
+        m_cr = re.search(r'Created:\s*([~\u223C]?)(\d{4}-\d{2}-\d{2})', txt)
+        if m_wb and m_cr:
+            try:
+                d_wb = dt.date.fromisoformat(m_wb.group(1))
+                d_cr = dt.date.fromisoformat(m_cr.group(2))
+                if d_wb < d_cr and 'PRIOR OWNER (history)' not in txt:
+                    txt = re.sub(r'(Wayback:\s*first\s*\d{4}-\d{2}-\d{2}.*)</pre>', r"\1\nHISTORY: PRIOR OWNER (history)</pre>", txt, count=1)
+            except Exception:
+                pass
+        return txt.encode('utf-8', errors='ignore')
+    except Exception:
+        return raw
+
 
 # [REMOVED_UNUSED_FUNCTION:_strip_dexscreener_links]
 # [REMOVED_UNUSED_FUNCTION:_sanitize_why_for_untradable]
