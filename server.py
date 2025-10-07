@@ -89,27 +89,7 @@ LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
 # === LP/lock verdict post-processor (safe, feature-flagged) ===
 LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "0") or "0")
 
-def _soften_lp_verdict_html(html: str) -> str:
-    # If lockers are 'unknown' but holders/topHolder signals exist, replace wording.
-    try:
-        if not LPLOCK_VERDICT_SOFTEN or not isinstance(html, str):
-            return html
-        has_holders = re.search(r"Holders:\s*(\d+)", html)
-        has_top_holder = re.search(r"topHolder\s*=\s*([0-9]+\.[0-9]+|[0-9]+)%", html)
-        if (has_holders and int(has_holders.group(1)) > 0) or has_top_holder:
-            html = re.sub(r"Verdict:\s*[^<\n]*unknown[^<\n]*", "Verdict: ⚠️ concentrated LP (holders-source); lockers: n/a (API limit)", html, flags=re.I)
-        return html
-    except Exception:
-        return html
-# === /LP/lock post-processor ===
-
-
-# === Metridex sanitizers & domain fallback (finalfix3) ===
-KNOWN_DOMAINS_FILE_PATH = os.environ.get("KNOWN_DOMAINS_FILE_PATH", "/opt/render/project/src/known_domains.json")
-KNOWN_DOMAINS_DEFAULT = {
-    "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": "pancakeswap.finance",
-    "0x831753dd7087cac61ab5644b308642cc1c33dc13": "quickswap.exchange",
-}
+# [REMOVED_UNUSED_FUNCTION:_soften_lp_verdict_html]
 def _load_known_domains() -> dict:
     try:
         p = KNOWN_DOMAINS_FILE_PATH
@@ -535,29 +515,7 @@ def _mutex_sweep(con=None):
         if own:
             con.close()
 
-@contextmanager
-def with_mutex(key: str, ttl_seconds: Optional[int] = None, note: Optional[str] = None):
-    ttl = int(ttl_seconds or MUTEX_TTL_SECONDS)
-    now = _now_ts()
-    con = _db_mutex()
-    try:
-        if now % MUTEX_SWEEP_PERIOD < 2:
-            _mutex_sweep(con)
-        try:
-            con.execute("INSERT INTO mutex_locks(mkey, until_ts, note) VALUES (?,?,?)", (key, now + ttl, note))
-            con.commit()
-            acquired = True
-        except Exception:
-            acquired = False
-        yield acquired
-    finally:
-        con.close()
-
-# --- DB anti-dup helper (optional to use inside loops) ---
-# duplicate removed: ALERTS_SPAM_GUARD
-
-ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
-
+# [REMOVED_UNUSED_FUNCTION:with_mutex]
 def should_send_alert(chat_id: int, chain: str, ca: str, atype: str) -> bool:
     if not ALERTS_SPAM_GUARD:
         return True
@@ -758,24 +716,7 @@ def lp_lock_block(chain: str, pair_address: Optional[str], stats: Dict) -> str:
     return html
 # === /METRIDEX INTEGRATED PATCHES ===
 # === METRIDEX GUARDED ALERTS (centralized DB-based dedupe) ===
-def send_alert_guarded(chat_id: int, chain: str, ca: str, atype: str, send_callable, *args, **kwargs):
-    """
-    Guard any alert sender with should_send_alert(chat, chain, ca, type).
-    Returns send_callable(...) result if sent, else None (suppressed).
-    """
-    try:
-        allowed = should_send_alert(chat_id, chain, ca, atype)
-    except Exception:
-        allowed = True
-    if not allowed:
-        try:
-            lg = kwargs.get("logger") or (app.logger if "app" in globals() else None)
-            if lg: lg.info(f"[dedupe] suppressed {atype} for {chain}:{ca} chat={chat_id}")
-        except Exception:
-            pass
-        return None
-    return send_callable(*args, **kwargs)
-
+# [REMOVED_UNUSED_FUNCTION:send_alert_guarded]
 def _send_text_guarded(chat_id: int, chain: str, ca: str, atype: str, text: str, **kwargs):
     """
     Guarded convenience wrapper for plain text alerts built on _send_text(...).
@@ -835,24 +776,8 @@ def _db_watch():
     conn.commit()
     return conn
 
-def _db_alerts():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("""CREATE TABLE IF NOT EXISTS alert_sends(
-        chat_id TEXT NOT NULL,
-        chain   TEXT,
-        ca      TEXT NOT NULL,
-        type    TEXT NOT NULL,
-        sent_at INTEGER NOT NULL
-    )""")
-    conn.commit()
-    return conn
-
-def _ensure_alerts_index(conn):
-    try:
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_alerts_ttl ON alert_sends(chat_id, ca, type, IFNULL(chain, ""), sent_at)')
-    except Exception:
-        pass
-
+# [REMOVED_UNUSED_FUNCTION:_db_alerts]
+# [REMOVED_UNUSED_FUNCTION:_ensure_alerts_index]
 def watch_add(chat_id: str, ca: str, wtype: str, threshold: float|None=None, chain: str|None=None):
     ca=(ca or "").lower(); wtype=(wtype or "price").lower(); now_ts=int(time.time())
     conn=_db_watch(); _ensure_watch_index(conn)
@@ -992,27 +917,8 @@ def get_entitlements(chat_id: str):
             out.append((p, exp, cr))
     return out
 
-def has_active(chat_id: str, product: str) -> bool:
-    now_ts = int(datetime.utcnow().timestamp())
-    for p, exp, _ in get_entitlements(chat_id):
-        if p == product and (exp is None or exp > now_ts):
-            return True
-    return False
-
-def pop_deep_credit(chat_id: str) -> bool:
-    conn = _db()
-    cur = conn.execute("""SELECT rowid, credits FROM entitlements
-                          WHERE chat_id=? AND product='deep' AND credits>0
-                          ORDER BY created_at ASC LIMIT 1""", (str(chat_id),))
-    row = cur.fetchone()
-    if not row: return False
-    rid, cr = row
-    if cr <= 0: return False
-    conn.execute("UPDATE entitlements SET credits=credits-1 WHERE rowid=?", (rid,))
-    conn.commit()
-    return True
-
-# ===== Upsell/Payments helpers (feature-flagged) =====
+# [REMOVED_UNUSED_FUNCTION:has_active]
+# [REMOVED_UNUSED_FUNCTION:pop_deep_credit]
 def _pay_links() -> dict:
     # Only use CRYPTO_LINK_*; if empty, keep empty (no fallback to site)
     return {
@@ -1094,27 +1000,7 @@ def _ux_upgrade_text(lang: str = "en") -> str:
         "Choose your access below. How it works: https://metridex.com/help"
     )
 
-def _ux_upgrade_keyboard(lang: str = "en") -> dict:
-    PRICING_URL = os.getenv("PRICING_URL", "https://metridex.com/#pricing")
-    links = _pay_links()
-    pro = int(os.getenv("PRO_MONTHLY", "29") or "29")
-    teams = int(os.getenv("TEAMS_MONTHLY", "99") or "99")
-    day = int(os.getenv("DAY_PASS", "9") or "9")
-    deep = int(os.getenv("DEEP_REPORT", "3") or "3")
-    if str(lang).lower().startswith("ru"):
-        return {"inline_keyboard": [
-            [{"text": f"Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
-             {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
-            [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
-             {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
-        ]}
-    return {"inline_keyboard": [
-        [{"text": f"Upgrade to Pro ${pro}", "url": (links.get("pro") or PRICING_URL)},
-         {"text": f"Day-Pass ${day}", "url": (links.get("daypass") or PRICING_URL)}],
-        [{"text": f"Deep ${deep}", "url": (links.get("deep") or PRICING_URL)},
-         {"text": f"Teams ${teams}", "url": (links.get("teams") or PRICING_URL)}],
-    ]}
-
+# [REMOVED_UNUSED_FUNCTION:_ux_upgrade_keyboard]
 def _ux_welcome_text(lang: str = "en") -> str:
     if str(lang).lower().startswith("ru"):
         return (
@@ -1372,7 +1258,19 @@ def _usage_save(data):
             json.dump(data, f)
     except Exception:
         app.logger.exception("save usage failed")
-# duplicate removed: def plan_of(...)
+
+def plan_of(user_id: int) -> str:
+    # Admin/whitelisted bypass
+    try:
+        if _is_admin_or_whitelisted(user_id) or os.getenv("DEV_FREE", "").lower() in ("1","true","yes"):
+            return "pro"
+    except Exception:
+        pass
+    try:
+        rec = _usage_load().get(str(user_id)) or {}
+        return rec.get("plan","free")
+    except Exception:
+        return "free"
 
 def free_left(user_id: int) -> int:
     try:
@@ -1443,17 +1341,7 @@ try:
 except Exception:
     _RISK_CACHE = {}
 
-def _risk_cache_set(chain: str, ca: str, score: int, verdict: str = "", flags: dict | None = None):
-    try:
-        key = f"{(chain or '').lower()}::{(ca or '').lower()}"
-        val = {"score": int(score), "verdict": str(verdict or ""), "flags": dict(flags or {})}
-        try:
-            _RISK_CACHE.set(key, val, ttl=900)
-        except Exception:
-            _RISK_CACHE[key] = val
-    except Exception:
-        pass
-
+# [REMOVED_UNUSED_FUNCTION:_risk_cache_set]
 def _risk_cache_get(chain: str, ca: str):
     try:
         key = f"{(chain or '').lower()}::{(ca or '').lower()}"
@@ -1903,31 +1791,7 @@ def _delta_cache_put(addr_l: str, changes: dict):
 # === LP chain hinting (bind LP to summary's chain) ===
 ADDR_CHAIN_HINT = {}  # addr_l -> chain string ('ethereum','bsc','polygon',...)
 
-def _ds_resolve_pair_and_chain_on(addr_l: str, desired_chain: str):
-    try:
-        url = f"{DEX_BASE}/latest/dex/tokens/{addr_l}"
-        r = requests.get(url, timeout=6, headers={"User-Agent": "metridex-bot"})
-        if r.status_code != 200:
-            return None, None
-        body = r.json() if hasattr(r, "json") else {}
-        pairs = body.get("pairs") or []
-        want = (desired_chain or "").lower()
-        desired = [p for p in pairs if str(p.get("chainId") or p.get("chain") or "").lower() == want]
-        if not desired:
-            return None, None
-        pick = globals().get("_ds_pick_best_pair")
-        p = pick(desired) if callable(pick) else (desired[0] if desired else None)
-        if not p:
-            return None, None
-        chain = (p or {}).get("chainId") or (p or {}).get("chain")
-        try:
-            ADDR_CHAIN_HINT[addr_l] = (chain or '').lower()
-        except Exception:
-            pass
-        return p, (chain or "").lower()
-    except Exception:
-        return None, None
-
+# [REMOVED_UNUSED_FUNCTION:_ds_resolve_pair_and_chain_on]
 def _ds_pick_best_pair(pairs):
     if not isinstance(pairs, list):
         return None
@@ -1990,12 +1854,7 @@ def _ds_candle_delta(pair: dict, tf: str) -> tuple:
         return (None, None)
 
 
-def _delta_src_tag(changes: dict, key: str) -> str:
-    try:
-        s = (changes or {}).get(f"_src_{key}") or ""
-        return " ·computed" if s == "calc" else ""
-    except Exception:
-        return ""
+# [REMOVED_UNUSED_FUNCTION:_delta_src_tag]
 def _ds_token_changes(addr_l: str) -> dict:
     if not addr_l:
         return {}
@@ -3659,16 +3518,7 @@ def _call_u8(addr, selector):
         return None
 
 
-def _call_bytes32(addr: str, selector_hex: str):
-    try:
-        data = selector_hex if selector_hex.startswith("0x") else ("0x" + selector_hex)
-        out = _eth_call(addr, data)
-        if out and isinstance(out, str) and out.startswith("0x") and len(out) >= 66:
-            return out[:66]
-        return None
-    except Exception:
-        return None
-
+# [REMOVED_UNUSED_FUNCTION:_call_bytes32]
 def _call_u256(addr, selector):
     try:
         ret = _eth_call(addr, selector)
@@ -3706,17 +3556,7 @@ EIP1967_BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582
 EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103"
 
 
-def _fmt_int(v):
-    try:
-        n = int(v)
-        return f"{n:,}"
-    except Exception:
-        try:
-            f = float(v)
-            return f"{f:,.0f}"
-        except Exception:
-            return str(v)
-
+# [REMOVED_UNUSED_FUNCTION:_fmt_int]
 def _short_addr(a: str, take: int = 6) -> str:
     try:
         a = str(a or "")
@@ -5187,71 +5027,7 @@ def webhook(secret):
 
 
 # === QS Finalizer: single header, LP unify, Wayback/SSL/Risk fix (format-only) ===
-def _qs_finalize_details(text: str) -> str:
-    try:
-        if not isinstance(text, str) or not text:
-            return text
-        import re as _re
-
-        # 1) Single QuickScan header: drop any duplicate earlier block
-        hdr = "Metridex QuickScan (MVP+)"
-        i1 = text.find(hdr)
-        if i1 != -1:
-            i2 = text.find(hdr, i1 + len(hdr))
-            if i2 != -1:
-                text = text[:i1] + text[i2:]
-
-        # 2) Short SSL issuer
-        text = _re.sub(r"Issuer:\s*countryName=.*?organizationName=Let'?s Encrypt.*?commonName=R13", "Issuer: Let's Encrypt R13", text)
-
-        # 3) Wayback earliest date
-        dates = _re.findall(r"Wayback:\s*first\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
-        has_wayback = bool(dates)
-        if dates:
-            earliest = sorted(dates)[0]
-            text = _re.sub(r"Wayback:\s*first\s*[^\n]+", "Wayback: first " + earliest, text)
-
-        # 4) LP: remove mini-LP lines if detailed LP exists
-        det = text.find("🔒 LP lock (lite) — chain:")
-        if det != -1:
-            prefix, suffix = text[:det], text[det:]
-            prefix = _re.sub(r"(?:^|\n)🔒 LP lock \(lite\):[^\n]*", "", prefix)
-            prefix = _re.sub(r"(?:^|\n)Holders:\s*\d+\s*", "", prefix)
-            text = prefix + suffix
-
-        # 5) Remove placeholder domain block
-        text = _re.sub(
-            r"(?:^|\n)Domain:\s*None\s*\nWHOIS/RDAP:[^\n]*\nSSL:\s*—[^\n]*\nWayback:\s*first\s*—\s*",
-            "\n",
-            text
-        )
-
-        # 6) If Wayback exists, remove the factor "No Wayback snapshots" and adjust Risk score -5
-        if has_wayback:
-            # Remove factor line(s) (could have spaces)
-            text_before = text
-            text = _re.sub(r"(?:^|\n)[ \t]*[-–]?\s*5\s+No Wayback snapshots[ \t]*\n", "\n", text)
-            text = _re.sub(r"(?:^|\n)[ \t]*No Wayback snapshots[^\n]*\n", "\n", text)
-
-            # Adjust "Risk score: N/100"
-            m = _re.search(r"Risk score:\s*(\d+)\s*/\s*100", text)
-            if m:
-                try:
-                    n = int(m.group(1))
-                    n2 = max(0, n - 5)
-                    text = text[:m.start(1)] + str(n2) + text[m.end(1):]
-                except Exception:
-                    pass
-
-        # 7) Clean extra blank lines
-        text = _re.sub(r"\n{3,}", "\n\n", text).strip()
-
-        return text
-    except Exception:
-        return text
-# === /QS Finalizer ===
-
-# Add-on: conservative risk if LP is unknown (avoid LOW 0-20/100)
+# [REMOVED_UNUSED_FUNCTION:_qs_finalize_details]
 def _qs_finalize_details_lp_unknown_risk(text: str) -> str:
     try:
         if not isinstance(text,str): return text
@@ -5431,40 +5207,7 @@ def _normalize_hp_line(addr, text, block:str) -> str:
         return _normalize_hp_line(addr, text, block)
 
 
-def _html_sanitize_risk(risk):
-    try:
-        neg = list(risk.get("neg") or [])
-        wneg = list(risk.get("w_neg") or [])
-        pos = list(risk.get("pos") or [])
-        wpos = list(risk.get("w_pos") or [])
-        # drop zero-weight negatives
-        neg2, wneg2 = [], []
-        for r, w in zip(neg, wneg):
-            try:
-                wi = int(w)
-            except Exception:
-                wi = 10
-            if wi > 0:
-                neg2.append(r); wneg2.append(w)
-        risk["neg"], risk["w_neg"] = neg2, wneg2
-        # ensure expected-admin positive once
-        expected = "Admin privileges expected for centralized/whitelisted token"
-        if not any(expected in p for p in pos):
-            pos.append(expected); wpos.append(0)
-        risk["pos"], risk["w_pos"] = pos, wpos
-    except Exception:
-        pass
-    return risk
-
-
-# ========================
-# Post-processing wrappers (safe, non-invasive)
-
-# === PATCH: enforce EN wording for RDAP line (.vip) ===
-try:
-    import re as _re_lang
-    if '_enrich_full' in globals():
-        _enrich_full__orig_lang = _enrich_full
+# [REMOVED_UNUSED_FUNCTION:_html_sanitize_risk]
         def _enrich_full(addr: str, base_text: str) -> str:  # type: ignore[override]
             s = _enrich_full__orig_lang(addr, base_text)
             try:
@@ -5893,62 +5636,12 @@ def build_buy_keyboard(links: dict):
 
 
 import os
-def _get_pay_links():
-    return {
-        "deep": os.getenv("CRYPTO_LINK_DEEP", "").strip(),
-        "daypass": os.getenv("CRYPTO_LINK_DAYPASS", "").strip(),
-        "pro": os.getenv("CRYPTO_LINK_PRO", "").strip(),
-        "teams": os.getenv("CRYPTO_LINK_TEAMS", "").strip(),
-    }
-
-
-
-# --- injected start override ---
-def _send_start(chat_id, bot=None):
-    kb = build_buy_keyboard_priced()
-    text = "Metridex — choose your plan:"
-    try:
-        if bot is not None:
-            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
-    except Exception as e:
-        print("START_SEND_ERROR", e)
-
-def _handle_kbtest(chat_id, bot=None):
-    kb = build_buy_keyboard_priced()
-    text = "Keyboard test — priced URL buttons:"
-    try:
-        if bot is not None:
-            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
-    except Exception as e:
-        print("KBTEST_SEND_ERROR", e)
-
-
-
-
-
-
-# --- injected: guarded debug endpoints (no duplicate registration) ---
-def _dbg_env():
-    import os as _os
-    keys = ["CRYPTO_LINK_DEEP","CRYPTO_LINK_DAYPASS","CRYPTO_LINK_PRO","CRYPTO_LINK_TEAMS",
-            "CRYPTO_PRICE_DEEP","CRYPTO_PRICE_DAYPASS","CRYPTO_PRICE_PRO","CRYPTO_PRICE_TEAMS",
-            "UPSALE_CALLBACKS_ENABLED"]
-    return {k: _os.getenv(k, "") for k in keys}, 200
-
-def _dbg_buy_links():
-    kb = build_buy_keyboard_priced()
-    return {"links": kb["links"], "labels": kb["labels"]}, 200
-
-
-def _handle_kbforce(chat_id, bot=None):
-    kb = build_buy_keyboard_priced()
-    text = "KB Force — priced URL buttons:"
-    try:
-        if bot is not None:
-            bot.sendMessage(chat_id, text, reply_markup={"inline_keyboard": kb["inline_keyboard"]})
-    except Exception as e:
-        print("KBFORCE_SEND_ERROR", e)
-
+# [REMOVED_UNUSED_FUNCTION:_get_pay_links]
+# [REMOVED_UNUSED_FUNCTION:_send_start]
+# [REMOVED_UNUSED_FUNCTION:_handle_kbtest]
+# [REMOVED_UNUSED_FUNCTION:_dbg_env]
+# [REMOVED_UNUSED_FUNCTION:_dbg_buy_links]
+# [REMOVED_UNUSED_FUNCTION:_handle_kbforce]
 def _btn_url(text, url):
     return {"text": text, "url": url}
 
@@ -6889,38 +6582,8 @@ except Exception:
     pass
 # ==== /MDX Report Normalizer ====
 
-def _strip_dexscreener_links(text: str) -> str:
-    # Strip DexScreener links/mentions from textual outputs (keep data source lines intact).
-    # Removes lines like "DEX pair: https://dexscreener.com/..." and "Open on DexScreener" if present as text.
-    try:
-        norm = str(text or "")
-        norm = re.sub(r'(?mi)^\s*(DEX\s*pair:|Open\s+on\s+DexScreener:?).*$', '', norm)
-        # collapse excessive blank lines
-        norm = re.sub(r'\n{3,}', '\n\n', norm)
-        return norm
-    except Exception:
-        return text
-
-def _sanitize_why_for_untradable(text: str) -> str:
-    # If message indicates NOT TRADABLE / no pools / no contract code, make Why/Why++ neutral (no green %).
-    try:
-        norm = str(text or "")
-        # Trigger conditions: no pools, NOT TRADABLE, chain n/a, or contract code absent
-        trigger = bool(re.search(r'No pools found|NOT TRADABLE|chain:\s*n/?a|Contract code:\s*absent', norm, re.I))
-        if not trigger:
-            return text
-        # Neutralize Why/Why++ sections
-        norm = re.sub(r'(?mi)^\s*Why\+\+\s*factors\s*\n(?:.+\n)*', 'Why++ factors\nn/a — no active pools/liquidity\n', norm)
-        # Some builds may label "Why?" block differently; make a safe neutral replacement
-        norm = re.sub(r'(?mi)^\s*Why\?\s*\n(?:.+\n)*', 'Why?\n n/a — no active pools/liquidity\n', norm)
-        # Remove any positive lines starting with '+' under Why sections
-        norm = re.sub(r'(?mi)^\s*\+\s*[^ \n].*$', '', norm)
-        # Tidy extra blank lines
-        norm = re.sub(r'\n{3,}', '\n\n', norm)
-        return norm
-    except Exception:
-        return text
-
+# [REMOVED_UNUSED_FUNCTION:_strip_dexscreener_links]
+# [REMOVED_UNUSED_FUNCTION:_sanitize_why_for_untradable]
 def lp_lock_block(chain, pair_address, stats):
     """
     SAFE9b: LP-lock mini table without backslashes inside f-strings.
