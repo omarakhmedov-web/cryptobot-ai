@@ -1,0 +1,73 @@
+name: Coverage
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  run-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps (best effort)
+        run: |
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt || true
+          fi
+          pip install "coverage==7.*" gunicorn flask requests || true
+
+      # Запуск сервера под coverage в фоне
+      - name: Start app (gunicorn under coverage)
+        run: |
+          nohup coverage run --parallel-mode -m gunicorn -w 1 -t 120 server:app --bind 127.0.0.1:8000 >/dev/null 2>&1 &
+          sleep 4
+
+      # Минимальный трафик, чтобы реально прошлись нужные ветки
+      - name: Hit healthz (если есть)
+        run: |
+          curl -fsS http://127.0.0.1:8000/healthz || true
+
+      # Доп. дымовой вызов рендера без изменения кода (если функция есть)
+      - name: Smoke render call
+        run: |
+          python - <<'PY'
+          import os
+          try:
+              from server import _render_report
+              addr='0x6982508145454Ce325dDbE47a25d4ec3d2311933'
+              text='Metridex QuickScan (MVP+)\nPEPE/WETH on uniswap (ethereum)\n⚠️ Signals: Owner privileges present; LP concentrated in a single holder: 99.87%\n✅ Positives: High liquidity (≥$1,000,000)\n'
+              p, html = _render_report(addr, text)
+              print("Render OK, len(html)=", len(html))
+          except Exception as e:
+              print("Render path not hit:", e)
+          PY
+          true
+
+      - name: Stop app
+        run: |
+          pkill -f gunicorn || true
+          sleep 1
+
+      - name: Combine & report
+        run: |
+          coverage combine
+          coverage report -m server.py || true
+          coverage html -d htmlcov || true
+
+      - name: Upload HTML coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: htmlcov
+          path: htmlcov
+          if-no-files-found: ignore
