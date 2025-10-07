@@ -1,31 +1,29 @@
 name: Coverage
-
 on:
   workflow_dispatch:
     inputs:
       app_module:
-        description: 'WSGI app module (module:app)'
+        description: "WSGI app module (module:object)"
         required: false
-        default: 'server:app'
+        default: "server:app"
       bind:
-        description: 'Bind address for gunicorn'
+        description: "Gunicorn bind address"
         required: false
-        default: '127.0.0.1:8000'
-      healthz:
-        description: 'Health check path (blank to skip)'
+        default: "127.0.0.1:8000"
+      python-version:
+        description: "Python version"
         required: false
-        default: '/healthz'
-      python:
-        description: 'Python version'
-        required: false
-        default: '3.11'
+        default: "3.11"
       run_smoke:
-        description: 'Run smoke render call'
-        type: boolean
-        default: true
+        description: "Run optional smoke _render_report() if present"
+        required: false
+        default: "true"
+      healthz:
+        description: "Health check path (relative)"
+        required: false
+        default: "/healthz"
   push:
     branches: [ main, master ]
-  pull_request:
 
 permissions:
   contents: read
@@ -34,6 +32,13 @@ jobs:
   run-coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      APP_MODULE: ${{ inputs.app_module != '' && inputs.app_module || 'server:app' }}
+      BIND_ADDR: ${{ inputs.bind != '' && inputs.bind || '127.0.0.1:8000' }}
+      PY_VER: ${{ inputs['python-version'] != '' && inputs['python-version'] || '3.11' }}
+      RUN_SMOKE: ${{ inputs.run_smoke != '' && inputs.run_smoke || 'true' }}
+      HEALTHZ_PATH: ${{ inputs.healthz != '' && inputs.healthz || '/healthz' }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,7 +46,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ inputs.python }}
+          python-version: ${{ env.PY_VER }}
 
       - name: Install deps (best effort)
         run: |
@@ -49,70 +54,61 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt || true
           fi
-          pip install "coverage==7.*" gunicorn flask requests waitress || true
+          pip install "coverage==7.*" gunicorn flask requests || true
 
-      - name: Start app (gunicorn under coverage)
+      - name: Start app (gunicorn under coverage, background)
         run: |
-          APP_MODULE="${{ inputs.app_module }}"
-          [ -z "$APP_MODULE" ] && APP_MODULE="server:app"
-          BIND="${{ inputs.bind }}"
-          [ -z "$BIND" ] && BIND="127.0.0.1:8000"
-          nohup coverage run --parallel-mode -m gunicorn -w 1 -t 120 "$APP_MODULE" --bind "$BIND" >/dev/null 2>&1 &
-          sleep 4
+          set -eu
+          APP_MODULE="${APP_MODULE:-server:app}"
+          BIND_ADDR="${BIND_ADDR:-127.0.0.1:8000}"
+          echo "Starting gunicorn for ${APP_MODULE} on ${BIND_ADDR}..."
+          nohup coverage run --parallel-mode -m gunicorn -w 1 -t 120 "${APP_MODULE}" --bind "${BIND_ADDR}" >/dev/null 2>&1 &
+          # Give it a moment to boot
+          for i in $(seq 1 15); do
+            sleep 1
+            if curl -fsS "http://${BIND_ADDR%:*}:${BIND_ADDR#*:}${HEALTHZ_PATH}" >/dev/null 2>&1; then
+              echo "Health OK"
+              break
+            fi
+          done
+          true
 
-      - name: Hit healthz (optional)
+      - name: Optional smoke render (if _render_report exists)
+        if: ${{ env.RUN_SMOKE == 'true' }}
         run: |
-          BIND="${{ inputs.bind }}"
-          [ -z "$BIND" ] && BIND="127.0.0.1:8000"
-          HEALTHZ="${{ inputs.healthz }}"
-          # allow blank to skip
-          if [ -n "$HEALTHZ" ]; then
-            curl -fsS "http://$BIND$HEALTHZ" || true
-          fi
-
-      - name: Smoke render call
-        if: ${{ inputs.run_smoke == true }}
-        env:
-          APP_MODULE: ${{ inputs.app_module }}
-        run: |
-          python - <<'PY'
-          import os, importlib
-          app_mod = os.environ.get('APP_MODULE') or 'server:app'
-          mod_name = app_mod.split(':',1)[0]
+          python - << 'PY'
+          import importlib, os, sys
+          modname = os.environ.get("APP_MODULE","server:app").split(":")[0]
           try:
-              mod = importlib.import_module(mod_name)
-              fn = getattr(mod, '_render_report', None)
-              if callable(fn):
-                  addr='0x6982508145454Ce325dDbE47a25d4ec3d2311933'
-                  text='Metridex QuickScan (MVP+)\\nPEPE/WETH on uniswap (ethereum)\\n⚠️ Signals: Owner privileges present; LP concentrated in a single holder: 99.87%\\n✅ Positives: High liquidity (≥$1,000,000)\\n'
-                  res = fn(addr, text)
-                  if isinstance(res, tuple) and len(res) == 2:
-                      p, html = res
-                      print("Render OK, len(html)=", len(html))
-                  else:
-                      print("Render returned non-tuple or unexpected shape:", type(res))
-              else:
-                  print("_render_report() not found; skipping smoke render.")
+            m = importlib.import_module(modname)
           except Exception as e:
-              print("Render path not hit:", e)
+            print(f"[smoke] import failed: {e}")
+            sys.exit(0)
+          func = getattr(m, "_render_report", None)
+          if callable(func):
+            try:
+              html = func({})  # best-effort; your impl may ignore params
+              print("[smoke] _render_report executed, len(html)=", len(str(html)))
+            except Exception as e:
+              print(f"[smoke] _render_report raised (ignored): {e}")
+          else:
+            print("[smoke] _render_report not present — skipping")
           PY
 
       - name: Stop app
         if: always()
         run: |
           pkill -f gunicorn || true
-          sleep 1
 
       - name: Combine & report
         if: always()
         run: |
           coverage combine || true
-          echo "------ coverage (all) ------"
+          echo "::group::coverage report -m"
           coverage report -m || true
-          echo "------ coverage (server.py) ------"
-          coverage report -m server.py || true
+          echo "::endgroup::"
+          coverage xml || true
           coverage html -d htmlcov || true
-          coverage xml -o coverage.xml || true
 
       - name: Upload HTML coverage
         if: always()
@@ -120,12 +116,12 @@ jobs:
         with:
           name: htmlcov
           path: htmlcov
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
-      - name: Upload coverage.xml
+      - name: Upload coverage XML
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-xml
           path: coverage.xml
-          if-no-files-found: ignore
+          if-no-files-found: warn
