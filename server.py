@@ -84,6 +84,14 @@ DEX_STRICT_CHAIN      = int(os.getenv("DEX_STRICT_CHAIN", "0") or "0")      # 1:
 DS_ALLOW_FALLBACK     = int(os.getenv("DS_ALLOW_FALLBACK", "1") or "1")     # 0: no 'search?q=' fallback; show base link only
 MDX_ENABLE_POSTPROCESS= int(os.getenv("MDX_ENABLE_POSTPROCESS", "1") or "1")# 1: run post-processors (_sanitize/*)
 MDX_BYPASS_SANITIZERS = int(os.getenv("MDX_BYPASS_SANITIZERS","0") or "0")  # 1: skip sanitizers even if postprocess enabled
+MDX_LOG_SCORE_IDS = os.getenv("MDX_LOG_SCORE_IDS", "true")
+MDX_ALLOWLIST_PATH = os.getenv("MDX_ALLOWLIST_PATH", "/etc/metridex/custodians.json")
+MDX_BTN_ORDER_FIX = os.getenv("MDX_BTN_ORDER_FIX", "true")
+MDX_HTML_FIX = os.getenv("MDX_HTML_FIX", "true")
+MDX_DISABLE_RATE_LIMIT_FINAL_UNKNOWN = os.getenv("MDX_DISABLE_RATE_LIMIT_FINAL_UNKNOWN", "true")
+MDX_LANG = os.getenv("MDX_LANG", "en")
+MDX_SCORE_VERSION = os.getenv("MDX_SCORE_VERSION", "v1.3")
+MDX_STRICT_SCORE_SNAPSHOT = os.getenv("MDX_STRICT_SCORE_SNAPSHOT", "true")
 DETAILS_ENFORCE_DOMAIN= int(os.getenv("DETAILS_ENFORCE_DOMAIN","0") or "0") # 1: enforce domain matches current token/site, else strip
 MDX_LAST_SITE_SCOPE   = (os.getenv("MDX_LAST_SITE_SCOPE","chat") or "chat").strip().lower()  # 'chat' | 'message'
 DOMAIN_META_STRICT    = int(os.getenv("DOMAIN_META_STRICT","0") or "0")     # 1: if domain cannot be verified for current token/site — hide meta
@@ -389,6 +397,8 @@ def _dedupe_quickscan_blocks(text: str) -> str:
     except Exception:
         return text
 
+# [dedup removed duplicate of _dedupe_quickscan_blocks]
+
 
 
 def _dedupe_quickscan_blocks(text: str) -> str:
@@ -406,6 +416,8 @@ def _dedupe_quickscan_blocks(text: str) -> str:
     except Exception:
         return text
 
+# [dedup removed duplicate of _lp_contract_mixed_verdict_fix]
+
 
 
 def _lp_contract_mixed_verdict_fix(text: str) -> str:
@@ -420,6 +432,8 @@ def _lp_contract_mixed_verdict_fix(text: str) -> str:
     except Exception:
         return text
 
+# [dedup removed duplicate of _enforce_lp_pending_on_ratelimit]
+
 
 
 def _enforce_lp_pending_on_ratelimit(text: str) -> str:
@@ -429,6 +443,8 @@ def _enforce_lp_pending_on_ratelimit(text: str) -> str:
         return text
     except Exception:
         return text
+
+# [dedup removed duplicate of _tag_prior_owner_history]
 
 
 
@@ -444,6 +460,8 @@ def _tag_prior_owner_history(text: str) -> str:
         return text
     except Exception:
         return text
+
+# [dedup removed duplicate of _validate_fdv_ge_mc]
 
 
 
@@ -462,6 +480,8 @@ def _validate_fdv_ge_mc(text: str) -> str:
         return text
     except Exception:
         return text
+
+# [dedup removed duplicate of _parse_money_compact]
 
 
 
@@ -495,6 +515,8 @@ def _parse_money_compact(v: str) -> float:
         return text
     except Exception:
         return text
+
+# [dedup removed duplicate of _sanitize_lp_claims]
 
 
 def _sanitize_lp_claims(text: str) -> str:
@@ -2520,6 +2542,8 @@ def _enforce_details_host(text: str, chat_id) -> str:
         return text
     except Exception:
         return text
+
+# [dedup removed duplicate of _sanitize_lp_claims]
 
 def _sanitize_lp_claims(text: str) -> str:
     """Avoid obviously wrong LP claims (when LP holder equals token CA string found nearby)."""
@@ -7162,3 +7186,30 @@ try:
         return _orig__send_text(chat_id, processed, **kwargs)
 except Exception:
     pass
+
+
+try:
+    import requests as _rq2
+    _orig_session_request = getattr(_rq2.Session, "request", None)
+    if callable(_orig_session_request):
+        def _mdx_requests_session_request(self, method, url, *args, **kwargs):
+            try:
+                if isinstance(url, str) and 'api.telegram.org' in url and (url.endswith('/sendMessage') or url.endswith('/editMessageText') or url.endswith('/sendDocument')):
+                    js = kwargs.get('json') or {}
+                    data = kwargs.get('data') or {}
+                    ch = None
+                    if isinstance(js, dict):
+                        ch = js.get('chat_id')
+                        if js.get('text'): js['text'] = mdx_postprocess_text(js.get('text'), ch)
+                        if js.get('caption'): js['caption'] = mdx_postprocess_text(js.get('caption'), ch)
+                        kwargs['json'] = js
+                    if isinstance(data, dict) and data.get('caption'):
+                        data['caption'] = mdx_postprocess_text(data.get('caption'), ch)
+                        kwargs['data'] = data
+            except Exception:
+                pass
+            return _orig_session_request(self, method, url, *args, **kwargs)
+        _rq2.Session.request = _mdx_requests_session_request
+except Exception:
+    pass
+
