@@ -266,6 +266,237 @@ def _sanitize_owner_privileges2(text: str, chat_id):
         return text
 
 
+
+
+
+def _sanitize_lp_claims(text: str) -> str:
+    try:
+        norm = unicodedata.normalize("NFKC", text or "")
+        # Prefer CA from "Scan token:" line; fallback to the last "/token/0x..." occurrence
+        m_token = re.search(r'(?mi)^Scan\s+token:\s*\S*/token/(0x[0-9a-fA-F]{40})', norm)
+        if not m_token:
+            m_all = re.findall(r'/token/(0x[0-9a-fA-F]{40})', norm)
+            ca = (m_all[-1].lower() if m_all else "")
+        else:
+            ca = m_token.group(1).lower()
+        if not ca:
+            return text
+        th = re.search(r'^•\s*Top holder:\s*(0x[0-9a-fA-F]{40}|n/a)', norm, re.M)
+        if th and th.group(1).lower() == ca:
+            # If top holder equals the token CA → that's not an LP holder; sanitize
+            text = re.sub(r'^(•\s*Top holder:\s*)(0x[0-9a-fA-F]{40})', r'\1n/a', text, flags=re.M)
+            text = re.sub(r'(•\s*Top holder type:\s*)EOA', r'\1contract', text)
+        # Wording fix: if type is 'contract' → replace '(EOA holds LP)' phrasing
+        if re.search(r'(Top holder type:\s*)contract', text, re.I):
+            text = re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', text)
+        return text
+    except Exception:
+        return text
+        norm = unicodedata.normalize("NFKC", text or "")
+        m = re.search(r'/token/(0x[0-9a-fA-F]{40})', norm)
+        if not m:
+            return text
+        ca = m.group(1).lower()
+        th = re.search(r'^•\s*Top holder:\s*(0x[0-9a-fA-F]{40})', norm, re.M)
+        if th and th.group(1).lower() == ca:
+            text = re.sub(r'^(•\s*Top holder:\s*)(0x[0-9a-fA-F]{40})', r'\1n/a', text, flags=re.M)
+            text = re.sub(r'(•\s*Top holder type:\s*)EOA', r'\1contract', text)
+        
+        # Flip verdict wording if needed
+        try:
+            if re.search(r'(Top holder type:\s*)contract', text, re.I):
+                text = re.sub(r'\(EOA holds LP\)', '(contract/custodian holds LP)', text)
+        except Exception:
+            pass
+        return text
+    except Exception:
+        return text
+
+
+
+def _parse_money_compact(v: str) -> float:
+    try:
+        s = str(v or "").strip().replace(",", "")
+        m = re.match(r'^\$?\s*([0-9]*\.?[0-9]+)\s*([kKmMbB])?$', s)
+        if not m: return float("nan")
+        num = float(m.group(1)); suf = (m.group(2) or "").lower()
+        mult = 1.0 if not suf else (1e3 if suf=="k" else (1e6 if suf=="m" else (1e9 if suf=="b" else 1.0)))
+        return num*mult
+    except Exception:
+        return float("nan")
+
+def _validate_fdv_ge_mc(text: str) -> str:
+    try:
+        m = re.search(r'FDV\s+([\$\d\.\,kKmMbB]+)\s*\|\s*MC\s+([\$\d\.\,kKmMbB]+)', text or "")
+        if not m: return text
+        fdv = _parse_money_compact(m.group(1))
+        mc  = _parse_money_compact(m.group(2))
+        if fdv==fdv and mc==mc and (fdv + 1e-6) < mc:
+            # Append anomaly note next to DexScreener source or verdict line
+            if re.search(r'(?mi)^source:\s*DexScreener', text or ""):
+                text = re.sub(r'(?mi)^(source:\s*DexScreener.*)$', r"\\1\nDATA:ANOMALY — FDV < MC (validate metrics)", text)
+            else:
+                text = re.sub(r'(?mi)^(Trust\s+verdict:.*)$', r"\\1\nDATA:ANOMALY — FDV < MC (validate metrics)", text)
+        return text
+    except Exception:
+        return text
+
+def _tag_prior_owner_history(text: str) -> str:
+    try:
+        m_wb = re.search(r'(?mi)^Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})', text or "")
+        m_cr = re.search(r'(?mi)Created:\s*([~\u223C]?)(\d{4}-\d{2}-\d{2})', text or "")
+        if not (m_wb and m_cr): return text
+        d_wb = _dt.date.fromisoformat(m_wb.group(1))
+        d_cr = _dt.date.fromisoformat(m_cr.group(2))
+        if d_wb < d_cr and "PRIOR OWNER (history)" not in (text or ""):
+            text = re.sub(r'(?mi)^(Wayback:\s*first\s*\d{4}-\d{2}-\d{2}.*)$', r"\\1\nHISTORY: PRIOR OWNER (history)", text)
+        return text
+    except Exception:
+        return text
+
+def _enforce_lp_pending_on_ratelimit(text: str) -> str:
+    try:
+        if re.search(r'LP holders API/rate-limit', text or "", re.I):
+            text = re.sub(r'(?mi)^Verdict:\s*⚪\s*unknown\s*\(no\s*LP\s*data\)', 'Verdict: ⏳ pending (rate-limited)', text)
+        return text
+    except Exception:
+        return text
+
+def _lp_contract_mixed_verdict_fix(text: str) -> str:
+    try:
+        if re.search(r'(Top\s+holder\s+type:\s*)contract', text or "", re.I):
+            # Verdict line
+            text = re.sub(r'(?mi)^Verdict:\s*🔴\s*high\s*risk\s*\(EOA\s*holds\s*LP\)',
+                          'Verdict: 🟡 mixed (contract/custodian holds LP)', text)
+            text = re.sub(r'(?mi)^Verdict:\s*⚪\s*unknown.*$',
+                          'Verdict: 🟡 mixed (contract/custodian holds LP)', text)
+        return text
+    except Exception:
+        return text
+
+def _dedupe_quickscan_blocks(text: str) -> str:
+    try:
+        lines = (text or "").splitlines()
+        out = []
+        last_qs = -999
+        for i, ln in enumerate(lines):
+            if ln.strip() == "Metridex QuickScan (MVP+)":
+                if i - last_qs <= 3:
+                    continue
+                last_qs = i
+            out.append(ln)
+        return "\n".join(out)
+    except Exception:
+        return text
+
+
+
+def _dedupe_quickscan_blocks(text: str) -> str:
+    try:
+        lines = (text or "").splitlines()
+        out = []
+        last_qs = -999
+        for i, ln in enumerate(lines):
+            if ln.strip() == "Metridex QuickScan (MVP+)":
+                if i - last_qs <= 3:
+                    continue
+                last_qs = i
+            out.append(ln)
+        return "\n".join(out)
+    except Exception:
+        return text
+
+
+
+def _lp_contract_mixed_verdict_fix(text: str) -> str:
+    try:
+        if re.search(r'(Top\s+holder\s+type:\s*)contract', text or "", re.I):
+            # Verdict line
+            text = re.sub(r'(?mi)^Verdict:\s*🔴\s*high\s*risk\s*\(EOA\s*holds\s*LP\)',
+                          'Verdict: 🟡 mixed (contract/custodian holds LP)', text)
+            text = re.sub(r'(?mi)^Verdict:\s*⚪\s*unknown.*$',
+                          'Verdict: 🟡 mixed (contract/custodian holds LP)', text)
+        return text
+    except Exception:
+        return text
+
+
+
+def _enforce_lp_pending_on_ratelimit(text: str) -> str:
+    try:
+        if re.search(r'LP holders API/rate-limit', text or "", re.I):
+            text = re.sub(r'(?mi)^Verdict:\s*⚪\s*unknown\s*\(no\s*LP\s*data\)', 'Verdict: ⏳ pending (rate-limited)', text)
+        return text
+    except Exception:
+        return text
+
+
+
+def _tag_prior_owner_history(text: str) -> str:
+    try:
+        m_wb = re.search(r'(?mi)^Wayback:\s*first\s*(\d{4}-\d{2}-\d{2})', text or "")
+        m_cr = re.search(r'(?mi)Created:\s*([~\u223C]?)(\d{4}-\d{2}-\d{2})', text or "")
+        if not (m_wb and m_cr): return text
+        d_wb = _dt.date.fromisoformat(m_wb.group(1))
+        d_cr = _dt.date.fromisoformat(m_cr.group(2))
+        if d_wb < d_cr and "PRIOR OWNER (history)" not in (text or ""):
+            text = re.sub(r'(?mi)^(Wayback:\s*first\s*\d{4}-\d{2}-\d{2}.*)$', r"\\1\nHISTORY: PRIOR OWNER (history)", text)
+        return text
+    except Exception:
+        return text
+
+
+
+def _validate_fdv_ge_mc(text: str) -> str:
+    try:
+        m = re.search(r'FDV\s+([\$\d\.\,kKmMbB]+)\s*\|\s*MC\s+([\$\d\.\,kKmMbB]+)', text or "")
+        if not m: return text
+        fdv = _parse_money_compact(m.group(1))
+        mc  = _parse_money_compact(m.group(2))
+        if fdv==fdv and mc==mc and (fdv + 1e-6) < mc:
+            # Append anomaly note next to DexScreener source or verdict line
+            if re.search(r'(?mi)^source:\s*DexScreener', text or ""):
+                text = re.sub(r'(?mi)^(source:\s*DexScreener.*)$', r"\\1\nDATA:ANOMALY — FDV < MC (validate metrics)", text)
+            else:
+                text = re.sub(r'(?mi)^(Trust\s+verdict:.*)$', r"\\1\nDATA:ANOMALY — FDV < MC (validate metrics)", text)
+        return text
+    except Exception:
+        return text
+
+
+
+def _parse_money_compact(v: str) -> float:
+    try:
+        s = str(v or "").strip().replace(",", "")
+        m = re.match(r'^\$?\s*([0-9]*\.?[0-9]+)\s*([kKmMbB])?$', s)
+        if not m: return float("nan")
+        num = float(m.group(1)); suf = (m.group(2) or "").lower()
+        mult = 1.0 if not suf else (1e3 if suf=="k" else (1e6 if suf=="m" else (1e9 if suf=="b" else 1.0)))
+        return num*mult
+    except Exception:
+        return float("nan")
+
+
+    try:
+        import re
+        is_renounced = bool(re.search(r'Owner:\s*(0x0{4,}|0x0{3,}[\.…]+0+)|Owner:\s*renounced', text, re.I))
+        has_proxy = bool(re.search(r'Proxy:\s*(yes|true|1)', text, re.I))
+        if not is_renounced or has_proxy:
+            return text
+        def strip_owner_in_signals(m):
+            line = m.group(0)
+            line = re.sub(r'(;|\uFF1B|\s)*Owner\s+privileges\s+present', '', line, flags=re.I)
+            line = re.sub(r'\s*;\s*;', ';', line)
+            line = re.sub(r'\s*;\s*$', '', line)
+            return line if re.search(r'⚠️\s*Signals:\s*\S', line) else '⚠️ Signals: —'
+        text = re.sub(r'^⚠️\s*Signals:.*$', strip_owner_in_signals, text, flags=re.M)
+        text = re.sub(r'^\s*[–\-]\s*\d+\s+Owner\s+privileges\s+present\s*$', '', text, flags=re.M|re.I)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text
+    except Exception:
+        return text
+
+
 def _sanitize_lp_claims(text: str) -> str:
     try:
         norm = unicodedata.normalize("NFKC", text or "")
@@ -476,6 +707,18 @@ try:
         def post(url, *args, **kwargs):
             try:
                 if isinstance(url, str) and 'api.telegram.org' in url and (url.endswith('/sendMessage') or url.endswith('/editMessageText')):
+
+                    # Apply text postprocess to text/caption before sending
+                    try:
+                        js = kwargs.get('json') or {}
+                        ch = js.get('chat_id') if isinstance(js, dict) else None
+                        if isinstance(js, dict) and js.get('text'):
+                            js['text'] = mdx_postprocess_text(js.get('text'), ch)
+                        if isinstance(js, dict) and js.get('caption'):
+                            js['caption'] = mdx_postprocess_text(js.get('caption'), ch)
+                        kwargs['json'] = js
+                    except Exception:
+                        pass
                     js = kwargs.get('json') or {}
                     txt = js.get('text') or js.get('caption') or ''
                     rm = js.get('reply_markup') or {}
@@ -6889,6 +7132,11 @@ def mdx_postprocess_text(text: str, chat_id=None) -> str:
         t = _normalize_whois_rdap(t)
         t = _sanitize_owner_privileges(t, chat_id)
         t = _sanitize_lp_claims(t)
+        t = _lp_contract_mixed_verdict_fix(t)
+        t = _validate_fdv_ge_mc(t)
+        t = _tag_prior_owner_history(t)
+        t = _enforce_lp_pending_on_ratelimit(t)
+        t = _dedupe_quickscan_blocks(t)
         t = _align_lp_verdict_with_onchain(t)
         t = _fix_chain_verdict_newline(t)
         t = _fix_lp_top_holder_equals_token(t)
