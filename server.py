@@ -4056,6 +4056,24 @@ def _render_report(addr: str, text: str):
                 text = re.sub(r"^\s*Domain:\s*.*$", "Domain: quickswap.exchange", text, flags=re.MULTILINE)
     except Exception:
         pass
+    # Extra fallback: parse from compact lines "⚠️ Signals: ..." / "✅ Positives: ..."
+    if (not neg and re.search(r'(?mi)^⚠️\s*Signals:\s*(.+)$', text)) or (not pos and re.search(r'(?mi)^✅\s*Positives:\s*(.+)$', text)):
+        try:
+            ms = re.search(r'(?mi)^⚠️\s*Signals:\s*(.+)$', text)
+            if not neg and ms:
+                for part in re.split(r'\s*;\s*', ms.group(1).strip()):
+                    if part and part != "—":
+                        neg.append(part)
+                        wn.append(0)
+            mp = re.search(r'(?mi)^✅\s*Positives:\s*(.+)$', text)
+            if not pos and mp:
+                for part in re.split(r'\s*;\s*', mp.group(1).strip()):
+                    if part and part != "—":
+                        pos.append(part)
+                        wp.append(0)
+        except Exception:
+            pass
+    
     # Parse pair/dex/chain from the first lines
     pair = None; dex = None; chain = None
     m = re.search(r"^\s*([A-Za-z0-9_\-\.\/]+)\s+on\s+([A-Za-z0-9_\-\.]+)\s*\(([^)]+)\)", text, re.IGNORECASE | re.MULTILINE)
