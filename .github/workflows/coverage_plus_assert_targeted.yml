@@ -1,0 +1,239 @@
+name: Coverage (plus, assert + targeted)
+on:
+  workflow_dispatch:
+    inputs:
+      app_module:
+        description: "WSGI app module (module:object)"
+        required: false
+        default: "server:app"
+      bind:
+        description: "Gunicorn bind address"
+        required: false
+        default: "127.0.0.1:8000"
+      python-version:
+        description: "Python version"
+        required: false
+        default: "3.11"
+      run_smoke:
+        description: "Run optional smoke _render_report() if present"
+        required: false
+        default: "true"
+      healthz:
+        description: "Health check path (relative)"
+        required: false
+        default: "/healthz"
+
+permissions:
+  contents: read
+
+jobs:
+  run-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APP_MODULE: ${{ inputs.app_module != '' && inputs.app_module || 'server:app' }}
+      BIND_ADDR: ${{ inputs.bind != '' && inputs.bind || '127.0.0.1:8000' }}
+      PY_VER: ${{ inputs['python-version'] != '' && inputs['python-version'] || '3.11' }}
+      RUN_SMOKE: ${{ inputs.run_smoke != '' && inputs.run_smoke || 'true' }}
+      HEALTHZ_PATH: ${{ inputs.healthz != '' && inputs.healthz || '/healthz' }}
+      TELEGRAM_TOKEN: "ci-dummy"
+      WEBHOOK_SECRET: "ci"
+      WEBHOOK_HEADER_SECRET: "ci"
+      SITE_URL: "http://127.0.0.1:8000"
+      DB_PATH: "/tmp/metridex_ci.db"
+
+    steps:
+      - name: Checkout (selected branch)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VER }}
+
+      - name: Install deps (best effort)
+        run: |
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt || true
+          fi
+          pip install "coverage==7.*" gunicorn flask requests || true
+
+      - name: Show server candidates
+        run: |
+          echo ">>> pwd"; pwd
+          echo ">>> LS at repo root"; ls -la
+          echo ">>> Find server* (maxdepth 2)"; find . -maxdepth 2 -iname "server*"
+
+      - name: Assert AGGRESSIVE server is in use (manual runs only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          python - << 'PY'
+          import importlib, pathlib, hashlib, sys, re
+          try:
+              m = importlib.import_module('server')
+          except Exception as e:
+              print("::error::import server failed:", e)
+              sys.exit(1)
+          p = pathlib.Path(m.__file__)
+          data = p.read_bytes()
+          txt = data.decode("utf-8", errors="ignore")
+          nlines = txt.count("\n") + 1
+          markers = len(re.findall(r'\[REMOVED_UNUSED_FUNCTION:', txt))
+          sha256 = hashlib.sha256(data).hexdigest()
+          print("server module path:", p)
+          print("line count:", nlines)
+          print("sha256:", sha256)
+          print("removed markers:", markers)
+          if nlines >= 7000 or markers < 10:
+              print("::error::Not using AGGRESSIVE trimmed server.py (lines>=7000 or too few markers)")
+              sys.exit(1)
+          PY
+
+      - name: Write targeted_exercise.py
+        run: |
+          cat > targeted_exercise.py << 'PY'
+          import os, importlib, sys, inspect
+          # Env flags to open useful branches
+          os.environ.setdefault("FEATURE_LPLOCK_VERDICT_SOFTEN","1")
+          os.environ.setdefault("DETAILS_MODE_SUPPRESS_COMPACT","1")
+          os.environ.setdefault("MDX_ENABLE_POSTPROCESS","1")
+          os.environ.setdefault("DEX_STRICT_CHAIN","1")
+          os.environ.setdefault("DS_ALLOW_FALLBACK","0")
+          os.environ.setdefault("ADMIN_CHAT_ID","1")
+          os.environ.setdefault("ALLOWED_CHAT_IDS","1")
+          os.environ.setdefault("DEV_FREE","1")
+
+          def log(m): print(f"[targeted] {m}")
+
+          try:
+              mod = importlib.import_module("server")
+          except Exception as e:
+              log(f"import failed: {e}")
+              sys.exit(0)
+
+          def try_call(name, *args, **kw):
+              f = getattr(mod, name, None)
+              if callable(f):
+                  try:
+                      r = f(*args, **kw)
+                      log(f"{name} ✓ type={type(r).__name__}")
+                  except Exception as e:
+                      log(f"{name} ✗ {e}")
+              else:
+                  log(f"{name} — missing")
+
+          # Core report/answer builders
+          try_call("_render_report", {})
+          try_call("mdx_build_html_report", {})
+          try_call("mdx_postprocess_text", "Hello", 0)
+          try_call("mdx_build_short_reply", "0x"+"0"*40, **{"chain":"ethereum"})
+
+          # Utilities / sanitizers
+          try_call("__mdx_fmt_lines", ["A","B","C"], [1,"",None])
+          try_call("_soften_lp_verdict_html", "Holders: 12\ntopHolder = 19.3%\nVerdict: unknown")
+          try_call("_sanitize_compact_domains", "Domain: x\nWHOIS: y\nSSL: z\nWayback: k\nTrust verdict: —", False)
+          try_call("_extract_host", "https://example.com/a/b")
+          try_call("_sanitize_owner_privileges", "Owner privileges present\nTop holder: 0xabc... (12.0%)", 0)
+
+          # Dex URL cases (strict on + fallback on)
+          try:
+              os.environ["DEX_STRICT_CHAIN"]="1"; os.environ["DS_ALLOW_FALLBACK"]="0"
+              try_call("_dexscreener_pair_url", "ethereum", "0x"+"0"*40)
+              os.environ["DEX_STRICT_CHAIN"]="0"; os.environ["DS_ALLOW_FALLBACK"]="1"
+              try_call("_dexscreener_pair_url", "unknown", "0x"+"0"*40)
+          except Exception as e:
+              log(f"dex url calls failed: {e}")
+
+          # Judge/Admin: probe simple callables by name
+          names = [n for n in dir(mod) if any(k in n.lower() for k in ("judge","admin","owner","limit"))]
+          for n in names[:12]:
+              obj = getattr(mod, n)
+              if callable(obj):
+                  sig = inspect.signature(obj)
+                  try:
+                      if len(sig.parameters) == 0:
+                          try_call(n)
+                      elif len(sig.parameters) == 1:
+                          try_call(n, 0)
+                  except Exception as e:
+                      log(f"{n} introspect failed: {e}")
+
+          log("Done.")
+          PY
+
+      - name: Run targeted_exercise under coverage
+        run: |
+          coverage run --parallel-mode targeted_exercise.py || true
+
+      - name: Start app (gunicorn under coverage, background)
+        run: |
+          set -eu
+          APP_MODULE="${APP_MODULE:-server:app}"
+          BIND_ADDR="${BIND_ADDR:-127.0.0.1:8000}"
+          echo "Starting gunicorn for ${APP_MODULE} on ${BIND_ADDR}..."
+          nohup coverage run --parallel-mode -m gunicorn -w 1 -t 120 "${APP_MODULE}" --bind "${BIND_ADDR}" >/dev/null 2>&1 &
+          for i in $(seq 1 15); do
+            sleep 1
+            if curl -fsS "http://${BIND_ADDR%:*}:${BIND_ADDR#*:}${HEALTHZ_PATH}" >/dev/null 2>&1 ||                curl -fsS "http://${BIND_ADDR%:*}:${BIND_ADDR#*:}/" >/dev/null 2>&1; then
+              echo "Health OK"
+              break
+            fi
+          done
+          true
+
+      - name: Optional smoke render (if _render_report exists)
+        if: ${{ env.RUN_SMOKE == 'true' }}
+        run: |
+          python - << 'PY'
+          import importlib, os, sys
+          modname = os.environ.get("APP_MODULE","server:app").split(":")[0]
+          try:
+            m = importlib.import_module(modname)
+          except Exception as e:
+            print(f"[smoke] import failed: {e}")
+            sys.exit(0)
+          func = getattr(m, "_render_report", None)
+          if callable(func):
+            try:
+              html = func({})
+              print("[smoke] _render_report executed, len(html)=", len(str(html)))
+            except Exception as e:
+              print(f"[smoke] _render_report raised (ignored): {e}")
+          else:
+            print("[smoke] _render_report not present — skipping")
+          PY
+
+      - name: Stop app
+        if: always()
+        run: |
+          pkill -f gunicorn || true
+
+      - name: Combine & report
+        if: always()
+        run: |
+          coverage combine || true
+          echo "::group::coverage report -m"
+          coverage report -m || true
+          echo "::endgroup::"
+          coverage xml || true
+          coverage html -d htmlcov || true
+
+      - name: Upload HTML coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: htmlcov
+          path: htmlcov
+          if-no-files-found: warn
+
+      - name: Upload coverage XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
