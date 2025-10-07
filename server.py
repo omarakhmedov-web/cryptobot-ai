@@ -554,7 +554,8 @@ def with_mutex(key: str, ttl_seconds: Optional[int] = None, note: Optional[str] 
         con.close()
 
 # --- DB anti-dup helper (optional to use inside loops) ---
-ALERTS_SPAM_GUARD = int(os.getenv("ALERTS_SPAM_GUARD", "1") or "1")
+# duplicate removed: ALERTS_SPAM_GUARD
+
 ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN", "15") or "15")
 
 def should_send_alert(chat_id: int, chain: str, ca: str, atype: str) -> bool:
@@ -1371,19 +1372,7 @@ def _usage_save(data):
             json.dump(data, f)
     except Exception:
         app.logger.exception("save usage failed")
-
-def plan_of(user_id: int) -> str:
-    # Admin/whitelisted bypass
-    try:
-        if _is_admin_or_whitelisted(user_id) or os.getenv("DEV_FREE", "").lower() in ("1","true","yes"):
-            return "pro"
-    except Exception:
-        pass
-    try:
-        rec = _usage_load().get(str(user_id)) or {}
-        return rec.get("plan","free")
-    except Exception:
-        return "free"
+# duplicate removed: def plan_of(...)
 
 def free_left(user_id: int) -> int:
     try:
