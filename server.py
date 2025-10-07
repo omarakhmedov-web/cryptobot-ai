@@ -90,6 +90,10 @@ LP_LOCK_HTML_ENABLED = int(os.getenv("LP_LOCK_HTML_ENABLED", "0") or "0")
 LPLOCK_VERDICT_SOFTEN = int(os.getenv("FEATURE_LPLOCK_VERDICT_SOFTEN", "0") or "0")
 
 # [REMOVED_UNUSED_FUNCTION:_soften_lp_verdict_html]
+
+# === Known domains config (safe defaults) ===
+KNOWN_DOMAINS_FILE_PATH = os.getenv("KNOWN_DOMAINS_FILE_PATH") or os.path.join(os.path.dirname(__file__), "known_domains.json")
+KNOWN_DOMAINS_DEFAULT: dict = {}
 def _load_known_domains() -> dict:
     try:
         p = KNOWN_DOMAINS_FILE_PATH
