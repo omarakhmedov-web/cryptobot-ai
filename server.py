@@ -5220,8 +5220,6 @@ def _normalize_hp_line(addr, text, block:str) -> str:
             except Exception:
                 pass
             return s
-except Exception:
-    pass
 # === /PATCH: enforce EN wording for RDAP line (.vip) ===
 # ========================
 try:
