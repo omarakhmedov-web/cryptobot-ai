@@ -1,9 +1,34 @@
 name: Coverage
+
 on:
   workflow_dispatch:
+    inputs:
+      app_module:
+        description: 'WSGI app module (module:app)'
+        required: false
+        default: 'server:app'
+      bind:
+        description: 'Bind address for gunicorn'
+        required: false
+        default: '127.0.0.1:8000'
+      healthz:
+        description: 'Health check path (blank to skip)'
+        required: false
+        default: '/healthz'
+      python:
+        description: 'Python version'
+        required: false
+        default: '3.11'
+      run_smoke:
+        description: 'Run smoke render call'
+        type: boolean
+        default: true
   push:
     branches: [ main, master ]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   run-coverage:
@@ -16,7 +41,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ inputs.python }}
 
       - name: Install deps (best effort)
         run: |
@@ -24,45 +49,70 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt || true
           fi
-          pip install "coverage==7.*" gunicorn flask requests || true
+          pip install "coverage==7.*" gunicorn flask requests waitress || true
 
-      # Запуск сервера под coverage в фоне
       - name: Start app (gunicorn under coverage)
         run: |
-          nohup coverage run --parallel-mode -m gunicorn -w 1 -t 120 server:app --bind 127.0.0.1:8000 >/dev/null 2>&1 &
+          APP_MODULE="${{ inputs.app_module }}"
+          [ -z "$APP_MODULE" ] && APP_MODULE="server:app"
+          BIND="${{ inputs.bind }}"
+          [ -z "$BIND" ] && BIND="127.0.0.1:8000"
+          nohup coverage run --parallel-mode -m gunicorn -w 1 -t 120 "$APP_MODULE" --bind "$BIND" >/dev/null 2>&1 &
           sleep 4
 
-      # Минимальный трафик, чтобы реально прошлись нужные ветки
-      - name: Hit healthz (если есть)
+      - name: Hit healthz (optional)
         run: |
-          curl -fsS http://127.0.0.1:8000/healthz || true
+          BIND="${{ inputs.bind }}"
+          [ -z "$BIND" ] && BIND="127.0.0.1:8000"
+          HEALTHZ="${{ inputs.healthz }}"
+          # allow blank to skip
+          if [ -n "$HEALTHZ" ]; then
+            curl -fsS "http://$BIND$HEALTHZ" || true
+          fi
 
-      # Доп. дымовой вызов рендера без изменения кода (если функция есть)
       - name: Smoke render call
+        if: ${{ inputs.run_smoke == true }}
+        env:
+          APP_MODULE: ${{ inputs.app_module }}
         run: |
           python - <<'PY'
-          import os
+          import os, importlib
+          app_mod = os.environ.get('APP_MODULE') or 'server:app'
+          mod_name = app_mod.split(':',1)[0]
           try:
-              from server import _render_report
-              addr='0x6982508145454Ce325dDbE47a25d4ec3d2311933'
-              text='Metridex QuickScan (MVP+)\nPEPE/WETH on uniswap (ethereum)\n⚠️ Signals: Owner privileges present; LP concentrated in a single holder: 99.87%\n✅ Positives: High liquidity (≥$1,000,000)\n'
-              p, html = _render_report(addr, text)
-              print("Render OK, len(html)=", len(html))
+              mod = importlib.import_module(mod_name)
+              fn = getattr(mod, '_render_report', None)
+              if callable(fn):
+                  addr='0x6982508145454Ce325dDbE47a25d4ec3d2311933'
+                  text='Metridex QuickScan (MVP+)\\nPEPE/WETH on uniswap (ethereum)\\n⚠️ Signals: Owner privileges present; LP concentrated in a single holder: 99.87%\\n✅ Positives: High liquidity (≥$1,000,000)\\n'
+                  res = fn(addr, text)
+                  if isinstance(res, tuple) and len(res) == 2:
+                      p, html = res
+                      print("Render OK, len(html)=", len(html))
+                  else:
+                      print("Render returned non-tuple or unexpected shape:", type(res))
+              else:
+                  print("_render_report() not found; skipping smoke render.")
           except Exception as e:
               print("Render path not hit:", e)
           PY
-          true
 
       - name: Stop app
+        if: always()
         run: |
           pkill -f gunicorn || true
           sleep 1
 
       - name: Combine & report
+        if: always()
         run: |
-          coverage combine
+          coverage combine || true
+          echo "------ coverage (all) ------"
+          coverage report -m || true
+          echo "------ coverage (server.py) ------"
           coverage report -m server.py || true
           coverage html -d htmlcov || true
+          coverage xml -o coverage.xml || true
 
       - name: Upload HTML coverage
         if: always()
@@ -70,4 +120,12 @@ jobs:
         with:
           name: htmlcov
           path: htmlcov
+          if-no-files-found: ignore
+
+      - name: Upload coverage.xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
           if-no-files-found: ignore
