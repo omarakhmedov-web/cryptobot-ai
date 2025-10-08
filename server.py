@@ -4262,9 +4262,6 @@ def _render_report(addr: str, text: str):
         safe_addr = (addr or "unknown")[:10]
         filename = f"metridex_report_{safe_addr}_{tsf}.html"
         path = os.path.join(tempfile.gettempdir(), filename)
-        # research-mode hook
-        html = _mdx_fix_report_html_text(html)
-
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
         return path, html
@@ -6222,16 +6219,6 @@ try:
                 s = _apply_risk_gates__text(s)
             except Exception:
                 pass
-            try:
-                verdict, score = _mdx_summary_verdict_score_from_text(s)
-                if verdict and score is not None:
-                    em = {"HIGH RISK":"🔴","CAUTION":"🟡","LOW RISK":"🟢"}.get(verdict, "🟡")
-                    s = re.sub(r'(?m)^(LOW RISK|CAUTION|HIGH RISK).*(\(score\s*\d+\/100\))?$', verdict+" "+em+" ("+str(score)+"/100)")
-                if re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|no\s+active\s+pools)', s) and "Not tradable (no pools/liquidity)" not in s:
-                    s = re.sub(r'(?mi)^(⚠️\s*Signals:\s*)(.*)$', lambda m: m.group(1)+((m.group(2)+"; ") if m.group(2).strip() not in ("","-","—") else "")+"Not tradable (no pools/liquidity)", s)
-            except Exception:
-                pass
-
             return s
 except Exception:
     pass
@@ -7204,42 +7191,63 @@ def _mdx_summary_verdict_score_from_text(text: str):
     import re
     try:
         if not text: return (None, None)
-        m = re.search(r'(?mi)^Trust\s+verdict:\s*([A-Z ]+)', text)
+        m = re.search(r'(?mi)^Trust\\s+verdict:\\s*([A-Z ]+)', text)
         verdict = m.group(1).strip().upper() if m else None
-        s = re.search(r'(?mi)Risk\s*score:\s*(\d+)\s*/\s*100', text)
+        s = re.search(r'(?mi)Risk\\s*score:\\s*(\\d+)\\s*/\\s*100', text)
         score = int(s.group(1)) if s else None
         return (verdict, score)
     except Exception:
         return (None, None)
 
 
-def _mdx_fix_report_html_text(html: str) -> str:
+def _mdx_text_whitelist_hide_signals(text: str) -> str:
     import re
     try:
-        if not isinstance(html, str): return html
-        text = re.sub(r'<[^>]+>', '', html)
-        verdict, score = _mdx_summary_verdict_score_from_text(text)
-        not_tradable = bool(re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|no\s+active\s+pools)', text))
-        whitelisted = bool(re.search(r'(?i)Whitelisted\s+by\s+address', text) or re.search(r'expected\s+for\s+centralized/whitelisted', text, re.I))
-        has_wayback = bool(re.search(r'(?mi)^Wayback:\s*first\s*\d{4}-\d{2}-\d{2}', text))
-        if verdict and score is not None:
-            em = {"HIGH RISK":"🔴","CAUTION":"🟡","LOW RISK":"🟢"}.get(verdict, "🟡")
-            html = re.sub(r'(<div class="box"><h2>Risk verdict</h2><p><b)(>.*?)(</b></p>)',
-                          lambda m: m.group(1)+">"+verdict+" "+em+" ("+str(score)+"/100)"+m.group(3),
-                          html, flags=re.S)
-        if not_tradable:
-            html = re.sub(r'(<h3>Signals</h3><pre>)(.*?)</pre>',
-                          lambda m: m.group(1)+((m.group(2).strip()+"\n") if m.group(2).strip() else "")+"• Not tradable (no pools/liquidity)\n</pre>",
-                          html, flags=re.S)
-        if whitelisted:
-            html = re.sub(r'•\s*LP\s+concentrated[^\n]*\n?', '', html, flags=re.I)
-            html = re.sub(r'•\s*Top\s+holders[^\n]*\n?', '', html, flags=re.I)
-            html = re.sub(r'•\s*Owner\s+privileges\s+present[^\n]*\n?', '', html, flags=re.I)
-            html = re.sub(r'(<h3>Signals</h3><pre>)\s*(</pre>)', r'\1—\2', html)
-        if has_wayback and not re.search(r'Historical\s+presence\s*\(Wayback\s+found\)', html):
-            html = re.sub(r'(<h3>Positives</h3><pre>)(.*?)</pre>',
-                          lambda m: m.group(1)+((m.group(2).strip()+"\n") if m.group(2).strip() else "")+"• Historical presence (Wayback found)\n</pre>",
-                          html, flags=re.S)
-        return html
+        t = str(text or "")
+        if not (re.search(r'(?i)Whitelisted\\s+by\\s+address', t) or re.search(r'(?i)expected\\s+for\\s+centralized/whitelisted', t)):
+            return t
+        def _clean(m):
+            line = m.group(0)
+            line = re.sub(r'(;\\s*|\\s*)LP\\s+concentrated[^;\\n]*', '', line, flags=re.I)
+            line = re.sub(r'(;\\s*|\\s*)Top\\s+holders[^;\\n]*', '', line, flags=re.I)
+            line = re.sub(r'(;\\s*|\\s*)Owner\\s+privileges\\s+present', '', line, flags=re.I)
+            line = re.sub(r'\\s*;\\s*;\\s*', '; ', line)
+            line = re.sub(r'\\s*;\\s*$', '', line)
+            payload = re.sub(r'^\\s*⚠️\\s*Signals:\\s*', '', line).strip()
+            if payload in ('', '-', '—'):
+                return '⚠️ Signals: —'
+            return '⚠️ Signals: ' + payload
+        return re.sub(r'(?mi)^\\s*⚠️\\s*Signals:.*$', _clean, t)
     except Exception:
-        return html
+        return text
+
+
+def _mdx_text_fix_lp_lock_verdict(text: str) -> str:
+    import re
+    try:
+        t = str(text or "")
+        lines = t.splitlines()
+        out = []
+        i = 0
+        while i < len(lines):
+            out.append(lines[i])
+            if re.search(r'^\\s*🔒\\s*LP lock\\s*\\(lite\\)', lines[i] or ''):
+                j = i + 1
+                seen_contract = False
+                v_idx = None
+                while j < len(lines) and j <= i + 15:
+                    if re.search(r'^\\s*Top holder type:\\s*(contract|custodian)', lines[j], re.I):
+                        seen_contract = True
+                    if re.search(r'^\\s*Verdict:\\s*', lines[j]):
+                        v_idx = j
+                    j += 1
+                if seen_contract and v_idx is not None:
+                    lines[v_idx] = 'Verdict: 🟡 mixed (contract/custodian holds LP)'
+                out.pop()
+                out.extend(lines[i:j])
+                i = j
+                continue
+            i += 1
+        return '\\n'.join(out)
+    except Exception:
+        return text
