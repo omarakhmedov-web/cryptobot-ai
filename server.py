@@ -103,21 +103,21 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 # --- Feature flags (ENV) ---
-DEX_STRICT_CHAIN = _env_bool("DEX_STRICT_CHAIN", false)
-DS_ALLOW_FALLBACK = _env_bool("DS_ALLOW_FALLBACK", true)
-MDX_ENABLE_POSTPROCESS = _env_bool("MDX_ENABLE_POSTPROCESS", true)
-MDX_BYPASS_SANITIZERS = _env_bool("MDX_BYPASS_SANITIZERS", false)
-DETAILS_ENFORCE_DOMAIN = _env_bool("DETAILS_ENFORCE_DOMAIN", false)
+DEX_STRICT_CHAIN = _env_bool("DEX_STRICT_CHAIN", False)
+DS_ALLOW_FALLBACK = _env_bool("DS_ALLOW_FALLBACK", True)
+MDX_ENABLE_POSTPROCESS = _env_bool("MDX_ENABLE_POSTPROCESS", True)
+MDX_BYPASS_SANITIZERS = _env_bool("MDX_BYPASS_SANITIZERS", False)
+DETAILS_ENFORCE_DOMAIN = _env_bool("DETAILS_ENFORCE_DOMAIN", False)
 MDX_LAST_SITE_SCOPE   = (os.getenv("MDX_LAST_SITE_SCOPE","chat") or "chat").strip().lower()  # 'chat' | 'message'
-DOMAIN_META_STRICT = _env_bool("DOMAIN_META_STRICT", false)
+DOMAIN_META_STRICT = _env_bool("DOMAIN_META_STRICT", False)
 
 
-ALERTS_SPAM_GUARD = _env_bool("ALERTS_SPAM_GUARD", true)
+ALERTS_SPAM_GUARD = _env_bool("ALERTS_SPAM_GUARD", True)
 ALERTS_COOLDOWN_MIN = _env_int("ALERTS_COOLDOWN_MIN", 15)
-LP_LOCK_HTML_ENABLED = _env_bool("LP_LOCK_HTML_ENABLED", false)
+LP_LOCK_HTML_ENABLED = _env_bool("LP_LOCK_HTML_ENABLED", False)
 
 # === LP/lock verdict post-processor (safe, feature-flagged) ===
-LPLOCK_VERDICT_SOFTEN = _env_bool("FEATURE_LPLOCK_VERDICT_SOFTEN", false)
+LPLOCK_VERDICT_SOFTEN = _env_bool("FEATURE_LPLOCK_VERDICT_SOFTEN", False)
 
 # [REMOVED_UNUSED_FUNCTION:_soften_lp_verdict_html]
 
