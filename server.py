@@ -742,6 +742,36 @@ def _postprocess_why_text_align(text: str) -> str:
         if not_tradable and "Why++" in text and not re.search(r'(?mi)Not\s+tradable', text):
             text = re.sub(r'(?mi)^(Why\+\+\s*factors\s*)$', r"\1\n−80  Not tradable (no pools/liquidity)", text)
 
+
+        # --- Unify verdict + prepend correct header for Why? ---
+        try:
+            t = str(text or "")
+            # Normalize any stale verdict lines to the computed score
+            t = _mdx_unify_verdict_lines(t)
+            # Build header from current score/flags
+            verdict_label, sc_label = _mdx_classify_verdict(int(sc_now), not_tradable)
+            header_line = f"{verdict_label} • Risk score: {sc_label}/100 (lower = safer)"
+            # If Why++ block exists, ensure header appears immediately above it (or replace stale header)
+            if re.search(r'(?mi)^Why\+\+\s*factors\s*$', t):
+                if re.search(r'(?m)^(LOW\s+RISK|CAUTION|HIGH\s+RISK).*Risk\s*score:\s*\d+\s*/\s*100\s*$', t):
+                    # Replace the very first verdict line with the fresh header
+                    t = re.sub(r'(?m)^(LOW\s+RISK.*|CAUTION.*|HIGH\s+RISK.*)$', header_line, t, count=1)
+                else:
+                    # Insert the header right above the Why++ title
+                    t = re.sub(r'(?mi)^(Why\+\+\s*factors\s*)$', header_line + "\\n" + r"\1", t, count=1)
+            else:
+                # If no Why++ marker, still ensure a header at the top if none present
+                if not re.search(r'(?m)^(LOW\s+RISK|CAUTION|HIGH\s+RISK).*Risk\s*score:\s*\d+\s*/\s*100\s*$', t):
+                    t = header_line + "\\n" + t
+
+            # Ensure explicit 'Risk score: N/100' line exists for downstream consumers
+            if not re.search(r'(?mi)Risk\s*score:\s*\d+\s*/\s*100', t):
+                t = t.rstrip() + f"\\nRisk score: {sc_label}/100"
+
+            text = t
+        except Exception:
+            pass
+        # --- /Unify verdict + header ---
         return text
     except Exception:
         # --- prepend verdict header (MDX) & ensure Risk score line ---
@@ -799,7 +829,6 @@ app = Flask(__name__)
 
 
 # === DS URL helper (safe) ===
-
 def _dexscreener_pair_url(chain: str, pair_addr: str) -> str:
     # Build a DexScreener pair URL if pair_addr looks like 0x + 40 hex chars.
     # Fallback behavior is controlled by ENV:
