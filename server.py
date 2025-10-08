@@ -2858,7 +2858,27 @@ def _answer_why_deep(cq: dict, addr_hint: str = None):
 
         if not lines:
             lines = ["No weighted factors captured yet. Tap 🧪 On-chain first."]
-        _send_text(chat_id, "Why++ factors\n" + "\n".join(lines[:40]), logger=app.logger)
+                # Build verdict/score header from cache or fallback
+        try:
+            info = None
+            try:
+                info = _RISK_CACHE.get(addr) if addr else None
+            except Exception:
+                info = RISK_CACHE.get(addr) if addr else None
+            if not info:
+                sc, lab, _rs = _risk_verdict(addr or "", text or "")
+                info = {"score": sc, "label": lab}
+            sc = int(info.get("score", 0))
+            lab = str(info.get("label") or "")
+            # Ensure NOT TRADABLE bump is reflected
+            if not_tradable and sc < 80:
+                sc = 80
+                if "NOT TRADABLE" not in lab:
+                    lab = "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)"
+            header = f"{lab} • Risk score: {sc}/100 (lower = safer)\n"
+        except Exception:
+            header = ""
+        _send_text(chat_id, header + "Why++ factors\n" + "\n".join(lines[:40]), logger=app.logger)
     except Exception:
         pass
 
