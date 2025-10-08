@@ -58,6 +58,74 @@ def __mdx_fmt_lines(items, weights):
 _fmt_lines = __mdx_fmt_lines
 from flask import Flask, request, jsonify
 
+# ===== SAFE9e consistency helpers (injected) =====
+try:
+    _LAST_SITE_HOST
+except NameError:
+    _LAST_SITE_HOST = {}
+
+def _risk_cache_get(chain: str, ca: str):
+    # Optional: centralized cache provider; safe stub
+    try:
+        ca = (ca or "").lower()
+        return LAST_VERDICT.get(ca) if ca else None
+    except Exception:
+        return None
+
+def _risk_bump_not_tradable(score_now: int) -> int:
+    try:
+        s = int(score_now)
+    except Exception:
+        s = 50
+    return 80 if s < 80 else s
+
+def _locker_locktime(provider: str, pair: str, chain: str):
+    # Safe stub; upstream locker fetchers can overwrite/import this.
+    return {}
+
+def mdx_postprocess_text(text: str, chat_id=None) -> str:
+    """
+    Centralized, deterministic post-processor.
+    Applies (in order): LP claim fixes -> owner privilege normalization -> FDV/MC sanity ->
+    prior-owner tag -> LP rate-limit normalization -> LP verdict wording -> Why/Why++ alignment ->
+    verdict unifier -> domain/compact blocks -> return.
+    Also captures/aligns Risk score across sections.
+    """
+    try:
+        t = str(text or "")
+        # Core sanitizers / normalizers
+        try: t = _sanitize_lp_claims(t)
+        except Exception: pass
+        try: t = _sanitize_owner_privileges(t, chat_id)
+        except Exception: pass
+        try: t = _sanitize_owner_privileges2(t, chat_id)
+        except Exception: pass
+        try: t = _validate_fdv_ge_mc(t)
+        except Exception: pass
+        try: t = _tag_prior_owner_history(t)
+        except Exception: pass
+        try: t = _enforce_lp_pending_on_ratelimit(t)
+        except Exception: pass
+        try: t = _lp_contract_mixed_verdict_fix(t)
+        except Exception: pass
+        # Align Why?/Why++ header and risk score line
+        try: t = _postprocess_why_text_align(t)
+        except Exception: pass
+        # Finalize trust/verdict lines
+        try: t = _mdx_unify_verdict_lines(t)
+        except Exception: pass
+        # Domain/compact handling (depends on env flags)
+        try: t = _enforce_details_host(t, chat_id)
+        except Exception: pass
+        try: t = _sanitize_compact_domains(t, is_details=True)
+        except Exception: pass
+        return t
+    except Exception:
+        return text
+# ===== /SAFE9e consistency helpers (injected) =====
+
+
+
 # === MDX POPUP ALIGN CACHE (addresses & per-chat last verdicts) ===
 LAST_VERDICT: dict = {}          # key: ca (0x...), value: {"score": int, "label": str, "nt": bool}
 _LAST_VERDICT_BY_CHAT: dict = {} # key: chat_id (str), value: same
