@@ -6,56 +6,45 @@
 import os
 
 
-# === SAFE9e CONSISTENCY CORE v4p (with reply_markup sanitizer) ===
+# === SAFE9e CONSISTENCY CORE v5 (stateful) ===
 import os as _os, sys as _sys
-
 _SAFE9E_DEBUG = _os.getenv("SAFE9E_DEBUG", "0") in {"1","true","TRUE","yes","on"}
 def _dbg(msg):
     if _SAFE9E_DEBUG:
         _sys.stdout.write(f"[SAFE9e] {msg}\n"); _sys.stdout.flush()
 
 try:
-    from safe9e_text_normalizer import normalize as _safe9e_norm
-except Exception:
+    from safe9e_stateful import normalize_consistent as _safe9e_norm
+except Exception as _e:
     def _safe9e_norm(x): return x
 
 def _sanitize_reply_markup(markup):
-    """Clean Telegram inline keyboards: trim text, dedupe exact duplicates, drop empties."""
     try:
         if not isinstance(markup, dict): return markup
         ik = markup.get("inline_keyboard")
         if not isinstance(ik, list): return markup
-        seen = set()
-        new_ik = []
+        seen = set(); new_ik = []
         for row in ik:
             if not isinstance(row, list): continue
             new_row = []
             for btn in row:
                 if not isinstance(btn, dict): continue
                 txt = str(btn.get("text",""))
-                txt = txt.replace("nsufficient data", "Insufficient data")
-                if len(txt) > 64: txt = txt[:61] + "…"
-                # normalize score artifacts inside button text too
                 txt = _safe9e_norm(txt)
+                if len(txt) > 64: txt = txt[:61] + "…"
                 btn["text"] = txt
-                # limit callback_data (1-64 bytes per Telegram spec)
                 if "callback_data" in btn:
                     cb = str(btn["callback_data"])
                     if len(cb.encode("utf-8")) > 64:
                         btn["callback_data"] = cb.encode("utf-8")[:64].decode("utf-8","ignore")
                 key = (btn.get("text",""), btn.get("url",""), btn.get("callback_data",""))
-                if key in seen: 
-                    continue
-                seen.add(key)
-                new_row.append(btn)
-            if new_row:
-                new_ik.append(new_row)
-        if new_ik:
-            markup["inline_keyboard"] = new_ik
+                if key in seen: continue
+                seen.add(key); new_row.append(btn)
+            if new_row: new_ik.append(new_row)
+        if new_ik: markup["inline_keyboard"] = new_ik
         return markup
     except Exception as e:
-        _dbg(f"sanitize markup err: {e}")
-        return markup
+        _dbg(f"sanitize markup err: {e}"); return markup
 
 def _patch_payload(payload):
     if not isinstance(payload, dict): return payload
@@ -65,7 +54,7 @@ def _patch_payload(payload):
         payload["reply_markup"] = _sanitize_reply_markup(payload["reply_markup"])
     return payload
 
-# Patch requests
+# requests
 try:
     import requests as _rq
     if not getattr(_rq, "_SAFE9E_POST_PATCHED", False):
@@ -84,118 +73,7 @@ try:
 except Exception as e:
     _dbg(f"requests not patched: {e}")
 
-# Patch httpx (if present)
-try:
-    import httpx as _hx
-    if not getattr(_hx, "_SAFE9E_HTTPX_PATCHED", False):
-        _orig_hx_post = getattr(_hx, "post", None)
-        def _hx_post(url, *a, **kw):
-            try:
-                payload = kw.get("json") if isinstance(kw.get("json"), dict) else kw.get("data")
-                if isinstance(payload, dict) and ("sendMessage" in url or "editMessageText" in url):
-                    _patch_payload(payload)
-            except Exception as e:
-                _dbg(f"httpx.post patch err: {e}")
-            return _orig_hx_post(url, *a, **kw) if _orig_hx_post else None
-        if _orig_hx_post:
-            _hx.post = _hx_post
-        _orig_client_req = _hx.Client.request
-        def _client_request(self, method, url, *a, **kw):
-            try:
-                payload = kw.get("json") if isinstance(kw.get("json"), dict) else kw.get("data")
-                if isinstance(payload, dict) and ("sendMessage" in url or "editMessageText" in url):
-                    _patch_payload(payload)
-            except Exception as e:
-                _dbg(f"httpx.Client.request patch err: {e}")
-            return _orig_client_req(self, method, url, *a, **kw)
-        _hx.Client.request = _client_request
-        _hx._SAFE9E_HTTPX_PATCHED = True
-        _dbg("patched httpx")
-except Exception as e:
-    _dbg(f"httpx not patched: {e}")
-
-# telebot
-try:
-    import telebot as _tb
-    if not getattr(_tb, "_SAFE9E_TB_PATCHED", False):
-        _orig_send = _tb.TeleBot.send_message
-        def _tb_send(self, chat_id, text, *a, **kw):
-            if "reply_markup" in kw:
-                kw["reply_markup"] = _sanitize_reply_markup(kw["reply_markup"].to_dict() if hasattr(kw["reply_markup"], "to_dict") else kw["reply_markup"])
-            return _orig_send(self, chat_id, _safe9e_norm(text), *a, **kw)
-        _tb.TeleBot.send_message = _tb_send
-        if hasattr(_tb.TeleBot, "edit_message_text"):
-            _orig_edit = _tb.TeleBot.edit_message_text
-            def _tb_edit(self, text, *a, **kw):
-                if "reply_markup" in kw:
-                    kw["reply_markup"] = _sanitize_reply_markup(kw["reply_markup"].to_dict() if hasattr(kw["reply_markup"], "to_dict") else kw["reply_markup"])
-                return _orig_edit(self, _safe9e_norm(text), *a, **kw)
-            _tb.TeleBot.edit_message_text = _tb_edit
-        _tb._SAFE9E_TB_PATCHED = True
-        _dbg("patched telebot")
-except Exception as e:
-    _dbg(f"telebot not patched: {e}")
-
-# aiogram
-try:
-    import aiogram as _ag
-    from aiogram import Bot as _AgBot, types as _ag_types
-    if not getattr(_ag, "_SAFE9E_AG_PATCHED", False):
-        _orig_ag_send = _AgBot.send_message
-        async def _ag_send(self, chat_id, text, *a, **kw):
-            if "reply_markup" in kw:
-                rm = kw["reply_markup"]
-                if hasattr(rm, "model_dump"):
-                    kw["reply_markup"] = _sanitize_reply_markup(rm.model_dump())
-                else:
-                    kw["reply_markup"] = _sanitize_reply_markup(rm)
-            return await _orig_ag_send(self, chat_id, _safe9e_norm(text), *a, **kw)
-        _AgBot.send_message = _ag_send
-        if hasattr(_AgBot, "edit_message_text"):
-            _orig_ag_edit = _AgBot.edit_message_text
-            async def _ag_edit(self, text, *a, **kw):
-                if "reply_markup" in kw:
-                    rm = kw["reply_markup"]
-                    if hasattr(rm, "model_dump"):
-                        kw["reply_markup"] = _sanitize_reply_markup(rm.model_dump())
-                    else:
-                        kw["reply_markup"] = _sanitize_reply_markup(rm)
-                return await _orig_ag_edit(self, _safe9e_norm(text), *a, **kw)
-            _AgBot.edit_message_text = _ag_edit
-        _ag._SAFE9E_AG_PATCHED = True
-        _dbg("patched aiogram")
-except Exception as e:
-    _dbg(f"aiogram not patched: {e}")
-
-# python-telegram-bot
-try:
-    import telegram as _ptb
-    from telegram import Bot as _PTBBot
-    if not getattr(_ptb, "_SAFE9E_PTB_PATCHED", False):
-        _orig_ptb_send = _PTBBot.send_message
-        def _ptb_send(self, chat_id, text, *a, **kw):
-            if "reply_markup" in kw:
-                rm = kw["reply_markup"]
-                # try export
-                if hasattr(rm, "to_dict"): rm = rm.to_dict()
-                kw["reply_markup"] = _sanitize_reply_markup(rm)
-            return _orig_ptb_send(self, chat_id, _safe9e_norm(text), *a, **kw)
-        _PTBBot.send_message = _ptb_send
-        if hasattr(_PTBBot, "edit_message_text"):
-            _orig_ptb_edit = _PTBBot.edit_message_text
-            def _ptb_edit(self, text, *a, **kw):
-                if "reply_markup" in kw:
-                    rm = kw["reply_markup"]
-                    if hasattr(rm, "to_dict"): rm = rm.to_dict()
-                    kw["reply_markup"] = _sanitize_reply_markup(rm)
-                return _orig_ptb_edit(self, _safe9e_norm(text), *a, **kw)
-            _PTBBot.edit_message_text = _ptb_edit
-        _ptb._SAFE9E_PTB_PATCHED = True
-        _dbg("patched python-telegram-bot")
-except Exception as e:
-    _dbg(f"python-telegram-bot not patched: {e}")
-
-# Normalize HTML writes
+# html writes
 try:
     import builtins as _bi
     if not getattr(_bi, "_SAFE9E_OPEN_PATCHED", False):
@@ -210,8 +88,7 @@ try:
                         data = s2.encode("utf-8", "ignore")
                     elif isinstance(data, str):
                         data = _safe9e_norm(data) if (self._p.endswith(".html") and "Metridex QuickScan" in data) else data
-                except Exception:
-                    pass
+                except Exception: pass
                 return self._f.write(data)
             def __getattr__(self,k): return getattr(self._f,k)
             def __enter__(self): self._f.__enter__(); return self
@@ -228,7 +105,7 @@ try:
         _dbg("patched open(.html)")
 except Exception as e:
     _dbg(f"open patch failed: {e}")
-# === /SAFE9e CONSISTENCY CORE v4p ===
+# === /SAFE9e CONSISTENCY CORE v5 ===
 
 import re
 import ssl
