@@ -6,60 +6,51 @@
 import os
 
 
-# === SAFE9e CONSISTENCY CORE v2 (strong idempotence) ===
-import re as _re, time as _time
+# === SAFE9e CONSISTENCY CORE v3 (requests+httpx+telegram libs, idempotent, debug) ===
+import os as _os, re as _re, time as _time, sys as _sys
 
 if not globals().get("_SAFE9E_PATCHED", False):
     _SAFE9E_PATCHED = True
+    _SAFE9E_DEBUG = _os.getenv("SAFE9E_DEBUG", "0") in {"1","true","TRUE","yes","on"}
 
-    _SAFE9E_STATE = {"last_score": None, "last_label": None, "patch_count": 0}
+    def _dbg(msg):
+        if _SAFE9E_DEBUG:
+            _sys.stdout.write(f"[SAFE9e] {msg}\n")
+            _sys.stdout.flush()
 
-    _RE_RISK_LINE   = _re.compile(r"(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK)\s*.*?•\s*Risk score:\s*(?P<score>\d{1,3})/100", _re.I)
-    _RE_TRUST_LINE  = _re.compile(r"Trust verdict:\s*(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK)[^\n]*", _re.I)
-    _RE_SCORE_INLINE= _re.compile(r"\(score\s*(?P<score>\d{1,3})/100\)", _re.I)
-    _RE_NOTTRAD     = _re.compile(r"NOT TRADABLE\s*\(no active pools/liquidity\)", _re.I)
-    _RE_NOPools     = _re.compile(r"No pools found", _re.I)
-    _RE_INSUFF      = _re.compile(r"Insufficient data\s*\(run .*?On-chain\)", _re.I)
-    _RE_NSUFF_GLUE  = _re.compile(r"(Insufficient data\s*\(run .*?On-chain\))\1+", _re.I)
-    _RE_NOTR_GLUE   = _re.compile(r"(NOT TRADABLE\s*\(no active pools/liquidity\))\1+", _re.I)
-    _RE_BROKEN_NALS = _re.compile(r"(?:^|\n)\s*nals:", _re.I)
+    _dbg("activating core v3")
 
-    def _safe9e_bucket(score: int) -> str:
+    _RE_RISK_LINE    = _re.compile(r"(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK)\s*.*?•\s*Risk score:\s*(?P<score>\d{1,3})/100", _re.I)
+    _RE_TRUST_LINE   = _re.compile(r"Trust verdict:\s*(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK)[^\n]*", _re.I)
+    _RE_SCORE_INLINE = _re.compile(r"\(score\s*(?P<score>\d{1,3})/100\)", _re.I)
+    _RE_NOTTRAD      = _re.compile(r"NOT TRADABLE\s*\(no active pools/liquidity\)", _re.I)
+    _RE_NOPools      = _re.compile(r"No pools found", _re.I)
+    _RE_INSUFF       = _re.compile(r"Insufficient data\s*\(run .*?On-chain\)", _re.I)
+    _RE_NSUFF_GLUE   = _re.compile(r"(Insufficient data\s*\(run .*?On-chain\))\1+", _re.I)
+    _RE_NOTR_GLUE    = _re.compile(r"(NOT TRADABLE\s*\(no active pools/liquidity\))\1+", _re.I)
+    _RE_BROKEN_NALS  = _re.compile(r"(?:^|\n)\s*nals:", _re.I)
+    _RE_LOW60        = _re.compile(r"LOW RISK\s*🟢?\s*•\s*Risk score:\s*60/100", _re.I)
+
+    def _bucket(score: int) -> str:
         if score <= 14: return "LOW RISK"
         if score <= 59: return "CAUTION"
         return "HIGH RISK"
 
-    def _dedupe_phrases(t: str) -> str:
+    def _dedupe(t: str) -> str:
         t = t.replace("nsufficient data", "Insufficient data")
         t = _RE_NSUFF_GLUE.sub(lambda m: m.group(1), t)
         t = _RE_NOTR_GLUE.sub(lambda m: m.group(1), t)
         t = _RE_BROKEN_NALS.sub("\n⚠️ Signals:", t)
         return t
 
-    def _pre_onchain_mode(t: str) -> str:
+    def _pre_onchain(t: str) -> str:
         if _RE_INSUFF.search(t):
             t = _RE_RISK_LINE.sub("MEDIUM RISK 🟡 • Insufficient data (run 🧪 On-chain)", t, count=1)
             t = _RE_SCORE_INLINE.sub("", t)
             t = _RE_TRUST_LINE.sub("Trust verdict: MEDIUM RISK 🟡 • Insufficient data (run 🧪 On-chain)", t)
         return t
 
-    def _apply_buckets(t: str) -> str:
-        m = _RE_RISK_LINE.search(t)
-        if m:
-            try: score = int(m.group("score"))
-            except Exception: score = _SAFE9E_STATE.get("last_score") or 60
-        else:
-            score = _SAFE9E_STATE.get("last_score") or 60
-        label = _safe9e_bucket(score)
-        _SAFE9E_STATE["last_score"], _SAFE9E_STATE["last_label"] = score, label
-        emoji = {"LOW RISK":"🟢","CAUTION":"🟡","HIGH RISK":"🔴"}.get(label,"🟡")
-        t = _RE_RISK_LINE.sub(f"{label} {emoji} • Risk score: {score}/100", t)
-        t = _RE_SCORE_INLINE.sub(f"(score {score}/100)", t)
-        if not _RE_INSUFF.search(t):
-            t = _RE_TRUST_LINE.sub(f"Trust verdict: {label} {emoji} • Risk score: {score}/100 (lower = safer)", t)
-        return t
-
-    def _force_not_tradable(t: str) -> str:
+    def _force_no_pools(t: str) -> str:
         if _RE_NOTTRAD.search(t) or _RE_NOPools.search(t):
             score = 80; label = "HIGH RISK"; emoji = "🔴"
             t = _RE_RISK_LINE.sub(f"{label} {emoji} • Risk score: {score}/100", t)
@@ -67,17 +58,36 @@ if not globals().get("_SAFE9E_PATCHED", False):
             t = _RE_SCORE_INLINE.sub(f"(score {score}/100)", t)
         return t
 
-    def _safe9e_unify_v2(text: str) -> str:
+    def _apply_bucket(t: str) -> str:
+        m = _RE_RISK_LINE.search(t)
+        if m:
+            try: score = int(m.group("score"))
+            except Exception: score = 60
+        else:
+            score = 60
+        label = _bucket(score)
+        emoji = {"LOW RISK":"🟢","CAUTION":"🟡","HIGH RISK":"🔴"}.get(label,"🟡")
+        t = _RE_RISK_LINE.sub(f"{label} {emoji} • Risk score: {score}/100", t)
+        t = _RE_SCORE_INLINE.sub(f"(score {score}/100)", t)
+        if not _RE_INSUFF.search(t):
+            t = _RE_TRUST_LINE.sub(f"Trust verdict: {label} {emoji} • Risk score: {score}/100 (lower = safer)", t)
+        t = _RE_LOW60.sub("CAUTION 🟡 • Risk score: 60/100", t)
+        return t
+
+    def safe9e_unify(text: str) -> str:
         if not isinstance(text, str) or not text:
             return text
-        t = text
-        t = _dedupe_phrases(t)
-        t = _pre_onchain_mode(t)
-        t = _force_not_tradable(t)
-        t = _apply_buckets(t)
-        t2 = _dedupe_phrases(t)
-        return t2
+        t0 = text
+        t = _dedupe(t0)
+        t = _pre_onchain(t)
+        t = _force_no_pools(t)
+        t = _apply_bucket(t)
+        t = _dedupe(t)
+        if _SAFE9E_DEBUG and t != t0:
+            _dbg("normalized telegram text")
+        return t
 
+    # Patch requests
     try:
         import requests as _rq
         if not getattr(_rq, "_SAFE9E_POST_PATCHED", False):
@@ -87,50 +97,155 @@ if not globals().get("_SAFE9E_PATCHED", False):
                     payload = kw.get("json") if isinstance(kw.get("json"), dict) else kw.get("data")
                     if isinstance(payload, dict) and ("sendMessage" in url or "editMessageText" in url):
                         if "text" in payload and isinstance(payload["text"], str):
-                            payload["text"] = _safe9e_unify_v2(payload["text"])
-                except Exception:
-                    pass
+                            payload["text"] = safe9e_unify(payload["text"])
+                except Exception as e:
+                    _dbg(f"requests patch error: {e}")
                 return _orig_post(url, *a, **kw)
             _rq.post = _patched_post
             _rq._SAFE9E_POST_PATCHED = True
-    except Exception:
-        pass
+            _dbg("patched requests.post")
+    except Exception as e:
+        _dbg(f"requests not patched: {e}")
 
+    # Patch httpx (client + module-level)
+    try:
+        import httpx as _hx
+        if not getattr(_hx, "_SAFE9E_HTTPX_PATCHED", False):
+            _orig_hx_post = getattr(_hx, "post", None)
+            def _hx_post(url, *a, **kw):
+                try:
+                    data = kw.get("data") or kw.get("json")
+                    if isinstance(data, dict) and ("sendMessage" in url or "editMessageText" in url):
+                        if "text" in data and isinstance(data["text"], str):
+                            data["text"] = safe9e_unify(data["text"])
+                except Exception as e:
+                    _dbg(f"httpx.post patch err: {e}")
+                return _orig_hx_post(url, *a, **kw) if _orig_hx_post else None
+            if _orig_hx_post:
+                _hx.post = _hx_post
+            # Client.request
+            _orig_client_request = _hx.Client.request
+            def _client_request(self, method, url, *a, **kw):
+                try:
+                    data = kw.get("data") or kw.get("json")
+                    if isinstance(data, dict) and ("sendMessage" in url or "editMessageText" in url):
+                        if "text" in data and isinstance(data["text"], str):
+                            data["text"] = safe9e_unify(data["text"])
+                except Exception as e:
+                    _dbg(f"httpx.Client.request patch err: {e}")
+                return _orig_client_request(self, method, url, *a, **kw)
+            _hx.Client.request = _client_request
+            _hx._SAFE9E_HTTPX_PATCHED = True
+            _dbg("patched httpx")
+    except Exception as e:
+        _dbg(f"httpx not patched: {e}")
+
+    # Patch common Telegram libs
+    # telebot (pyTelegramBotAPI)
+    try:
+        import telebot as _tb
+        if not getattr(_tb, "_SAFE9E_TB_PATCHED", False):
+            _orig_send = _tb.TeleBot.send_message
+            def _tb_send(self, chat_id, text, *a, **kw):
+                try: text = safe9e_unify(text)
+                except Exception as e: _dbg(f"telebot send patch err: {e}")
+                return _orig_send(self, chat_id, text, *a, **kw)
+            _tb.TeleBot.send_message = _tb_send
+            if hasattr(_tb.TeleBot, "edit_message_text"):
+                _orig_edit = _tb.TeleBot.edit_message_text
+                def _tb_edit(self, text, *a, **kw):
+                    try: text = safe9e_unify(text)
+                    except Exception as e: _dbg(f"telebot edit patch err: {e}")
+                    return _orig_edit(self, text, *a, **kw)
+                _tb.TeleBot.edit_message_text = _tb_edit
+            _tb._SAFE9E_TB_PATCHED = True
+            _dbg("patched telebot")
+    except Exception as e:
+        _dbg(f"telebot not patched: {e}")
+
+    # aiogram
+    try:
+        import aiogram as _ag
+        from aiogram import Bot as _AgBot
+        if not getattr(_ag, "_SAFE9E_AG_PATCHED", False):
+            _orig_ag_send = _AgBot.send_message
+            async def _ag_send(self, chat_id, text, *a, **kw):
+                try: text = safe9e_unify(text)
+                except Exception as e: _dbg(f"aiogram send patch err: {e}")
+                return await _orig_ag_send(self, chat_id, text, *a, **kw)
+            _AgBot.send_message = _ag_send
+            if hasattr(_AgBot, "edit_message_text"):
+                _orig_ag_edit = _AgBot.edit_message_text
+                async def _ag_edit(self, text, *a, **kw):
+                    try: text = safe9e_unify(text)
+                    except Exception as e: _dbg(f"aiogram edit patch err: {e}")
+                    return await _orig_ag_edit(self, text, *a, **kw)
+                _AgBot.edit_message_text = _ag_edit
+            _ag._SAFE9E_AG_PATCHED = True
+            _dbg("patched aiogram")
+    except Exception as e:
+        _dbg(f"aiogram not patched: {e}")
+
+    # python-telegram-bot
+    try:
+        import telegram as _ptb
+        from telegram import Bot as _PTBBot
+        if not getattr(_ptb, "_SAFE9E_PTB_PATCHED", False):
+            _orig_ptb_send = _PTBBot.send_message
+            def _ptb_send(self, chat_id, text, *a, **kw):
+                try: text = safe9e_unify(text)
+                except Exception as e: _dbg(f"ptb send patch err: {e}")
+                return _orig_ptb_send(self, chat_id, text, *a, **kw)
+            _PTBBot.send_message = _ptb_send
+            if hasattr(_PTBBot, "edit_message_text"):
+                _orig_ptb_edit = _PTBBot.edit_message_text
+                def _ptb_edit(self, text, *a, **kw):
+                    try: text = safe9e_unify(text)
+                    except Exception as e: _dbg(f"ptb edit patch err: {e}")
+                    return _orig_ptb_edit(self, text, *a, **kw)
+                _PTBBot.edit_message_text = _ptb_edit
+            _ptb._SAFE9E_PTB_PATCHED = True
+            _dbg("patched python-telegram-bot")
+    except Exception as e:
+        _dbg(f"python-telegram-bot not patched: {e}")
+
+    # Patch open for HTML reports
     try:
         import builtins as _bi
         if not getattr(_bi, "_SAFE9E_OPEN_PATCHED", False):
             _orig_open = _bi.open
             class _Safe9eFileWrapper:
-                def __init__(self, f, path):
-                    self._f = f; self._p = str(path)
+                def __init__(self, f, path): self._f=f; self._p=str(path)
                 def write(self, data):
                     try:
                         if isinstance(data, bytes):
                             s = data.decode("utf-8", "ignore")
-                            s2 = _safe9e_unify_v2(s) if (self._p.endswith(".html") and "Metridex QuickScan" in s) else s
+                            s2 = safe9e_unify(s) if (self._p.endswith(".html") and "Metridex QuickScan" in s) else s
                             data = s2.encode("utf-8", "ignore")
                         elif isinstance(data, str):
-                            data = _safe9e_unify_v2(data) if (self._p.endswith(".html") and "Metridex QuickScan" in data) else data
-                    except Exception:
-                        pass
+                            data = safe9e_unify(data) if (self._p.endswith(".html") and "Metridex QuickScan" in data) else data
+                    except Exception as e:
+                        _dbg(f"open write patch err: {e}")
                     return self._f.write(data)
-                def __getattr__(self, k): return getattr(self._f, k)
+                def __getattr__(self,k): return getattr(self._f,k)
                 def __enter__(self): self._f.__enter__(); return self
-                def __exit__(self, *a, **kw): return self._f.__exit__(*a, **kw)
-            def _patched_open(file, *a, **kw):
-                f = _orig_open(file, *a, **kw)
+                def __exit__(self,*a,**kw): return self._f.__exit__(*a,**kw)
+            def _patched_open(file,*a,**kw):
+                f = _orig_open(file,*a,**kw)
                 try:
                     path = str(file)
-                    if isinstance(path, (str, bytes)) and str(path).endswith(".html"):
+                    if isinstance(path,(str,bytes)) and str(path).endswith(".html"):
                         return _Safe9eFileWrapper(f, path)
-                except Exception:
-                    pass
+                except Exception: pass
                 return f
             _bi.open = _patched_open
             _bi._SAFE9E_OPEN_PATCHED = True
-    except Exception:
-        pass
-# === /SAFE9e CONSISTENCY CORE v2 ===
+            _dbg("patched open(.html)")
+    except Exception as e:
+        _dbg(f"open patch failed: {e}")
+
+    _dbg("core v3 ready")
+# === /SAFE9e CONSISTENCY CORE v3 ===
 
 import re
 import ssl
