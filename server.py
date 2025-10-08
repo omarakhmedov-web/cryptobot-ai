@@ -4,6 +4,142 @@
 # Patched on 2025-10-06 21:46:59 UTC
 # Cleaned by auto-fix at 2025-10-06 21:40:29 UTC
 import os
+
+
+# === SAFE9e CONSISTENCY CORE (auto-injected) ===
+import time, json as _json, re as _re
+
+_SAFE9E_SENT = {"last_score": None, "last_label": None}
+
+_RISK_LINE_RE = _re.compile(r"(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK).{0,8}•\s*Risk score:\s*(?P<score>\d{1,3})/100", _re.I)
+_TRUST_VERDICT_RE = _re.compile(r"Trust verdict:\s*(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK)[^\\n]*", _re.I)
+_SCORE_INLINE_RE = _re.compile(r"\(score\s*(?P<score>\d{1,3})/100\)", _re.I)
+
+def _safe9e_bucket(score: int) -> str:
+    if score <= 14: return "LOW RISK"
+    if score <= 59: return "CAUTION"
+    return "HIGH RISK"
+
+def _safe9e_unify(text: str) -> str:
+    if not text or not isinstance(text, str): 
+        return text
+    t = text
+
+    # 1) If there is an explicit "NOT TRADABLE" or "No pools found" anywhere -> force 80/HIGH
+    if "NOT TRADABLE" in t or "No pools found" in t:
+        forced_score = 80
+        forced_label = "HIGH RISK"
+        t = _RISK_LINE_RE.sub(f"{forced_label} 🔴 • Risk score: {forced_score}/100", t)
+        t = _TRUST_VERDICT_RE.sub(f"Trust verdict: {forced_label} 🔴 • NOT TRADABLE (no active pools/liquidity)", t)
+        t = _SCORE_INLINE_RE.sub(f"(score {forced_score}/100)", t)
+        _SAFE9E_SENT["last_score"], _SAFE9E_SENT["last_label"] = forced_score, forced_label
+        return t
+
+    # 2) Capture any score present; if none, keep previous
+    m = _RISK_LINE_RE.search(t)
+    if m:
+        try:
+            score = int(m.group("score"))
+        except Exception:
+            score = _SAFE9E_SENT.get("last_score") or 60
+    else:
+        score = _SAFE9E_SENT.get("last_score") or 60
+
+    # 3) Compute canonical label
+    label = _safe9e_bucket(score)
+    _SAFE9E_SENT["last_score"], _SAFE9E_SENT["last_label"] = score, label
+
+    # 4) Normalize all risk lines
+    emoji = {"LOW RISK": "🟢", "CAUTION": "🟡", "HIGH RISK": "🔴"}.get(label, "🟡")
+    t = _RISK_LINE_RE.sub(f"{label} {emoji} • Risk score: {score}/100", t)
+    t = _SCORE_INLINE_RE.sub(f"(score {score}/100)", t)
+
+    # 5) Trust verdict line: if on-chain not ready, keep 'Insufficient'; else align label
+    if "Insufficient data (run 🧪 On-chain)" in t:
+        t = _TRUST_VERDICT_RE.sub("Trust verdict: MEDIUM RISK 🟡 • Insufficient data (run 🧪 On-chain)", t)
+    else:
+        t = _TRUST_VERDICT_RE.sub(f"Trust verdict: {label} {emoji} • Risk score: {score}/100 (lower = safer)", t)
+
+    # 6) Minor fixes: "LOW RISK 60/100" bug
+    t = t.replace("LOW RISK 🟢 • Risk score: 60/100", "CAUTION 🟡 • Risk score: 60/100")
+    return t
+
+# Monkey patch requests.post/json to sanitize outgoing Telegram messages
+try:
+    import requests as _requests
+    _orig_post = _requests.post
+
+    def _patched_post(url, *args, **kwargs):
+        try:
+            if isinstance(kwargs.get("data"), dict):
+                d = kwargs["data"]
+                # Telegram send/edit endpoints
+                if "text" in d and ("sendMessage" in url or "editMessageText" in url):
+                    d["text"] = _safe9e_unify(d["text"])
+            elif "json" in kwargs and isinstance(kwargs["json"], dict):
+                d = kwargs["json"]
+                if "text" in d and ("sendMessage" in url or "editMessageText" in url):
+                    d["text"] = _safe9e_unify(d["text"])
+        except Exception:
+            pass
+        return _orig_post(url, *args, **kwargs)
+
+    _requests.post = _patched_post
+except Exception:
+    pass
+
+def mdx_render_final(text: str) -> str:
+    return _safe9e_unify(text)
+# === /SAFE9e CONSISTENCY CORE ===
+
+# --- HTML write normalizer (for exported reports) ---
+try:
+    import builtins as _bi, io as _io, os as _os
+    _orig_open = _bi.open
+    class _Safe9eFileWrapper:
+        def __init__(self, f, path):
+            self._f = f
+            self._p = str(path)
+        def write(self, data):
+            try:
+                if isinstance(data, (str, bytes)):
+                    if isinstance(data, bytes):
+                        try:
+                            s = data.decode("utf-8", "ignore")
+                        except Exception:
+                            s = None
+                        if s is not None:
+                            s2 = _safe9e_unify(s) if (self._p.endswith(".html") and "Metridex QuickScan" in s) else s
+                            data = s2.encode("utf-8", "ignore")
+                    else:
+                        data = _safe9e_unify(data) if (self._p.endswith(".html") and "Metridex QuickScan" in data) else data
+            except Exception:
+                pass
+            return self._f.write(data)
+        def __getattr__(self, k):
+            return getattr(self._f, k)
+        def __enter__(self): 
+            self._f.__enter__(); 
+            return self
+        def __exit__(self, *a, **kw): 
+            return self._f.__exit__(*a, **kw)
+
+    def _patched_open(file, *a, **kw):
+        f = _orig_open(file, *a, **kw)
+        try:
+            path = str(file)
+            if isinstance(path, (str, bytes)) and (str(path).endswith(".html")):
+                return _Safe9eFileWrapper(f, path)
+        except Exception:
+            pass
+        return f
+
+    _bi.open = _patched_open
+except Exception:
+    pass
+# --- /HTML write normalizer ---
+
+
 import re
 import ssl
 import json
@@ -57,74 +193,6 @@ def __mdx_fmt_lines(items, weights):
 # Back-compat alias for older code paths
 _fmt_lines = __mdx_fmt_lines
 from flask import Flask, request, jsonify
-
-# ===== SAFE9e consistency helpers (injected) =====
-try:
-    _LAST_SITE_HOST
-except NameError:
-    _LAST_SITE_HOST = {}
-
-def _risk_cache_get(chain: str, ca: str):
-    # Optional: centralized cache provider; safe stub
-    try:
-        ca = (ca or "").lower()
-        return LAST_VERDICT.get(ca) if ca else None
-    except Exception:
-        return None
-
-def _risk_bump_not_tradable(score_now: int) -> int:
-    try:
-        s = int(score_now)
-    except Exception:
-        s = 50
-    return 80 if s < 80 else s
-
-def _locker_locktime(provider: str, pair: str, chain: str):
-    # Safe stub; upstream locker fetchers can overwrite/import this.
-    return {}
-
-def mdx_postprocess_text(text: str, chat_id=None) -> str:
-    """
-    Centralized, deterministic post-processor.
-    Applies (in order): LP claim fixes -> owner privilege normalization -> FDV/MC sanity ->
-    prior-owner tag -> LP rate-limit normalization -> LP verdict wording -> Why/Why++ alignment ->
-    verdict unifier -> domain/compact blocks -> return.
-    Also captures/aligns Risk score across sections.
-    """
-    try:
-        t = str(text or "")
-        # Core sanitizers / normalizers
-        try: t = _sanitize_lp_claims(t)
-        except Exception: pass
-        try: t = _sanitize_owner_privileges(t, chat_id)
-        except Exception: pass
-        try: t = _sanitize_owner_privileges2(t, chat_id)
-        except Exception: pass
-        try: t = _validate_fdv_ge_mc(t)
-        except Exception: pass
-        try: t = _tag_prior_owner_history(t)
-        except Exception: pass
-        try: t = _enforce_lp_pending_on_ratelimit(t)
-        except Exception: pass
-        try: t = _lp_contract_mixed_verdict_fix(t)
-        except Exception: pass
-        # Align Why?/Why++ header and risk score line
-        try: t = _postprocess_why_text_align(t)
-        except Exception: pass
-        # Finalize trust/verdict lines
-        try: t = _mdx_unify_verdict_lines(t)
-        except Exception: pass
-        # Domain/compact handling (depends on env flags)
-        try: t = _enforce_details_host(t, chat_id)
-        except Exception: pass
-        try: t = _sanitize_compact_domains(t, is_details=True)
-        except Exception: pass
-        return t
-    except Exception:
-        return text
-# ===== /SAFE9e consistency helpers (injected) =====
-
-
 
 # === MDX POPUP ALIGN CACHE (addresses & per-chat last verdicts) ===
 LAST_VERDICT: dict = {}          # key: ca (0x...), value: {"score": int, "label": str, "nt": bool}
