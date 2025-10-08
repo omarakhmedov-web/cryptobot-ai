@@ -6,139 +6,131 @@
 import os
 
 
-# === SAFE9e CONSISTENCY CORE (auto-injected) ===
-import time, json as _json, re as _re
+# === SAFE9e CONSISTENCY CORE v2 (strong idempotence) ===
+import re as _re, time as _time
 
-_SAFE9E_SENT = {"last_score": None, "last_label": None}
+if not globals().get("_SAFE9E_PATCHED", False):
+    _SAFE9E_PATCHED = True
 
-_RISK_LINE_RE = _re.compile(r"(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK).{0,8}•\s*Risk score:\s*(?P<score>\d{1,3})/100", _re.I)
-_TRUST_VERDICT_RE = _re.compile(r"Trust verdict:\s*(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK)[^\\n]*", _re.I)
-_SCORE_INLINE_RE = _re.compile(r"\(score\s*(?P<score>\d{1,3})/100\)", _re.I)
+    _SAFE9E_STATE = {"last_score": None, "last_label": None, "patch_count": 0}
 
-def _safe9e_bucket(score: int) -> str:
-    if score <= 14: return "LOW RISK"
-    if score <= 59: return "CAUTION"
-    return "HIGH RISK"
+    _RE_RISK_LINE   = _re.compile(r"(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK)\s*.*?•\s*Risk score:\s*(?P<score>\d{1,3})/100", _re.I)
+    _RE_TRUST_LINE  = _re.compile(r"Trust verdict:\s*(?P<label>LOW RISK|CAUTION|HIGH RISK|MEDIUM RISK)[^\n]*", _re.I)
+    _RE_SCORE_INLINE= _re.compile(r"\(score\s*(?P<score>\d{1,3})/100\)", _re.I)
+    _RE_NOTTRAD     = _re.compile(r"NOT TRADABLE\s*\(no active pools/liquidity\)", _re.I)
+    _RE_NOPools     = _re.compile(r"No pools found", _re.I)
+    _RE_INSUFF      = _re.compile(r"Insufficient data\s*\(run .*?On-chain\)", _re.I)
+    _RE_NSUFF_GLUE  = _re.compile(r"(Insufficient data\s*\(run .*?On-chain\))\1+", _re.I)
+    _RE_NOTR_GLUE   = _re.compile(r"(NOT TRADABLE\s*\(no active pools/liquidity\))\1+", _re.I)
+    _RE_BROKEN_NALS = _re.compile(r"(?:^|\n)\s*nals:", _re.I)
 
-def _safe9e_unify(text: str) -> str:
-    if not text or not isinstance(text, str): 
-        return text
-    t = text
+    def _safe9e_bucket(score: int) -> str:
+        if score <= 14: return "LOW RISK"
+        if score <= 59: return "CAUTION"
+        return "HIGH RISK"
 
-    # 1) If there is an explicit "NOT TRADABLE" or "No pools found" anywhere -> force 80/HIGH
-    if "NOT TRADABLE" in t or "No pools found" in t:
-        forced_score = 80
-        forced_label = "HIGH RISK"
-        t = _RISK_LINE_RE.sub(f"{forced_label} 🔴 • Risk score: {forced_score}/100", t)
-        t = _TRUST_VERDICT_RE.sub(f"Trust verdict: {forced_label} 🔴 • NOT TRADABLE (no active pools/liquidity)", t)
-        t = _SCORE_INLINE_RE.sub(f"(score {forced_score}/100)", t)
-        _SAFE9E_SENT["last_score"], _SAFE9E_SENT["last_label"] = forced_score, forced_label
+    def _dedupe_phrases(t: str) -> str:
+        t = t.replace("nsufficient data", "Insufficient data")
+        t = _RE_NSUFF_GLUE.sub(lambda m: m.group(1), t)
+        t = _RE_NOTR_GLUE.sub(lambda m: m.group(1), t)
+        t = _RE_BROKEN_NALS.sub("\n⚠️ Signals:", t)
         return t
 
-    # 2) Capture any score present; if none, keep previous
-    m = _RISK_LINE_RE.search(t)
-    if m:
-        try:
-            score = int(m.group("score"))
-        except Exception:
-            score = _SAFE9E_SENT.get("last_score") or 60
-    else:
-        score = _SAFE9E_SENT.get("last_score") or 60
+    def _pre_onchain_mode(t: str) -> str:
+        if _RE_INSUFF.search(t):
+            t = _RE_RISK_LINE.sub("MEDIUM RISK 🟡 • Insufficient data (run 🧪 On-chain)", t, count=1)
+            t = _RE_SCORE_INLINE.sub("", t)
+            t = _RE_TRUST_LINE.sub("Trust verdict: MEDIUM RISK 🟡 • Insufficient data (run 🧪 On-chain)", t)
+        return t
 
-    # 3) Compute canonical label
-    label = _safe9e_bucket(score)
-    _SAFE9E_SENT["last_score"], _SAFE9E_SENT["last_label"] = score, label
+    def _apply_buckets(t: str) -> str:
+        m = _RE_RISK_LINE.search(t)
+        if m:
+            try: score = int(m.group("score"))
+            except Exception: score = _SAFE9E_STATE.get("last_score") or 60
+        else:
+            score = _SAFE9E_STATE.get("last_score") or 60
+        label = _safe9e_bucket(score)
+        _SAFE9E_STATE["last_score"], _SAFE9E_STATE["last_label"] = score, label
+        emoji = {"LOW RISK":"🟢","CAUTION":"🟡","HIGH RISK":"🔴"}.get(label,"🟡")
+        t = _RE_RISK_LINE.sub(f"{label} {emoji} • Risk score: {score}/100", t)
+        t = _RE_SCORE_INLINE.sub(f"(score {score}/100)", t)
+        if not _RE_INSUFF.search(t):
+            t = _RE_TRUST_LINE.sub(f"Trust verdict: {label} {emoji} • Risk score: {score}/100 (lower = safer)", t)
+        return t
 
-    # 4) Normalize all risk lines
-    emoji = {"LOW RISK": "🟢", "CAUTION": "🟡", "HIGH RISK": "🔴"}.get(label, "🟡")
-    t = _RISK_LINE_RE.sub(f"{label} {emoji} • Risk score: {score}/100", t)
-    t = _SCORE_INLINE_RE.sub(f"(score {score}/100)", t)
+    def _force_not_tradable(t: str) -> str:
+        if _RE_NOTTRAD.search(t) or _RE_NOPools.search(t):
+            score = 80; label = "HIGH RISK"; emoji = "🔴"
+            t = _RE_RISK_LINE.sub(f"{label} {emoji} • Risk score: {score}/100", t)
+            t = _RE_TRUST_LINE.sub(f"Trust verdict: {label} {emoji} • NOT TRADABLE (no active pools/liquidity)", t)
+            t = _RE_SCORE_INLINE.sub(f"(score {score}/100)", t)
+        return t
 
-    # 5) Trust verdict line: if on-chain not ready, keep 'Insufficient'; else align label
-    if "Insufficient data (run 🧪 On-chain)" in t:
-        t = _TRUST_VERDICT_RE.sub("Trust verdict: MEDIUM RISK 🟡 • Insufficient data (run 🧪 On-chain)", t)
-    else:
-        t = _TRUST_VERDICT_RE.sub(f"Trust verdict: {label} {emoji} • Risk score: {score}/100 (lower = safer)", t)
+    def _safe9e_unify_v2(text: str) -> str:
+        if not isinstance(text, str) or not text:
+            return text
+        t = text
+        t = _dedupe_phrases(t)
+        t = _pre_onchain_mode(t)
+        t = _force_not_tradable(t)
+        t = _apply_buckets(t)
+        t2 = _dedupe_phrases(t)
+        return t2
 
-    # 6) Minor fixes: "LOW RISK 60/100" bug
-    t = t.replace("LOW RISK 🟢 • Risk score: 60/100", "CAUTION 🟡 • Risk score: 60/100")
-    return t
+    try:
+        import requests as _rq
+        if not getattr(_rq, "_SAFE9E_POST_PATCHED", False):
+            _orig_post = _rq.post
+            def _patched_post(url, *a, **kw):
+                try:
+                    payload = kw.get("json") if isinstance(kw.get("json"), dict) else kw.get("data")
+                    if isinstance(payload, dict) and ("sendMessage" in url or "editMessageText" in url):
+                        if "text" in payload and isinstance(payload["text"], str):
+                            payload["text"] = _safe9e_unify_v2(payload["text"])
+                except Exception:
+                    pass
+                return _orig_post(url, *a, **kw)
+            _rq.post = _patched_post
+            _rq._SAFE9E_POST_PATCHED = True
+    except Exception:
+        pass
 
-# Monkey patch requests.post/json to sanitize outgoing Telegram messages
-try:
-    import requests as _requests
-    _orig_post = _requests.post
-
-    def _patched_post(url, *args, **kwargs):
-        try:
-            if isinstance(kwargs.get("data"), dict):
-                d = kwargs["data"]
-                # Telegram send/edit endpoints
-                if "text" in d and ("sendMessage" in url or "editMessageText" in url):
-                    d["text"] = _safe9e_unify(d["text"])
-            elif "json" in kwargs and isinstance(kwargs["json"], dict):
-                d = kwargs["json"]
-                if "text" in d and ("sendMessage" in url or "editMessageText" in url):
-                    d["text"] = _safe9e_unify(d["text"])
-        except Exception:
-            pass
-        return _orig_post(url, *args, **kwargs)
-
-    _requests.post = _patched_post
-except Exception:
-    pass
-
-def mdx_render_final(text: str) -> str:
-    return _safe9e_unify(text)
-# === /SAFE9e CONSISTENCY CORE ===
-
-# --- HTML write normalizer (for exported reports) ---
-try:
-    import builtins as _bi, io as _io, os as _os
-    _orig_open = _bi.open
-    class _Safe9eFileWrapper:
-        def __init__(self, f, path):
-            self._f = f
-            self._p = str(path)
-        def write(self, data):
-            try:
-                if isinstance(data, (str, bytes)):
-                    if isinstance(data, bytes):
-                        try:
+    try:
+        import builtins as _bi
+        if not getattr(_bi, "_SAFE9E_OPEN_PATCHED", False):
+            _orig_open = _bi.open
+            class _Safe9eFileWrapper:
+                def __init__(self, f, path):
+                    self._f = f; self._p = str(path)
+                def write(self, data):
+                    try:
+                        if isinstance(data, bytes):
                             s = data.decode("utf-8", "ignore")
-                        except Exception:
-                            s = None
-                        if s is not None:
-                            s2 = _safe9e_unify(s) if (self._p.endswith(".html") and "Metridex QuickScan" in s) else s
+                            s2 = _safe9e_unify_v2(s) if (self._p.endswith(".html") and "Metridex QuickScan" in s) else s
                             data = s2.encode("utf-8", "ignore")
-                    else:
-                        data = _safe9e_unify(data) if (self._p.endswith(".html") and "Metridex QuickScan" in data) else data
-            except Exception:
-                pass
-            return self._f.write(data)
-        def __getattr__(self, k):
-            return getattr(self._f, k)
-        def __enter__(self): 
-            self._f.__enter__(); 
-            return self
-        def __exit__(self, *a, **kw): 
-            return self._f.__exit__(*a, **kw)
-
-    def _patched_open(file, *a, **kw):
-        f = _orig_open(file, *a, **kw)
-        try:
-            path = str(file)
-            if isinstance(path, (str, bytes)) and (str(path).endswith(".html")):
-                return _Safe9eFileWrapper(f, path)
-        except Exception:
-            pass
-        return f
-
-    _bi.open = _patched_open
-except Exception:
-    pass
-# --- /HTML write normalizer ---
-
+                        elif isinstance(data, str):
+                            data = _safe9e_unify_v2(data) if (self._p.endswith(".html") and "Metridex QuickScan" in data) else data
+                    except Exception:
+                        pass
+                    return self._f.write(data)
+                def __getattr__(self, k): return getattr(self._f, k)
+                def __enter__(self): self._f.__enter__(); return self
+                def __exit__(self, *a, **kw): return self._f.__exit__(*a, **kw)
+            def _patched_open(file, *a, **kw):
+                f = _orig_open(file, *a, **kw)
+                try:
+                    path = str(file)
+                    if isinstance(path, (str, bytes)) and str(path).endswith(".html"):
+                        return _Safe9eFileWrapper(f, path)
+                except Exception:
+                    pass
+                return f
+            _bi.open = _patched_open
+            _bi._SAFE9E_OPEN_PATCHED = True
+    except Exception:
+        pass
+# === /SAFE9e CONSISTENCY CORE v2 ===
 
 import re
 import ssl
