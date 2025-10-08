@@ -704,6 +704,17 @@ def _normalize_whois_rdap(text: str) -> str:
 
 
 
+
+def _rdap_ru2en(text: str) -> str:
+    """Replace Russian RDAP message with EN to keep WHOIS/RDAP line English-only."""
+    try:
+        t = str(text or "")
+        t = re.sub(r'RDAP\s*недоступен\s*для\s*реестра\s*\.vip', 'RDAP unavailable for .vip registry', t, flags=re.I)
+        t = re.sub(r'RDAP\s*недоступен', 'RDAP unavailable', t, flags=re.I)
+        return t
+    except Exception:
+        return text
+
 def _postprocess_why_text_align(text: str) -> str:
     try:
         if not isinstance(text, str):
@@ -730,6 +741,13 @@ def _postprocess_why_text_align(text: str) -> str:
         if not_tradable:
             sc_now = _risk_bump_not_tradable(sc_now)
 
+        # Ensure a Risk score line exists for unifier
+        if not re.search(r'(?mi)Risk\s*score:\s*\d+\s*/\s*100', text or ''):
+            if re.search(r'(?mi)^(Why\+\+\s*factors\s*)$', text):
+                text = re.sub(r'(?mi)^(Why\+\+\s*factors\s*)$', r"\1\nRisk score: %d/100" % sc_now, text, count=1)
+            else:
+                text = (text.rstrip() + "\nRisk score: %d/100" % sc_now)
+
         # Write back score
         text = re.sub(r'(?mi)(Risk\s*score:\s*)\d+(\s*/\s*100)', rf'\g<1>{sc_now}\2', text)
 
@@ -740,44 +758,6 @@ def _postprocess_why_text_align(text: str) -> str:
         return text
     except Exception:
         return text
-
-# === /sanitizers (finalfix3) ===
-DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
-FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "MetridexBot")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
-WEBHOOK_HEADER_SECRET = os.environ.get("WEBHOOK_HEADER_SECRET", "")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # numeric string
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
-ALLOWED_CHAT_IDS = set([cid.strip() for cid in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if cid.strip()])
-
-CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "600"))
-HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "6.0"))
-KNOWN_AUTORELOAD_SEC = int(os.environ.get("KNOWN_AUTORELOAD_SEC", "300"))
-SCANNER_URL = os.environ.get("SCANNER_URL", "").strip()
-ETH_RPC_URLS = os.environ.get("ETH_RPC_URLS", "").strip()
-
-# Domain meta TTLs
-try:
-    DOMAIN_META_TTL = int(os.getenv("DOMAIN_META_TTL", "2592000"))      # 30 days
-    DOMAIN_META_TTL_NEG = int(os.getenv("DOMAIN_META_TTL_NEG", "120"))  # 2 min for negative WB
-except Exception:
-    DOMAIN_META_TTL = 2592000
-    DOMAIN_META_TTL_NEG = 120
-
-LOC = locale_text
-app = Flask(__name__)
-
-
-
-
-
-
-
-
-
-# === DS URL helper (safe) ===
 
 def _dexscreener_pair_url(chain: str, pair_addr: str) -> str:
     # Build a DexScreener pair URL if pair_addr looks like 0x + 40 hex chars.
@@ -804,7 +784,7 @@ try:
         _MDX_TG_SEND_BTN_ORDER_FIX_V1 = _rq.post
         def post(url, *args, **kwargs):
             try:
-                if isinstance(url, str) and 'api.telegram.org' in url and (url.endswith('/sendMessage') or url.endswith('/editMessageText')) or url.endswith('/answerCallbackQuery') or url.endswith('/sendPhoto') or url.endswith('/sendDocument'):
+                if (isinstance(url, str) and 'api.telegram.org' in url and (url.endswith('/sendMessage') or url.endswith('/editMessageText') or url.endswith('/answerCallbackQuery') or url.endswith('/sendPhoto') or url.endswith('/sendDocument'))):
 
                     # Apply text postprocess to text/caption before sending
                     try:
