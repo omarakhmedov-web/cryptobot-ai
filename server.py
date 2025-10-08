@@ -804,7 +804,7 @@ try:
         _MDX_TG_SEND_BTN_ORDER_FIX_V1 = _rq.post
         def post(url, *args, **kwargs):
             try:
-                if isinstance(url, str) and 'api.telegram.org' in url and (url.endswith('/sendMessage') or url.endswith('/editMessageText')):
+                if isinstance(url, str) and 'api.telegram.org' in url and (url.endswith('/sendMessage') or url.endswith('/editMessageText')) or url.endswith('/answerCallbackQuery') or url.endswith('/sendPhoto') or url.endswith('/sendDocument'):
 
                     # Apply text postprocess to text/caption before sending
                     try:
