@@ -136,21 +136,7 @@ def mdx_unify_html_verdict(html:str):
 # Project-local utilities (must exist in your project)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
-from tg_safe import tg_send_message, tg_answer_callback as __mdx_orig_answer_cb
-
-# --- MDX: ensure popup texts also go through post-processor ---
-def tg_answer_callback(token, callback_query_id, text: str = "", logger=None, show_alert: bool = False, cache_time: int | None = None):
-    try:
-        processed = mdx_postprocess_text(text, None)
-    except Exception:
-        processed = text
-    try:
-        return __mdx_orig_answer_cb(token, callback_query_id, processed, logger=logger, show_alert=show_alert, cache_time=cache_time)
-    except TypeError:
-        # Fallback for older tg_safe signature
-        return __mdx_orig_answer_cb(token, callback_query_id, processed)
-# --- /MDX wrapper ---
-
+from tg_safe import tg_send_message, tg_answer_callback
 from metri_domain_rdap import _rdap as __rdap_impl  # injected
 from flask import Flask
 import sqlite3
@@ -7410,3 +7396,83 @@ def _mdx_text_fix_lp_lock_verdict(text: str) -> str:
         return '\\n'.join(out)
     except Exception:
         return text
+
+
+# ========================= MDX HOTFIX (POPUP ALIGN) =========================
+# Align Why? popup verdict with the Risk score shown in the message.
+# This overrides the earlier definition of _answer_why_quickly.
+def _answer_why_quickly(cq, addr_hint=None):
+    try:
+        msg_obj = cq.get("message", {}) or {}
+        text_msg = msg_obj.get("text") or ""
+        addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text_msg) or "").lower()
+
+        # Prefer cached verdict, fallback to compute
+        info = None
+        try:
+            info = _RISK_CACHE.get(addr) if addr else None
+        except Exception:
+            try:
+                info = RISK_CACHE.get(addr) if addr else None
+            except Exception:
+                info = None
+        if not info:
+            score, label, rs = _risk_verdict(addr or "", text_msg or "")
+            info = {
+                "score": score or 0,
+                "reasons_pos": [(t, w) for t, w in (rs.get("pos") or []) if t][:8],
+                "reasons_neg": [(t, w) for t, w in (rs.get("neg") or []) if t][:8],
+            }
+
+        # Parse score directly from visible message (source of truth for UI)
+        sc_from_msg = None
+        try:
+            m_sc = re.search(r'(?mi)Risk\\s*score:\\s*(\\d+)\\s*/\\s*100', text_msg or '')
+            sc_from_msg = int(m_sc.group(1)) if m_sc else None
+        except Exception:
+            sc_from_msg = None
+
+        # Detect non-tradable/unknown LP states based on UI message
+        not_tradable = bool(re.search(r'(?i)(NOT\\s+TRADABLE|no\\s+active\\s+pools|unknown\\s*\\(no\\s*LP\\s*data\\))', text_msg or ''))
+
+        sc_now = sc_from_msg if isinstance(sc_from_msg, int) else int(info.get("score") or 0)
+        try:
+            sc_now = int(sc_now)
+        except Exception:
+            sc_now = 0
+
+        # Label mapping
+        def _label_for_score(n: int) -> str:
+            try:
+                n = int(n)
+            except Exception:
+                n = 0
+            if n <= 15:
+                return "LOW RISK ⚪"
+            if n >= 70:
+                return "HIGH RISK 🔴"
+            return "CAUTION 🟡"
+
+        if not_tradable and sc_now < 80:
+            sc_now = 80
+
+        label_now = _label_for_score(sc_now)
+
+        pairs_pos = info.get("reasons_pos") or []
+        pairs_neg = info.get("reasons_neg") or []
+        neg_s = "; ".join([f"{t} (−{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
+        pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
+
+        body = f"{label_now} • Risk score: {sc_now}/100"
+        if not_tradable:
+            body = f"HIGH RISK 🔴 • NOT TRADABLE — Risk score: {sc_now}/100"
+        if neg_s:
+            body += f" — ⚠️ {neg_s}"
+        if pos_s:
+            body += f" — ✅ {pos_s}"
+        if len(body) > 190:
+            body = body[:187] + "…"
+        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+    except Exception:
+        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
+# ======================= /MDX HOTFIX (POPUP ALIGN) ==========================
