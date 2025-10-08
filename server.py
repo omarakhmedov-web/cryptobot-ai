@@ -58,6 +58,36 @@ def __mdx_fmt_lines(items, weights):
 _fmt_lines = __mdx_fmt_lines
 from flask import Flask, request, jsonify
 
+# === MDX POPUP ALIGN CACHE (addresses & per-chat last verdicts) ===
+LAST_VERDICT: dict = {}          # key: ca (0x...), value: {"score": int, "label": str, "nt": bool}
+_LAST_VERDICT_BY_CHAT: dict = {} # key: chat_id (str), value: same
+_LAST_CA_BY_CHAT: dict = {}      # key: chat_id (str), last seen ca
+
+def _remember_verdict(addr: str|None, score: int|None, label: str|None, not_tradable: bool=False, chat_id: str|None=None):
+    try:
+        if score is None: return
+        sc = int(score)
+    except Exception:
+        sc = None
+    try:
+        if chat_id is not None:
+            _LAST_VERDICT_BY_CHAT[str(chat_id)] = {"score": sc, "label": label or "", "nt": bool(not_tradable)}
+        if addr:
+            a = str(addr).lower().strip()
+            if re.fullmatch(r"0x[0-9a-fA-F]{40}", a):
+                LAST_VERDICT[a] = {"score": sc, "label": label or "", "nt": bool(not_tradable)}
+    except Exception:
+        pass
+
+def _remember_ca_for_chat(chat_id: str|None, addr: str|None):
+    try:
+        if chat_id and addr and re.fullmatch(r"0x[0-9a-fA-F]{40}", str(addr)):
+            _LAST_CA_BY_CHAT[str(chat_id)] = str(addr).lower()
+    except Exception:
+        pass
+# === /MDX POPUP ALIGN CACHE ===
+
+
 
 # === MDX UNIFIED VERDICT (minimal injected patch) ===
 import re as _re2
@@ -85,22 +115,29 @@ def _mdx_extract_score_flags(text:str):
     not_tradable = bool(_re2.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found)', text or ""))
     return sc, not_tradable
 
+
 def _mdx_unify_verdict_lines(text:str):
     try:
+        # Try Risk score line first
         sc, nt = _mdx_extract_score_flags(text)
+        # If absent, try bare "(N/100)" in first line
+        if sc is None:
+            m0 = _re2.search(r'(?m)^(LOW\s+RISK.*?|CAUTION.*?|HIGH\s+RISK.*?)\(\s*(\d+)\s*/\s*100\s*\)\s*$', str(text or ''))
+            if m0:
+                sc = int(m0.group(2))
         if sc is None:
             return text
         verdict, sc = _mdx_classify_verdict(sc, nt)
-        # Trust verdict:
+        # Normalize Trust verdict:
         text = _re2.sub(r'(?mi)^Trust\s+verdict:.*$',
                         f"Trust verdict: {verdict} • Risk score: {sc}/100 (lower = safer)",
                         text)
-        # Compact verdict lines
-        text = _re2.sub(r'(?mi)^(LOW\s+RISK.*?|CAUTION.*?|HIGH\s+RISK.*?)\(\s*score\s*\d+\s*/\s*100\s*\)\s*$',
+        # Compact verdict lines with or without 'score'
+        text = _re2.sub(r'(?mi)^(LOW\s+RISK.*?|CAUTION.*?|HIGH\s+RISK.*?)\(\s*(?:score\s*)?(\d+)\s*/\s*100\s*\)\s*$',
                         f"{verdict} • Risk score: {sc}/100 (lower = safer)", text)
-        # Remove dangling '(score N/100)'
+        # Remove dangling '(score N/100)' at line end
         text = _re2.sub(r'\(\s*score\s*\d+\s*/\s*100\s*\)\s*$', '', text)
-        # Normalize single verdict lines (end-of-block titles)
+        # Normalize any single verdict lines
         text = _re2.sub(r'(?mi)^(LOW\s+RISK.*?|CAUTION.*?|HIGH\s+RISK.*?)$',
                         f"{verdict} • Risk score: {sc}/100 (lower = safer)", text)
         return text
@@ -4554,63 +4591,93 @@ def admin_diag():
 # ========================
 # Telegram webhook & callbacks
 # ========================
+
 def _answer_why_quickly(cq, addr_hint=None):
     try:
-        msg_obj = cq.get("message", {}) or {}
-        text = msg_obj.get("text") or ""
-        addr = (addr_hint or msg2addr.get(str(msg_obj.get("message_id"))) or _extract_addr_from_text(text) or "").lower()
+        msg = cq.get("message", {}) or {}
+        text_msg = msg.get("text") or msg.get("caption") or ""
+        chat_id = msg.get("chat", {}).get("id")
+        # Try extract CA from message or stored map
+        m_ca = re.search(r'(?i)\b(0x[0-9a-fA-F]{40})\b', text_msg or '')
+        ca = (addr_hint or (m_ca.group(1) if m_ca else None) or _LAST_CA_BY_CHAT.get(str(chat_id)) or "")
+        if ca: _remember_ca_for_chat(str(chat_id), ca)
+        # Score from message
+        sc_msg = None
+        msc = re.search(r'(?mi)Risk\\s*score:\\s*(\\d+)\\s*/\\s*100', text_msg or '')
+        if msc: sc_msg = int(msc.group(1))
+        # Bare (N/100) variant
+        if sc_msg is None:
+            m0 = re.search(r'\\(\\s*(\\d+)\\s*/\\s*100\\s*\\)', text_msg or '')
+            if m0: sc_msg = int(m0.group(1))
+        # Detect NOT TRADABLE flag from text
+        not_tradable = bool(re.search(r'(?i)(NOT\\s+TRADABLE|no\\s+active\\s+pools|No\\s+pools\\s+found)', text_msg or ''))
+        # Fallback: LAST_VERDICT by CA or chat
+        sc_cache = None
+        if ca and ca.lower() in LAST_VERDICT and LAST_VERDICT[ca.lower()].get("score") is not None:
+            sc_cache = int(LAST_VERDICT[ca.lower()]["score"])
+            not_tradable = not_tradable or bool(LAST_VERDICT[ca.lower()].get("nt"))
+        elif str(chat_id) in _LAST_VERDICT_BY_CHAT and _LAST_VERDICT_BY_CHAT[str(chat_id)].get("score") is not None:
+            sc_cache = int(_LAST_VERDICT_BY_CHAT[str(chat_id)]["score"])
+            not_tradable = not_tradable or bool(_LAST_VERDICT_BY_CHAT[str(chat_id)].get("nt"))
+        # Choose score
+        sc = sc_msg if sc_msg is not None else sc_cache
+        if sc is None:
+            # Last resort: recompute
+            try:
+                sc2, _, rs = _risk_verdict(ca or "", text_msg or "")
+                if sc2 is not None:
+                    sc = int(sc2)
+            except Exception:
+                sc = 0
+        # NOT TRADABLE bump
+        if not_tradable and sc < 80:
+            sc = 80
+        # Label
+        if sc <= 15: label_now = "LOW RISK 🟢"
+        elif sc >= 70: label_now = "HIGH RISK 🔴"
+        else: label_now = "CAUTION 🟡"
+        # Reasons (best-effort from cache)
         info = None
         try:
-            info = _RISK_CACHE.get(addr) if addr else None
+            info = _RISK_CACHE.get(ca.lower()) if ca else None  # may differ in impl
         except Exception:
             try:
-                info = RISK_CACHE.get(addr) if addr else None
+                info = RISK_CACHE.get(ca.lower()) if ca else None
             except Exception:
                 info = None
-        if not info:
-            score, label, rs = _risk_verdict(addr or "", text or "")
-            info = {
-                "score": score,
-                "label": label,
-                "neg": list(rs.get("neg", []) or []),
-                "pos": list(rs.get("pos", []) or []),
-                "w_neg": list(rs.get("w_neg", []) or []),
-                "w_pos": list(rs.get("w_pos", []) or []),
-            }
-
-        # Align with NOT TRADABLE / no pools signals
-        try:
-            base_txt = text or ""
-            not_tradable = bool(re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|Contract code:\s*absent|chain:\s*n/?a)', base_txt))
-            if not_tradable:
-                if int(info.get("score", 0)) < 80:
-                    info["score"] = 80
-                lab = info.get("label") or "HIGH RISK 🔴"
-                if "NOT TRADABLE" not in lab:
-                    lab = "HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)"
-                info["label"] = lab
-                if isinstance(info.get("neg"), list) and not any("Not tradable" in str(x) for x in info["neg"]):
-                    info["neg"].insert(0, "Not tradable (no pools/liquidity)")
-                    info.setdefault("w_neg", []).insert(0, 80)
-        except Exception:
-            pass
-
-        pairs_neg = list(zip(info.get("neg", []), info.get("w_neg", [])))
-        pairs_pos = list(zip(info.get("pos", []), info.get("w_pos", [])))
-        pairs_neg.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-        pairs_pos.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-        neg_s = "; ".join([f"{t} (+{w})" for t, w in pairs_neg[:2] if t]) if pairs_neg else ""
-        pos_s = "; ".join([f"{t} (+{w})" for t, w in pairs_pos[:2] if t]) if pairs_pos else ""
-        body = f"{info.get('label','?')} ({info.get('score',0)}/100)"
-        if neg_s:
-            body += f" — ⚠️ {neg_s}"
-        if pos_s:
-            body += f" — ✅ {pos_s}"
-        if len(body) > 190:
-            body = body[:187] + "…"
+        reasons_pos = []
+        reasons_neg = []
+        if isinstance(info, dict):
+            reasons_pos = info.get("reasons_pos") or list(zip(info.get("pos", []), info.get("w_pos", [])))
+            reasons_neg = info.get("reasons_neg") or list(zip(info.get("neg", []), info.get("w_neg", [])))
+        # Normalize reasons to tuples
+        def _pairs(p):
+            out=[]
+            for x in (p or [])[:8]:
+                try: t,w = x[0], x[1]
+                except Exception: t,w = (str(x),0)
+                out.append((t,w))
+            try:
+                out.sort(key=lambda k: (k[1] if isinstance(k[1],(int,float)) else 0), reverse=True)
+            except Exception: pass
+            return out
+        ppos = _pairs(reasons_pos); pneg=_pairs(reasons_neg)
+        neg_s = "; ".join([f"{t} (−{w})" for t,w in pneg[:2] if t]) if pneg else ""
+        pos_s = "; ".join([f"{t} (+{w})" for t,w in ppos[:2] if t]) if ppos else ""
+        # Build popup
+        if not_tradable:
+            body = f"HIGH RISK 🔴 • NOT TRADABLE — Risk score: {sc}/100"
+        else:
+            body = f"{label_now} • Risk score: {sc}/100"
+        if neg_s: body += f" — ⚠️ {neg_s}"
+        if pos_s: body += f" — ✅ {pos_s}"
+        if len(body) > 190: body = body[:187] + "…"
+        # Remember for future
+        _remember_verdict(ca, sc, label_now, not_tradable, str(chat_id) if chat_id is not None else None)
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
     except Exception:
         tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
+
 @app.route("/webhook/<secret>", methods=["POST"])
 @require_webhook_secret
 def webhook(secret):
@@ -7303,6 +7370,23 @@ def mdx_postprocess_text(text: str, chat_id=None) -> str:
         t = _lp_contract_mixed_verdict_fix(t)
         t = _validate_fdv_ge_mc(t)
         t = _tag_prior_owner_history(t)
+        # Align Why? headers and unify verdict lines; also remember last verdict & CA for popups
+        t = _postprocess_why_text_align(t)
+        try:
+            # Remember CA and verdict by scanning current text
+            m_ca = re.search(r'(?mi)^Scan\s+token:\s*\S*/token/(0x[0-9a-fA-F]{40})', t or '')
+            if not m_ca:
+                m_ca2 = re.search(r'(?i)\b(0x[0-9a-fA-F]{40})\b', t or '')
+            ca = (m_ca.group(1) if m_ca else (m_ca2.group(1) if m_ca2 else None))
+            if ca and chat_id is not None:
+                _remember_ca_for_chat(str(chat_id), ca)
+            sc_seen, nt_seen = _mdx_extract_score_flags(t)
+            if sc_seen is not None:
+                lab, _ = _mdx_classify_verdict(int(sc_seen), bool(nt_seen))
+                _remember_verdict(ca, int(sc_seen), lab, bool(nt_seen), str(chat_id) if chat_id is not None else None)
+        except Exception:
+            pass
+
         t = _enforce_lp_pending_on_ratelimit(t)
         t = _dedupe_quickscan_blocks(t)
         t = _align_lp_verdict_with_onchain(t)
@@ -7461,7 +7545,7 @@ def _answer_why_quickly(cq, addr_hint=None):
 
         # Label by score
         if sc_now <= 15:
-            label_now = "LOW RISK ⚪"
+            label_now = "LOW RISK 🟢"
         elif sc_now >= 70:
             label_now = "HIGH RISK 🔴"
         else:
