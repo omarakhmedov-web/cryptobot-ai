@@ -648,6 +648,11 @@ def _normalize_whois_rdap(text: str) -> str:
     """
     try:
         norm = str(text or "")
+        # Force RU -> EN for RDAP message before normalization
+        try:
+            norm = re.sub(r'RDAP\s*недоступен[^|\n]*', 'RDAP unavailable for .vip registry', norm, flags=re.I)
+        except Exception:
+            pass
         # Only operate when a Domain block exists (avoid false inserts elsewhere)
         has_domain = re.search(r'(?mi)^Domain:\s*\S+', norm) is not None
         if not has_domain:
@@ -739,6 +744,22 @@ def _postprocess_why_text_align(text: str) -> str:
 
         return text
     except Exception:
+        # --- prepend verdict header (MDX) & ensure Risk score line ---
+        try:
+            _t = str(text or '')
+            if re.search(r'(?mi)^Why\+\+\s*factors', _t):
+                m_sc = re.search(r'(?mi)Risk\s*score:\s*(\d+)\s*/\s*100', _t)
+                sc2 = int(m_sc.group(1)) if m_sc else sc_now
+                verdict_label, sc_label = _mdx_classify_verdict(int(sc2), not_tradable)
+                header = f"{verdict_label} • Risk score: {sc_label}/100 (lower = safer)"
+                if not re.search(r'(?m)^(LOW\s+RISK|CAUTION|HIGH\s+RISK).*Risk\s*score:\s*\d+\s*/\s*100', _t):
+                    _t = re.sub(r'(?mi)^(Why\+\+\s*factors\s*)$', header + "\n" + r"\1", _t, count=1)
+                if not re.search(r'(?mi)Risk\s*score:\s*\d+\s*/\s*100', _t):
+                    _t = _t.rstrip() + f"\nRisk score: {sc_label}/100"
+                text = _t
+        except Exception:
+            pass
+        # --- /prepend verdict header ---
         return text
 
 # === /sanitizers (finalfix3) ===
@@ -804,7 +825,7 @@ try:
         _MDX_TG_SEND_BTN_ORDER_FIX_V1 = _rq.post
         def post(url, *args, **kwargs):
             try:
-                if isinstance(url, str) and 'api.telegram.org' in url and (url.endswith('/sendMessage') or url.endswith('/editMessageText')) or url.endswith('/answerCallbackQuery') or url.endswith('/sendPhoto') or url.endswith('/sendDocument'):
+                if (isinstance(url, str) and 'api.telegram.org' in url and (url.endswith('/sendMessage') or url.endswith('/editMessageText') or url.endswith('/answerCallbackQuery') or url.endswith('/sendPhoto') or url.endswith('/sendDocument'))):
 
                     # Apply text postprocess to text/caption before sending
                     try:
