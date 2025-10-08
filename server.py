@@ -666,6 +666,77 @@ def _postprocess_why_text_align(text: str) -> str:
     except Exception:
         return text
 
+
+def _sync_verdict_with_score(text: str) -> str:
+    try:
+        if not isinstance(text, str):
+            return text
+        m_tv = re.search(r'(?mi)^Trust\s+verdict:\s*([A-Z ]+)', text or '')
+        verdict = (m_tv.group(1).strip().upper() if m_tv else '')
+        m_sc = re.search(r'(?mi)Risk\s*score:\s*(\d+)\s*/\s*100', text or '')
+        score = int(m_sc.group(1)) if m_sc else None
+        not_tradable = bool(re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|no\s+active\s+pools)', text or ''))
+        if not verdict:
+            if score is not None:
+                if score >= 70: verdict = "HIGH RISK"
+                elif score >= 50: verdict = "CAUTION"
+                else: verdict = "LOW RISK"
+            elif not_tradable:
+                verdict = "HIGH RISK"
+        em = {"HIGH RISK":"🔴", "CAUTION":"🟡", "LOW RISK":"🟢"}.get(verdict or "", "🟡")
+        def _fix_line(m):
+            ln = m.group(0)
+            ln = re.sub(r'^(LOW RISK|CAUTION|HIGH RISK)', verdict, ln)
+            if em not in ln:
+                ln = re.sub(r'^(LOW RISK|CAUTION|HIGH RISK)', verdict + f" {em}", ln)
+            return ln
+        text = re.sub(r'(?m)^(LOW RISK|CAUTION|HIGH RISK).*(Risk\s*score:.*)$', _fix_line, text)
+        if not_tradable and not re.search(r'(?i)Not\s+tradable\s*\(no\s*pools', text):
+            if re.search(r'(?mi)^Why\+\+\s*factors', text or ''):
+                text = re.sub(r'(?mi)^(Why\+\+\s*factors\s*)$', r"\1\n−80  Not tradable (no pools/liquidity)", text)
+            text = re.sub(r'(?mi)^(⚠️\s*Signals:\s*)(.*)$',
+                          lambda m: m.group(1) + ((m.group(2)+'; ') if m.group(2).strip() not in ('','—') else '') + "Not tradable (no pools/liquidity)",
+                          text)
+        return text
+    except Exception:
+        return text
+
+def _ensure_wayback_positive(text: str) -> str:
+    try:
+        if not isinstance(text, str):
+            return text
+        if not re.search(r'(?mi)^Wayback:\s*first\s*\d{4}-\d{2}-\d{2}', text or ''):
+            return text
+        if re.search(r'(?mi)^✅\s*Positives:\s*', text or '') and not re.search(r'(?i)Historical\s+presence', text or ''):
+            text = re.sub(r'(?mi)^(✅\s*Positives:\s*)(.*)$',
+                          lambda m: m.group(1) + ((m.group(2)+'; ') if m.group(2).strip() not in ('','—') else '') + "Historical presence (Wayback found)",
+                          text)
+        if re.search(r'(?mi)^Why\+\+\s*factors', text or '') and not re.search(r'(?mi)^\s*\+\s*8\s+Historical\s+presence', text or ''):
+            text = re.sub(r'(?mi)^(Why\+\+\s*factors\s*)$', r"\1\n+ 8  Historical presence (Wayback found)", text)
+        return text
+    except Exception:
+        return text
+
+def _whitelist_hide_zero_signals(text: str) -> str:
+    try:
+        if not isinstance(text, str):
+            return text
+        if not re.search(r'(?i)Whitelisted\s+by\s+address', text or '') and not re.search(r'(?i)expected\s+for\s+centralized/whitelisted', text or ''):
+            return text
+        def _clean_signals_line(m):
+            line = m.group(0)
+            line = re.sub(r'(;|\s)*LP\s+concentrated[^;]*', '', line, flags=re.I)
+            line = re.sub(r'(;|\s)*Top\s+holders[^;]*', '', line, flags=re.I)
+            line = re.sub(r'(;|\s)*Owner\s+privileges\s+present', '', line, flags=re.I)
+            line = re.sub(r'\s*;\s*;', ';', line)
+            line = re.sub(r'\s*;\s*$', '', line)
+            if re.sub(r'^\s*⚠️\s*Signals:\s*', '', line).strip() == '':
+                return '⚠️ Signals: —'
+            return line
+        text = re.sub(r'(?mi)^\s*⚠️\s*Signals:.*$', _clean_signals_line, text)
+        return text
+    except Exception:
+        return text
 # === /sanitizers (finalfix3) ===
 DETAILS_MODE_SUPPRESS_COMPACT = int(os.getenv("DETAILS_MODE_SUPPRESS_COMPACT", "0") or "0")
 FEATURE_SAMPLE_REPORT = int(os.getenv("FEATURE_SAMPLE_REPORT", "0") or "0")
