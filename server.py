@@ -58,6 +58,81 @@ def __mdx_fmt_lines(items, weights):
 _fmt_lines = __mdx_fmt_lines
 from flask import Flask, request, jsonify
 
+
+# === MDX UNIFIED VERDICT (minimal injected patch) ===
+import re as _re2
+
+def _mdx_classify_verdict(score:int, not_tradable:bool=False):
+    try:
+        sc = int(score)
+    except Exception:
+        sc = 50
+    if not_tradable:
+        return ("HIGH RISK 🔴 • NOT TRADABLE (no active pools/liquidity)", sc)
+    if sc <= 15:
+        return ("LOW RISK 🟢", sc)
+    if sc >= 70:
+        return ("HIGH RISK 🔴", sc)
+    return ("CAUTION 🟡", sc)
+
+def _mdx_extract_score_flags(text:str):
+    sc = None
+    try:
+        m = _re2.search(r'(?mi)Risk\s*score:\s*(\d+)\s*/\s*100', text or "")
+        if m: sc = int(m.group(1))
+    except Exception:
+        pass
+    not_tradable = bool(_re2.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found)', text or ""))
+    return sc, not_tradable
+
+def _mdx_unify_verdict_lines(text:str):
+    try:
+        sc, nt = _mdx_extract_score_flags(text)
+        if sc is None:
+            return text
+        verdict, sc = _mdx_classify_verdict(sc, nt)
+        # Trust verdict:
+        text = _re2.sub(r'(?mi)^Trust\s+verdict:.*$',
+                        f"Trust verdict: {verdict} • Risk score: {sc}/100 (lower = safer)",
+                        text)
+        # Compact verdict lines
+        text = _re2.sub(r'(?mi)^(LOW\s+RISK.*?|CAUTION.*?|HIGH\s+RISK.*?)\(\s*score\s*\d+\s*/\s*100\s*\)\s*$',
+                        f"{verdict} • Risk score: {sc}/100 (lower = safer)", text)
+        # Remove dangling '(score N/100)'
+        text = _re2.sub(r'\(\s*score\s*\d+\s*/\s*100\s*\)\s*$', '', text)
+        # Normalize single verdict lines (end-of-block titles)
+        text = _re2.sub(r'(?mi)^(LOW\s+RISK.*?|CAUTION.*?|HIGH\s+RISK.*?)$',
+                        f"{verdict} • Risk score: {sc}/100 (lower = safer)", text)
+        return text
+    except Exception:
+        return text
+
+# === MDX REPORT HTML NORMALIZER (minimal) ===
+def mdx_unify_html_verdict(html:str):
+    """
+    Align <h2>Risk verdict</h2> card with Summary's Risk score / NOT TRADABLE flag.
+    No-op if patterns not found.
+    """
+    try:
+        s = str(html or "")
+        m_sum = _re2.search(r'(?s)<div class="box"><h2>Summary</h2><pre>(.*?)</pre></div>', s)
+        summary = m_sum.group(1) if m_sum else ""
+        sc, nt = _mdx_extract_score_flags(summary)
+        if sc is None:
+            sc, nt = _mdx_extract_score_flags(s)
+        if sc is None:
+            return html
+        verdict, sc = _mdx_classify_verdict(sc, nt)
+        new_block = f'<div class="box"><h2>Risk verdict</h2><p><b>{verdict} ({sc}/100)</b></p>'
+        s = _re2.sub(r'(?s)<div class="box"><h2>Risk verdict</h2><p><b>.*?</b></p>', new_block, s, count=1)
+        return s
+    except Exception:
+        return html
+# === /MDX REPORT HTML NORMALIZER (minimal) ===
+# === /MDX UNIFIED VERDICT (minimal injected patch) ===
+
+
+
 # Project-local utilities (must exist in your project)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
