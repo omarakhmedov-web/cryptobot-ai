@@ -136,7 +136,21 @@ def mdx_unify_html_verdict(html:str):
 # Project-local utilities (must exist in your project)
 from quickscan import quickscan_entrypoint, quickscan_pair_entrypoint, SafeCache
 from utils import locale_text
-from tg_safe import tg_send_message, tg_answer_callback
+from tg_safe import tg_send_message, tg_answer_callback as __mdx_orig_answer_cb
+
+# --- MDX: ensure popup texts also go through post-processor ---
+def tg_answer_callback(token, callback_query_id, text: str = "", logger=None, show_alert: bool = False, cache_time: int | None = None):
+    try:
+        processed = mdx_postprocess_text(text, None)
+    except Exception:
+        processed = text
+    try:
+        return __mdx_orig_answer_cb(token, callback_query_id, processed, logger=logger, show_alert=show_alert, cache_time=cache_time)
+    except TypeError:
+        # Fallback for older tg_safe signature
+        return __mdx_orig_answer_cb(token, callback_query_id, processed)
+# --- /MDX wrapper ---
+
 from metri_domain_rdap import _rdap as __rdap_impl  # injected
 from flask import Flask
 import sqlite3
