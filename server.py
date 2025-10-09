@@ -7703,3 +7703,73 @@ def _answer_why_quickly(cq, addr_hint=None):
         except Exception:
             pass
 # ================= /MDX HOTFIX v2 (Robust POPUP ALIGN) =================
+
+
+# === SAFE9e FINAL TELEGRAM WRAP (non-invasive) ===
+try:
+    import requests as _rq_final
+    if not getattr(_rq_final, "_SAFE9E_FINAL_WRAP", False):
+        _SAFE9E_PREV_POST = _rq_final.post
+        def _safe9e_final_post(url, *args, **kwargs):
+            try:
+                if isinstance(url, str) and 'api.telegram.org' in url:
+                    js = kwargs.get('json')
+                    if isinstance(js, dict):
+                        ch = js.get('chat_id')
+                        try:
+                            if js.get('text'):
+                                js['text'] = mdx_postprocess_text(js.get('text'), ch)
+                            if js.get('caption'):
+                                js['caption'] = mdx_postprocess_text(js.get('caption'), ch)
+                        except Exception:
+                            pass
+                        kwargs['json'] = js
+            except Exception:
+                pass
+            return _SAFE9E_PREV_POST(url, *args, **kwargs)
+        _rq_final.post = _safe9e_final_post
+        _rq_final._SAFE9E_FINAL_WRAP = True
+except Exception:
+    pass
+# === /SAFE9e FINAL TELEGRAM WRAP ===
+
+
+# === SAFE9e OUTBOUND GUARD (anti-glushilka) ===
+try:
+    import os as _os_guard
+    import urllib.parse as _urlp_guard
+    import requests as _rq_guard
+    if not getattr(_rq_guard, "_SAFE9E_OUTBOUND_GUARD", False):
+        _SAFE9E_ORIG_SESSION_POST = _rq_guard.sessions.Session.post
+        _SAFE9E_PREV_CHAIN_POST = _rq_guard.post  # whatever chain currently installed
+
+        _SAFE9E_ALLOWED_HOSTS = set((_os_guard.getenv("SAFE9E_ALLOWED_HOSTS") or "api.telegram.org").split(","))
+
+        def _safe9e_guard_post(url, *args, **kwargs):
+            # Hard off-switch for all patches
+            if _os_guard.getenv("SAFE9E_PATCH_DISABLE") == "1":
+                s = _rq_guard.sessions.Session()
+                return _SAFE9E_ORIG_SESSION_POST(s, url, *args, **kwargs)
+            try:
+                host = _urlp_guard.urlparse(url).hostname or ""
+            except Exception:
+                host = ""
+            # Only allow the patched chain for allowed hosts (default: Telegram only).
+            if host in _SAFE9E_ALLOWED_HOSTS:
+                return _SAFE9E_PREV_CHAIN_POST(url, *args, **kwargs)
+            # For everything else, bypass the patched chain entirely.
+            s = _rq_guard.sessions.Session()
+            return _SAFE9E_ORIG_SESSION_POST(s, url, *args, **kwargs)
+
+        _rq_guard.post = _safe9e_guard_post
+        # Also reflect into any alias like _rq
+        try:
+            import requests as _rq_alias
+            _rq_alias.post = _safe9e_guard_post
+        except Exception:
+            pass
+        _rq_guard._SAFE9E_OUTBOUND_GUARD = True
+except Exception:
+    pass
+# === /SAFE9e OUTBOUND GUARD ===
+
