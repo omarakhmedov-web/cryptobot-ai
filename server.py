@@ -7706,104 +7706,227 @@ def _answer_why_quickly(cq, addr_hint=None):
 
 
 
-# === SAFE9e MONO CONSISTENCY WRAP v7 ===
-# Non-invasive: wraps existing functions; does NOT touch webhook handlers.
-# Goals:
-#  - Keep webhook stable
-#  - Avoid global "глушилка" for non-Telegram POSTs
-#  - Normalize Telegram texts AFTER original mdx_postprocess_text
-#  - Fix HTML 'Risk verdict' header if missing, by intercepting .html writes
+# === SAFE9e MONO CONSISTENCY WRAP v9 ===
+# Purpose: Unify risk/verdict across all outgoing Telegram messages and HTML without touching webhook handlers.
+# - Anti-"глушилка": non-Telegram POST bypasses patched chain
+# - Telegram final filter applies to BOTH json and multipart "data"
+# - Canonicalization: remember canonical (verdict, score) per (chat_id, token) and apply to subsequent messages
+# - HTML write filter: fill Risk verdict header if missing, using canonical or heuristics
 try:
-    import os as _os7, re as _re7, builtins as _bi7, urllib.parse as _u7, requests as _rq7
+    import os as _os9, re as _re9, builtins as _bi9, urllib.parse as _u9, requests as _rq9, time as _t9
 
-    # ---- 1) Outbound guard (anti-"глушилка") ----
-    if not getattr(_rq7, "_SAFE9E_OUTBOUND_GUARD_V7", False):
-        _SAFE9E_ORIG_SESSION_POST_V7 = _rq7.sessions.Session.post
-        _SAFE9E_CHAIN_POST_V7 = _rq7.post  # whatever is currently installed
-        _SAFE9E_ALLOWED_V7 = set((_os7.getenv("SAFE9E_ALLOWED_HOSTS") or "api.telegram.org").split(","))
+    # ------------------------- Utilities -------------------------
+    _MDX_CANON = {}  # (chat_id, token_lower) -> {"score": int, "verdict": "CAUTION 🟡"}
+    _MDX_CANON_TTL = 600  # seconds
+    _MDX_CANON_TIME = {}
 
-        def _safe9e_guard_post_v7(url, *args, **kwargs):
-            if _os7.getenv("SAFE9E_PATCH_DISABLE") == "1":
-                s = _rq7.sessions.Session()
-                return _SAFE9E_ORIG_SESSION_POST_V7(s, url, *args, **kwargs)
-            try:
-                host = _u7.urlparse(url).hostname or ""
-            except Exception:
-                host = ""
-            if host in _SAFE9E_ALLOWED_V7:
-                return _SAFE9E_CHAIN_POST_V7(url, *args, **kwargs)
-            s = _rq7.sessions.Session()
-            return _SAFE9E_ORIG_SESSION_POST_V7(s, url, *args, **kwargs)
+    def _canon_key(chat_id, token):
+        if chat_id is None: return None
+        if not token: return None
+        return (str(chat_id), token.lower())
 
-        _rq7.post = _safe9e_guard_post_v7
-        _rq7._SAFE9E_OUTBOUND_GUARD_V7 = True
+    def _canon_set(chat_id, token, score, verdict):
+        k = _canon_key(chat_id, token)
+        if not k: return
+        _MDX_CANON[k] = {"score": int(score), "verdict": verdict}
+        _MDX_CANON_TIME[k] = _t9.time()
+        try:
+            print(f"[SAFE9e] canon set chat={chat_id} token={token} score={score} verdict={verdict}", flush=True)
+        except Exception:
+            pass
 
-    # ---- 2) Extend mdx_postprocess_text, don't replace ----
-    _MDX_ORIG_POSTPROC = globals().get('mdx_postprocess_text')
+    def _canon_get(chat_id, token):
+        k = _canon_key(chat_id, token)
+        if not k: return None
+        ts = _MDX_CANON_TIME.get(k, 0)
+        if ts and (_t9.time() - ts) > _MDX_CANON_TTL:
+            _MDX_CANON.pop(k, None); _MDX_CANON_TIME.pop(k, None); return None
+        return _MDX_CANON.get(k)
 
-    def _mdx_enhance_text_v7(txt: str, chat_id=None) -> str:
-        t = str(txt or "")
-        # A) Why++ sign normalization
-        t = _re7.sub(r'(?m)^[\s–-]*−\s*20\s+Owner privileges present', r'+20  Owner privileges present', t)
-        t = _re7.sub(r'(?m)^[\s–-]*−\s*30\s+LP concentrated in a single holder:\s*([0-9\.%]+)', r'+30  LP concentrated in a single holder: \\1', t)
-        # B) Owner renounced cleanup (remove negative "Owner privileges present", add positive)
-        if _re7.search(r'(?i)\bOwner:\s*0x0+…?0+\b', t) or _re7.search(r'(?i)ownership\s+renounced', t):
-            # remove the factor line if present after A)
-            t = _re7.sub(r'(?m)^\s*\+?\s*20\s+Owner privileges present\s*$', r'', t)
+    _RISK_WORD = r'(LOW RISK|CAUTION|MEDIUM RISK|HIGH RISK|EXTREME RISK)'
+    _EMOJI = r'[🟢🟡🟠🔴🟣]?'
+    _RSCORE = r'Risk\s*score\s*:\s*(\d{1,3})\s*/\s*100'
+    _TVLINE = r'Trust\s+verdict\s*:\s*([^\n•<]+)'
+    _HEX = r'0x[a-fA-F0-9]{40}'
+
+    def _find_token(text):
+        m = _re9.search(_HEX, text or '')
+        return m.group(0) if m else None
+
+    def _extract_score_and_verdict(text):
+        """Try to extract (score, verdict_label_with_emoji) from text."""
+        t = str(text or '')
+        # Case A: "Trust verdict: NAME • Risk score: N/100"
+        mv = _re9.search(_TVLINE, t, _re9.I)
+        ms = _re9.search(_RSCORE, t, _re9.I)
+        if mv and ms:
+            verdict = mv.group(1).strip()
+            return int(ms.group(1)), verdict
+        # Case B: line like "CAUTION 🟡 • Risk score: 50/100"
+        m2 = _re9.search(rf'{_RISK_WORD}\s*{_EMOJI}\s*•\s*{_RSCORE}', t, _re9.I)
+        if m2:
+            verdict = m2.group(1).strip()
+            score = m2.group(2)
+            return int(score), verdict
+        # Case C: header-like "LOW RISK 🟢" and later "Risk score: N/100"
+        m3v = _re9.search(_RISK_WORD, t, _re9.I)
+        m3s = _re9.search(_RSCORE, t, _re9.I)
+        if m3v and m3s:
+            return int(m3s.group(1)), m3v.group(1).strip()
+        return None, None
+
+    def _apply_canon(text, chat_id):
+        """Return text with canonical verdict/score applied if available."""
+        t = str(text or '')
+        tok = _find_token(t)
+        if not tok:
+            return t
+        canon = _canon_get(chat_id, tok)
+        if not canon:
+            # capture if found in this text
+            sc, vv = _extract_score_and_verdict(t)
+            if sc is not None and vv:
+                _canon_set(chat_id, tok, sc, vv)
+            return t
+        # Rewrite any verdict+score line to canonical
+        sc = canon["score"]; vv = canon["verdict"]
+        t = _re9.sub(rf'{_RISK_WORD}\s*{_EMOJI}\s*•\s*{_RSCORE}', f'{vv} • Risk score: {sc}/100', t, flags=_re9.I)
+        t = _re9.sub(_RSCORE, f'Risk score: {sc}/100', t, flags=_re9.I)
+        # Replace preliminary banner
+        t = _re9.sub(r'(?i)MEDIUM RISK\s*🟡?\s*•\s*Insufficient data.*', f'{vv} • Risk score: {sc}/100', t)
+        return t
+
+    def _enhance_why_and_lp(t):
+        t = str(t or '')
+        # Normalize Why++ signs
+        t = _re9.sub(r'(?m)^[\s–-]*−\s*20\s+Owner privileges present', r'+20  Owner privileges present', t)
+        t = _re9.sub(r'(?m)^[\s–-]*−\s*30\s+LP concentrated in a single holder:\s*([0-9\.%]+)', r'+30  LP concentrated in a single holder: \\1', t)
+        # Owner renounced cleanup
+        if _re9.search(r'(?i)\bOwner:\s*0x0+…?0+\b', t) or _re9.search(r'(?i)ownership\s+renounced', t):
+            t = _re9.sub(r'(?m)^\s*\+?\s*20\s+Owner privileges present\s*$', r'', t)
             if 'Ownership renounced' not in t:
                 t = t.replace('Why++ factors', 'Why++ factors\n-20  Ownership renounced')
-        # C) LP verdict reconciliation
-        if 'EOA holds LP' in t and _re7.search(r'Top holder type:\s*contract', t):
+        # LP verdict reconciliation
+        if 'EOA holds LP' in t and _re9.search(r'Top holder type:\s*contract', t):
             t = t.replace('Verdict: 🔴 high risk (EOA holds LP)', 'Verdict: 🟡 mixed (contract/custodian holds LP)')
         return t
 
-    def mdx_postprocess_text(text: str, chat_id=None):  # wrapper that calls original first
-        try:
-            base = _MDX_ORIG_POSTPROC(text, chat_id) if callable(_MDX_ORIG_POSTPROC) else str(text or "")
-            return _mdx_enhance_text_v7(base, chat_id)
-        except Exception:
-            try:
-                return _mdx_enhance_text_v7(text, chat_id)
-            except Exception:
-                return text
+    def _final_filter(text, chat_id):
+        t = _apply_canon(text, chat_id)
+        t = _enhance_why_and_lp(t)
+        return t
 
-    # ---- 3) Telegram-only final filter ----
-    if not getattr(_rq7, "_SAFE9E_TG_FINAL_WRAP_V7", False):
-        _SAFE9E_PREV_POST_V7 = _rq7.post
-        def _safe9e_tg_final_post_v7(url, *args, **kwargs):
+    # ------------------ 1) Outbound guard (anti-glushilka) ------------------
+    if not getattr(_rq9, "_SAFE9E_OUTBOUND_GUARD_V9", False):
+        _SAFE9E_ORIG_SESSION_POST_V9 = _rq9.sessions.Session.post
+        _SAFE9E_CHAIN_POST_V9 = _rq9.post  # current chain
+        _SAFE9E_ALLOWED_V9 = set((_os9.getenv("SAFE9E_ALLOWED_HOSTS") or "api.telegram.org").split(","))
+
+        def _safe9e_guard_post_v9(url, *args, **kwargs):
+            if _os9.getenv("SAFE9E_PATCH_DISABLE") == "1":
+                s = _rq9.sessions.Session()
+                return _SAFE9E_ORIG_SESSION_POST_V9(s, url, *args, **kwargs)
+            try:
+                host = _u9.urlparse(url).hostname or ""
+            except Exception:
+                host = ""
+            if host in _SAFE9E_ALLOWED_V9:
+                return _SAFE9E_CHAIN_POST_V9(url, *args, **kwargs)
+            s = _rq9.sessions.Session()
+            return _SAFE9E_ORIG_SESSION_POST_V9(s, url, *args, **kwargs)
+
+        _rq9.post = _safe9e_guard_post_v9
+        _rq9._SAFE9E_OUTBOUND_GUARD_V9 = True
+
+    # ------------- 2) Telegram final filter (json AND data paths) ------------
+    def _inject_tg_payload(kwargs, chat_id):
+        js = kwargs.get('json')
+        if isinstance(js, dict):
+            if js.get('text'):
+                js['text'] = _final_filter(js.get('text'), chat_id)
+            if js.get('caption'):
+                js['caption'] = _final_filter(js.get('caption'), chat_id)
+            kwargs['json'] = js
+        dt = kwargs.get('data')
+        if isinstance(dt, dict):
+            if dt.get('text'):
+                dt['text'] = _final_filter(dt.get('text'), chat_id)
+            if dt.get('caption'):
+                dt['caption'] = _final_filter(dt.get('caption'), chat_id)
+            kwargs['data'] = dt
+        return kwargs
+
+    if not getattr(_rq9, "_SAFE9E_TG_FINAL_WRAP_V9", False):
+        _SAFE9E_PREV_POST_V9 = _rq9.post
+        def _safe9e_tg_final_post_v9(url, *args, **kwargs):
             try:
                 if isinstance(url, str) and 'api.telegram.org' in url:
+                    ch = None
                     js = kwargs.get('json')
+                    dt = kwargs.get('data')
                     if isinstance(js, dict):
-                        ch = js.get('chat_id')
-                        if js.get('text'):
-                            js['text'] = mdx_postprocess_text(js.get('text'), ch)
-                        if js.get('caption'):
-                            js['caption'] = mdx_postprocess_text(js.get('caption'), ch)
-                        kwargs['json'] = js
+                        ch = js.get('chat_id') or js.get('message',{}).get('chat',{}).get('id')
+                    if ch is None and isinstance(dt, dict):
+                        ch = dt.get('chat_id')
+                    kwargs = _inject_tg_payload(kwargs, ch)
             except Exception:
                 pass
-            return _SAFE9E_PREV_POST_V7(url, *args, **kwargs)
-        _rq7.post = _safe9e_tg_final_post_v7
-        _rq7._SAFE9E_TG_FINAL_WRAP_V7 = True
+            return _SAFE9E_PREV_POST_V9(url, *args, **kwargs)
+        _rq9.post = _safe9e_tg_final_post_v9
+        _rq9._SAFE9E_TG_FINAL_WRAP_V9 = True
 
-    # ---- 4) HTML write-time patch (fill Risk verdict header if "? (?/100)") ----
-    def _mdx_html_fill_verdict_v7(h: str) -> str:
+    # Also wrap Session.post for Telegram in case code uses a Session instance.
+    if not getattr(_rq9.sessions.Session, "_SAFE9E_TG_SESSION_WRAP_V9", False):
+        _SAFE9E_ORIG_SES_POST_V9 = _rq9.sessions.Session.post
+        def _safe9e_tg_session_post_v9(self, url, *args, **kwargs):
+            try:
+                if isinstance(url, str) and 'api.telegram.org' in url:
+                    ch = None
+                    js = kwargs.get('json')
+                    dt = kwargs.get('data')
+                    if isinstance(js, dict):
+                        ch = js.get('chat_id') or js.get('message',{}).get('chat',{}).get('id')
+                    if ch is None and isinstance(dt, dict):
+                        ch = dt.get('chat_id')
+                    kwargs = _inject_tg_payload(kwargs, ch)
+            except Exception:
+                pass
+            return _SAFE9E_ORIG_SES_POST_V9(self, url, *args, **kwargs)
+        _rq9.sessions.Session.post = _safe9e_tg_session_post_v9
+        _rq9.sessions.Session._SAFE9E_TG_SESSION_WRAP_V9 = True
+
+    # --------------------- 3) HTML write-time patch ---------------------
+    def _mdx_html_fill_verdict_v9(h: str) -> str:
         try:
-            if _re7.search(r'(<h2>Risk verdict</h2>\\s*<p><b>)\\?\\s*\\(\\?/100\\)(</b></p>)', h):
-                mv = _re7.search(r'Trust verdict:\\s*([^<\\n]+)\\s*•\\s*Risk score:\\s*(\\d+)\\s*/\\s*100', h, _re7.I)
-                if mv:
-                    name, score = mv.group(1).strip(), mv.group(2)
-                    h = _re7.sub(r'(<h2>Risk verdict</h2>\\s*<p><b>)\\?\\s*\\(\\?/100\\)(</b></p>)',
-                                 rf'\\1{name} ({score}/100)\\2', h, count=1)
-            return h
+            txt = str(h or '')
+            # If header missing 'Name (N/100)', try to fill.
+            if _re9.search(r'(<h2>Risk verdict</h2>\s*<p><b>)(\?\s*\(\?\/100\))', txt):
+                # Prefer canonical
+                chat_match = _re9.search(r'Chat:\s*(\-?\d+)', txt)  # if present
+                token = _find_token(txt)
+                ch = chat_match.group(1) if chat_match else None
+                canon = _canon_get(ch, token) if (ch and token) else None
+                if canon:
+                    rep = f"{canon['verdict']} ({canon['score']}/100)"
+                    txt = _re9.sub(r'(<h2>Risk verdict</h2>\s*<p><b>)\?\s*\(\?\/100\)',
+                                   rf'\1{rep}', txt, count=1)
+                else:
+                    # Fallback: parse from body
+                    sc, vv = _extract_score_and_verdict(txt)
+                    if sc is not None and vv:
+                        txt = _re9.sub(r'(<h2>Risk verdict</h2>\s*<p><b>)\?\s*\(\?\/100\)',
+                                       rf'\1{vv} ({sc}/100)', txt, count=1)
+                    elif sc is not None:
+                        txt = _re9.sub(r'(<h2>Risk verdict</h2>\s*<p><b>)\?\s*\(\?\/100\)',
+                                       rf'\1Risk score: {sc}/100', txt, count=1)
+            return txt
         except Exception:
             return h
 
-    _SAFE9E_PREV_OPEN_V7 = getattr(_bi7, "open", open)
-    if not getattr(_bi7, "_SAFE9E_OPEN_WRAP_V7", False):
+    _SAFE9E_PREV_OPEN_V9 = getattr(_bi9, "open", open)
+    if not getattr(_bi9, "_SAFE9E_OPEN_WRAP_V9", False):
         def open(file, *a, **kw):  # noqa: F811
-            f = _SAFE9E_PREV_OPEN_V7(file, *a, **kw)
+            f = _SAFE9E_PREV_OPEN_V9(file, *a, **kw)
             try:
                 p = str(file)
                 if p.endswith(".html"):
@@ -7813,10 +7936,10 @@ try:
                             try:
                                 if isinstance(data, (bytes, bytearray)):
                                     s = data.decode("utf-8", "ignore")
-                                    s2 = _mdx_html_fill_verdict_v7(s)
+                                    s2 = _mdx_html_fill_verdict_v9(s)
                                     data = s2.encode("utf-8", "ignore")
                                 elif isinstance(data, str):
-                                    data = _mdx_html_fill_verdict_v7(data)
+                                    data = _mdx_html_fill_verdict_v9(data)
                             except Exception: pass
                             return self._f.write(data)
                         def __getattr__(self,k): return getattr(self._f,k)
@@ -7826,14 +7949,13 @@ try:
             except Exception:
                 pass
             return f
-        _bi7.open = open
-        _bi7._SAFE9E_OPEN_WRAP_V7 = True
+        _bi9.open = open
+        _bi9._SAFE9E_OPEN_WRAP_V9 = True
 
-    # Minimal log to know patch loaded
-    print("[SAFE9e] MONO v7 loaded", flush=True)
+    print("[SAFE9e] MONO v9 loaded", flush=True)
 
-except Exception as _e_safe9e_v7:
-    try: print(f"[SAFE9e] MONO v7 failed: {_e_safe9e_v7}", flush=True)
+except Exception as _e_safe9e_v9:
+    try: print(f"[SAFE9e] MONO v9 failed: {_e_safe9e_v9}", flush=True)
     except Exception: pass
-# === /SAFE9e MONO CONSISTENCY WRAP v7 ===
+# === /SAFE9e MONO CONSISTENCY WRAP v9 ===
 
