@@ -7760,14 +7760,15 @@ def _answer_why_quickly(cq, addr_hint=None):
 # ================= /MDX HOTFIX v2 (Robust POPUP ALIGN) =================
 
 # ========================
-# CONSISTENCY SHIM (append-only, safe)
-# Enforces single source of truth for risk across Why?/Why++/Report/On-chain.
+# CONSISTENCY SHIM — single source of truth for risk (score/label/neg/pos)
 try:
     import re as _re
 
     def _label_for(sc: int) -> str:
-        try: sc = int(sc)
-        except Exception: sc = 50
+        try:
+            sc = int(sc)
+        except Exception:
+            sc = 50
         if sc >= 75: return "HIGH RISK 🔴"
         if sc >= 25: return "CAUTION 🟡"
         return "LOW RISK 🟢"
@@ -7781,7 +7782,7 @@ try:
             except Exception:
                 pass
             ent = RISK_CACHE.get(a) or {}
-        # normalize fields
+        # normalize & freeze core fields
         try:
             sc = int(ent.get("score", 50))
         except Exception:
@@ -7805,15 +7806,12 @@ try:
         if pos_s: body += f" — ✅ {pos_s}"
         return body[:190] + ("…" if len(body) > 190 else "")
 
-    # Wrap original Why handlers if present
+    # Wrap Why?/Why++ to always use the unified entry
     _orig_quick = globals().get("_answer_why_quickly")
-    _orig_deep = globals().get("_answer_why_deep")
-
     def _answer_why_quickly(cq, addr_hint=None):
         try:
             msg = cq.get("message", {}) or {}
             base_text = msg.get("text") or msg.get("caption") or ""
-            chat_id = ((msg.get("chat") or {}) or {}).get("id")
             addr = (addr_hint or "") or ""
             if not addr:
                 m = _re.search(r'(?i)\b(0x[0-9a-fA-F]{40})\b', base_text or "")
@@ -7829,11 +7827,11 @@ try:
             except Exception:
                 pass
 
+    _orig_deep = globals().get("_answer_why_deep")
     def _answer_why_deep(cq, addr_hint=None):
-        # For now identical behavior to ensure consistency
         return _answer_why_quickly(cq, addr_hint)
 
-    # Prevent on-chain builders from overriding score/label
+    # Harden on-chain merge: never override score/label
     _orig_merge = globals().get("_merge_onchain_into_risk")
     if callable(_orig_merge):
         def _merge_onchain_into_risk(addr, meta):
@@ -7854,5 +7852,4 @@ except Exception as _e_consistency:
         print("[CONSISTENCY_SHIM] disabled:", _e_consistency)
     except Exception:
         pass
-
 # ========================
