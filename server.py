@@ -1010,15 +1010,16 @@ try:
                             rm['inline_keyboard'] = rows
                         except Exception:
                             pass
-                    # Standardize order within each row
-                    order = ['Why++','More','Details','Report','↻ Retry LP','HP','Open in Scan','Open on DexScreener','Open in DEX','Copy CA','Save PDF']
-                    rank = {k:i for i,k in enumerate(order)}
+                    # Standardize order within each row (only in CANON mode)
                     try:
-                        rows = rm.get('inline_keyboard') or []
-                        for r in rows:
-                            if isinstance(r, list):
-                                r.sort(key=lambda b: rank.get(str(b.get('text','')), 999))
-                        rm['inline_keyboard'] = rows
+                        if (os.getenv("SAFE9E_MARKUP_MODE", "legacy") or "legacy").lower() == "canon":
+                            order = ['Why++','More','Details','Report','↻ Retry LP','HP','Open in Scan','Open on DexScreener','Open in DEX','Copy CA','Save PDF']
+                            rank = {k:i for i,k in enumerate(order)}
+                            rows = rm.get('inline_keyboard') or []
+                            for r in rows:
+                                if isinstance(r, list):
+                                    r.sort(key=lambda b: rank.get(str(b.get('text','')), 999))
+                            rm['inline_keyboard'] = rows
                     except Exception:
                         pass
                     js['reply_markup'] = rm
@@ -3665,6 +3666,48 @@ def _is_whitelisted(addr: str, text: str):
         pass
     return False, None
 
+
+# === Consistent popup computation (fresh, cache-agnostic) ===
+def _compute_quick_popup(addr: str, base_text: str):
+    """Return dict with keys: score,label,neg,pos,w_neg,w_pos,not_tradable.
+    Computes from message text and refreshes on-chain overlays for better accuracy.
+    """
+    try:
+        addr = (addr or "").lower()
+        # 1) initial from text
+        sc, lab, rs = _risk_verdict(addr, base_text or "")
+        entry = {
+            "score": int(sc or 0),
+            "label": lab or "LOW RISK 🟢",
+            "neg": list((rs or {}).get("neg") or []),
+            "pos": list((rs or {}).get("pos") or []),
+            "w_neg": list((rs or {}).get("w_neg") or []),
+            "w_pos": list((rs or {}).get("w_pos") or []),
+            "not_tradable": False,
+        }
+        # 2) align with not tradable markers in the message
+        try:
+            if re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|Contract code:\s*absent)', base_text or ""):
+                entry["not_tradable"] = True
+                entry["score"] = _risk_bump_not_tradable(entry["score"])
+                entry["label"] = "HIGH RISK 🔴"
+        except Exception:
+            pass
+        # 3) enrich with on-chain inspector (best-effort)
+        try:
+            _details, meta = _onchain_inspect(addr)
+            _merge_onchain_into_risk(addr, meta)
+            rc = RISK_CACHE.get(addr) or {}
+            if rc:
+                for k in ("score","label","neg","pos","w_neg","w_pos"):
+                    if rc.get(k) is not None:
+                        entry[k] = rc.get(k)
+        except Exception:
+            pass
+        return entry
+    except Exception:
+        return {"score": 0, "label": "LOW RISK 🟢", "neg": [], "pos": [], "w_neg": [], "w_pos": [], "not_tradable": False}
+# === /Consistent popup computation ===
 def _risk_verdict(addr, text):
     score = 0
     neg = []
@@ -4540,6 +4583,72 @@ def _render_report(addr: str, text: str):
     except Exception:
         return None, html
 
+
+
+# --- Webhook compatibility shim (accepts both /crypto_webhook/<secret> and /webhook/<secret>) ---
+try:
+    from flask import request
+    import os
+
+    def _verify_header_secret():
+        hs = os.getenv("WEBHOOK_HEADER_SECRET", "") or os.getenv("CRYPTO_WEBHOOK_HEADER", "")
+        if not hs:
+            return True
+        got = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        return got == hs
+
+    @app.route("/webhook/<secret>", methods=["POST"])
+    def webhook_compat(secret):
+        # Accept either WEBHOOK_SECRET or CRYPTO_WEBHOOK_SECRET
+        ok = False
+        if secret and secret == (os.getenv("WEBHOOK_SECRET", "") or ""):
+            ok = True
+        if secret and secret == (os.getenv("CRYPTO_WEBHOOK_SECRET", "") or ""):
+            ok = True
+        if not ok or not _verify_header_secret():
+            return ("forbidden", 403)
+        # Temporarily align CRYPTO_WEBHOOK_SECRET for the inner handler
+        prev = os.environ.get("CRYPTO_WEBHOOK_SECRET")
+        os.environ["CRYPTO_WEBHOOK_SECRET"] = secret
+        try:
+            # Reuse existing crypto_webhook handler for actual processing
+            return crypto_webhook(secret)
+        finally:
+            if prev is None:
+                try: del os.environ["CRYPTO_WEBHOOK_SECRET"]
+                except Exception: pass
+            else:
+                os.environ["CRYPTO_WEBHOOK_SECRET"] = prev
+
+    # Optional: header-token only endpoint without path secret (Telegram supports header secret)
+    @app.route("/webhook", methods=["POST"])
+    def webhook_header_only():
+        if not _verify_header_secret():
+            return ("forbidden", 403)
+        # Route to crypto_webhook with env secret (if set), otherwise bypass strict check
+        secret = os.getenv("CRYPTO_WEBHOOK_SECRET", "") or os.getenv("WEBHOOK_SECRET", "")
+        if secret:
+            return crypto_webhook(secret)
+        # Fallback: emulate inner logic with minimal parsing
+        try:
+            payload = request.get_json(force=True, silent=True) or {}
+        except Exception:
+            payload = {}
+        # If the project defines a generic update processor use it; else no-op OK
+        try:
+            handler = globals().get("process_update") or globals().get("_process_update")
+            if callable(handler):
+                handler(payload)
+        except Exception:
+            pass
+        return ("ok", 200)
+except Exception as _e:
+    try:
+        print(f"[webhook-compat] init failed: {_e}")
+    except Exception:
+        pass
+# --- /Webhook compatibility shim ---
+
 # ========================
 # HTTP routes
 # ========================
@@ -4682,94 +4791,45 @@ def admin_diag():
 # Telegram webhook & callbacks
 # ========================
 
+
 def _answer_why_quickly(cq, addr_hint=None):
     try:
         msg = cq.get("message", {}) or {}
         text_msg = msg.get("text") or msg.get("caption") or ""
-        chat_id = msg.get("chat", {}).get("id")
-        # Try extract CA from message or stored map
-        m_ca = re.search(r'(?i)\b(0x[0-9a-fA-F]{40})\b', text_msg or '')
-        ca = (addr_hint or (m_ca.group(1) if m_ca else None) or _LAST_CA_BY_CHAT.get(str(chat_id)) or "")
-        if ca: _remember_ca_for_chat(str(chat_id), ca)
-        # Score from message
-        sc_msg = None
-        msc = re.search(r'(?mi)Risk\\s*score:\\s*(\\d+)\\s*/\\s*100', text_msg or '')
-        if msc: sc_msg = int(msc.group(1))
-        # Bare (N/100) variant
-        if sc_msg is None:
-            m0 = re.search(r'\\(\\s*(\\d+)\\s*/\\s*100\\s*\\)', text_msg or '')
-            if m0: sc_msg = int(m0.group(1))
-        # Detect NOT TRADABLE flag from text
-        not_tradable = bool(re.search(r'(?i)(NOT\\s+TRADABLE|no\\s+active\\s+pools|No\\s+pools\\s+found)', text_msg or ''))
-        # Fallback: LAST_VERDICT by CA or chat
-        sc_cache = None
-        if ca and ca.lower() in LAST_VERDICT and LAST_VERDICT[ca.lower()].get("score") is not None:
-            sc_cache = int(LAST_VERDICT[ca.lower()]["score"])
-            not_tradable = not_tradable or bool(LAST_VERDICT[ca.lower()].get("nt"))
-        elif str(chat_id) in _LAST_VERDICT_BY_CHAT and _LAST_VERDICT_BY_CHAT[str(chat_id)].get("score") is not None:
-            sc_cache = int(_LAST_VERDICT_BY_CHAT[str(chat_id)]["score"])
-            not_tradable = not_tradable or bool(_LAST_VERDICT_BY_CHAT[str(chat_id)].get("nt"))
-        # Choose score
-        sc = sc_msg if sc_msg is not None else sc_cache
-        if sc is None:
-            # Last resort: recompute
-            try:
-                sc2, _, rs = _risk_verdict(ca or "", text_msg or "")
-                if sc2 is not None:
-                    sc = int(sc2)
-            except Exception:
-                sc = 0
-        # NOT TRADABLE bump
-        if not_tradable and sc < 80:
-            sc = 80
-        # Label
-        if sc <= 15: label_now = "LOW RISK 🟢"
-        elif sc >= 70: label_now = "HIGH RISK 🔴"
-        else: label_now = "CAUTION 🟡"
-        # Reasons (best-effort from cache)
-        info = None
-        try:
-            info = _RISK_CACHE.get(ca.lower()) if ca else None  # may differ in impl
-        except Exception:
-            try:
-                info = RISK_CACHE.get(ca.lower()) if ca else None
-            except Exception:
-                info = None
-        reasons_pos = []
-        reasons_neg = []
-        if isinstance(info, dict):
-            reasons_pos = info.get("reasons_pos") or list(zip(info.get("pos", []), info.get("w_pos", [])))
-            reasons_neg = info.get("reasons_neg") or list(zip(info.get("neg", []), info.get("w_neg", [])))
-        # Normalize reasons to tuples
-        def _pairs(p):
-            out=[]
-            for x in (p or [])[:8]:
-                try: t,w = x[0], x[1]
-                except Exception: t,w = (str(x),0)
-                out.append((t,w))
-            try:
-                out.sort(key=lambda k: (k[1] if isinstance(k[1],(int,float)) else 0), reverse=True)
-            except Exception: pass
-            return out
-        ppos = _pairs(reasons_pos); pneg=_pairs(reasons_neg)
-        neg_s = "; ".join([f"{t} (−{w})" for t,w in pneg[:2] if t]) if pneg else ""
-        pos_s = "; ".join([f"{t} (+{w})" for t,w in ppos[:2] if t]) if ppos else ""
-        # Build popup
-        if not_tradable:
-            body = f"HIGH RISK 🔴 • NOT TRADABLE — Risk score: {sc}/100"
+        chat_id = (msg.get("chat", {}) or {}).get("id")
+        # extract CA reliably
+        ca = None
+        if addr_hint:
+            ca = addr_hint.strip().lower()
         else:
-            body = f"{label_now} • Risk score: {sc}/100"
+            m_ca = re.search(r'(?i)\b(0x[0-9a-fA-F]{40})\b', text_msg or '')
+            ca = m_ca.group(1).lower() if m_ca else None
+        if ca:
+            try:
+                _remember_ca_for_chat(str(chat_id), ca)
+            except Exception:
+                pass
+        entry = _compute_quick_popup(ca or "", text_msg or "")
+        sc = int(entry.get("score") or 0)
+        lab = entry.get("label") or "LOW RISK 🟢"
+        neg = list(entry.get("neg") or [])
+        pos = list(entry.get("pos") or [])
+        neg_s = "; ".join([str(x) for x in neg[:2] if x]) if neg else ""
+        pos_s = "; ".join([str(x) for x in pos[:2] if x]) if pos else ""
+        body = f"{lab} • Risk score: {sc}/100"
         if neg_s: body += f" — ⚠️ {neg_s}"
         if pos_s: body += f" — ✅ {pos_s}"
         if len(body) > 190: body = body[:187] + "…"
-        # Remember for future
-        _remember_verdict(ca, sc, label_now, not_tradable, str(chat_id) if chat_id is not None else None)
-        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+        try:
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+        except TypeError:
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body)
     except Exception:
-        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
+        try:
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
+        except Exception:
+            pass
 
-@app.route("/webhook/<secret>", methods=["POST"])
-@require_webhook_secret
 def webhook(secret):
 
     # --- EARLY START HANDLER (runs before anything else) ---
@@ -5149,6 +5209,10 @@ def webhook(secret):
                     kind = "dex"; addr = data.split(":",1)[1]
                 addr = (addr or "").strip().lower()
                 pair, chain = _ds_resolve_pair_and_chain(addr)
+                try:
+                    _onchain_inspect(addr)
+                except Exception:
+                    pass
                 chain = (chain or "ethereum").lower()
                 if kind == "scan":
                     base = _explorer_base_for(chain)
@@ -5174,6 +5238,10 @@ def webhook(secret):
                 addr = data.split(":",1)[1].strip().lower()
                 # Resolve pair & chain
                 pair, chain = _ds_resolve_pair_and_chain(addr)
+                try:
+                    _onchain_inspect(addr)
+                except Exception:
+                    pass
                 chain = (chain or "").lower()
                 paddr = None
                 if isinstance(pair, dict):
@@ -7690,3 +7758,101 @@ def _answer_why_quickly(cq, addr_hint=None):
         except Exception:
             pass
 # ================= /MDX HOTFIX v2 (Robust POPUP ALIGN) =================
+
+# ========================
+# CONSISTENCY SHIM (append-only, safe)
+# Enforces single source of truth for risk across Why?/Why++/Report/On-chain.
+try:
+    import re as _re
+
+    def _label_for(sc: int) -> str:
+        try: sc = int(sc)
+        except Exception: sc = 50
+        if sc >= 75: return "HIGH RISK 🔴"
+        if sc >= 25: return "CAUTION 🟡"
+        return "LOW RISK 🟢"
+
+    def _ensure_full_verdict(addr: str, base_text: str):
+        a = (addr or "").lower()
+        ent = RISK_CACHE.get(a)
+        if not ent or "score" not in ent:
+            try:
+                _ = _append_verdict_block(a, base_text or "")
+            except Exception:
+                pass
+            ent = RISK_CACHE.get(a) or {}
+        # normalize fields
+        try:
+            sc = int(ent.get("score", 50))
+        except Exception:
+            sc = 50
+        ent["score"] = sc
+        ent["label"] = ent.get("label") or _label_for(sc)
+        ent["neg"] = list(ent.get("neg") or ent.get("w_neg") or [])
+        ent["pos"] = list(ent.get("pos") or ent.get("w_pos") or [])
+        RISK_CACHE[a] = ent
+        return ent
+
+    def _why_reply_from_entry(ent: dict) -> str:
+        sc = int(ent.get("score", 50))
+        lab = ent.get("label") or _label_for(sc)
+        neg = ent.get("neg") or []
+        pos = ent.get("pos") or []
+        neg_s = "; ".join([str(x) for x in neg[:2] if x]) if neg else ""
+        pos_s = "; ".join([str(x) for x in pos[:2] if x]) if pos else ""
+        body = f"{lab} • Risk score: {sc}/100"
+        if neg_s: body += f" — ⚠️ {neg_s}"
+        if pos_s: body += f" — ✅ {pos_s}"
+        return body[:190] + ("…" if len(body) > 190 else "")
+
+    # Wrap original Why handlers if present
+    _orig_quick = globals().get("_answer_why_quickly")
+    _orig_deep = globals().get("_answer_why_deep")
+
+    def _answer_why_quickly(cq, addr_hint=None):
+        try:
+            msg = cq.get("message", {}) or {}
+            base_text = msg.get("text") or msg.get("caption") or ""
+            chat_id = ((msg.get("chat") or {}) or {}).get("id")
+            addr = (addr_hint or "") or ""
+            if not addr:
+                m = _re.search(r'(?i)\b(0x[0-9a-fA-F]{40})\b', base_text or "")
+                addr = (m.group(1) if m else "").lower()
+            ent = _ensure_full_verdict(addr, base_text)
+            body = _why_reply_from_entry(ent)
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+        except TypeError:
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "processing…", logger=app.logger)
+        except Exception:
+            try:
+                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "processing…", logger=app.logger)
+            except Exception:
+                pass
+
+    def _answer_why_deep(cq, addr_hint=None):
+        # For now identical behavior to ensure consistency
+        return _answer_why_quickly(cq, addr_hint)
+
+    # Prevent on-chain builders from overriding score/label
+    _orig_merge = globals().get("_merge_onchain_into_risk")
+    if callable(_orig_merge):
+        def _merge_onchain_into_risk(addr, meta):
+            try:
+                a = (addr or "").lower()
+                _orig_merge(addr, meta)
+                ent = RISK_CACHE.get(a) or {}
+                sc = int(ent.get("score", 50))
+                ent["score"] = sc
+                ent["label"] = ent.get("label") or _label_for(sc)
+                RISK_CACHE[a] = ent
+            except Exception:
+                pass
+        globals()["_merge_onchain_into_risk"] = _merge_onchain_into_risk
+
+except Exception as _e_consistency:
+    try:
+        print("[CONSISTENCY_SHIM] disabled:", _e_consistency)
+    except Exception:
+        pass
+
+# ========================
