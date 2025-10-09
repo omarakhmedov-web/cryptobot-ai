@@ -7705,160 +7705,135 @@ def _answer_why_quickly(cq, addr_hint=None):
 # ================= /MDX HOTFIX v2 (Robust POPUP ALIGN) =================
 
 
-# === SAFE9e FINAL TELEGRAM WRAP (non-invasive) ===
+
+# === SAFE9e MONO CONSISTENCY WRAP v7 ===
+# Non-invasive: wraps existing functions; does NOT touch webhook handlers.
+# Goals:
+#  - Keep webhook stable
+#  - Avoid global "глушилка" for non-Telegram POSTs
+#  - Normalize Telegram texts AFTER original mdx_postprocess_text
+#  - Fix HTML 'Risk verdict' header if missing, by intercepting .html writes
 try:
-    import requests as _rq_final
-    if not getattr(_rq_final, "_SAFE9E_FINAL_WRAP", False):
-        _SAFE9E_PREV_POST = _rq_final.post
-        def _safe9e_final_post(url, *args, **kwargs):
+    import os as _os7, re as _re7, builtins as _bi7, urllib.parse as _u7, requests as _rq7
+
+    # ---- 1) Outbound guard (anti-"глушилка") ----
+    if not getattr(_rq7, "_SAFE9E_OUTBOUND_GUARD_V7", False):
+        _SAFE9E_ORIG_SESSION_POST_V7 = _rq7.sessions.Session.post
+        _SAFE9E_CHAIN_POST_V7 = _rq7.post  # whatever is currently installed
+        _SAFE9E_ALLOWED_V7 = set((_os7.getenv("SAFE9E_ALLOWED_HOSTS") or "api.telegram.org").split(","))
+
+        def _safe9e_guard_post_v7(url, *args, **kwargs):
+            if _os7.getenv("SAFE9E_PATCH_DISABLE") == "1":
+                s = _rq7.sessions.Session()
+                return _SAFE9E_ORIG_SESSION_POST_V7(s, url, *args, **kwargs)
+            try:
+                host = _u7.urlparse(url).hostname or ""
+            except Exception:
+                host = ""
+            if host in _SAFE9E_ALLOWED_V7:
+                return _SAFE9E_CHAIN_POST_V7(url, *args, **kwargs)
+            s = _rq7.sessions.Session()
+            return _SAFE9E_ORIG_SESSION_POST_V7(s, url, *args, **kwargs)
+
+        _rq7.post = _safe9e_guard_post_v7
+        _rq7._SAFE9E_OUTBOUND_GUARD_V7 = True
+
+    # ---- 2) Extend mdx_postprocess_text, don't replace ----
+    _MDX_ORIG_POSTPROC = globals().get('mdx_postprocess_text')
+
+    def _mdx_enhance_text_v7(txt: str, chat_id=None) -> str:
+        t = str(txt or "")
+        # A) Why++ sign normalization
+        t = _re7.sub(r'(?m)^[\s–-]*−\s*20\s+Owner privileges present', r'+20  Owner privileges present', t)
+        t = _re7.sub(r'(?m)^[\s–-]*−\s*30\s+LP concentrated in a single holder:\s*([0-9\.%]+)', r'+30  LP concentrated in a single holder: \\1', t)
+        # B) Owner renounced cleanup (remove negative "Owner privileges present", add positive)
+        if _re7.search(r'(?i)\bOwner:\s*0x0+…?0+\b', t) or _re7.search(r'(?i)ownership\s+renounced', t):
+            # remove the factor line if present after A)
+            t = _re7.sub(r'(?m)^\s*\+?\s*20\s+Owner privileges present\s*$', r'', t)
+            if 'Ownership renounced' not in t:
+                t = t.replace('Why++ factors', 'Why++ factors\n-20  Ownership renounced')
+        # C) LP verdict reconciliation
+        if 'EOA holds LP' in t and _re7.search(r'Top holder type:\s*contract', t):
+            t = t.replace('Verdict: 🔴 high risk (EOA holds LP)', 'Verdict: 🟡 mixed (contract/custodian holds LP)')
+        return t
+
+    def mdx_postprocess_text(text: str, chat_id=None):  # wrapper that calls original first
+        try:
+            base = _MDX_ORIG_POSTPROC(text, chat_id) if callable(_MDX_ORIG_POSTPROC) else str(text or "")
+            return _mdx_enhance_text_v7(base, chat_id)
+        except Exception:
+            try:
+                return _mdx_enhance_text_v7(text, chat_id)
+            except Exception:
+                return text
+
+    # ---- 3) Telegram-only final filter ----
+    if not getattr(_rq7, "_SAFE9E_TG_FINAL_WRAP_V7", False):
+        _SAFE9E_PREV_POST_V7 = _rq7.post
+        def _safe9e_tg_final_post_v7(url, *args, **kwargs):
             try:
                 if isinstance(url, str) and 'api.telegram.org' in url:
                     js = kwargs.get('json')
                     if isinstance(js, dict):
                         ch = js.get('chat_id')
-                        try:
-                            if js.get('text'):
-                                js['text'] = mdx_postprocess_text(js.get('text'), ch)
-                            if js.get('caption'):
-                                js['caption'] = mdx_postprocess_text(js.get('caption'), ch)
-                        except Exception:
-                            pass
+                        if js.get('text'):
+                            js['text'] = mdx_postprocess_text(js.get('text'), ch)
+                        if js.get('caption'):
+                            js['caption'] = mdx_postprocess_text(js.get('caption'), ch)
                         kwargs['json'] = js
             except Exception:
                 pass
-            return _SAFE9E_PREV_POST(url, *args, **kwargs)
-        _rq_final.post = _safe9e_final_post
-        _rq_final._SAFE9E_FINAL_WRAP = True
-except Exception:
-    pass
-# === /SAFE9e FINAL TELEGRAM WRAP ===
+            return _SAFE9E_PREV_POST_V7(url, *args, **kwargs)
+        _rq7.post = _safe9e_tg_final_post_v7
+        _rq7._SAFE9E_TG_FINAL_WRAP_V7 = True
 
+    # ---- 4) HTML write-time patch (fill Risk verdict header if "? (?/100)") ----
+    def _mdx_html_fill_verdict_v7(h: str) -> str:
+        try:
+            if _re7.search(r'(<h2>Risk verdict</h2>\\s*<p><b>)\\?\\s*\\(\\?/100\\)(</b></p>)', h):
+                mv = _re7.search(r'Trust verdict:\\s*([^<\\n]+)\\s*•\\s*Risk score:\\s*(\\d+)\\s*/\\s*100', h, _re7.I)
+                if mv:
+                    name, score = mv.group(1).strip(), mv.group(2)
+                    h = _re7.sub(r'(<h2>Risk verdict</h2>\\s*<p><b>)\\?\\s*\\(\\?/100\\)(</b></p>)',
+                                 rf'\\1{name} ({score}/100)\\2', h, count=1)
+            return h
+        except Exception:
+            return h
 
-# === SAFE9e OUTBOUND GUARD (anti-glushilka) ===
-try:
-    import os as _os_guard
-    import urllib.parse as _urlp_guard
-    import requests as _rq_guard
-    if not getattr(_rq_guard, "_SAFE9E_OUTBOUND_GUARD", False):
-        _SAFE9E_ORIG_SESSION_POST = _rq_guard.sessions.Session.post
-        _SAFE9E_PREV_CHAIN_POST = _rq_guard.post  # whatever chain currently installed
-
-        _SAFE9E_ALLOWED_HOSTS = set((_os_guard.getenv("SAFE9E_ALLOWED_HOSTS") or "api.telegram.org").split(","))
-
-        def _safe9e_guard_post(url, *args, **kwargs):
-            # Hard off-switch for all patches
-            if _os_guard.getenv("SAFE9E_PATCH_DISABLE") == "1":
-                s = _rq_guard.sessions.Session()
-                return _SAFE9E_ORIG_SESSION_POST(s, url, *args, **kwargs)
+    _SAFE9E_PREV_OPEN_V7 = getattr(_bi7, "open", open)
+    if not getattr(_bi7, "_SAFE9E_OPEN_WRAP_V7", False):
+        def open(file, *a, **kw):  # noqa: F811
+            f = _SAFE9E_PREV_OPEN_V7(file, *a, **kw)
             try:
-                host = _urlp_guard.urlparse(url).hostname or ""
+                p = str(file)
+                if p.endswith(".html"):
+                    class _W:
+                        def __init__(self, fobj, path): self._f=fobj; self._p=path
+                        def write(self, data):
+                            try:
+                                if isinstance(data, (bytes, bytearray)):
+                                    s = data.decode("utf-8", "ignore")
+                                    s2 = _mdx_html_fill_verdict_v7(s)
+                                    data = s2.encode("utf-8", "ignore")
+                                elif isinstance(data, str):
+                                    data = _mdx_html_fill_verdict_v7(data)
+                            except Exception: pass
+                            return self._f.write(data)
+                        def __getattr__(self,k): return getattr(self._f,k)
+                        def __enter__(self): self._f.__enter__(); return self
+                        def __exit__(self,*x): return self._f.__exit__(*x)
+                    return _W(f, p)
             except Exception:
-                host = ""
-            # Only allow the patched chain for allowed hosts (default: Telegram only).
-            if host in _SAFE9E_ALLOWED_HOSTS:
-                return _SAFE9E_PREV_CHAIN_POST(url, *args, **kwargs)
-            # For everything else, bypass the patched chain entirely.
-            s = _rq_guard.sessions.Session()
-            return _SAFE9E_ORIG_SESSION_POST(s, url, *args, **kwargs)
+                pass
+            return f
+        _bi7.open = open
+        _bi7._SAFE9E_OPEN_WRAP_V7 = True
 
-        _rq_guard.post = _safe9e_guard_post
-        # Also reflect into any alias like _rq
-        try:
-            import requests as _rq_alias
-            _rq_alias.post = _safe9e_guard_post
-        except Exception:
-            pass
-        _rq_guard._SAFE9E_OUTBOUND_GUARD = True
-except Exception:
-    pass
-# === /SAFE9e OUTBOUND GUARD ===
+    # Minimal log to know patch loaded
+    print("[SAFE9e] MONO v7 loaded", flush=True)
 
+except Exception as _e_safe9e_v7:
+    try: print(f"[SAFE9e] MONO v7 failed: {_e_safe9e_v7}", flush=True)
+    except Exception: pass
+# === /SAFE9e MONO CONSISTENCY WRAP v7 ===
 
-
-
-# === MDX CONSISTENCY PATCH v3 ===
-# Goal: unify risk/verdict across Telegram & HTML without touching webhook handlers.
-# - Fix Why++ sign conventions for display
-# - Remove "Owner privileges present" when owner is renounced (0x0)
-# - Reconcile LP "EOA holds LP" vs "Top holder type: contract"
-# - Fill missing HTML Risk verdict from "Trust verdict" (or compute)
-try:
-    import re as _re_mdx
-
-    def _mdx_fix_why_signs(txt: str) -> str:
-        t = str(txt or "")
-        # Convert negative signs for risk factors to + (risk-increasing), keep positives as -
-        t = _re_mdx.sub(r'(?m)^[\s–-]*−\s*20\s+Owner privileges present', r'+20  Owner privileges present', t)
-        t = _re_mdx.sub(r'(?m)^[\s–-]*−\s*30\s+LP concentrated in a single holder:\s*([0-9\.%]+)', r'+30  LP concentrated in a single holder: \\1', t)
-        # Normalize bullet prefix if needed
-        t = _re_mdx.sub(r'(?m)^[\s•]*\+\s*20', r'+20', t)
-        t = _re_mdx.sub(r'(?m)^[\s•]*\+\s*30', r'+30', t)
-        t = _re_mdx.sub(r'(?m)^[\s•]*−\s*15', r'-15', t)
-        return t
-
-    def _mdx_owner_renounce_fix(txt: str) -> str:
-        t = str(txt or "")
-        # If owner=0x0 present, drop 'Owner privileges present' factor
-        if _re_mdx.search(r'(?i)\bOwner:\s*0x0+…?0+\b', t) or _re_mdx.search(r'(?i)ownership\s+renounced', t):
-            t = _re_mdx.sub(r'(?m)^\s*(?:[+–-]\s*)?20\s+Owner privileges present\s*$', r'', t)
-            t = _re_mdx.sub(r'(?m)^\s*•?\s*Owner privileges present\s*(\[\d+\])?\s*$', r'', t)
-            # Add positive note
-            if 'Ownership renounced' not in t:
-                t = t.replace('Why++ factors', 'Why++ factors\n-20  Ownership renounced')
-                t = t.replace('Positives', 'Positives\n• Ownership renounced [20]')
-        return t
-
-    def _mdx_lp_claims_fix(txt: str) -> str:
-        t = str(txt or "")
-        # If text says EOA holds LP but type says contract -> downgrade to mixed (contract/custodian)
-        if 'EOA holds LP' in t and _re_mdx.search(r'Top holder type:\s*contract', t):
-            t = t.replace('Verdict: 🔴 high risk (EOA holds LP)', 'Verdict: 🟡 mixed (contract/custodian holds LP)')
-        # Ensure token address is not shown as top LP holder if clearly token_ca pattern repeated
-        # (heuristic: "Top holder: <token_ca> — 99" and "Scan token:" same address)
-        m_ca = _re_mdx.search(r'Scan token:\s+https?://[^/]+/token/(0x[a-fA-F0-9]{40})', t)
-        if m_ca:
-            ca = m_ca.group(1).lower()
-            t = _re_mdx.sub(rf'Top holder:\s*{_re_mdx.escape(ca)}\b', 'Top holder: <lp_token_holder>', t)
-        return t
-
-    def mdx_postprocess_text(text: str, chat_id=None) -> str:  # ensure we have this name available for wrappers
-        try:
-            t = str(text or '')
-            t = _mdx_fix_why_signs(t)
-            t = _mdx_owner_renounce_fix(t)
-            t = _mdx_lp_claims_fix(t)
-            return t
-        except Exception:
-            return text
-
-    def _mdx_html_fill_verdict(html: str) -> str:
-        h = str(html or '')
-        # If Risk verdict is "?(?/100)", try to extract "Trust verdict: NAME • Risk score: N/100"
-        if _re_mdx.search(r'<h2>Risk verdict</h2>\s*<p><b>\?\s*\(\?\/100\)</b></p>', h):
-            mv = _re_mdx.search(r'Trust verdict:\s*([^<\n]+)\s*•\s*Risk score:\s*(\d+)\s*/\s*100', h, _re_mdx.I)
-            if mv:
-                name = mv.group(1).strip()
-                score = mv.group(2)
-                # Replace the placeholder
-                h = _re_mdx.sub(r'(<h2>Risk verdict</h2>\s*<p><b>)(\?\s*\(\?\/100\))',
-                                rf'\\1{name} ({score}/100)', h)
-        return h
-
-    # Wrap any HTML renderers that return a string with <html> to normalize the verdict block
-    try:
-        _MDX__ORIG_RENDER_HTML = globals().get('render_html_report')
-        if callable(_MDX__ORIG_RENDER_HTML):
-            def render_html_report(*a, **kw):
-                out = _MDX__ORIG_RENDER_HTML(*a, **kw)
-                try:
-                    if isinstance(out, str) and '</html>' in out.lower():
-                        out = _mdx_html_fill_verdict(out)
-                except Exception:
-                    pass
-                return out
-    except Exception:
-        pass
-
-except Exception:
-    pass
-# === /MDX CONSISTENCY PATCH v3 ===
