@@ -7773,3 +7773,92 @@ except Exception:
     pass
 # === /SAFE9e OUTBOUND GUARD ===
 
+
+
+
+# === MDX CONSISTENCY PATCH v3 ===
+# Goal: unify risk/verdict across Telegram & HTML without touching webhook handlers.
+# - Fix Why++ sign conventions for display
+# - Remove "Owner privileges present" when owner is renounced (0x0)
+# - Reconcile LP "EOA holds LP" vs "Top holder type: contract"
+# - Fill missing HTML Risk verdict from "Trust verdict" (or compute)
+try:
+    import re as _re_mdx
+
+    def _mdx_fix_why_signs(txt: str) -> str:
+        t = str(txt or "")
+        # Convert negative signs for risk factors to + (risk-increasing), keep positives as -
+        t = _re_mdx.sub(r'(?m)^[\s–-]*−\s*20\s+Owner privileges present', r'+20  Owner privileges present', t)
+        t = _re_mdx.sub(r'(?m)^[\s–-]*−\s*30\s+LP concentrated in a single holder:\s*([0-9\.%]+)', r'+30  LP concentrated in a single holder: \\1', t)
+        # Normalize bullet prefix if needed
+        t = _re_mdx.sub(r'(?m)^[\s•]*\+\s*20', r'+20', t)
+        t = _re_mdx.sub(r'(?m)^[\s•]*\+\s*30', r'+30', t)
+        t = _re_mdx.sub(r'(?m)^[\s•]*−\s*15', r'-15', t)
+        return t
+
+    def _mdx_owner_renounce_fix(txt: str) -> str:
+        t = str(txt or "")
+        # If owner=0x0 present, drop 'Owner privileges present' factor
+        if _re_mdx.search(r'(?i)\bOwner:\s*0x0+…?0+\b', t) or _re_mdx.search(r'(?i)ownership\s+renounced', t):
+            t = _re_mdx.sub(r'(?m)^\s*(?:[+–-]\s*)?20\s+Owner privileges present\s*$', r'', t)
+            t = _re_mdx.sub(r'(?m)^\s*•?\s*Owner privileges present\s*(\[\d+\])?\s*$', r'', t)
+            # Add positive note
+            if 'Ownership renounced' not in t:
+                t = t.replace('Why++ factors', 'Why++ factors\n-20  Ownership renounced')
+                t = t.replace('Positives', 'Positives\n• Ownership renounced [20]')
+        return t
+
+    def _mdx_lp_claims_fix(txt: str) -> str:
+        t = str(txt or "")
+        # If text says EOA holds LP but type says contract -> downgrade to mixed (contract/custodian)
+        if 'EOA holds LP' in t and _re_mdx.search(r'Top holder type:\s*contract', t):
+            t = t.replace('Verdict: 🔴 high risk (EOA holds LP)', 'Verdict: 🟡 mixed (contract/custodian holds LP)')
+        # Ensure token address is not shown as top LP holder if clearly token_ca pattern repeated
+        # (heuristic: "Top holder: <token_ca> — 99" and "Scan token:" same address)
+        m_ca = _re_mdx.search(r'Scan token:\s+https?://[^/]+/token/(0x[a-fA-F0-9]{40})', t)
+        if m_ca:
+            ca = m_ca.group(1).lower()
+            t = _re_mdx.sub(rf'Top holder:\s*{_re_mdx.escape(ca)}\b', 'Top holder: <lp_token_holder>', t)
+        return t
+
+    def mdx_postprocess_text(text: str, chat_id=None) -> str:  # ensure we have this name available for wrappers
+        try:
+            t = str(text or '')
+            t = _mdx_fix_why_signs(t)
+            t = _mdx_owner_renounce_fix(t)
+            t = _mdx_lp_claims_fix(t)
+            return t
+        except Exception:
+            return text
+
+    def _mdx_html_fill_verdict(html: str) -> str:
+        h = str(html or '')
+        # If Risk verdict is "?(?/100)", try to extract "Trust verdict: NAME • Risk score: N/100"
+        if _re_mdx.search(r'<h2>Risk verdict</h2>\s*<p><b>\?\s*\(\?\/100\)</b></p>', h):
+            mv = _re_mdx.search(r'Trust verdict:\s*([^<\n]+)\s*•\s*Risk score:\s*(\d+)\s*/\s*100', h, _re_mdx.I)
+            if mv:
+                name = mv.group(1).strip()
+                score = mv.group(2)
+                # Replace the placeholder
+                h = _re_mdx.sub(r'(<h2>Risk verdict</h2>\s*<p><b>)(\?\s*\(\?\/100\))',
+                                rf'\\1{name} ({score}/100)', h)
+        return h
+
+    # Wrap any HTML renderers that return a string with <html> to normalize the verdict block
+    try:
+        _MDX__ORIG_RENDER_HTML = globals().get('render_html_report')
+        if callable(_MDX__ORIG_RENDER_HTML):
+            def render_html_report(*a, **kw):
+                out = _MDX__ORIG_RENDER_HTML(*a, **kw)
+                try:
+                    if isinstance(out, str) and '</html>' in out.lower():
+                        out = _mdx_html_fill_verdict(out)
+                except Exception:
+                    pass
+                return out
+    except Exception:
+        pass
+
+except Exception:
+    pass
+# === /MDX CONSISTENCY PATCH v3 ===
