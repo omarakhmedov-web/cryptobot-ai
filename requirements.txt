@@ -1,0 +1,11 @@
+Flask==3.0.3
+gunicorn==22.0.0
+requests==2.32.3
+redis==5.0.8
+python-dotenv==1.0.1
+structlog==24.1.0
+tenacity==9.0.0
+pydantic==2.9.2
+web3==6.21.1
+python-whois==0.9.4
+idna==3.7
