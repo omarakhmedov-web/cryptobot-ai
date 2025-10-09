@@ -7760,44 +7760,47 @@ def _answer_why_quickly(cq, addr_hint=None):
 # ================= /MDX HOTFIX v2 (Robust POPUP ALIGN) =================
 
 # ========================
-# WEBHOOK NO-HEADER-SECRET SHIM (path secret only; avoids 403 when Telegram secret_token not set)
+# OPEN WEBHOOK DEBUG SHIM (no header secret; align internal secret)
 try:
+    import os as _os
     from flask import request as _rq
 
-    def _secret_ok(_s: str) -> bool:
-        import os as _os
-        return bool(_s) and _s in { _os.getenv("WEBHOOK_SECRET",""), _os.getenv("CRYPTO_WEBHOOK_SECRET","") }
+    _ORIG_CRYPTO = globals().get("crypto_webhook")
 
     @app.route("/webhook/<secret>", methods=["POST"])
-    def webhook_nohdr(secret):
-        if not _secret_ok(secret):
-            return ("forbidden", 403)
-        # strictly proxy into existing crypto_webhook if present
-        target = globals().get("crypto_webhook")
-        if callable(target):
-            return target(secret)
-        # fallback: best-effort process_update
+    def _open_webhook(secret):
         try:
-            payload = _rq.get_json(force=True, silent=True) or {}
-        except Exception:
-            payload = {}
-        try:
-            handler = globals().get("process_update") or globals().get("_process_update")
-            if callable(handler):
-                handler(payload)
+            app.logger.info("[openhook] start path=%s len=%s", _rq.path, _rq.headers.get("Content-Length", "-"))
         except Exception:
             pass
-        return ("ok", 200)
+        if not callable(_ORIG_CRYPTO):
+            try:
+                payload = _rq.get_json(force=True, silent=True) or {}
+                handler = globals().get("process_update") or globals().get("_process_update")
+                if callable(handler):
+                    handler(payload)
+            except Exception:
+                pass
+            return ("ok", 200)
+        prev = _os.environ.get("CRYPTO_WEBHOOK_SECRET")
+        _os.environ["CRYPTO_WEBHOOK_SECRET"] = secret or ""
+        try:
+            resp = _ORIG_CRYPTO(secret)
+            try:
+                app.logger.info("[openhook] done status=%s", getattr(resp, "status_code", None))
+            except Exception:
+                pass
+            return resp
+        finally:
+            if prev is None:
+                try: del _os.environ["CRYPTO_WEBHOOK_SECRET"]
+                except Exception: pass
+            else:
+                _os.environ["CRYPTO_WEBHOOK_SECRET"] = prev
 
-    # Optional: pure /webhook (no path secret) — DISABLED to avoid accidental exposure
-    # Uncomment if you want to use header-only mode.
-    # @app.route("/webhook", methods=["POST"])
-    # def webhook_header_only_disabled():
-    #     return ("forbidden", 403)
-
-except Exception as _e_nohdr:
+except Exception as _e_openhook:
     try:
-        print("[WEBHOOK_NOHDR] init failed:", _e_nohdr)
+        print("[OPENHOOK] init failed:", _e_openhook)
     except Exception:
         pass
 # ========================
