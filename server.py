@@ -6,89 +6,75 @@
 import os
 
 
-# === SAFE9e CONSISTENCY CORE v5 (stateful) ===
+# === SAFE9e CONSISTENCY CORE v6 ===
 import os as _os, sys as _sys
 _SAFE9E_DEBUG = _os.getenv("SAFE9E_DEBUG", "0") in {"1","true","TRUE","yes","on"}
+SAFE9E_MARKUP_MODE = (_os.getenv("SAFE9E_MARKUP_MODE", "legacy") or "legacy").lower()
 def _dbg(msg):
     if _SAFE9E_DEBUG:
         _sys.stdout.write(f"[SAFE9e] {msg}\n"); _sys.stdout.flush()
 
 try:
     from safe9e_stateful import normalize_consistent as _safe9e_norm
-except Exception as _e:
-    def _safe9e_norm(x): return x
-
-def _sanitize_reply_markup(markup):
+except Exception:
     try:
-        if not isinstance(markup, dict): return markup
-        ik = markup.get("inline_keyboard")
-        if not isinstance(ik, list): return markup
-        seen = set(); new_ik = []
-        for row in ik:
-            if not isinstance(row, list): continue
-            new_row = []
-            for btn in row:
-                if not isinstance(btn, dict): continue
-                txt = str(btn.get("text",""))
-                txt = _safe9e_norm(txt)
-                if len(txt) > 64: txt = txt[:61] + "…"
-                btn["text"] = txt
-                if "callback_data" in btn:
-                    cb = str(btn["callback_data"])
-                    if len(cb.encode("utf-8")) > 64:
-                        btn["callback_data"] = cb.encode("utf-8")[:64].decode("utf-8","ignore")
-                key = (btn.get("text",""), btn.get("url",""), btn.get("callback_data",""))
-                if key in seen: continue
-                seen.add(key); new_row.append(btn)
-            if new_row: new_ik.append(new_row)
-        if new_ik: markup["inline_keyboard"] = new_ik
-        return markup
-    except Exception as e:
-        _dbg(f"sanitize markup err: {e}"); return markup
+        from safe9e_text_normalizer import normalize as _safe9e_norm
+    except Exception:
+        def _safe9e_norm(x): return x
+
+try:
+    from safe9e_replycanon import canonicalize_reply_markup as _canon_markup
+except Exception:
+    def _canon_markup(x, max_per_row=3): return x
 
 def _patch_payload(payload):
-    if not isinstance(payload, dict): return payload
+    if not isinstance(payload, dict):
+        return payload
     if "text" in payload and isinstance(payload["text"], str):
         payload["text"] = _safe9e_norm(payload["text"])
-    if "reply_markup" in payload:
-        payload["reply_markup"] = _sanitize_reply_markup(payload["reply_markup"])
+    if "caption" in payload and isinstance(payload["caption"], str):
+        payload["caption"] = _safe9e_norm(payload["caption"])
+    if "reply_markup" in payload and isinstance(payload["reply_markup"], dict):
+        payload["reply_markup"] = _canon_markup(payload["reply_markup"], max_per_row=3)
     return payload
 
-# requests
 try:
     import requests as _rq
-    if not getattr(_rq, "_SAFE9E_POST_PATCHED", False):
+    if not getattr(_rq, "_SAFE9E_POST_PATCHED_V6", False):
         _orig_post = _rq.post
         def _patched_post(url, *a, **kw):
             try:
-                payload = kw.get("json") if isinstance(kw.get("json"), dict) else kw.get("data")
-                if isinstance(payload, dict) and ("sendMessage" in url or "editMessageText" in url):
-                    _patch_payload(payload)
+                if "api.telegram.org" in url:
+                    payload = kw.get("json") if isinstance(kw.get("json"), dict) else kw.get("data")
+                    if isinstance(payload, dict):
+                        _patch_payload(payload)
             except Exception as e:
-                _dbg(f"requests patch err: {e}")
+                _dbg(f"requests v6 patch err: {e}")
             return _orig_post(url, *a, **kw)
         _rq.post = _patched_post
-        _rq._SAFE9E_POST_PATCHED = True
-        _dbg("patched requests.post")
+        _rq._SAFE9E_POST_PATCHED_V6 = True
+        _dbg("patched requests.post (v6 global)")
 except Exception as e:
     _dbg(f"requests not patched: {e}")
 
-# html writes
 try:
     import builtins as _bi
-    if not getattr(_bi, "_SAFE9E_OPEN_PATCHED", False):
+    if not getattr(_bi, "_SAFE9E_OPEN_PATCHED_V6", False):
         _orig_open = _bi.open
         class _Safe9eFileWrapper:
             def __init__(self, f, path): self._f=f; self._p=str(path)
             def write(self, data):
                 try:
-                    if isinstance(data, bytes):
+                    if isinstance(data, (bytes, bytearray)):
                         s = data.decode("utf-8", "ignore")
-                        s2 = _safe9e_norm(s) if (self._p.endswith(".html") and "Metridex QuickScan" in s) else s
-                        data = s2.encode("utf-8", "ignore")
+                        if self._p.endswith(".html") and ("Metridex QuickScan" in s or "<title>Metridex Report" in s):
+                            s = _safe9e_norm(s)
+                        data = s.encode("utf-8", "ignore")
                     elif isinstance(data, str):
-                        data = _safe9e_norm(data) if (self._p.endswith(".html") and "Metridex QuickScan" in data) else data
-                except Exception: pass
+                        if self._p.endswith(".html") and ("Metridex QuickScan" in data or "<title>Metridex Report" in data):
+                            data = _safe9e_norm(data)
+                except Exception as e:
+                    pass
                 return self._f.write(data)
             def __getattr__(self,k): return getattr(self._f,k)
             def __enter__(self): self._f.__enter__(); return self
@@ -101,11 +87,11 @@ try:
             except Exception: pass
             return f
         _bi.open = _patched_open
-        _bi._SAFE9E_OPEN_PATCHED = True
-        _dbg("patched open(.html)")
+        _bi._SAFE9E_OPEN_PATCHED_V6 = True
+        _dbg("patched open(.html) v6")
 except Exception as e:
-    _dbg(f"open patch failed: {e}")
-# === /SAFE9e CONSISTENCY CORE v5 ===
+    pass
+# === /SAFE9e CONSISTENCY CORE v6 ===
 
 import re
 import ssl
@@ -2953,7 +2939,8 @@ def _compress_keyboard(kb: dict):
             cb_cache.set(token, data)
             btn["callback_data"] = token
 
-    ik = _kb_enforce_pair_row(ik)
+    if SAFE9E_MARKUP_MODE == "canon":
+        ik = _kb_enforce_pair_row(ik)
     return _kb_dedupe_all({"inline_keyboard": ik})
 
 def _kb_clone(kb):
@@ -3678,6 +3665,48 @@ def _is_whitelisted(addr: str, text: str):
         pass
     return False, None
 
+
+# === Consistent popup computation (fresh, cache-agnostic) ===
+def _compute_quick_popup(addr: str, base_text: str):
+    """Return dict with keys: score,label,neg,pos,w_neg,w_pos,not_tradable.
+    Computes from message text and refreshes on-chain overlays for better accuracy.
+    """
+    try:
+        addr = (addr or "").lower()
+        # 1) initial from text
+        sc, lab, rs = _risk_verdict(addr, base_text or "")
+        entry = {
+            "score": int(sc or 0),
+            "label": lab or "LOW RISK 🟢",
+            "neg": list((rs or {}).get("neg") or []),
+            "pos": list((rs or {}).get("pos") or []),
+            "w_neg": list((rs or {}).get("w_neg") or []),
+            "w_pos": list((rs or {}).get("w_pos") or []),
+            "not_tradable": False,
+        }
+        # 2) align with not tradable markers in the message
+        try:
+            if re.search(r'(?i)(NOT\s+TRADABLE|No\s+pools\s+found|Contract code:\s*absent)', base_text or ""):
+                entry["not_tradable"] = True
+                entry["score"] = _risk_bump_not_tradable(entry["score"])
+                entry["label"] = "HIGH RISK 🔴"
+        except Exception:
+            pass
+        # 3) enrich with on-chain inspector (best-effort)
+        try:
+            _details, meta = _onchain_inspect(addr)
+            _merge_onchain_into_risk(addr, meta)
+            rc = RISK_CACHE.get(addr) or {}
+            if rc:
+                for k in ("score","label","neg","pos","w_neg","w_pos"):
+                    if rc.get(k) is not None:
+                        entry[k] = rc.get(k)
+        except Exception:
+            pass
+        return entry
+    except Exception:
+        return {"score": 0, "label": "LOW RISK 🟢", "neg": [], "pos": [], "w_neg": [], "w_pos": [], "not_tradable": False}
+# === /Consistent popup computation ===
 def _risk_verdict(addr, text):
     score = 0
     neg = []
@@ -4695,94 +4724,45 @@ def admin_diag():
 # Telegram webhook & callbacks
 # ========================
 
+
 def _answer_why_quickly(cq, addr_hint=None):
     try:
         msg = cq.get("message", {}) or {}
         text_msg = msg.get("text") or msg.get("caption") or ""
-        chat_id = msg.get("chat", {}).get("id")
-        # Try extract CA from message or stored map
-        m_ca = re.search(r'(?i)\b(0x[0-9a-fA-F]{40})\b', text_msg or '')
-        ca = (addr_hint or (m_ca.group(1) if m_ca else None) or _LAST_CA_BY_CHAT.get(str(chat_id)) or "")
-        if ca: _remember_ca_for_chat(str(chat_id), ca)
-        # Score from message
-        sc_msg = None
-        msc = re.search(r'(?mi)Risk\\s*score:\\s*(\\d+)\\s*/\\s*100', text_msg or '')
-        if msc: sc_msg = int(msc.group(1))
-        # Bare (N/100) variant
-        if sc_msg is None:
-            m0 = re.search(r'\\(\\s*(\\d+)\\s*/\\s*100\\s*\\)', text_msg or '')
-            if m0: sc_msg = int(m0.group(1))
-        # Detect NOT TRADABLE flag from text
-        not_tradable = bool(re.search(r'(?i)(NOT\\s+TRADABLE|no\\s+active\\s+pools|No\\s+pools\\s+found)', text_msg or ''))
-        # Fallback: LAST_VERDICT by CA or chat
-        sc_cache = None
-        if ca and ca.lower() in LAST_VERDICT and LAST_VERDICT[ca.lower()].get("score") is not None:
-            sc_cache = int(LAST_VERDICT[ca.lower()]["score"])
-            not_tradable = not_tradable or bool(LAST_VERDICT[ca.lower()].get("nt"))
-        elif str(chat_id) in _LAST_VERDICT_BY_CHAT and _LAST_VERDICT_BY_CHAT[str(chat_id)].get("score") is not None:
-            sc_cache = int(_LAST_VERDICT_BY_CHAT[str(chat_id)]["score"])
-            not_tradable = not_tradable or bool(_LAST_VERDICT_BY_CHAT[str(chat_id)].get("nt"))
-        # Choose score
-        sc = sc_msg if sc_msg is not None else sc_cache
-        if sc is None:
-            # Last resort: recompute
-            try:
-                sc2, _, rs = _risk_verdict(ca or "", text_msg or "")
-                if sc2 is not None:
-                    sc = int(sc2)
-            except Exception:
-                sc = 0
-        # NOT TRADABLE bump
-        if not_tradable and sc < 80:
-            sc = 80
-        # Label
-        if sc <= 15: label_now = "LOW RISK 🟢"
-        elif sc >= 70: label_now = "HIGH RISK 🔴"
-        else: label_now = "CAUTION 🟡"
-        # Reasons (best-effort from cache)
-        info = None
-        try:
-            info = _RISK_CACHE.get(ca.lower()) if ca else None  # may differ in impl
-        except Exception:
-            try:
-                info = RISK_CACHE.get(ca.lower()) if ca else None
-            except Exception:
-                info = None
-        reasons_pos = []
-        reasons_neg = []
-        if isinstance(info, dict):
-            reasons_pos = info.get("reasons_pos") or list(zip(info.get("pos", []), info.get("w_pos", [])))
-            reasons_neg = info.get("reasons_neg") or list(zip(info.get("neg", []), info.get("w_neg", [])))
-        # Normalize reasons to tuples
-        def _pairs(p):
-            out=[]
-            for x in (p or [])[:8]:
-                try: t,w = x[0], x[1]
-                except Exception: t,w = (str(x),0)
-                out.append((t,w))
-            try:
-                out.sort(key=lambda k: (k[1] if isinstance(k[1],(int,float)) else 0), reverse=True)
-            except Exception: pass
-            return out
-        ppos = _pairs(reasons_pos); pneg=_pairs(reasons_neg)
-        neg_s = "; ".join([f"{t} (−{w})" for t,w in pneg[:2] if t]) if pneg else ""
-        pos_s = "; ".join([f"{t} (+{w})" for t,w in ppos[:2] if t]) if ppos else ""
-        # Build popup
-        if not_tradable:
-            body = f"HIGH RISK 🔴 • NOT TRADABLE — Risk score: {sc}/100"
+        chat_id = (msg.get("chat", {}) or {}).get("id")
+        # extract CA reliably
+        ca = None
+        if addr_hint:
+            ca = addr_hint.strip().lower()
         else:
-            body = f"{label_now} • Risk score: {sc}/100"
+            m_ca = re.search(r'(?i)\b(0x[0-9a-fA-F]{40})\b', text_msg or '')
+            ca = m_ca.group(1).lower() if m_ca else None
+        if ca:
+            try:
+                _remember_ca_for_chat(str(chat_id), ca)
+            except Exception:
+                pass
+        entry = _compute_quick_popup(ca or "", text_msg or "")
+        sc = int(entry.get("score") or 0)
+        lab = entry.get("label") or "LOW RISK 🟢"
+        neg = list(entry.get("neg") or [])
+        pos = list(entry.get("pos") or [])
+        neg_s = "; ".join([str(x) for x in neg[:2] if x]) if neg else ""
+        pos_s = "; ".join([str(x) for x in pos[:2] if x]) if pos else ""
+        body = f"{lab} • Risk score: {sc}/100"
         if neg_s: body += f" — ⚠️ {neg_s}"
         if pos_s: body += f" — ✅ {pos_s}"
         if len(body) > 190: body = body[:187] + "…"
-        # Remember for future
-        _remember_verdict(ca, sc, label_now, not_tradable, str(chat_id) if chat_id is not None else None)
-        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+        try:
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
+        except TypeError:
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body)
     except Exception:
-        tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
+        try:
+            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "No cached reasons yet. Tap “More details” first.", logger=app.logger)
+        except Exception:
+            pass
 
-@app.route("/webhook/<secret>", methods=["POST"])
-@require_webhook_secret
 def webhook(secret):
 
     # --- EARLY START HANDLER (runs before anything else) ---
@@ -5162,6 +5142,10 @@ def webhook(secret):
                     kind = "dex"; addr = data.split(":",1)[1]
                 addr = (addr or "").strip().lower()
                 pair, chain = _ds_resolve_pair_and_chain(addr)
+                try:
+                    _onchain_inspect(addr)
+                except Exception:
+                    pass
                 chain = (chain or "ethereum").lower()
                 if kind == "scan":
                     base = _explorer_base_for(chain)
@@ -5187,6 +5171,10 @@ def webhook(secret):
                 addr = data.split(":",1)[1].strip().lower()
                 # Resolve pair & chain
                 pair, chain = _ds_resolve_pair_and_chain(addr)
+                try:
+                    _onchain_inspect(addr)
+                except Exception:
+                    pass
                 chain = (chain or "").lower()
                 paddr = None
                 if isinstance(pair, dict):
