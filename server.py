@@ -4582,6 +4582,72 @@ def _render_report(addr: str, text: str):
     except Exception:
         return None, html
 
+
+
+# --- Webhook compatibility shim (accepts both /crypto_webhook/<secret> and /webhook/<secret>) ---
+try:
+    from flask import request
+    import os
+
+    def _verify_header_secret():
+        hs = os.getenv("WEBHOOK_HEADER_SECRET", "") or os.getenv("CRYPTO_WEBHOOK_HEADER", "")
+        if not hs:
+            return True
+        got = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        return got == hs
+
+    @app.route("/webhook/<secret>", methods=["POST"])
+    def webhook_compat(secret):
+        # Accept either WEBHOOK_SECRET or CRYPTO_WEBHOOK_SECRET
+        ok = False
+        if secret and secret == (os.getenv("WEBHOOK_SECRET", "") or ""):
+            ok = True
+        if secret and secret == (os.getenv("CRYPTO_WEBHOOK_SECRET", "") or ""):
+            ok = True
+        if not ok or not _verify_header_secret():
+            return ("forbidden", 403)
+        # Temporarily align CRYPTO_WEBHOOK_SECRET for the inner handler
+        prev = os.environ.get("CRYPTO_WEBHOOK_SECRET")
+        os.environ["CRYPTO_WEBHOOK_SECRET"] = secret
+        try:
+            # Reuse existing crypto_webhook handler for actual processing
+            return crypto_webhook(secret)
+        finally:
+            if prev is None:
+                try: del os.environ["CRYPTO_WEBHOOK_SECRET"]
+                except Exception: pass
+            else:
+                os.environ["CRYPTO_WEBHOOK_SECRET"] = prev
+
+    # Optional: header-token only endpoint without path secret (Telegram supports header secret)
+    @app.route("/webhook", methods=["POST"])
+    def webhook_header_only():
+        if not _verify_header_secret():
+            return ("forbidden", 403)
+        # Route to crypto_webhook with env secret (if set), otherwise bypass strict check
+        secret = os.getenv("CRYPTO_WEBHOOK_SECRET", "") or os.getenv("WEBHOOK_SECRET", "")
+        if secret:
+            return crypto_webhook(secret)
+        # Fallback: emulate inner logic with minimal parsing
+        try:
+            payload = request.get_json(force=True, silent=True) or {}
+        except Exception:
+            payload = {}
+        # If the project defines a generic update processor use it; else no-op OK
+        try:
+            handler = globals().get("process_update") or globals().get("_process_update")
+            if callable(handler):
+                handler(payload)
+        except Exception:
+            pass
+        return ("ok", 200)
+except Exception as _e:
+    try:
+        print(f"[webhook-compat] init failed: {_e}")
+    except Exception:
+        pass
+# --- /Webhook compatibility shim ---
+
 # ========================
 # HTTP routes
 # ========================
