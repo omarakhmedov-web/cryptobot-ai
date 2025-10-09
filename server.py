@@ -1011,17 +1011,17 @@ try:
                         except Exception:
                             pass
                     # Standardize order within each row (only in CANON mode)
-try:
-    if (os.getenv("SAFE9E_MARKUP_MODE", "legacy") or "legacy").lower() == "canon":
-        order = ['Why++','More','Details','Report','↻ Retry LP','HP','Open in Scan','Open on DexScreener','Open in DEX','Copy CA','Save PDF']
-        rank = {k:i for i,k in enumerate(order)}
-        rows = rm.get('inline_keyboard') or []
-        for r in rows:
-            if isinstance(r, list):
-                r.sort(key=lambda b: rank.get(str(b.get('text','')), 999))
-        rm['inline_keyboard'] = rows
-except Exception:
-    pass
+                    try:
+                        if (os.getenv("SAFE9E_MARKUP_MODE", "legacy") or "legacy").lower() == "canon":
+                            order = ['Why++','More','Details','Report','↻ Retry LP','HP','Open in Scan','Open on DexScreener','Open in DEX','Copy CA','Save PDF']
+                            rank = {k:i for i,k in enumerate(order)}
+                            rows = rm.get('inline_keyboard') or []
+                            for r in rows:
+                                if isinstance(r, list):
+                                    r.sort(key=lambda b: rank.get(str(b.get('text','')), 999))
+                            rm['inline_keyboard'] = rows
+                    except Exception:
+                        pass
                     js['reply_markup'] = rm
                     kwargs['json'] = js
             except Exception:
