@@ -6,7 +6,7 @@
 import os
 
 
-# === SAFE9e CONSISTENCY CORE v5 (stateful) ===
+# === SAFE9e CONSISTENCY CORE v6 ===
 import os as _os, sys as _sys
 _SAFE9E_DEBUG = _os.getenv("SAFE9E_DEBUG", "0") in {"1","true","TRUE","yes","on"}
 def _dbg(msg):
@@ -15,80 +15,65 @@ def _dbg(msg):
 
 try:
     from safe9e_stateful import normalize_consistent as _safe9e_norm
-except Exception as _e:
-    def _safe9e_norm(x): return x
-
-def _sanitize_reply_markup(markup):
+except Exception:
     try:
-        if not isinstance(markup, dict): return markup
-        ik = markup.get("inline_keyboard")
-        if not isinstance(ik, list): return markup
-        seen = set(); new_ik = []
-        for row in ik:
-            if not isinstance(row, list): continue
-            new_row = []
-            for btn in row:
-                if not isinstance(btn, dict): continue
-                txt = str(btn.get("text",""))
-                txt = _safe9e_norm(txt)
-                if len(txt) > 64: txt = txt[:61] + "…"
-                btn["text"] = txt
-                if "callback_data" in btn:
-                    cb = str(btn["callback_data"])
-                    if len(cb.encode("utf-8")) > 64:
-                        btn["callback_data"] = cb.encode("utf-8")[:64].decode("utf-8","ignore")
-                key = (btn.get("text",""), btn.get("url",""), btn.get("callback_data",""))
-                if key in seen: continue
-                seen.add(key); new_row.append(btn)
-            if new_row: new_ik.append(new_row)
-        if new_ik: markup["inline_keyboard"] = new_ik
-        return markup
-    except Exception as e:
-        _dbg(f"sanitize markup err: {e}"); return markup
+        from safe9e_text_normalizer import normalize as _safe9e_norm
+    except Exception:
+        def _safe9e_norm(x): return x
+
+try:
+    from safe9e_replycanon import canonicalize_reply_markup as _canon_markup
+except Exception:
+    def _canon_markup(x, max_per_row=3): return x
 
 def _patch_payload(payload):
-    if not isinstance(payload, dict): return payload
+    if not isinstance(payload, dict):
+        return payload
     if "text" in payload and isinstance(payload["text"], str):
         payload["text"] = _safe9e_norm(payload["text"])
-    if "reply_markup" in payload:
-        payload["reply_markup"] = _sanitize_reply_markup(payload["reply_markup"])
+    if "caption" in payload and isinstance(payload["caption"], str):
+        payload["caption"] = _safe9e_norm(payload["caption"])
+    if "reply_markup" in payload and isinstance(payload["reply_markup"], dict):
+        payload["reply_markup"] = _canon_markup(payload["reply_markup"], max_per_row=3)
     return payload
 
-# requests
 try:
     import requests as _rq
-    if not getattr(_rq, "_SAFE9E_POST_PATCHED", False):
+    if not getattr(_rq, "_SAFE9E_POST_PATCHED_V6", False):
         _orig_post = _rq.post
         def _patched_post(url, *a, **kw):
             try:
-                payload = kw.get("json") if isinstance(kw.get("json"), dict) else kw.get("data")
-                if isinstance(payload, dict) and ("sendMessage" in url or "editMessageText" in url):
-                    _patch_payload(payload)
+                if "api.telegram.org" in url:
+                    payload = kw.get("json") if isinstance(kw.get("json"), dict) else kw.get("data")
+                    if isinstance(payload, dict):
+                        _patch_payload(payload)
             except Exception as e:
-                _dbg(f"requests patch err: {e}")
+                _dbg(f"requests v6 patch err: {e}")
             return _orig_post(url, *a, **kw)
         _rq.post = _patched_post
-        _rq._SAFE9E_POST_PATCHED = True
-        _dbg("patched requests.post")
+        _rq._SAFE9E_POST_PATCHED_V6 = True
+        _dbg("patched requests.post (v6 global)")
 except Exception as e:
     _dbg(f"requests not patched: {e}")
 
-# html writes
 try:
     import builtins as _bi
-    if not getattr(_bi, "_SAFE9E_OPEN_PATCHED", False):
+    if not getattr(_bi, "_SAFE9E_OPEN_PATCHED_V6", False):
         _orig_open = _bi.open
         class _Safe9eFileWrapper:
             def __init__(self, f, path): self._f=f; self._p=str(path)
             def write(self, data):
                 try:
-                    if isinstance(data, bytes):
+                    if isinstance(data, (bytes, bytearray)):
                         s = data.decode("utf-8", "ignore")
-                        s2 = _safe9e_norm(s) if (self._p.endswith(".html") and "Metridex QuickScan" in s) else s
-                        data = s2.encode("utf-8", "ignore")
+                        if self._p.endswith(".html") and ("Metridex QuickScan" in s or "<title>Metridex Report" in s):
+                            s = _safe9e_norm(s)
+                        data = s.encode("utf-8", "ignore")
                     elif isinstance(data, str):
-                        data = _safe9e_norm(data) if (self._p.endswith(".html") and "Metridex QuickScan" in data) else data
-                except Exception: pass
+                        if self._p.endswith(".html") and ("Metridex QuickScan" in data or "<title>Metridex Report" in data):
+                            data = _safe9e_norm(data)
+                except Exception as e:
+                    pass
                 return self._f.write(data)
             def __getattr__(self,k): return getattr(self._f,k)
             def __enter__(self): self._f.__enter__(); return self
@@ -101,11 +86,11 @@ try:
             except Exception: pass
             return f
         _bi.open = _patched_open
-        _bi._SAFE9E_OPEN_PATCHED = True
-        _dbg("patched open(.html)")
+        _bi._SAFE9E_OPEN_PATCHED_V6 = True
+        _dbg("patched open(.html) v6")
 except Exception as e:
-    _dbg(f"open patch failed: {e}")
-# === /SAFE9e CONSISTENCY CORE v5 ===
+    pass
+# === /SAFE9e CONSISTENCY CORE v6 ===
 
 import re
 import ssl
