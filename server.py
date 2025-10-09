@@ -7760,55 +7760,44 @@ def _answer_why_quickly(cq, addr_hint=None):
 # ================= /MDX HOTFIX v2 (Robust POPUP ALIGN) =================
 
 # ========================
-# FAIL-FAST & VERBOSE LOGGING SHIM
-# - Wraps crypto_webhook to log start/end/exception
-# - No swallowing: exceptions bubble to 500 (so issues are visible)
+# WEBHOOK NO-HEADER-SECRET SHIM (path secret only; avoids 403 when Telegram secret_token not set)
 try:
-    import time as _time
-    from flask import request as _rq, jsonify as _jsonify
+    from flask import request as _rq
 
-    _ORIG_CRYPTO = globals().get("crypto_webhook")
+    def _secret_ok(_s: str) -> bool:
+        import os as _os
+        return bool(_s) and _s in { _os.getenv("WEBHOOK_SECRET",""), _os.getenv("CRYPTO_WEBHOOK_SECRET","") }
 
-    if callable(_ORIG_CRYPTO):
-        def crypto_webhook(secret):
-            _t0 = _time.time()
-            try:
-                ua = _rq.headers.get("User-Agent", "-")
-                clen = _rq.headers.get("Content-Length", "-")
-                app.logger.info("[ff] ➜ webhook start path=%s len=%s ua=%s", _rq.path, clen, ua)
-            except Exception:
-                pass
-            try:
-                resp = _ORIG_CRYPTO(secret)
-                try:
-                    dur = int((_time.time() - _t0) * 1000)
-                    sc = getattr(resp, "status_code", None)
-                    app.logger.info("[ff] ✓ webhook end status=%s dur_ms=%s", sc, dur)
-                except Exception:
-                    pass
-                return resp
-            except Exception as e:
-                # Log full stack and re-raise to surface 500
-                try:
-                    app.logger.exception("[ff] ✗ webhook error: %s", e)
-                except Exception:
-                    pass
-                raise
+    @app.route("/webhook/<secret>", methods=["POST"])
+    def webhook_nohdr(secret):
+        if not _secret_ok(secret):
+            return ("forbidden", 403)
+        # strictly proxy into existing crypto_webhook if present
+        target = globals().get("crypto_webhook")
+        if callable(target):
+            return target(secret)
+        # fallback: best-effort process_update
+        try:
+            payload = _rq.get_json(force=True, silent=True) or {}
+        except Exception:
+            payload = {}
+        try:
+            handler = globals().get("process_update") or globals().get("_process_update")
+            if callable(handler):
+                handler(payload)
+        except Exception:
+            pass
+        return ("ok", 200)
 
-    # Health route (idempotent)
+    # Optional: pure /webhook (no path secret) — DISABLED to avoid accidental exposure
+    # Uncomment if you want to use header-only mode.
+    # @app.route("/webhook", methods=["POST"])
+    # def webhook_header_only_disabled():
+    #     return ("forbidden", 403)
+
+except Exception as _e_nohdr:
     try:
-        @app.get("/version")
-        def __version__ff():
-            try:
-                mode = (SAFE9E_MARKUP_MODE if "SAFE9E_MARKUP_MODE" in globals() else "legacy")
-            except Exception:
-                mode = "legacy"
-            return _jsonify(ok=True, version="failfast-v1", mode=mode)
-    except Exception:
-        pass
-except Exception as _e_ff:
-    try:
-        print("[FAILFAST] init failed:", _e_ff)
+        print("[WEBHOOK_NOHDR] init failed:", _e_nohdr)
     except Exception:
         pass
 # ========================
