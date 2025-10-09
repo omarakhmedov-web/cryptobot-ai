@@ -7760,37 +7760,35 @@ def _answer_why_quickly(cq, addr_hint=None):
 # ================= /MDX HOTFIX v2 (Robust POPUP ALIGN) =================
 
 # ========================
-# OPEN WEBHOOK DEBUG SHIM (no header secret; align internal secret)
+# WEBHOOK FORCE-OPEN (no 403, no swallow) + TRACE
+# Accept any /webhook/<secret> and /crypto_webhook/<secret>,
+# forward to original handler, do not enforce header-secret, and surface errors.
 try:
-    import os as _os
     from flask import request as _rq
+    import os as _os, time as _time
+
+    # Trace incoming requests (light)
+    @app.before_request
+    def _trace_in():
+        try:
+            if _rq.path.startswith("/webhook") or _rq.path.startswith("/crypto_webhook"):
+                app.logger.info("[trace] %s %s len=%s ua=%s",
+                                _rq.method, _rq.path,
+                                _rq.headers.get("Content-Length","-"),
+                                _rq.headers.get("User-Agent","-"))
+        except Exception:
+            pass
 
     _ORIG_CRYPTO = globals().get("crypto_webhook")
 
-    @app.route("/webhook/<secret>", methods=["POST"])
-    def _open_webhook(secret):
-        try:
-            app.logger.info("[openhook] start path=%s len=%s", _rq.path, _rq.headers.get("Content-Length", "-"))
-        except Exception:
-            pass
+    def _forward_to_crypto(secret):
         if not callable(_ORIG_CRYPTO):
-            try:
-                payload = _rq.get_json(force=True, silent=True) or {}
-                handler = globals().get("process_update") or globals().get("_process_update")
-                if callable(handler):
-                    handler(payload)
-            except Exception:
-                pass
             return ("ok", 200)
+        # Align env secret for internal checks (if any)
         prev = _os.environ.get("CRYPTO_WEBHOOK_SECRET")
         _os.environ["CRYPTO_WEBHOOK_SECRET"] = secret or ""
         try:
-            resp = _ORIG_CRYPTO(secret)
-            try:
-                app.logger.info("[openhook] done status=%s", getattr(resp, "status_code", None))
-            except Exception:
-                pass
-            return resp
+            return _ORIG_CRYPTO(secret)
         finally:
             if prev is None:
                 try: del _os.environ["CRYPTO_WEBHOOK_SECRET"]
@@ -7798,9 +7796,19 @@ try:
             else:
                 _os.environ["CRYPTO_WEBHOOK_SECRET"] = prev
 
-except Exception as _e_openhook:
+    # Replace /webhook/<secret> to be fully open (no header secret)
+    @app.route("/webhook/<secret>", methods=["POST"])
+    def webhook_forceopen(secret):
+        return _forward_to_crypto(secret)
+
+    # Keep legacy path too, also open (in case webhook points there)
+    @app.route("/crypto_webhook/<secret>", methods=["POST"])
+    def crypto_webhook_forceopen(secret):
+        return _forward_to_crypto(secret)
+
+except Exception as _e_force:
     try:
-        print("[OPENHOOK] init failed:", _e_openhook)
+        print("[FORCEOPEN] init failed:", _e_force)
     except Exception:
         pass
 # ========================
