@@ -7760,96 +7760,55 @@ def _answer_why_quickly(cq, addr_hint=None):
 # ================= /MDX HOTFIX v2 (Robust POPUP ALIGN) =================
 
 # ========================
-# CONSISTENCY SHIM — single source of truth for risk (score/label/neg/pos)
+# FAIL-FAST & VERBOSE LOGGING SHIM
+# - Wraps crypto_webhook to log start/end/exception
+# - No swallowing: exceptions bubble to 500 (so issues are visible)
 try:
-    import re as _re
+    import time as _time
+    from flask import request as _rq, jsonify as _jsonify
 
-    def _label_for(sc: int) -> str:
-        try:
-            sc = int(sc)
-        except Exception:
-            sc = 50
-        if sc >= 75: return "HIGH RISK 🔴"
-        if sc >= 25: return "CAUTION 🟡"
-        return "LOW RISK 🟢"
+    _ORIG_CRYPTO = globals().get("crypto_webhook")
 
-    def _ensure_full_verdict(addr: str, base_text: str):
-        a = (addr or "").lower()
-        ent = RISK_CACHE.get(a)
-        if not ent or "score" not in ent:
+    if callable(_ORIG_CRYPTO):
+        def crypto_webhook(secret):
+            _t0 = _time.time()
             try:
-                _ = _append_verdict_block(a, base_text or "")
+                ua = _rq.headers.get("User-Agent", "-")
+                clen = _rq.headers.get("Content-Length", "-")
+                app.logger.info("[ff] ➜ webhook start path=%s len=%s ua=%s", _rq.path, clen, ua)
             except Exception:
                 pass
-            ent = RISK_CACHE.get(a) or {}
-        # normalize & freeze core fields
-        try:
-            sc = int(ent.get("score", 50))
-        except Exception:
-            sc = 50
-        ent["score"] = sc
-        ent["label"] = ent.get("label") or _label_for(sc)
-        ent["neg"] = list(ent.get("neg") or ent.get("w_neg") or [])
-        ent["pos"] = list(ent.get("pos") or ent.get("w_pos") or [])
-        RISK_CACHE[a] = ent
-        return ent
-
-    def _why_reply_from_entry(ent: dict) -> str:
-        sc = int(ent.get("score", 50))
-        lab = ent.get("label") or _label_for(sc)
-        neg = ent.get("neg") or []
-        pos = ent.get("pos") or []
-        neg_s = "; ".join([str(x) for x in neg[:2] if x]) if neg else ""
-        pos_s = "; ".join([str(x) for x in pos[:2] if x]) if pos else ""
-        body = f"{lab} • Risk score: {sc}/100"
-        if neg_s: body += f" — ⚠️ {neg_s}"
-        if pos_s: body += f" — ✅ {pos_s}"
-        return body[:190] + ("…" if len(body) > 190 else "")
-
-    # Wrap Why?/Why++ to always use the unified entry
-    _orig_quick = globals().get("_answer_why_quickly")
-    def _answer_why_quickly(cq, addr_hint=None):
-        try:
-            msg = cq.get("message", {}) or {}
-            base_text = msg.get("text") or msg.get("caption") or ""
-            addr = (addr_hint or "") or ""
-            if not addr:
-                m = _re.search(r'(?i)\b(0x[0-9a-fA-F]{40})\b', base_text or "")
-                addr = (m.group(1) if m else "").lower()
-            ent = _ensure_full_verdict(addr, base_text)
-            body = _why_reply_from_entry(ent)
-            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), body, logger=app.logger)
-        except TypeError:
-            tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "processing…", logger=app.logger)
-        except Exception:
             try:
-                tg_answer_callback(TELEGRAM_TOKEN, cq.get("id"), "processing…", logger=app.logger)
-            except Exception:
-                pass
+                resp = _ORIG_CRYPTO(secret)
+                try:
+                    dur = int((_time.time() - _t0) * 1000)
+                    sc = getattr(resp, "status_code", None)
+                    app.logger.info("[ff] ✓ webhook end status=%s dur_ms=%s", sc, dur)
+                except Exception:
+                    pass
+                return resp
+            except Exception as e:
+                # Log full stack and re-raise to surface 500
+                try:
+                    app.logger.exception("[ff] ✗ webhook error: %s", e)
+                except Exception:
+                    pass
+                raise
 
-    _orig_deep = globals().get("_answer_why_deep")
-    def _answer_why_deep(cq, addr_hint=None):
-        return _answer_why_quickly(cq, addr_hint)
-
-    # Harden on-chain merge: never override score/label
-    _orig_merge = globals().get("_merge_onchain_into_risk")
-    if callable(_orig_merge):
-        def _merge_onchain_into_risk(addr, meta):
-            try:
-                a = (addr or "").lower()
-                _orig_merge(addr, meta)
-                ent = RISK_CACHE.get(a) or {}
-                sc = int(ent.get("score", 50))
-                ent["score"] = sc
-                ent["label"] = ent.get("label") or _label_for(sc)
-                RISK_CACHE[a] = ent
-            except Exception:
-                pass
-        globals()["_merge_onchain_into_risk"] = _merge_onchain_into_risk
-
-except Exception as _e_consistency:
+    # Health route (idempotent)
     try:
-        print("[CONSISTENCY_SHIM] disabled:", _e_consistency)
+        @app.get("/version")
+        def __version__ff():
+            try:
+                mode = (SAFE9E_MARKUP_MODE if "SAFE9E_MARKUP_MODE" in globals() else "legacy")
+            except Exception:
+                mode = "legacy"
+            return _jsonify(ok=True, version="failfast-v1", mode=mode)
+    except Exception:
+        pass
+except Exception as _e_ff:
+    try:
+        print("[FAILFAST] init failed:", _e_ff)
     except Exception:
         pass
 # ========================
