@@ -77,7 +77,26 @@
     "explorer": {
       "name": "ftmscan",
       "api_key_env": "FTMSCAN_API_KEY"
-    }
+    },
+    "explorers": [
+      {
+        "name": "ftmscan",
+        "api_key_env": "FTMSCAN_API_KEY",
+        "compat": "etherscan"
+      },
+      {
+        "name": "blockscout",
+        "base": "https://blockscout.com/fantom/mainnet/api",
+        "compat": "blockscout"
+      },
+      {
+        "name": "oklink",
+        "base": "https://www.oklink.com/api",
+        "api_key_env": "OKLINK_API_KEY",
+        "compat": "oklink",
+        "optional": true
+      }
+    ]
   },
   "sol": {
     "rpc": [
