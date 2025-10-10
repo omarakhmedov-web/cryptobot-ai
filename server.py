@@ -8,7 +8,11 @@ from dex_client import fetch_market
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
 from chain_client import fetch_onchain_factors
-from lp_lite import check_lp_lock_v2
+try:
+    from lp_lite import check_lp_lock_v2
+except Exception:
+    def check_lp_lock_v2(chain, lp_addr):
+        return {"provider": "lite-burn-check", "lpAddress": lp_addr or "—", "until": "—"}
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
