@@ -3,7 +3,7 @@ from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan, try_activate_judge_pass
 from state import store_bundle, load_bundle
-from buttons import build_keyboard  # dynamic ctx version
+from buttons import build_keyboard  # now supports ctx="start"
 from dex_client import fetch_market
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
@@ -13,12 +13,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en") or "en"
 
-# Pricing/Help URLs (override via ENV if нужно)
 HELP_URL = os.getenv("HELP_URL", "https://metridex.com/help")
 DEEP_REPORT_URL = os.getenv("DEEP_REPORT_URL", "https://metridex.com/upgrade/deep-report")
 DAY_PASS_URL = os.getenv("DAY_PASS_URL", "https://metridex.com/upgrade/day-pass")
 PRO_URL = os.getenv("PRO_URL", "https://metridex.com/upgrade/pro")
 TEAMS_URL = os.getenv("TEAMS_URL", "https://metridex.com/upgrade/teams")
+FREE_DAILY_SCANS = int(os.getenv("FREE_DAILY_SCANS", "2"))
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
@@ -59,22 +59,13 @@ def parse_cb(data: str):
     if not m: return None
     return m.group(1), int(m.group(2)), int(m.group(3))
 
-# --- Start/Upgrade keyboards ---
-def build_upgrade_keyboard() -> dict:
+def _pricing_links():
     return {
-        "inline_keyboard": [
-            [
-                {"text": "🔍 Deep report — $3", "url": DEEP_REPORT_URL},
-                {"text": "⏱ Day Pass — $9", "url": DAY_PASS_URL},
-            ],
-            [
-                {"text": "⚙️ Pro — $29", "url": PRO_URL},
-                {"text": "👥 Teams — from $99", "url": TEAMS_URL},
-            ],
-            [
-                {"text": "ℹ️ How it works?", "url": HELP_URL},
-            ]
-        ]
+        "deep_report": DEEP_REPORT_URL,
+        "day_pass": DAY_PASS_URL,
+        "pro": PRO_URL,
+        "teams": TEAMS_URL,
+        "help": HELP_URL,
     }
 
 WELCOME = (
@@ -90,6 +81,13 @@ UPGRADE_TEXT = (
     "• Day‑Pass $9 — 24h of Pro\n"
     "• Deep Report $3 — one detailed report\n\n"
     f"Choose your access below. How it works: {HELP_URL}"
+)
+HINT_QUICKSCAN = (
+    "Paste a *token address*, *TX hash* or *URL* to scan.\n"
+    "Examples:\n"
+    "`0x6982508145454ce325ddbe47a25d4ec3d2311933`  — ERC‑20\n"
+    "`https://dexscreener.com/ethereum/0x...` — pair\n\n"
+    "Then tap *More details* / *Why?* / *On‑chain* for deeper info."
 )
 
 @app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
@@ -107,24 +105,52 @@ def webhook():
 def on_message(msg):
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
+    low = text.lower()
 
-    if text.lower().startswith("/start"):
-        send_message(chat_id, WELCOME, reply_markup=build_upgrade_keyboard())
+    if low.startswith("/start"):
+        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
-    if text.lower().startswith("/upgrade"):
-        send_message(chat_id, UPGRADE_TEXT, reply_markup=build_upgrade_keyboard())
+    if low.startswith("/upgrade"):
+        send_message(chat_id, UPGRADE_TEXT, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
-    if text.upper().startswith("PASS "):
-        code = text.split(" ",1)[1].strip()
-        ok, msg_txt = try_activate_judge_pass(chat_id, code)
-        send_message(chat_id, msg_txt)
+    if low.startswith("/quickscan"):
+        send_message(chat_id, HINT_QUICKSCAN, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+
+    if low.startswith("/limits"):
+        plan = "Free"
+        try:
+            ok, tier = can_scan(chat_id)
+            plan = (tier or "Free")
+            allowed = "✅ allowed now" if ok else "⛔ not allowed now"
+        except Exception:
+            allowed = "—"
+        try:
+            from limits import is_judge_active
+            judge = "✅ active" if is_judge_active(chat_id) else "—"
+        except Exception:
+            judge = "—"
+        msg_txt = (
+            f"*Plan:* {plan}\n"
+            f"*Free quota:* {FREE_DAILY_SCANS}/day\n"
+            f"*Judge‑Pass:* {judge}\n"
+            f"*Now:* {allowed}\n\n"
+            "Upgrade for unlimited scans: /upgrade"
+        )
+        send_message(chat_id, msg_txt, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+
+    # Only non-command messages trigger scan
+    if text.startswith("/"):
+        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
     ok, _tier = can_scan(chat_id)
     if not ok:
-        send_message(chat_id, "Free scans exhausted. Use /upgrade or enter your Judge Pass.")
+        send_message(chat_id, "Free scans exhausted. Use /upgrade or enter your Judge Pass.",
+                     reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
     token = text
