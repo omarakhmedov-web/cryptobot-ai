@@ -1,7 +1,22 @@
 from __future__ import annotations
+import time
+import os
+from datetime import datetime, timezone
+
 from typing import Any, Dict, List, Optional
 
 # ---------- helpers ----------
+
+# ----- additions: as-of timestamp + env flags -----
+_TWOSRC = 1 if os.getenv("TWO_SOURCE_RULE","0") == "1" else 0
+def _asof_utc(ts: float | None = None) -> str:
+    if ts is None:
+        ts = time.time() if 'time' in globals() else datetime.now(tz=timezone.utc).timestamp()
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return "—"
+
 def _abbr_usd(v: Optional[float]) -> str:
     if v is None:
         return "—"
