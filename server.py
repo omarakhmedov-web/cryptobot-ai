@@ -1,7 +1,7 @@
 import os, json, re, time, traceback, requests
 from flask import Flask, request, jsonify
 
-from limits import can_scan, register_scan, try_activate_judge_pass
+from limits import can_scan, register_scan
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
 from dex_client import fetch_market
@@ -36,8 +36,10 @@ def tg(method, payload=None, files=None, timeout=12):
     payload = payload or {}
     try:
         r = requests.post(f"{TELEGRAM_API}/{method}", data=payload, files=files, timeout=timeout)
-        try: return r.json()
-        except Exception: return {"ok": False, "status_code": r.status_code, "text": r.text}
+        try:
+            return r.json()
+        except Exception:
+            return {"ok": False, "status_code": r.status_code, "text": r.text}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -69,6 +71,16 @@ def _pricing_links():
         "help": HELP_URL,
     }
 
+def build_hint_quickscan(clickable: bool) -> str:
+    pair_example = "https://dexscreener.com/ethereum/0x..." if clickable else "dexscreener[.]com/ethereum/0x…"
+    return (
+        "Paste a *token address*, *TX hash* or *URL* to scan.\n"
+        "Examples:\n"
+        "`0x6982508145454ce325ddbe47a25d4ec3d2311933`  — ERC‑20\n"
+        f"{pair_example} — pair\n\n"
+        "Then tap *More details* / *Why?* / *On‑chain* for deeper info."
+    )
+
 WELCOME = (
     "Welcome to Metridex.\n"
     "Send a token address, TX hash, or a link — I'll run a QuickScan.\n\n"
@@ -83,15 +95,28 @@ UPGRADE_TEXT = (
     "• Deep Report $3 — one detailed report\n\n"
     f"Choose your access below. How it works: {HELP_URL}"
 )
-def build_hint_quickscan(clickable: bool) -> str:
-    pair_example = "https://dexscreener.com/ethereum/0x..." if clickable else "dexscreener[.]com/ethereum/0x…"
-    return (
-        "Paste a *token address*, *TX hash* or *URL* to scan.\n"
-        "Examples:\n"
-        "`0x6982508145454ce325ddbe47a25d4ec3d2311933`  — ERC‑20\n"
-        f"{pair_example} — pair\n\n"
-        "Then tap *More details* / *Why?* / *On‑chain* for deeper info."
-    )
+
+# ---------- Back‑compat wrappers for renderers ----------
+def safe_render_why(verdict, market, lang):
+    try:
+        # New signature: (verdict, market, lang)
+        return render_why(verdict, market, lang)
+    except TypeError:
+        try:
+            # Old signature: (verdict, lang)
+            return render_why(verdict, lang)
+        except TypeError:
+            # Very old: (verdict)
+            return render_why(verdict)
+
+def safe_render_whypp(verdict, market, lang):
+    try:
+        return render_whypp(verdict, market, lang)
+    except TypeError:
+        try:
+            return render_whypp(verdict, lang)
+        except TypeError:
+            return render_whypp(verdict)
 
 @app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
 def webhook():
@@ -145,7 +170,7 @@ def on_message(msg):
 
     ok, _tier = can_scan(chat_id)
     if not ok:
-        send_message(chat_id, "Free scans exhausted. Use /upgrade or enter your Judge Pass.",
+        send_message(chat_id, "Free scans exhausted. Use /upgrade.",
                      reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
@@ -155,9 +180,16 @@ def on_message(msg):
 
     quick = render_quick(verdict, market, {}, DEFAULT_LANG)
     details = render_details(verdict, market, {}, DEFAULT_LANG)
-    why = render_why(verdict, market, DEFAULT_LANG)
-    whypp = render_whypp(verdict, market, DEFAULT_LANG)
-    lp = render_lp({}, DEFAULT_LANG)
+
+    # Back‑compat: Why/Why++ work whether renderers expect (v, m, lang) or (v, lang)
+    why = safe_render_why(verdict, market, DEFAULT_LANG)
+    whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
+
+    # LP text backward compatible
+    try:
+        lp = render_lp({}, DEFAULT_LANG)
+    except TypeError:
+        lp = render_lp({})
 
     links = (market.get("links") or {})
     bundle = {
@@ -175,6 +207,7 @@ def on_message(msg):
         "details": details, "why": why, "whypp": whypp, "lp": lp
     }
 
+    # 1) send with temp keyboard (msg_id=0), 2) store bundle, 3) rebind keyboard with real msg_id
     sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links, ctx="quick"))
     msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
     if msg_id:
@@ -261,7 +294,8 @@ def on_callback(cb):
 
     elif action == "COPY_CA":
         addr = (bundle.get("market") or {}).get("tokenAddress") or "—"
-        send_message(chat_id, addr + "\n(hold to copy)", reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
+        send_message(chat_id, addr + "\n(hold to copy)",
+                     reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
         answer_callback_query(cb_id, "Address posted.", False)
 
     elif action == "DELTA_M5":
