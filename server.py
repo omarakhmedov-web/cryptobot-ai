@@ -4,7 +4,16 @@ from flask import Flask, request, jsonify
 from limits import can_scan, register_scan
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
-from dex_client import fetch_market
+try:
+    from dex_client import fetch_market
+except Exception as _e:
+    try:
+        import dex_client as _dex
+        fetch_market = getattr(_dex, 'fetch_market')
+    except Exception as _e2:
+        _err = str(_e2)
+        def fetch_market(*args, **kwargs):
+            return {'ok': False, 'error': 'market_fetch_unavailable: ' + _err, 'sources': [], 'links': {}}
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
 try:
