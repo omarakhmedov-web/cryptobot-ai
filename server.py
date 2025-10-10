@@ -3,7 +3,7 @@ from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan, try_activate_judge_pass
 from state import store_bundle, load_bundle
-from buttons import build_keyboard  # classic UI
+from buttons import build_keyboard
 from dex_client import fetch_market
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
@@ -12,49 +12,31 @@ from chain_client import fetch_onchain_factors
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en") or "en"
-DEBUG_TG = os.getenv("DEBUG_TG", "0") == "1"
-
-# Pricing/Help URLs (override via ENV if нужно)
-HELP_URL = os.getenv("HELP_URL", "https://metridex.com/help")
-DEEP_REPORT_URL = os.getenv("DEEP_REPORT_URL", "https://metridex.com/upgrade/deep-report")
-DAY_PASS_URL = os.getenv("DAY_PASS_URL", "https://metridex.com/upgrade/day-pass")
-PRO_URL = os.getenv("PRO_URL", "https://metridex.com/upgrade/pro")
-TEAMS_URL = os.getenv("TEAMS_URL", "https://metridex.com/upgrade/teams")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
 
-# --- MarkdownV2 escape ---
 _MD2_SPECIALS = r'_*[]()~`>#+-=|{}.!'
 _MD2_PATTERN = re.compile('[' + re.escape(_MD2_SPECIALS) + ']')
 def mdv2_escape(text: str) -> str:
     if text is None: return ""
-    return _MD2_PATTERN.sub(lambda m: '\\\\' + m.group(0), str(text))
+    return _MD2_PATTERN.sub(lambda m: '\\' + m.group(0), str(text))
 
 def tg(method, payload=None, files=None, timeout=12):
     payload = payload or {}
     try:
         r = requests.post(f"{TELEGRAM_API}/{method}", data=payload, files=files, timeout=timeout)
-        try: j = r.json()
-        except Exception: j = {"ok": False, "status_code": r.status_code, "text": r.text}
-        if DEBUG_TG and not j.get("ok", False):
-            print("TG API ERR:", method, r.status_code, r.text[:300])
-        return j
+        try: return r.json()
+        except Exception: return {"ok": False, "status_code": r.status_code, "text": r.text}
     except Exception as e:
-        if DEBUG_TG: print("TG EXC:", method, e)
         return {"ok": False, "error": str(e)}
 
 def send_message(chat_id, text, reply_markup=None):
     data = {"chat_id": chat_id, "text": mdv2_escape(str(text)), "parse_mode": PARSE_MODE}
     if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
-    res = tg("sendMessage", data)
-    if not res.get("ok"):
-        data2 = {"chat_id": chat_id, "text": str(text)}
-        if reply_markup: data2["reply_markup"] = json.dumps(reply_markup)
-        res = tg("sendMessage", data2)
-    return res
+    return tg("sendMessage", data)
 
 def answer_callback_query(cb_id, text, show_alert=False):
     return tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": str(text), "show_alert": bool(show_alert)})
@@ -65,49 +47,26 @@ def send_document(chat_id: int, filename: str, content_bytes: bytes, caption: st
     if caption: payload["caption"] = caption
     return tg("sendDocument", payload, files=files)
 
-# --- Extra keyboards (Upgrade / How it works?) ---
-def build_upgrade_keyboard() -> dict:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "🔍 Deep report — $3", "url": DEEP_REPORT_URL},
-                {"text": "⏱ Day Pass — $9", "url": DAY_PASS_URL},
-            ],
-            [
-                {"text": "⚙️ Pro — $29", "url": PRO_URL},
-                {"text": "👥 Teams — from $99", "url": TEAMS_URL},
-            ],
-            [
-                {"text": "ℹ️ How it works?", "url": HELP_URL}
-            ]
-        ]
-    }
-
-def build_info_keyboard() -> dict:
-    return {"inline_keyboard": [[{"text": "ℹ️ How it works?", "url": HELP_URL}]]}
-
-# --- Callback parsing ---
 def parse_cb(data: str):
-    m = re.match(r"^v1:(\\w+):(\\-?\\d+):(\\-?\\d+)$", data or "")
+    m = re.match(r"^v1:(\w+):(\-?\d+):(\-?\d+)$", data or "")
     if not m: return None
     return m.group(1), int(m.group(2)), int(m.group(3))
 
-# --- On-chain formatter (lite) ---
-def format_onchain(addr: str, chain: str, factors: dict) -> str:
-    taxes = factors.get("taxes") or {}
-    def pct(x):
-        try: return f"{float(x):.1f}%"
-        except Exception: return "—"
-    return (\
-        "*On-chain*\\n"
-        f"Contract code: present\\n"
-        f"Token: {addr or '—'} on {chain}\\n"
-        f"Honeypot: {'YES' if factors.get('honeypot') else 'no'} | Blacklist: {'YES' if factors.get('blacklist') else 'no'}\\n"
-        f"Pausable: {'YES' if factors.get('pausable') else 'no'} | Upgradeable: {'YES' if factors.get('upgradeable') else 'no'}\\n"
-        f"Mint: {'YES' if factors.get('mint') else 'no'} | Taxes: buy {pct(taxes.get('buy'))}, sell {pct(taxes.get('sell'))}"
-    )
+WELCOME = (
+    "*Welcome to Metridex*\n"
+    "Send a token address, TX hash, or a link — I'll run a QuickScan.\n\n"
+    "*Commands:* /quickscan, /upgrade, /limits\n"
+    "Help: https://metridex.com/help"
+)
+UPGRADE_TEXT = (
+    "**Metridex Pro** — full QuickScan access\n"
+    "• Pro $29/mo — fast lane, Deep reports, export\n"
+    "• Teams $99/mo — for teams/channels\n"
+    "• Day‑Pass $9 — 24h of Pro\n"
+    "• Deep Report $3 — one detailed report\n\n"
+    "Choose your access below. How it works: https://metridex.com/help"
+)
 
-# --- Webhook ---
 @app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
 def webhook():
     try:
@@ -120,27 +79,16 @@ def webhook():
         print("WEBHOOK ERROR", e, traceback.format_exc())
         return jsonify({"ok": True})
 
-# --- Handlers ---
 def on_message(msg):
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
 
     if text.lower().startswith("/start"):
-        welcome = ("*Welcome to Metridex*\\n"
-                   "Send a token address, TX hash, or a link — I\\'ll run a QuickScan.\\n\\n"
-                   "*Commands:* /quickscan, /upgrade, /limits\\n"
-                   f"Help: {HELP_URL}")
-        send_message(chat_id, welcome, reply_markup=build_info_keyboard())
+        send_message(chat_id, WELCOME)
         return jsonify({"ok": True})
 
     if text.lower().startswith("/upgrade"):
-        msg_txt = ("**Metridex Pro** — full QuickScan access\\n"
-                   "• Pro $29/mo — fast lane, Deep reports, export\\n"
-                   "• Teams $99/mo — for teams/channels\\n"
-                   "• Day‑Pass $9 — 24h of Pro\\n"
-                   "• Deep Report $3 — one detailed report\\n\\n"
-                   "Choose your access below. How it works: " + HELP_URL)
-        send_message(chat_id, msg_txt, reply_markup=build_upgrade_keyboard())
+        send_message(chat_id, UPGRADE_TEXT)
         return jsonify({"ok": True})
 
     if text.upper().startswith("PASS "):
@@ -149,10 +97,9 @@ def on_message(msg):
         send_message(chat_id, msg_txt)
         return jsonify({"ok": True})
 
-    # scanning flow
     ok, _tier = can_scan(chat_id)
     if not ok:
-        send_message(chat_id, "Free scans exhausted\\. Use /upgrade or enter your Judge Pass\\.")
+        send_message(chat_id, "Free scans exhausted. Use /upgrade or enter your Judge Pass.")
         return jsonify({"ok": True})
 
     token = text
@@ -161,7 +108,7 @@ def on_message(msg):
     links = (market or {}).get("links") or {}
 
     quick = render_quick(verdict, market, {}, DEFAULT_LANG)
-    quick = re.sub(r"\\[.*?\\]\\(.*?\\)", "", quick).strip()  # drop inline links to keep MarkdownV2 safe
+    quick = re.sub(r"\[.*?\]\(.*?\)", "", quick).strip()
 
     details = render_details(verdict, market, {}, DEFAULT_LANG)
     why = render_why(verdict, DEFAULT_LANG)
@@ -182,10 +129,10 @@ def on_message(msg):
         "details": details, "why": why, "whypp": whypp, "lp": lp
     }
 
-    sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, None, links))
+    sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, None, links, ctx="quick"))
     msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
-    if msg_id:
-        store_bundle(chat_id, msg_id, bundle)
+    if msg_id: store_bundle(chat_id, msg_id, bundle)
+    register_scan(chat_id)
     return jsonify({"ok": True})
 
 def on_callback(cb):
@@ -205,7 +152,8 @@ def on_callback(cb):
 
     if action == "DETAILS":
         answer_callback_query(cb_id, "More details sent.", False)
-        send_message(chat_id, bundle.get("details","(no details)"))
+        send_message(chat_id, bundle.get("details","(no details)"),
+                     reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="details"))
 
     elif action == "WHY":
         answer_callback_query(cb_id, bundle.get("why","Why? n/a"), True)
@@ -215,14 +163,15 @@ def on_callback(cb):
         if len(text) <= 190: answer_callback_query(cb_id, text, True)
         else:
             answer_callback_query(cb_id, "Sent extended rationale.", False)
-            send_message(chat_id, text)
+            send_message(chat_id, text, reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="details"))
 
     elif action == "LP":
         text = bundle.get("lp","LP n/a")
-        if len(text) <= 190: answer_callback_query(cb_id, text, True)
+        if len(text) <= 190:
+            answer_callback_query(cb_id, text, True)
         else:
             answer_callback_query(cb_id, "LP lock info sent.", False)
-            send_message(chat_id, text)
+            send_message(chat_id, text, reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="details"))
 
     elif action == "REPORT":
         answer_callback_query(cb_id, "Report sent.", False)
@@ -235,14 +184,15 @@ def on_callback(cb):
         chain = mkt.get("chain","ethereum")
         try:
             f = fetch_onchain_factors(addr, chain)
-            txt = format_onchain(addr, chain, f)
+            txt = "*On-chain*\n" + json.dumps(f, ensure_ascii=False, indent=2)
         except Exception:
             txt = "On-chain: temporary unavailable"
-        send_message(chat_id, txt)
+        send_message(chat_id, txt, reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="onchain"))
 
     elif action == "COPY_CA":
         addr = (bundle.get("market") or {}).get("tokenAddress") or "—"
-        send_message(chat_id, f"`{addr}`\\n(hold to copy)")
+        send_message(chat_id, addr + "\n(hold to copy)",
+                     reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="details"))
 
     elif action == "DELTA_M5":
         ch = (bundle.get("market") or {}).get("priceChanges") or {}
@@ -259,10 +209,6 @@ def on_callback(cb):
     elif action == "DELTA_24H":
         ch = (bundle.get("market") or {}).get("priceChanges") or {}
         answer_callback_query(cb_id, f"Δ24h: {ch.get('h24','—')}", True)
-
-    elif action == "UPGRADE":
-        answer_callback_query(cb_id, "Upgrade options below.", False)
-        send_message(chat_id, "**Metridex Pro — upgrade**", reply_markup=build_upgrade_keyboard())
 
     else:
         answer_callback_query(cb_id, "Unknown action.", True)
