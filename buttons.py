@@ -1,8 +1,8 @@
 from typing import Optional, Dict, Any
 
 # Telegram inline keyboard builder.
-# callback_data format must be short (<64 bytes). We use: v1:<ACTION>:<msgId>:<chatId>
-# ACTION ∈ {DETAILS, WHY, WHYPP, LP, OPEN_DEX, OPEN_SCAN, UPGRADE}
+# callback_data format: v1:<ACTION>:<msgId>:<chatId>
+# ACTION ∈ {DETAILS, WHY, WHYPP, LP, REPORT, UPGRADE}
 def build_keyboard(chat_id: int, msg_id: int, links: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     links = links or {}
     dex_url = links.get("dex") or "https://dexscreener.com"
@@ -18,13 +18,19 @@ def build_keyboard(chat_id: int, msg_id: int, links: Optional[Dict[str, Any]] = 
         [
             {"text": "More details", "callback_data": cb("DETAILS")},
             {"text": "Why?",         "callback_data": cb("WHY")},
+        ],
+        [
             {"text": "Why++",        "callback_data": cb("WHYPP")},
             {"text": "LP lock",      "callback_data": cb("LP")},
         ],
         [
+            {"text": "Report",       "callback_data": cb("REPORT")},
+        ],
+        [
             {"text": "Open in DEX",  "url": dex_url},
-            # Only include Scan button if we have a link (keeps UI clean)
             *([{"text": "Open in Scan", "url": scan_url}] if scan_url else []),
+        ],
+        [
             {"text": "Upgrade",      "callback_data": cb("UPGRADE")},
         ]
     ]
