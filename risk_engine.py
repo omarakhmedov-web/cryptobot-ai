@@ -1,26 +1,6 @@
+from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Dict, Any, Tuple
-
-@dataclass
-class Factors:
-    # Contract risks
-    honeypot: bool
-    blacklist: bool
-    pausable: bool
-    upgradeable: bool
-    mint: bool
-    maxTx: float | None
-    maxWallet: float | None
-    taxes: Dict[str, float]  # {"buy":x,"sell":y}
-    # Liquidity/trade
-    liq_usd: float | None
-    fdv: float | None
-    vol24h: float | None
-    delta24h: float | None
-    # Web footprint
-    whois_created: str | None
-    ssl_ok: bool | None
-    wayback_first: str | None
+from typing import Any, Dict, List, Optional
 
 @dataclass
 class Verdict:
@@ -28,43 +8,110 @@ class Verdict:
     level: str
     reasons: List[str]
 
-def _level(score: int) -> str:
-    if score <= 24: return "LOW"
-    if score <= 49: return "MEDIUM"
-    if score <= 74: return "HIGH"
-    return "CRITICAL"
+def _to_float(x: Any) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        return float(x)
+    except Exception:
+        return None
 
-def compute_verdict(f: Factors) -> Verdict:
-    score = 0
+def _bucket(score: int) -> str:
+    # Higher score = higher risk
+    if score >= 75:
+        return "CRITICAL"
+    if score >= 50:
+        return "HIGH"
+    if score >= 25:
+        return "MEDIUM"
+    return "LOW"
+
+def compute_verdict(market: Dict[str, Any]) -> Verdict:
+    """
+    Compute a simple, transparent risk score from market dict.
+    The function is defensive and only uses dict.get() (no attribute access).
+    """
     reasons: List[str] = []
+    score = 0
 
-    # Contract risks (40 pts total potential)
-    if f.honeypot: score += 30; reasons.append("Honeypot suspicion")
-    if f.blacklist: score += 10; reasons.append("Blacklist control")
-    if f.pausable: score += 5; reasons.append("Pausable contract")
-    if f.upgradeable: score += 5; reasons.append("Upgradeable/proxy")
-    if f.mint: score += 10; reasons.append("Mint capability")
-    if (f.maxTx or 0) and f.maxTx < 0.01: score += 5; reasons.append("Very low maxTx")
-    if (f.maxWallet or 0) and f.maxWallet < 0.02: score += 5; reasons.append("Very low maxWallet")
-    taxes_buy = (f.taxes or {}).get("buy", 0.0)
-    taxes_sell = (f.taxes or {}).get("sell", 0.0)
-    if taxes_buy > 5 or taxes_sell > 5: score += 6; reasons.append("High taxes")
+    # Extract inputs safely
+    liq = _to_float((market or {}).get("liq"))
+    vol24 = _to_float((market or {}).get("vol24h"))
+    delta24 = _to_float(((market or {}).get("priceChanges") or {}).get("h24"))
+    delta5m = _to_float(((market or {}).get("priceChanges") or {}).get("m5"))
+    age_days = _to_float((market or {}).get("ageDays"))
+    fdv = _to_float((market or {}).get("fdv"))
+    mc = _to_float((market or {}).get("mc"))
+    token_addr = (market or {}).get("tokenAddress")
 
-    # Liquidity (25 pts)
-    if f.liq_usd is not None and f.fdv:
-        ratio = f.liq_usd / max(f.fdv, 1)
-        if ratio < 0.002: score += 15; reasons.append("Very thin liquidity vs FDV")
-        elif ratio < 0.005: score += 10; reasons.append("Thin liquidity vs FDV")
-    if (f.vol24h or 0) < 50000: score += 3; reasons.append("Low 24h volume")
+    # Liquidity checks
+    if liq is None:
+        score += 10; reasons.append("No liquidity data")
+    else:
+        if liq < 3000:
+            score += 30; reasons.append(f"Very low liquidity (${liq:,.0f})")
+        elif liq < 10000:
+            score += 18; reasons.append(f"Low liquidity (${liq:,.0f})")
+        elif liq < 25000:
+            score += 8; reasons.append(f"Modest liquidity (${liq:,.0f})")
+        else:
+            reasons.append(f"Healthy liquidity (${liq:,.0f})")
 
-    # Trading params (15 pts)
-    if (f.delta24h or 0) < -30: score += 8; reasons.append("Severe 24h drop")
-    if (f.delta24h or 0) > 300: score += 6; reasons.append("Extreme pump risk")
+    # Volume checks
+    if vol24 is None:
+        score += 5; reasons.append("No 24h volume data")
+    else:
+        if vol24 < 5000:
+            score += 12; reasons.append(f"Thin 24h volume (${vol24:,.0f})")
+        elif vol24 < 50000:
+            score += 5; reasons.append(f"Modest 24h volume (${vol24:,.0f})")
+        else:
+            reasons.append(f"Active trading (${vol24:,.0f} / 24h)")
 
-    # Web footprint (10 pts)
-    if f.ssl_ok is False: score += 3; reasons.append("No/invalid SSL")
-    if f.whois_created is None: score += 2; reasons.append("Unknown domain age")
-    if f.wayback_first is None: score += 2; reasons.append("No Wayback snapshots")
+    # Price change momentum risk
+    if delta24 is not None:
+        if delta24 > 300:
+            score += 22; reasons.append(f"Parabolic 24h pump (+{delta24:.0f}%)")
+        elif delta24 > 100:
+            score += 12; reasons.append(f"Strong 24h pump (+{delta24:.0f}%)")
+        elif delta24 < -70:
+            score += 10; reasons.append(f"Severe 24h dump ({delta24:.0f}%)")
+    if delta5m is not None and abs(delta5m) > 50:
+        score += 8; reasons.append(f"Extreme 5m volatility ({delta5m:+.0f}%)")
 
-    level = _level(min(score, 100))
-    return Verdict(score=min(score,100), level=level, reasons=reasons[:8])  # cap reasons
+    # Age risk
+    if age_days is None:
+        score += 8; reasons.append("Unknown pair age")
+    else:
+        if age_days < 1/24:  # <1 hour
+            score += 28; reasons.append("Pair is <1h old")
+        elif age_days < 1:
+            score += 20; reasons.append("Pair is <1 day old")
+        elif age_days < 7:
+            score += 10; reasons.append("Pair is <1 week old")
+        else:
+            reasons.append(f"Established pair (~{age_days:.1f}d)")
+
+    # FDV/MC sanity (optional)
+    if fdv is not None and mc is not None and fdv > 0 and mc > 0:
+        ratio = fdv / mc if mc else None
+        if ratio is not None and ratio > 5:
+            score += 6; reasons.append(f"FDV/MC unusually high (~{ratio:.1f}x)")
+    else:
+        reasons.append("FDV/MC not available")
+
+    # Token metadata
+    if not token_addr:
+        score += 6; reasons.append("Token address missing")
+
+    # Clamp score
+    if score < 0: score = 0
+    if score > 100: score = 100
+
+    level = _bucket(score)
+
+    # Ensure reasons are not empty
+    if not reasons:
+        reasons.append("No specific risk flags")
+
+    return Verdict(score=score, level=level, reasons=reasons)
