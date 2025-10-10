@@ -319,6 +319,12 @@ def on_callback(cb):
 
     return jsonify({"ok": True})
 
-@app.get("/healthz")
+
+
+@app.route("/", methods=["GET", "HEAD"])
+def root_ok():
+    return "OK", 200
+
+@app.route("/healthz", methods=["GET", "HEAD"])
 def healthz():
     return jsonify({"ok": True})
