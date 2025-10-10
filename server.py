@@ -8,6 +8,7 @@ from dex_client import fetch_market
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
 from chain_client import fetch_onchain_factors
+from lp_lite import check_lp_lock_v2
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
@@ -187,9 +188,12 @@ def on_message(msg):
 
     # LP text backward compatible
     try:
-        lp = render_lp({}, DEFAULT_LANG)
+        info = check_lp_lock_v2(market.get("chain","eth"), market.get("pairAddress"))
+        lp = render_lp(info, DEFAULT_LANG)
     except TypeError:
-        lp = render_lp({})
+        lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
+    except Exception:
+        lp = "LP lock: unknown"
 
     links = (market.get("links") or {})
     bundle = {
@@ -201,7 +205,7 @@ def on_message(msg):
             "liq": market.get("liq"), "vol24h": market.get("vol24h"),
             "priceChanges": market.get("priceChanges") or {},
             "tokenAddress": market.get("tokenAddress"), "pairAddress": market.get("pairAddress"),
-            "ageDays": market.get("ageDays"), "source": market.get("source")
+            "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
         },
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "site": links.get("site")},
         "details": details, "why": why, "whypp": whypp, "lp": lp
@@ -271,8 +275,8 @@ def on_callback(cb):
         answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
-        text = bundle.get("lp","LP n/a")
-        send_message(chat_id, "LP lock\n" + text, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
+        text = bundle.get("lp","LP lock: n/a")
+        send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
@@ -319,12 +323,6 @@ def on_callback(cb):
 
     return jsonify({"ok": True})
 
-
-
-@app.route("/", methods=["GET", "HEAD"])
-def root_ok():
-    return "OK", 200
-
-@app.route("/healthz", methods=["GET", "HEAD"])
+@app.get("/healthz")
 def healthz():
     return jsonify({"ok": True})
