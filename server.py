@@ -18,12 +18,12 @@ PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
 
-# ===== MarkdownV2 escaping =====
-MDV2_SPECIALS = r'[_*[\]()~`>#+\\-=|{}.!]'
+# ===== Robust MarkdownV2 escaping (no fragile char classes) =====
+_MD2_SPECIALS = r'_*[]()~`>#+-=|{}.!'  # as per Telegram docs
+_MD2_PATTERN = re.compile('[' + re.escape(_MD2_SPECIALS) + ']')
 def mdv2_escape(text: str) -> str:
     if text is None: return ""
-    def esc(m): return "\\" + m.group(0)
-    return re.sub(MDV2_SPECIALS, esc, str(text))
+    return _MD2_PATTERN.sub(lambda m: '\\\\' + m.group(0), str(text))
 
 def tg(method, payload=None, files=None, timeout=12):
     payload = payload or {}
@@ -48,12 +48,9 @@ def answer_callback_query(cb_id, text, show_alert=False):
     return tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": str(text), "show_alert": bool(show_alert)})
 
 def send_document(chat_id: int, filename: str, content_bytes: bytes, caption: str | None = None, content_type: str = "text/html"):
-    files = {
-        "document": (filename, content_bytes, content_type)
-    }
+    files = { "document": (filename, content_bytes, content_type) }
     payload = {"chat_id": chat_id}
-    if caption:
-        payload["caption"] = caption
+    if caption: payload["caption"] = caption
     return tg("sendDocument", payload, files=files)
 
 # ===== Callback versioning =====
@@ -65,7 +62,7 @@ def parse_callback(data: str):
     if action not in VALID_ACTIONS: return None
     return action, msg_id, chat_id
 
-# ===== HTML report builder =====
+# ===== HTML report builder (unchanged) =====
 def _sev_color(level: str) -> str:
     return {
         "LOW": "#16a34a",
@@ -99,9 +96,7 @@ def build_html_report(bundle: dict) -> str:
     .footer{margin-top:18px;font-size:12px;color:#9ca3af}
     .reasons li{margin:6px 0}
     """
-    pair = fmt(m.get("pairSymbol"))
-    chain = fmt(m.get("chain"))
-    price = fmt(m.get("price"))
+    pair = fmt(m.get("pairSymbol")); chain = fmt(m.get("chain")); price = fmt(m.get("price"))
     fdv = fmt(m.get("fdv")); mc = fmt(m.get("mc")); liq = fmt(m.get("liq"))
     vol24h = fmt(m.get("vol24h"))
     deltas = m.get("priceChanges") or {}
@@ -109,12 +104,9 @@ def build_html_report(bundle: dict) -> str:
     token = fmt(m.get("tokenAddress")); pairA = fmt(m.get("pairAddress"))
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    dex = links.get("dex") or ""
-    scan = links.get("scan") or ""
-    site = links.get("site") or ""
+    dex = links.get("dex") or ""; scan = links.get("scan") or ""; site = links.get("site") or ""
 
-    level = v.get("level","?")
-    score = v.get("score","?")
+    level = v.get("level","?"); score = v.get("score","?")
     color = _sev_color(level); emoji = _sev_emoji(level)
 
     html = f"""<!doctype html><html><head><meta charset="utf-8"><title>Metridex Report — {pair}</title>
@@ -150,7 +142,7 @@ def build_html_report(bundle: dict) -> str:
     </body></html>"""
     return html
 
-# ===== Routes =====
+# ===== Routes/Handlers (same flow as previous REPORT version) =====
 @app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
 def webhook():
     t0 = time.time()
@@ -168,7 +160,6 @@ def webhook():
             print(f"[SLOW] webhook {dur:.2f}s")
     return resp
 
-# ===== Handlers =====
 def on_message(msg):
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
@@ -208,39 +199,22 @@ def on_message(msg):
     whypp = render_whypp(verdict, {}, DEFAULT_LANG)
     lp = render_lp({}, DEFAULT_LANG)
 
-    # JSON-safe bundle
     market_safe = {
-        "pairSymbol": market.get("pairSymbol"),
-        "chain": market.get("chain"),
-        "price": market.get("price"),
-        "fdv": market.get("fdv"),
-        "mc": market.get("mc"),
-        "liq": market.get("liq"),
-        "vol24h": market.get("vol24h"),
-        "priceChanges": market.get("priceChanges") or {},
-        "tokenAddress": market.get("tokenAddress"),
-        "pairAddress": market.get("pairAddress"),
+        "pairSymbol": market.get("pairSymbol"), "chain": market.get("chain"),
+        "price": market.get("price"), "fdv": market.get("fdv"),
+        "mc": market.get("mc"), "liq": market.get("liq"),
+        "vol24h": market.get("vol24h"), "priceChanges": market.get("priceChanges") or {},
+        "tokenAddress": market.get("tokenAddress"), "pairAddress": market.get("pairAddress"),
     }
-    verdict_safe = {
-        "level": getattr(verdict, "level", None),
-        "score": getattr(verdict, "score", None),
-    }
-    # Try to include reasons array if доступно
+    verdict_safe = {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)}
     reasons = []
-    try:
-        reasons = list(getattr(verdict, "reasons", []) or [])
-    except Exception:
-        reasons = []
+    try: reasons = list(getattr(verdict, "reasons", []) or [])
+    except Exception: reasons = []
 
     bundle = {
-        "verdict": verdict_safe,
-        "reasons": reasons,
-        "market": market_safe,
+        "verdict": verdict_safe, "reasons": reasons, "market": market_safe,
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "site": links.get("site")},
-        "details": details,
-        "why": why,
-        "whypp": whypp,
-        "lp": lp,
+        "details": details, "why": why, "whypp": whypp, "lp": lp,
     }
 
     kb = build_keyboard(chat_id, None, links)
@@ -261,12 +235,12 @@ def on_callback(cb):
     chat_id = msg.get("chat",{}).get("id")
     msg_id = msg.get("message_id")
 
-    parsed = parse_callback(data)
-    if not parsed:
+    m = re.match(r"^v1:(\\w+):(\\-?\\d+):(\\-?\\d+)$", data or "")
+    if not m:
         answer_callback_query(cb_id, "Unsupported action", True)
         return jsonify({"ok": True})
 
-    action, cb_msg_id, cb_chat_id = parsed
+    action, cb_msg_id, cb_chat_id = m.group(1), int(m.group(2)), int(m.group(3))
     if chat_id != cb_chat_id or msg_id != cb_msg_id:
         answer_callback_query(cb_id, "This action is no longer available", True)
         return jsonify({"ok": True})
@@ -299,7 +273,6 @@ def on_callback(cb):
     elif action == "REPORT":
         answer_callback_query(cb_id, "Report sent.", False)
         html = build_html_report(bundle)
-        # send as a document to keep formatting perfect
         fname = f"Metridex_Report_{int(time.time())}.html"
         send_document(chat_id, fname, html.encode("utf-8"), caption="Metridex QuickScan report")
 
