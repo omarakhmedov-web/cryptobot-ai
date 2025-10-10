@@ -14,6 +14,7 @@ except Exception as _e:
         _err = str(_e2)
         def fetch_market(*args, **kwargs):
             return {'ok': False, 'error': 'market_fetch_unavailable: ' + _err, 'sources': [], 'links': {}}
+
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
 try:
@@ -66,10 +67,15 @@ def send_message(chat_id, text, reply_markup=None):
     if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
     return tg("sendMessage", data)
 
+def send_message_raw(chat_id, text, reply_markup=None):
+    data = {"chat_id": chat_id, "text": str(text)}
+    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+    return tg("sendMessage", data)
+
 def answer_callback_query(cb_id, text, show_alert=False):
     return tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": str(text), "show_alert": bool(show_alert)})
 
-def send_document(chat_id: int, filename: str, content_bytes: bytes, caption: str | None = None, content_type: str = "text/html"):
+def send_document(chat_id: int, filename: str, content_bytes: bytes, caption: str | None = None, content_type: str = "application/json"):
     files = { "document": (filename, content_bytes, content_type) }
     payload = {"chat_id": chat_id}
     if caption: payload["caption"] = caption
@@ -301,21 +307,22 @@ def on_callback(cb):
     elif action == "REPORT":
         try:
             html = "<!doctype html><html><body><pre>" + json.dumps(bundle, ensure_ascii=False, indent=2) + "</pre></body></html>"
-            send_document(chat_id, "Metridex_Report.html", html.encode("utf-8"), caption="Metridex QuickScan report")
+            send_document(chat_id, "Metridex_Report.html", html.encode("utf-8"), caption="Metridex QuickScan report", content_type="text/html")
             answer_callback_query(cb_id, "Report exported.", False)
         except Exception as e:
             answer_callback_query(cb_id, f"Export failed: {e}", True)
 
     elif action == "ONCHAIN":
+        answer_callback_query(cb_id, "Fetching on-chain info…", False)
         if inspect_token is None:
-            answer_callback_query(cb_id, "On-chain module missing.", True)
+            send_message(chat_id, "On-chain module missing.", reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
             return jsonify({"ok": True})
         mkt = (bundle.get("market") or {})
         ch = (mkt.get("chain") or "").lower()
         tok = mkt.get("tokenAddress")
         pair = mkt.get("pairAddress")
         if not tok:
-            answer_callback_query(cb_id, "No token in this message.", True)
+            send_message(chat_id, "No token found in this message.", reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
             return jsonify({"ok": True})
         chain_map = {
             "ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op",
@@ -323,9 +330,19 @@ def on_callback(cb):
         }
         short = chain_map.get(ch, ch or "eth")
         info = inspect_token(short, tok, pair)
-        pretty = "*On-chain*\n" + "```\n" + json.dumps(info, ensure_ascii=False, indent=2) + "\n```"
-        send_message(chat_id, pretty, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
-        answer_callback_query(cb_id, "On-chain posted.", False)
+        # Short preview (MarkdownV2-escaped)
+        preview = ("*On-chain*\n"
+                   f"owner: `{(info.get('owner') or '—')}`\n"
+                   f"renounced: `{(info.get('ownerRenounced') if info.get('owner') else None)}`\n"
+                   f"paused: `{info.get('pausable')}`  upgradeable: `{info.get('upgradeable')}`\n"
+                   f"taxes: `{(info.get('taxes') or {})}`\n"
+                   f"maxTx: `{info.get('maxTx')}`  maxWallet: `{info.get('maxWallet')}`")
+        send_message(chat_id, preview, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
+        try:
+            doc = json.dumps(info, ensure_ascii=False, indent=2).encode("utf-8")
+            send_document(chat_id, "Metridex_Onchain.json", doc, caption="On-chain data")
+        except Exception:
+            pass
 
     elif action == "COPY_CA":
         token = ((bundle.get("market") or {}).get("tokenAddress") or "—")
