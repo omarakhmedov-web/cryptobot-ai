@@ -2,9 +2,9 @@ from __future__ import annotations
 """
 dex_client.py — free-first, backward-compatible
 - Primary: DexScreener (no key)
-- Secondary: on-chain reserves (UniswapV2) по публичным RPC
+- Secondary: on-chain reserves (UniswapV2) via public RPC
 - Autodetect сети по ENABLED_NETWORKS
-- Backcompat: одиночный позиционный аргумент трактуется как query (адрес/ссылка)
+- Backcompat: один позиционный аргумент трактуется как query (адрес/URL)
 """
 import os, time, math, re
 from typing import Dict, Any, Optional, Tuple
@@ -38,8 +38,7 @@ CHAIN_RPC_ENV = {
 def _http_get(url: str, params: Dict[str, Any] | None = None):
     try:
         r = requests.get(url, params=params or {}, timeout=HTTP_TIMEOUT, headers=HEADERS)
-        if "json" in (r.headers.get("content-type") or ""):
-            return r.status_code, r.json()
+        if "json" in (r.headers.get("content-type") or ""): return r.status_code, r.json()
         return r.status_code, r.text
     except Exception as e:
         return 599, {"error": str(e)}
@@ -131,11 +130,10 @@ def _add_onchain_source(market: Dict[str, Any]) -> None:
             d1 = _decimals(rpc, t1) if t1 else 18
             price2 = _price_from_reserves(r0,d0,r1,d1, True)
             market.setdefault("meta", {})["reservePrice"] = price2
-            if isinstance(market.get("sources"), list):
-                if "On-chain reserves" not in market["sources"]:
-                    market["sources"].append("On-chain reserves")
-            else:
-                market["sources"] = ["DexScreener", "On-chain reserves"]
+            srcs = market.get("sources") or []
+            if "On-chain reserves" not in srcs:
+                srcs.append("On-chain reserves")
+                market["sources"] = srcs
     except Exception as e:
         market.setdefault("meta", {})["reserves_error"] = str(e)
 
