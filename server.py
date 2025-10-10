@@ -3,7 +3,7 @@ from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan, try_activate_judge_pass
 from state import store_bundle, load_bundle
-from buttons import build_keyboard  # now supports ctx="start"
+from buttons import build_keyboard
 from dex_client import fetch_market
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
@@ -19,6 +19,7 @@ DAY_PASS_URL = os.getenv("DAY_PASS_URL", "https://metridex.com/upgrade/day-pass"
 PRO_URL = os.getenv("PRO_URL", "https://metridex.com/upgrade/pro")
 TEAMS_URL = os.getenv("TEAMS_URL", "https://metridex.com/upgrade/teams")
 FREE_DAILY_SCANS = int(os.getenv("FREE_DAILY_SCANS", "2"))
+HINT_CLICKABLE_LINKS = os.getenv("HINT_CLICKABLE_LINKS", "0") == "1"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
@@ -82,13 +83,20 @@ UPGRADE_TEXT = (
     "• Deep Report $3 — one detailed report\n\n"
     f"Choose your access below. How it works: {HELP_URL}"
 )
-HINT_QUICKSCAN = (
-    "Paste a *token address*, *TX hash* or *URL* to scan.\n"
-    "Examples:\n"
-    "`0x6982508145454ce325ddbe47a25d4ec3d2311933`  — ERC‑20\n"
-    "`https://dexscreener.com/ethereum/0x...` — pair\n\n"
-    "Then tap *More details* / *Why?* / *On‑chain* for deeper info."
-)
+
+def build_hint_quickscan(clickable: bool) -> str:
+    if clickable:
+        pair_example = "https://dexscreener.com/ethereum/0x..."
+    else:
+        # obfuscated so Telegram won't autolink; shows intent clearly
+        pair_example = "dexscreener[.]com/ethereum/0x…"
+    return (
+        "Paste a *token address*, *TX hash* or *URL* to scan.\n"
+        "Examples:\n"
+        "`0x6982508145454ce325ddbe47a25d4ec3d2311933`  — ERC‑20\n"
+        f"{pair_example} — pair\n\n"
+        "Then tap *More details* / *Why?* / *On‑chain* for deeper info."
+    )
 
 @app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
 def webhook():
@@ -116,26 +124,19 @@ def on_message(msg):
         return jsonify({"ok": True})
 
     if low.startswith("/quickscan"):
-        send_message(chat_id, HINT_QUICKSCAN, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        send_message(chat_id, build_hint_quickscan(HINT_CLICKABLE_LINKS), reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
     if low.startswith("/limits"):
-        plan = "Free"
         try:
             ok, tier = can_scan(chat_id)
             plan = (tier or "Free")
             allowed = "✅ allowed now" if ok else "⛔ not allowed now"
         except Exception:
-            allowed = "—"
-        try:
-            from limits import is_judge_active
-            judge = "✅ active" if is_judge_active(chat_id) else "—"
-        except Exception:
-            judge = "—"
+            plan, allowed = "Free", "—"
         msg_txt = (
             f"*Plan:* {plan}\n"
             f"*Free quota:* {FREE_DAILY_SCANS}/day\n"
-            f"*Judge‑Pass:* {judge}\n"
             f"*Now:* {allowed}\n\n"
             "Upgrade for unlimited scans: /upgrade"
         )
