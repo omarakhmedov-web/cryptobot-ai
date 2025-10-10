@@ -1,243 +1,215 @@
-import os, json, requests
+import os, json, traceback, requests, re, time
 from flask import Flask, request, jsonify
 
+# ---- External project modules (kept as-is) ----
+# These must exist in your environment; we don't touch their internals.
 from limits import can_scan, register_scan, try_activate_judge_pass, is_judge_active
 from state import store_bundle, load_bundle
-from buttons import build_keyboard
 from dex_client import fetch_market
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
-DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en")
+DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en") or "en"
 
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+app = Flask(__name__)
 
-
-
-# === OMEGA FIXES BLOCK START (METRIDEX-OMEGA) ================================
-# Provides: stable button order, EN-only sanitize, webhook hardening.
-import re, json, time, sys, traceback
-
+# ================= OMEGA UTILITIES =================
 class OMEGA:
     BUTTONS_ORDER = [
         "More details",
         "Why?",
         "Why++",
         "LP lock",
+        "Report",
         "Open in DEX",
         "Open in Scan",
         "Upgrade",
     ]
-    _ALIASES = {
-        "more": "More details", "details": "More details",
-        "why": "Why?", "why?": "Why?",
-        "why++": "Why++",
-        "lp": "LP lock", "lp lock": "LP lock",
-        "open in dex": "Open in DEX", "open dex": "Open in DEX",
-        "open in scan": "Open in Scan", "open scan": "Open in Scan",
-        "upgrade": "Upgrade",
+    _RU = {
+        "Почему?":"Why?","Почему++":"Why++","Подробнее":"More details",
+        "Заблокировать LP":"LP lock","Открыть в DEX":"Open in DEX",
+        "Открыть в Scan":"Open in Scan","Отчёт":"Report","Обновить":"Upgrade"
     }
     @staticmethod
-    def _normalize_label(text: str) -> str:
-        if not text: return ""
-        t = re.sub(r"\s+", " ", str(text)).strip().lower()
-        return OMEGA._ALIASES.get(t, t.title() if t in OMEGA.BUTTONS_ORDER else t)
+    def force_en(s: str) -> str:
+        if not s: return s
+        for ru,en in OMEGA._RU.items(): s = s.replace(ru,en)
+        s = re.sub(r"[\\u0400-\\u04FF]+","",s) # strip Cyrillic
+        return re.sub(r"[ \\t]{2,}"," ",s).strip()
 
     @staticmethod
-    def enforce_button_order(markup):
-        if not isinstance(markup, dict): return markup
-        ik = markup.get("inline_keyboard")
-        if not isinstance(ik, list): return markup
-        # Flatten
-        flat = []
-        for row in ik:
-            if isinstance(row, (list, tuple)):
-                for btn in row:
-                    if isinstance(btn, dict):
-                        flat.append(btn)
-        buckets = {k: [] for k in OMEGA.BUTTONS_ORDER}
-        for btn in flat:
-            text = btn.get("text") or btn.get("label") or ""
-            cb = btn.get("callback_data") or btn.get("url") or ""
-            key = OMEGA._normalize_label(text) or OMEGA._normalize_label(cb)
-            key = re.sub(r"[^\w\s\+\?]", "", key).strip()
-            if key.lower() == "lp": key = "LP lock"
-            if key.lower() == "why": key = "Why?"
-            if key in buckets: buckets[key].append(btn)
-        ordered = []; row = []
-        for name in OMEGA.BUTTONS_ORDER:
-            for btn in buckets.get(name, []):
-                row.append(btn)
-                if len(row) == 2:
-                    ordered.append(row); row = []
-        if row: ordered.append(row)
-        if ordered:
-            markup["inline_keyboard"] = ordered
-        return markup
+    def verdict_emoji(vdict):
+        sev = (vdict or {}).get("severity","").upper()
+        return {"LOW":"🟢","MEDIUM":"🟡","HIGH":"🟠","CRITICAL":"🔴"}.get(sev,"ℹ️")
 
-    _RU_SNIPPETS = {
-        "Почему?": "Why?",
-        "Почему++": "Why++",
-        "Заблокировать LP": "LP lock",
-        "Подробнее": "More details",
-        "Открыть в DEX": "Open in DEX",
-        "Открыть в Scan": "Open in Scan",
-        "Обновить": "Upgrade",
-    }
-    @staticmethod
-    def force_english(text: str) -> str:
-        if not text: return text
-        s = str(text)
-        for ru, en in OMEGA._RU_SNIPPETS.items():
-            s = s.replace(ru, en)
-        s = re.sub(r"[\u0400-\u04FF]+", "", s)  # strip Cyrillic
-        s = re.sub(r"[ \t]{2,}", " ", s).strip()
-        return s
-
-    @staticmethod
-    def safe_endpoint(name="endpoint"):
-        def deco(fn):
-            def wrapper(*args, **kwargs):
-                try:
-                    return fn(*args, **kwargs)
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    sys.stderr.write(f"[OMEGA][{name}] ERROR: {e}\n{tb}\n")
-                    payload = {"ok": True, "status": "degraded", "endpoint": name}
-                    try:
-                        if "flask" in sys.modules:
-                            from flask import jsonify
-                            return jsonify(payload), 200
-                    except Exception:
-                        pass
-                    import json as _json
-                    return _json.dumps(payload), 200, {"Content-Type": "application/json"}
-            return wrapper
-        return deco
-# === OMEGA FIXES BLOCK END ====================================================
-
-
-app = Flask(__name__)
-
-def _tg_api(method: str, payload: dict):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+# ================= Telegram helpers =================
+def tg(method, payload, files=None, timeout=10):
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(f"{TELEGRAM_API}/{method}", data=payload, files=files, timeout=timeout)
+        if r.status_code != 200:
+            print("TG error:", r.status_code, r.text)
         return r.json()
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        print("TG exception", e)
+        return {"ok":False, "error":str(e)}
 
-def send_message(chat_id: int, text: str, reply_markup=None, parse_mode: str | None = None):
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_markup: payload["reply_markup"] = reply_markup
-    if parse_mode: payload["parse_mode"] = parse_mode
-    return _tg_api("sendMessage", payload)
+def send_message(chat_id, text, parse_mode=None, reply_markup=None):
+    text = OMEGA.force_en(text)
+    data = {"chat_id": chat_id, "text": text}
+    if parse_mode: data["parse_mode"] = parse_mode
+    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+    return tg("sendMessage", data)
 
-def answer_callback_query(cb_id: str, text: str, alert: bool = False):
-    return _tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": text, "show_alert": alert})
+def edit_message_text(chat_id, message_id, text, parse_mode=None, reply_markup=None):
+    text = OMEGA.force_en(text)
+    data = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if parse_mode: data["parse_mode"] = parse_mode
+    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+    return tg("editMessageText", data)
 
-@app.get("/healthz")
-def healthz():
-    return jsonify({"ok": True, "version": "superbot-1.0.1"})
+def answer_callback_query(cb_id, text, show_alert=False):
+    text = OMEGA.force_en(text)
+    return tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": text, "show_alert": bool(show_alert)})
 
-@OMEGA.safe_endpoint("webhook")
+def build_keyboard_standard(chat_id, msg_id, links):
+    # We do not depend on buttons.py; build inline keyboard here, then state can still be used for bundles.
+    btn = lambda text, data=None, url=None: {"text": text, **({"callback_data": data} if data else {}), **({"url": url} if url else {})}
+
+    rows = [
+        [btn("More details", f"A:DETAILS:{chat_id}:{msg_id}"), btn("Why?", f"A:WHY:{chat_id}:{msg_id}")],
+        [btn("Why++", f"A:WHYPP:{chat_id}:{msg_id}"), btn("LP lock", f"A:LP:{chat_id}:{msg_id}")],
+        [btn("Report", f"A:REPORT:{chat_id}:{msg_id}")],
+    ]
+    dex = (links or {}).get("dex") or (links or {}).get("dex_url")
+    scan = (links or {}).get("scan") or (links or {}).get("scan_url")
+    if dex or scan:
+        row = []
+        if dex: row.append(btn("Open in DEX", url=dex))
+        if scan: row.append(btn("Open in Scan", url=scan))
+        if row: rows.append(row)
+    rows.append([btn("Upgrade", f"A:UPGRADE:{chat_id}:{msg_id}")])
+    return {"inline_keyboard": rows}
+
+# ================= Routes =================
 @app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
 def webhook():
-    upd = request.get_json(force=True, silent=True) or {}
-    if "message" in upd: return handle_message(upd["message"])
-    if "callback_query" in upd: return handle_callback(upd["callback_query"])
-    return jsonify({"ok": True})
-
-def handle_message(msg: dict):
-    chat_id = msg.get("chat",{}).get("id"); text = (msg.get("text") or "").strip()
-    if not chat_id: return jsonify({"ok": True})
-
-    if text.startswith("/start"):
-        send_message(chat_id, "Send a token address / txhash / URL for a quick scan.")
+    try:
+        upd = request.get_json(force=True, silent=True) or {}
+        if "message" in upd:
+            return on_message(upd["message"])
+        if "callback_query" in upd:
+            return on_callback(upd["callback_query"])
         return jsonify({"ok": True})
-    if text.startswith("/limits"):
-        free = os.getenv("FREE_DAILY_LIMIT", "2")
-        send_message(chat_id, f"Free daily limit: {free}\nJudge-pass active: {'yes' if is_judge_active(chat_id) else 'no'}")
-        return jsonify({"ok": True})
-    if text.startswith("/pass"):
-        parts = text.split(maxsplit=1); code = parts[1].strip() if len(parts)>1 else ""
-        ok, msgp = try_activate_judge_pass(chat_id, code)
-        send_message(chat_id, msgp or ("Activated" if ok else "Invalid code"))
+    except Exception as e:
+        print("WEBHOOK ERROR", e, traceback.format_exc())
+        return jsonify({"ok": True, "status": "degraded"})
+
+# ================= Handlers =================
+def on_message(msg):
+    chat_id = msg["chat"]["id"]
+    text = (msg.get("text") or "").strip()
+
+    # /start and /help
+    if text.startswith("/start") or text.lower() in ("/help", "help"):
+        hello = (
+            "Welcome to Metridex.\n"
+            "Send a token address, TX hash, or a link — I'll run a QuickScan.\n\n"
+            "Commands: /quickscan, /upgrade, /limits\n"
+            "Pricing: metridex.com/pricing • Help: metridex.com/help"
+        )
+        send_message(chat_id, hello)
         return jsonify({"ok": True})
 
-    if not can_scan(chat_id):
-        send_message(chat_id, "Free limit reached. Tap Upgrade.")
+    # Judge pass activation
+    if text.upper().startswith("PASS "):
+        code = text.split(" ",1)[1].strip()
+        ok, msg_txt = try_activate_judge_pass(chat_id, code)
+        send_message(chat_id, msg_txt)
         return jsonify({"ok": True})
 
+    # Simple scan flow
     token = text
+    if not can_scan(chat_id):
+        send_message(chat_id, "Free scans exhausted. Use /upgrade or enter your Judge Pass.")
+        return jsonify({"ok": True})
+
     market = fetch_market(token)
-    # FIX: compute_verdict expects a single argument (market)
-    verdict = compute_verdict(market)
+    verdict = compute_verdict(market)  # external module
     links = market.get("links") or {}
 
     quick = render_quick(verdict, market, links, DEFAULT_LANG)
     details = render_details(verdict, market, {}, DEFAULT_LANG)
-    why = render_why(verdict, DEFAULT_LANG)
-    whypp = render_whypp(verdict, {}, DEFAULT_LANG)
+    why = render_why(verdict, DEFAULT_LANG)  # short bullets with emoji
+    whypp = render_whypp(verdict, {}, DEFAULT_LANG)  # long form
     lp = render_lp({}, DEFAULT_LANG)
-    # Enforce EN-only texts
-    quick = OMEGA.force_english(quick)
-    details = OMEGA.force_english(details)
-    why = OMEGA.force_english(why)
-    whypp = OMEGA.force_english(whypp)
-    lp = OMEGA.force_english(lp)
 
+    # Persist bundle for callbacks
+    bundle = {"details": details, "why": why, "whypp": whypp, "lp": lp}
     resp = send_message(chat_id, quick, parse_mode="Markdown")
     msg_id = None
-    if resp.get("ok") and resp.get("result"): msg_id = resp["result"]["message_id"]
+    if resp.get("ok") and resp.get("result"):
+        msg_id = resp["result"]["message_id"]
+        store_bundle(chat_id, msg_id, bundle)
 
-    try:
-        kb = build_keyboard(chat_id, msg_id, links)
-        # Enforce stable button order
-        try:
-            kb = OMEGA.enforce_button_order(kb)
-        except Exception:
-            pass
-        _ = _tg_api("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": msg_id, "reply_markup": kb})
-    except Exception:
-        pass
-
-    bundle = {"quick": quick, "details": details, "why": why, "whypp": whypp, "lp": lp}
-    if msg_id is not None: store_bundle(chat_id, msg_id, bundle)
+    # Our standard keyboard (includes Report and proper order)
+    kb = build_keyboard_standard(chat_id, msg_id, links)
+    if msg_id:
+        edit_message_text(chat_id, msg_id, quick, parse_mode="Markdown", reply_markup=kb)
+    else:
+        send_message(chat_id, quick, parse_mode="Markdown", reply_markup=kb)
 
     register_scan(chat_id)
     return jsonify({"ok": True})
 
-def handle_callback(cb: dict):
-    data = cb.get("data",""); cb_id = cb.get("id")
-    msg = cb.get("message",{}); chat_id = msg.get("chat",{}).get("id"); msg_id = msg.get("message_id")
+def on_callback(cb):
+    cb_id = cb["id"]
+    data = cb.get("data") or ""
+    msg = cb.get("message") or {}
+    chat_id = msg.get("chat",{}).get("id")
+    msg_id = msg.get("message_id")
 
-    try:
-        version, action, mid_s, cid_s = data.split(":", 3)
-        if version != "v1": answer_callback_query(cb_id, "Outdated action.", True); return jsonify({"ok": True})
-        try: mid = int(mid_s); cid = int(cid_s)
-        except ValueError: answer_callback_query(cb_id, "Bad callback data.", True); return jsonify({"ok": True})
-        if cid != chat_id or mid != msg_id: answer_callback_query(cb_id, "Stale/foreign message.", False); return jsonify({"ok": True})
-    except Exception:
-        answer_callback_query(cb_id, "Malformed callback.", True); return jsonify({"ok": True})
+    m = re.match(r"A:(\w+):(\-?\d+):(\d+)", data or "")
+    action = m.group(1) if m else None
 
-    bundle = load_bundle(chat_id, msg_id)
-    if not bundle:
-        answer_callback_query(cb_id, "This scan has expired. Resubmit the token/URL for fresh data.", True)
-        return jsonify({"ok": True})
+    bundle = load_bundle(chat_id, msg_id) or {}
 
     if action == "DETAILS":
         answer_callback_query(cb_id, "More details sent.", False)
-        send_message(chat_id, bundle.get("details","(no details)"), parse_mode="Markdown")
+        send_message(chat_id, bundle.get("details", "(no details)"), parse_mode="Markdown")
+
     elif action == "WHY":
-        answer_callback_query(cb_id, bundle.get("why","Why? n/a"), True)
+        txt = bundle.get("why","Why? n/a")
+        # WHY stays as a popup with emoji (nicer)
+        answer_callback_query(cb_id, txt, True)
+
     elif action == "WHYPP":
-        answer_callback_query(cb_id, bundle.get("whypp","Why++ n/a"), True)
+        # WHY++ posts a long message in chat (not a popup)
+        answer_callback_query(cb_id, "Sent full rationale.", False)
+        send_message(chat_id, bundle.get("whypp","Why++ n/a"), parse_mode="Markdown")
+
     elif action == "LP":
-        answer_callback_query(cb_id, bundle.get("lp","LP n/a"), True)
+        # LP posts text in chat (not a popup)
+        answer_callback_query(cb_id, "LP lock info sent.", False)
+        send_message(chat_id, bundle.get("lp","LP n/a"), parse_mode=None)
+
+    elif action == "REPORT":
+        # Lightweight report: details + separators (no HTML)
+        answer_callback_query(cb_id, "Report sent.", False)
+        rep = "*Metridex Report (lite)*\\n\\n" + (bundle.get("details","(no details)"))
+        send_message(chat_id, rep, parse_mode="Markdown")
+
     elif action == "UPGRADE":
-        answer_callback_query(cb_id, "Upgrade: Visit metridex.com/pricing", True)
+        answer_callback_query(cb_id, "Upgrade: metridex.com/pricing", True)
+
     else:
         answer_callback_query(cb_id, "Unknown action.", True)
+
+    return jsonify({"ok": True})
+
+# Health check
+@app.get("/healthz")
+def healthz():
     return jsonify({"ok": True})
