@@ -295,3 +295,49 @@ def _parse_query(q: str) -> tuple[str|None, str|None, str|None]:
     if ADDR_RE.match(q): return None, q, None
     if TX_RE.match(q):   return None, None, None
     return None, None, Nonet
+
+__all__ = ['fetch_market']
+
+
+# ---- Ensure public API is present ----
+def fetch_market(_pos: str | None = None, *, chain: str | None = None, token: str | None = None, pair: str | None = None) -> dict:
+    # Resolve positional by parsing
+    if _pos and not (chain or token or pair):
+        c,t,p = _parse_query(_pos); chain = chain or c; token = token or t; pair = pair or p
+
+    # If token accidentally passed as "chain"
+    if chain and ADDR_RE.match(chain):
+        token = token or chain; chain = None
+
+    # Direct target
+    if chain and (pair or token):
+        ch = (chain or "").strip().lower()
+        m = _ds_by_pair(ch, pair) if pair else _ds_by_token(ch, token)
+        if m.get("ok"):
+            _add_onchain_source(m)
+            return m
+
+    # Token only -> best pair across chains
+    if token and not pair:
+        m = _ds_by_token(None, token)
+        if m.get("ok"):
+            _add_onchain_source(m)
+            return m
+
+    # Pair only -> try across enabled chains
+    if pair and not chain:
+        for ch_short in enabled_networks():
+            m = _ds_by_pair(ch_short, pair)
+            if m.get("ok"):
+                _add_onchain_source(m)
+                return m
+
+    out = {"ok": False, "error": "no market found", "sources": [], "chain": chain or "—", "links": {}}
+    if token: out["tokenAddress"] = token
+    if pair:  out["pairAddress"] = pair
+    return out
+
+try:
+    __all__ = list(set((__all__ if '__all__' in globals() else []) + ['fetch_market']))
+except Exception:
+    __all__ = ['fetch_market']
