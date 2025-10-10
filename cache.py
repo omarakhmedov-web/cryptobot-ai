@@ -1,59 +1,46 @@
-import os
-import time
-from typing import Optional, Any
-from common import getenv_int
+import os, time, json
+from typing import Optional, Tuple, Dict, Any
 
-class _MemoryCache:
-    def __init__(self):
-        self._store = {}  # key -> (value, expires_at)
-    def set(self, key: str, value: Any, ttl: int):
-        self._store[key] = (value, time.time() + ttl)
-    def get(self, key: str) -> Optional[Any]:
-        v = self._store.get(key)
-        if not v: return None
-        val, exp = v
-        if time.time() > exp:
-            self._store.pop(key, None)
-            return None
-        return val
+_MEM: Dict[str, Tuple[float, str]] = {}
+_REDIS = None
 
-_redis = None
 def _get_redis():
-    global _redis
-    if _redis is not None:
-        return _redis
-    url = os.getenv("REDIS_URL")
+    global _REDIS
+    if _REDIS is not None:
+        return _REDIS
+    url = os.getenv("REDIS_URL", "").strip()
     if not url:
-        _redis = None
+        _REDIS = None
         return None
     try:
-        from redis import Redis
-        _redis = Redis.from_url(url, decode_responses=True)
-        _redis.ping()
-        return _redis
+        import redis  # optional
+        _REDIS = redis.from_url(url, decode_responses=True)
+        return _REDIS
     except Exception:
-        _redis = None
+        _REDIS = None
         return None
-
-_mem = _MemoryCache()
-
-def cache_set(key: str, value: str, ttl: int) -> None:
-    r = _get_redis()
-    if r:
-        try:
-            r.setex(key, ttl, value)
-            return
-        except Exception:
-            pass
-    _mem.set(key, value, ttl)
 
 def cache_get(key: str) -> Optional[str]:
     r = _get_redis()
     if r:
         try:
-            v = r.get(key)
-            if v is not None:
-                return v
+            return r.get(f"mdx:{key}")
         except Exception:
             pass
-    return _mem.get(key)
+    v = _MEM.get(key)
+    if not v: return None
+    expires_at, payload = v
+    if time.time() > expires_at:
+        _MEM.pop(key, None)
+        return None
+    return payload
+
+def cache_set(key: str, value: str, ttl_sec: int = 300) -> None:
+    r = _get_redis()
+    if r:
+        try:
+            r.setex(f"mdx:{key}", ttl_sec, value)
+            return
+        except Exception:
+            pass
+    _MEM[key] = (time.time() + max(1, int(ttl_sec)), value)
