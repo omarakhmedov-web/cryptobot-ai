@@ -1,98 +1,184 @@
-from typing import Dict, Any
-from risk_engine import Verdict
+from __future__ import annotations
+from typing import Any, Dict, List, Tuple, Optional
 
-def _fmt_usd(x):
-    if x is None: return "—"
+# ---------- helpers ----------
+def _abbr_usd(v: Optional[float]) -> str:
+    if v is None: return "—"
     try:
-        v = float(x)
+        n = float(v)
     except Exception:
-        return str(x)
-    if v >= 1e9: return f"${v/1e9:.2f}B"
-    if v >= 1e6: return f"${v/1e6:.2f}M"
-    if v >= 1e3: return f"${v/1e3:.2f}K"
-    return f"${v:.6f}" if v < 1 else f"${v:.2f}"
+        return str(v)
+    t = abs(n)
+    if t >= 1_000_000_000_000: s = f"${n/1_000_000_000_000:.2f}T"
+    elif t >= 1_000_000_000:   s = f"${n/1_000_000_000:.2f}B"
+    elif t >= 1_000_000:       s = f"${n/1_000_000:.2f}M"
+    elif t >= 1_000:           s = f"${n/1_000:.2f}K"
+    else:                      s = f"${n:.6f}" if t < 1 else f"${n:.2f}"
+    # strip trailing zeros
+    s = s.replace("000000", "")
+    while len(s) > 2 and s[-1] == "0" and s[-2] != ".":
+        s = s[:-1]
+    if s.endswith("."): s = s[:-1]
+    return s
 
-def _fmt_pct(x):
-    if x is None: return "—"
+def _fmt_pct(v):
+    if v is None or v == "—": return "—"
     try:
-        return f"{float(x):+.2f}%"
+        return f"{float(v):+.2f}%"
     except Exception:
-        return str(x)
+        return str(v)
 
-def _fmt_days(d):
-    if d is None: return "—"
+def _age_days(age):
+    if not age: return "—"
     try:
-        d = float(d)
-        if d < 1: return f"{int(d*24)}h"
+        d = float(age)
         return f"{d:.1f}d"
     except Exception:
-        return "—"
+        return str(age)
 
-def _sev_emoji(level: str) -> str:
-    lvl = (level or "").upper()
-    return {"LOW":"🟢","MEDIUM":"🟡","HIGH":"🟠","CRITICAL":"🔴"}.get(lvl, "ℹ️")
+def _level_from_score(score: Optional[float]) -> str:
+    if score is None: return "LOW"
+    s = float(score)
+    if s <= 24: return "LOW"
+    if s <= 49: return "MEDIUM"
+    if s <= 74: return "HIGH"
+    return "CRITICAL"
 
-def render_quick(verdict: Verdict, market: Dict[str,Any], links: Dict[str,str], lang: str = "en") -> str:
-    chain = market.get("chain","?")
-    pair = market.get("pairSymbol","?")
-    price = market.get("price")
-    fdv = market.get("fdv"); mc = market.get("mc"); liq = market.get("liq")
-    vol24 = market.get("vol24h")
-    chg = market.get("priceChanges") or {}
-    age = market.get("ageDays")
+def _emoji(level: Optional[str], score: Optional[float]) -> str:
+    lvl = (level or _level_from_score(score)).upper()
+    return {"LOW":"🟢","MEDIUM":"🟡","HIGH":"🟠","CRITICAL":"🔴"}.get(lvl,"🟢")
 
-    dex = (links or {}).get("dex") or "https://dexscreener.com"
-    scan = (links or {}).get("scan") or "—"
-    site = (links or {}).get("site") or "—"
+def _safe(s):
+    return "—" if s in (None, "", 0, "0") else s
 
-    emoji = _sev_emoji(getattr(verdict, "level", ""))
-    score = getattr(verdict, "score", "?")
+# ---------- WHY reasons synthesis ----------
+def _synth_reasons(verdict: Any, market: Dict[str, Any]) -> List[str]:
+    \"\"\"Build minimal, copyable reasons if verdict.reasons is empty.\"\"\"
+    rs: List[str] = []
+    score = getattr(verdict, "score", None)
+    level = getattr(verdict, "level", None)
+    lvl = (level or _level_from_score(score)).upper()
 
-    return (
-f"*Metridex QuickScan — {pair}* {emoji} ({score})\n"
-f"`{chain}`  •  Price: *{_fmt_usd(price)}*\n"
-f"FDV: {_fmt_usd(fdv)}  •  MC: {_fmt_usd(mc)}  •  Liq: {_fmt_usd(liq)}\n"
-f"Vol 24h: {_fmt_usd(vol24)}  •  Δ5m {_fmt_pct(chg.get('m5'))}  •  Δ1h {_fmt_pct(chg.get('h1'))}  •  Δ24h {_fmt_pct(chg.get('h24'))}\n"
-f"Age: {_fmt_days(age)}  •  Source: {market.get('source','partial')}\n\n"
-f"[Open in DEX]({dex})  |  [Scan]({scan})  |  Site: {site}"
-    )
+    liq = market.get("liq")
+    vol = market.get("vol24h")
+    fdv = market.get("fdv") or market.get("mc")
+    age = market.get("ageDays") or market.get("age")  # if you store it
+    pc = market.get("priceChanges") or {}
+    m5, h1, h24 = pc.get("m5"), pc.get("h1"), pc.get("h24")
 
-def render_details(verdict: Verdict, market: Dict[str,Any], webintel: Dict[str,Any], lang: str = "en") -> str:
-    t = market.get("tokenAddress") or "—"
-    p = market.get("pairAddress") or "—"
-    chg = market.get("priceChanges") or {}
-    vol = market.get("volumes") or {}
-    return (
-f"*More details*\n"
-f"Verdict: *{verdict.level}* ({verdict.score})\n\n"
-f"*Price change:* Δ5m {_fmt_pct(chg.get('m5'))} • Δ1h {_fmt_pct(chg.get('h1'))} • Δ6h {_fmt_pct(chg.get('h6'))} • Δ24h {_fmt_pct(chg.get('h24'))}\n"
-f"*Volumes:* 5m {_fmt_usd(vol.get('m5'))} • 1h {_fmt_usd(vol.get('h1'))} • 6h {_fmt_usd(vol.get('h6'))} • 24h {_fmt_usd(vol.get('h24'))}\n\n"
-f"*Token:* `{t}`\n"
-f"*Pair:*  `{p}`"
-    )
+    # Liquidity
+    if isinstance(liq, (int, float)) and liq > 0:
+        if isinstance(fdv, (int, float)) and fdv > 0 and (liq/fdv) >= 0.01:
+            rs.append(f"LP depth {_abbr_usd(liq)} is healthy vs FDV {_abbr_usd(fdv)}")
+        else:
+            rs.append(f"LP depth {_abbr_usd(liq)} — check slippage on large orders")
+    else:
+        rs.append("LP depth unknown — verify slippage before size")
 
-def render_why(verdict: Verdict, lang: str = "en") -> str:
-    reasons = verdict.reasons or ["No specific risk flags"]
-    lines = "\\n".join(f"• {r}" for r in reasons[:6])
-    return f"*Why?* {_sev_emoji(verdict.level)}\\n{lines}\\n\\n*Verdict:* {verdict.level} ({verdict.score})"
+    # Volume / activity
+    if isinstance(vol, (int, float)):
+        if vol >= 500_000:
+            rs.append(f"24h volume {_abbr_usd(vol)} — active market")
+        elif vol > 0:
+            rs.append(f"24h volume {_abbr_usd(vol)} — thin liquidity regime")
 
-def render_whypp(verdict: Verdict, factors: dict, lang: str = "en") -> str:
-    lines = "\\n".join(f"• {r}" for r in (verdict.reasons or [])[:12])
-    return (
-        f"*Why++ — extended factors* {_sev_emoji(verdict.level)}\\n"
-        f"{lines}\\n\\n"
-        f"*Score:* {verdict.score}   *Level:* {verdict.level}"
-    )
+    # Momentum
+    if m5 is not None: rs.append(f"Δ5m {_fmt_pct(m5)}")
+    if h1 is not None: rs.append(f"Δ1h {_fmt_pct(h1)}")
+    if h24 is not None: rs.append(f"Δ24h {_fmt_pct(h24)}")
 
-def render_lp(lp_info: dict | None, lang: str = "en") -> str:
-    info = lp_info or {}
-    lock = info.get("lock") or {}
-    provider = lock.get("provider") or "n/a"
-    pct = lock.get("percent") or "—"
-    until = lock.get("until") or "—"
-    return (
-        "🔒 *LP lock (lite)*\\n"
-        f"Provider: {provider}\\n"
-        f"Locked: {pct}\\n"
-        f"Until: {until}"
-    )
+    # Age
+    if isinstance(age, (int, float)):
+        if age >= 180: rs.append(f"Age {age:.0f}d — seasoned")
+        elif age <= 7: rs.append(f"Age {age:.0f}d — very new")
+
+    # On-chain disclaimer
+    rs.append("Taxes/owner functions not verified yet — run On-chain")
+    # Verdict recap
+    if score is not None:
+        rs.append(f"Verdict: {_level_from_score(score)} (score {int(score)})")
+
+    # de-dup, keep order
+    seen = set(); out = []
+    for r in rs:
+        if r not in seen:
+            out.append(r); seen.add(r)
+    return out[:8]  # keep concise
+
+# ---------- Renderers ----------
+def render_quick(verdict: Any, market: Dict[str, Any], opts: Dict[str, Any], lang: str) -> str:
+    pair = market.get("pairSymbol") or "—"
+    chain = market.get("chain") or "—"
+    price = _abbr_usd(market.get("price"))
+    fdv = _abbr_usd(market.get("fdv"))
+    mc  = _abbr_usd(market.get("mc"))
+    liq = _abbr_usd(market.get("liq"))
+    vol = _abbr_usd(market.get("vol24h"))
+    pc = market.get("priceChanges") or {}
+    m5, h1, h24 = _fmt_pct(pc.get("m5")), _fmt_pct(pc.get("h1")), _fmt_pct(pc.get("h24"))
+    age = _age_days(market.get("ageDays") or market.get("age"))
+    source = market.get("source") or "DexScreener"
+
+    score = getattr(verdict, "score", None)
+    level = getattr(verdict, "level", None)
+    emj = _emoji(level, score)
+    sc  = int(score) if isinstance(score, (int, float)) else "—"
+
+    # No link row in text; navigation is in buttons
+    lines = [
+        f"*Metridex QuickScan — {pair}* {emj} ({sc})",
+        f"`{chain}`  •  Price: *{price}*",
+        f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}",
+        f"Vol 24h: {vol}  •  Δ5m {m5}  •  Δ1h {h1}  •  Δ24h {h24}",
+        f"Age: {age}  •  Source: {source}",
+    ]
+    return \"\n\".join(lines).strip()
+
+def render_details(verdict: Any, market: Dict[str, Any], opts: Dict[str, Any], lang: str) -> str:
+    # Minimal details; can be extended later
+    pair = market.get("pairSymbol") or "—"
+    chain = market.get("chain") or "—"
+    score = getattr(verdict, "score", None)
+    level = _level_from_score(score)
+    emj = _emoji(level, score)
+    lines = [
+        f\"*Details — {pair}* {emj} ({int(score) if isinstance(score,(int,float)) else '—'})\",
+        f\"Chain: `{chain}`\",
+        f\"Token: `{market.get('tokenAddress') or '—'}`\",
+        f\"Pair: `{market.get('pairAddress') or '—'}`\",
+    ]
+    site = (market.get(\"links\") or {}).get(\"site\")
+    if site:
+        lines.append(f\"Site: {site}\")
+    return \"\n\".join(lines).strip()
+
+def render_why(verdict: Any, market: Dict[str, Any], lang: str) -> str:
+    reasons = list(getattr(verdict, \"reasons\", []) or [])
+    if not reasons:
+        reasons = _synth_reasons(verdict, market)
+    # keep 4-6 concise bullets
+    bullets = reasons[:6]
+    out = [\"*Why?*\"]
+    for r in bullets:
+        out.append(f\"• {r}\")
+    return \"\n\".join(out)
+
+def render_whypp(verdict: Any, market: Dict[str, Any], lang: str) -> str:
+    score = getattr(verdict, \"score\", None)
+    level = getattr(verdict, \"level\", None) or _level_from_score(score)
+    reasons = list(getattr(verdict, \"reasons\", []) or [])
+    if not reasons:
+        reasons = _synth_reasons(verdict, market)
+    out = [
+        \"*Why++ — detailed factors*\",\n        f\"Score: {int(score) if isinstance(score,(int,float)) else '—'}  •  Level: {level}\",\n        \"\",\n        \"*Factors considered:*\",\n    ]
+    for i, r in enumerate(reasons, 1):
+        out.append(f\"{i}. {r}\")
+    return \"\n\".join(out)
+
+def render_lp(lp: Dict[str, Any], lang: str) -> str:
+    if not lp:
+        return \"LP lock: no data\"
+    prov = lp.get(\"provider\") or \"—\"
+    addr = lp.get(\"lpAddress\") or \"—\"
+    until = lp.get(\"until\") or \"—\"
+    return f\"LP lock\nProvider: {prov}\nLP: `{addr}`\nUntil: {until}\"
