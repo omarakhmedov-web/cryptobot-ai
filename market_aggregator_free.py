@@ -1,4 +1,3 @@
-
 """
 market_aggregator_free.py — Free-first market aggregator
 - Primary: DexScreener (no key)
