@@ -11,7 +11,8 @@ UA = os.getenv("HTTP_UA","MetridexBot/1.0 (+https://metridex.com)")
 HEADERS = {"User-Agent": UA, "Accept": "application/json"}
 
 # DexScreener hosts (try in order)
-DS_BASES = [b.strip() for b in (os.getenv("DEXSCREENER_BASES") or os.getenv("DEXSCREENER_BASE") or "https://api.dexscreener.com,https://io.dexscreener.com,https://cdn.dexscreener.com").split(",") if b.strip()]
+DS_PROXY_BASE = (os.getenv("DEXSCREENER_PROXY_BASE") or os.getenv("DS_PROXY_BASE") or "").strip()
+DS_BASES = ([DS_PROXY_BASE] if DS_PROXY_BASE else []) + [b.strip() for b in (os.getenv("DEXSCREENER_BASES") or os.getenv("DEXSCREENER_BASE") or "https://api.dexscreener.com,https://io.dexscreener.com,https://cdn.dexscreener.com").split(",") if b.strip()]
 
 # Supported networks (input short-hands)
 def enabled_networks() -> list[str]:
