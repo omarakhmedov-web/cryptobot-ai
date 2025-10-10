@@ -1,4 +1,4 @@
-import os, json, re, time, traceback, requests
+import os, json, re, traceback, requests
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
@@ -7,12 +7,16 @@ from buttons import build_keyboard
 from dex_client import fetch_market
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
-from chain_client import fetch_onchain_factors
 try:
     from lp_lite import check_lp_lock_v2
 except Exception:
     def check_lp_lock_v2(chain, lp_addr):
         return {"provider": "lite-burn-check", "lpAddress": lp_addr or "—", "until": "—"}
+
+try:
+    from onchain_inspector import inspect_token
+except Exception:
+    inspect_token = None
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
@@ -81,9 +85,9 @@ def build_hint_quickscan(clickable: bool) -> str:
     return (
         "Paste a *token address*, *TX hash* or *URL* to scan.\n"
         "Examples:\n"
-        "`0x6982508145454ce325ddbe47a25d4ec3d2311933`  — ERC‑20\n"
+        "`0x6982508145454ce325ddbe47a25d4ec3d2311933`  — ERC-20\n"
         f"{pair_example} — pair\n\n"
-        "Then tap *More details* / *Why?* / *On‑chain* for deeper info."
+        "Then tap *More details* / *Why?* / *On-chain* for deeper info."
     )
 
 WELCOME = (
@@ -96,22 +100,18 @@ UPGRADE_TEXT = (
     "Metridex Pro — full QuickScan access\n"
     "• Pro $29/mo — fast lane, Deep reports, export\n"
     "• Teams $99/mo — for teams/channels\n"
-    "• Day‑Pass $9 — 24h of Pro\n"
+    "• Day-Pass $9 — 24h of Pro\n"
     "• Deep Report $3 — one detailed report\n\n"
     f"Choose your access below. How it works: {HELP_URL}"
 )
 
-# ---------- Back‑compat wrappers for renderers ----------
 def safe_render_why(verdict, market, lang):
     try:
-        # New signature: (verdict, market, lang)
         return render_why(verdict, market, lang)
     except TypeError:
         try:
-            # Old signature: (verdict, lang)
             return render_why(verdict, lang)
         except TypeError:
-            # Very old: (verdict)
             return render_why(verdict)
 
 def safe_render_whypp(verdict, market, lang):
@@ -179,18 +179,25 @@ def on_message(msg):
                      reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
-    token = text
-    market = fetch_market(token) or {}
+    # QuickScan flow
+    market = fetch_market(text) or {}
+    if not market.get("ok"):
+        if re.match(r"^0x[a-fA-F0-9]{64}$", text):
+            pass
+        elif re.match(r"^0x[a-fA-F0-9]{40}$", text):
+            market.setdefault("tokenAddress", text)
+        market.setdefault("chain", market.get("chain") or "—")
+        market.setdefault("sources", [])
+        market.setdefault("priceChanges", {})
+        market.setdefault("links", {})
+
     verdict = compute_verdict(market)
 
     quick = render_quick(verdict, market, {}, DEFAULT_LANG)
     details = render_details(verdict, market, {}, DEFAULT_LANG)
-
-    # Back‑compat: Why/Why++ work whether renderers expect (v, m, lang) or (v, lang)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
-    # LP text backward compatible
     try:
         info = check_lp_lock_v2(market.get("chain","eth"), market.get("pairAddress"))
         lp = render_lp(info, DEFAULT_LANG)
@@ -215,7 +222,6 @@ def on_message(msg):
         "details": details, "why": why, "whypp": whypp, "lp": lp
     }
 
-    # 1) send with temp keyboard (msg_id=0), 2) store bundle, 3) rebind keyboard with real msg_id
     sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links, ctx="quick"))
     msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
     if msg_id:
@@ -284,49 +290,47 @@ def on_callback(cb):
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
-        answer_callback_query(cb_id, "Report sent.", False)
-        html = ("<!doctype html><html><body><pre>" + json.dumps(bundle, ensure_ascii=False, indent=2) + "</pre></body></html>").encode("utf-8")
-        send_document(chat_id, f"Metridex_Report_{int(time.time())}.html", html, caption="Metridex QuickScan report")
+        try:
+            html = "<!doctype html><html><body><pre>" + json.dumps(bundle, ensure_ascii=False, indent=2) + "</pre></body></html>"
+            send_document(chat_id, "Metridex_Report.html", html.encode("utf-8"), caption="Metridex QuickScan report")
+            answer_callback_query(cb_id, "Report exported.", False)
+        except Exception as e:
+            answer_callback_query(cb_id, f"Export failed: {e}", True)
 
     elif action == "ONCHAIN":
-        mkt = bundle.get("market") or {}
-        addr = mkt.get("tokenAddress")
-        chain = mkt.get("chain","ethereum")
-        try:
-            f = fetch_onchain_factors(addr, chain)
-            txt = "*On-chain*\n" + json.dumps(f, ensure_ascii=False, indent=2)
-        except Exception:
-            txt = "On-chain: temporary unavailable"
-        send_message(chat_id, txt, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
+        if inspect_token is None:
+            answer_callback_query(cb_id, "On-chain module missing.", True)
+            return jsonify({"ok": True})
+        mkt = (bundle.get("market") or {})
+        ch = (mkt.get("chain") or "").lower()
+        tok = mkt.get("tokenAddress")
+        pair = mkt.get("pairAddress")
+        if not tok:
+            answer_callback_query(cb_id, "No token in this message.", True)
+            return jsonify({"ok": True})
+        chain_map = {
+            "ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op",
+            "base":"base","avalanche":"avax","fantom":"ftm"
+        }
+        short = chain_map.get(ch, ch or "eth")
+        info = inspect_token(short, tok, pair)
+        pretty = "*On-chain*\n" + "```\n" + json.dumps(info, ensure_ascii=False, indent=2) + "\n```"
+        send_message(chat_id, pretty, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
         answer_callback_query(cb_id, "On-chain posted.", False)
 
     elif action == "COPY_CA":
-        addr = (bundle.get("market") or {}).get("tokenAddress") or "—"
-        send_message(chat_id, addr + "\n(hold to copy)",
+        token = ((bundle.get("market") or {}).get("tokenAddress") or "—")
+        answer_callback_query(cb_id, f"{token}", True)
+
+    elif action.startswith("DELTA_"):
+        send_message(chat_id, bundle.get("details","(no details)"),
                      reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
-        answer_callback_query(cb_id, "Address posted.", False)
-
-    elif action == "DELTA_M5":
-        ch = (bundle.get("market") or {}).get("priceChanges") or {}
-        answer_callback_query(cb_id, f"Δ5m: {ch.get('m5','—')}", True)
-
-    elif action == "DELTA_1H":
-        ch = (bundle.get("market") or {}).get("priceChanges") or {}
-        answer_callback_query(cb_id, f"Δ1h: {ch.get('h1','—')}", True)
-
-    elif action == "DELTA_6H":
-        ch = (bundle.get("market") or {}).get("priceChanges") or {}
-        answer_callback_query(cb_id, f"Δ6h: {ch.get('h6','—')}", True)
-
-    elif action == "DELTA_24H":
-        ch = (bundle.get("market") or {}).get("priceChanges") or {}
-        answer_callback_query(cb_id, f"Δ24h: {ch.get('h24','—')}", True)
+        answer_callback_query(cb_id, "Posted.", False)
 
     else:
-        answer_callback_query(cb_id, "Unknown action.", True)
+        answer_callback_query(cb_id, "Unsupported action", True)
 
     return jsonify({"ok": True})
 
-@app.get("/healthz")
-def healthz():
-    return jsonify({"ok": True})
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")))
