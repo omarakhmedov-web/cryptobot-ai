@@ -83,13 +83,8 @@ UPGRADE_TEXT = (
     "• Deep Report $3 — one detailed report\n\n"
     f"Choose your access below. How it works: {HELP_URL}"
 )
-
 def build_hint_quickscan(clickable: bool) -> str:
-    if clickable:
-        pair_example = "https://dexscreener.com/ethereum/0x..."
-    else:
-        # obfuscated so Telegram won't autolink; shows intent clearly
-        pair_example = "dexscreener[.]com/ethereum/0x…"
+    pair_example = "https://dexscreener.com/ethereum/0x..." if clickable else "dexscreener[.]com/ethereum/0x…"
     return (
         "Paste a *token address*, *TX hash* or *URL* to scan.\n"
         "Examples:\n"
@@ -97,6 +92,22 @@ def build_hint_quickscan(clickable: bool) -> str:
         f"{pair_example} — pair\n\n"
         "Then tap *More details* / *Why?* / *On‑chain* for deeper info."
     )
+
+def _send_chunked(chat_id: int, text: str, reply_markup=None, header: str|None=None):
+    # Telegram text limit ~4096; keep chunks around 3500 with clean breaks.
+    MAX = 3500
+    if text is None: text = ""
+    parts = []
+    t = str(text)
+    while len(t) > MAX:
+        cut = t.rfind("\n\n", 0, MAX)
+        if cut < 1200: cut = MAX  # hard cut if no good break
+        parts.append(t[:cut])
+        t = t[cut:].lstrip()
+    parts.append(t)
+    for i, p in enumerate(parts, 1):
+        prefix = f"{header} ({i}/{len(parts)})\n" if header and len(parts) > 1 else (f"{header}\n" if header and i == 1 else "")
+        send_message(chat_id, prefix + p, reply_markup=reply_markup if i == len(parts) else None)
 
 @app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
 def webhook():
@@ -192,38 +203,44 @@ def on_callback(cb):
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
     chat_id = msg.get("chat",{}).get("id")
-    msg_id = msg.get("message_id")
+    current_msg_id = msg.get("message_id")
 
-    m = parse_cb(data)
-    if not m:
+    parsed = parse_cb(data)
+    if not parsed:
         answer_callback_query(cb_id, "Unsupported action", True)
         return jsonify({"ok": True})
-    action, _, _ = m
+    action, orig_msg_id, orig_chat_id = parsed
 
-    bundle = load_bundle(chat_id, msg_id) or {}
+    # Anti-mixing: only serve callbacks that match the original chat
+    if chat_id != orig_chat_id:
+        answer_callback_query(cb_id, "This control expired.", True)
+        return jsonify({"ok": True})
+
+    bundle = load_bundle(orig_chat_id, orig_msg_id) or {}
+    links = bundle.get("links")
 
     if action == "DETAILS":
         answer_callback_query(cb_id, "More details sent.", False)
         send_message(chat_id, bundle.get("details","(no details)"),
-                     reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="details"))
+                     reply_markup=build_keyboard(orig_chat_id, orig_msg_id, links, ctx="details"))
 
     elif action == "WHY":
-        answer_callback_query(cb_id, bundle.get("why","Why? n/a"), True)
+        # Send copyable WHY text (no alert)
+        txt = bundle.get("why","Why? n/a")
+        _send_chunked(chat_id, txt, reply_markup=build_keyboard(orig_chat_id, orig_msg_id, links, ctx="details"), header="Why?")
+        answer_callback_query(cb_id, "Why? posted.", False)
 
     elif action == "WHYPP":
-        text = bundle.get("whypp","Why++ n/a")
-        if len(text) <= 190: answer_callback_query(cb_id, text, True)
-        else:
-            answer_callback_query(cb_id, "Sent extended rationale.", False)
-            send_message(chat_id, text, reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="details"))
+        # Send copyable WHY++ text; chunk if needed
+        txt = bundle.get("whypp","Why++ n/a")
+        _send_chunked(chat_id, txt, reply_markup=build_keyboard(orig_chat_id, orig_msg_id, links, ctx="details"), header="Why++")
+        answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
         text = bundle.get("lp","LP n/a")
-        if len(text) <= 190:
-            answer_callback_query(cb_id, text, True)
-        else:
-            answer_callback_query(cb_id, "LP lock info sent.", False)
-            send_message(chat_id, text, reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="details"))
+        # If short, still prefer sending as message to allow copy
+        _send_chunked(chat_id, text, reply_markup=build_keyboard(orig_chat_id, orig_msg_id, links, ctx="details"), header="LP lock")
+        answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
         answer_callback_query(cb_id, "Report sent.", False)
@@ -239,12 +256,14 @@ def on_callback(cb):
             txt = "*On-chain*\n" + json.dumps(f, ensure_ascii=False, indent=2)
         except Exception:
             txt = "On-chain: temporary unavailable"
-        send_message(chat_id, txt, reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="onchain"))
+        send_message(chat_id, txt, reply_markup=build_keyboard(orig_chat_id, orig_msg_id, links, ctx="onchain"))
+        answer_callback_query(cb_id, "On-chain posted.", False)
 
     elif action == "COPY_CA":
         addr = (bundle.get("market") or {}).get("tokenAddress") or "—"
         send_message(chat_id, addr + "\n(hold to copy)",
-                     reply_markup=build_keyboard(chat_id, msg_id, bundle.get("links"), ctx="details"))
+                     reply_markup=build_keyboard(orig_chat_id, orig_msg_id, links, ctx="details"))
+        answer_callback_query(cb_id, "Address posted.", False)
 
     elif action == "DELTA_M5":
         ch = (bundle.get("market") or {}).get("priceChanges") or {}
