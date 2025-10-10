@@ -1,4 +1,3 @@
-
 import os, json, requests
 from flask import Flask, request, jsonify
 
@@ -34,7 +33,7 @@ def answer_callback_query(cb_id: str, text: str, alert: bool = False):
 
 @app.get("/healthz")
 def healthz():
-    return jsonify({"ok": True, "version": "superbot-1.0"})
+    return jsonify({"ok": True, "version": "superbot-1.0.1"})
 
 @app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
 def webhook():
@@ -66,7 +65,8 @@ def handle_message(msg: dict):
 
     token = text
     market = fetch_market(token)
-    verdict = compute_verdict(market, {})
+    # FIX: compute_verdict expects a single argument (market)
+    verdict = compute_verdict(market)
     links = market.get("links") or {}
 
     quick = render_quick(verdict, market, links, DEFAULT_LANG)
