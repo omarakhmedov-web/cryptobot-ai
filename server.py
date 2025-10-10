@@ -3,7 +3,7 @@ from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan, try_activate_judge_pass
 from state import store_bundle, load_bundle
-from buttons import build_keyboard
+from buttons import build_keyboard  # dynamic ctx version
 from dex_client import fetch_market
 from risk_engine import compute_verdict
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
@@ -12,6 +12,13 @@ from chain_client import fetch_onchain_factors
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en") or "en"
+
+# Pricing/Help URLs (override via ENV if нужно)
+HELP_URL = os.getenv("HELP_URL", "https://metridex.com/help")
+DEEP_REPORT_URL = os.getenv("DEEP_REPORT_URL", "https://metridex.com/upgrade/deep-report")
+DAY_PASS_URL = os.getenv("DAY_PASS_URL", "https://metridex.com/upgrade/day-pass")
+PRO_URL = os.getenv("PRO_URL", "https://metridex.com/upgrade/pro")
+TEAMS_URL = os.getenv("TEAMS_URL", "https://metridex.com/upgrade/teams")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
@@ -52,19 +59,37 @@ def parse_cb(data: str):
     if not m: return None
     return m.group(1), int(m.group(2)), int(m.group(3))
 
+# --- Start/Upgrade keyboards ---
+def build_upgrade_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔍 Deep report — $3", "url": DEEP_REPORT_URL},
+                {"text": "⏱ Day Pass — $9", "url": DAY_PASS_URL},
+            ],
+            [
+                {"text": "⚙️ Pro — $29", "url": PRO_URL},
+                {"text": "👥 Teams — from $99", "url": TEAMS_URL},
+            ],
+            [
+                {"text": "ℹ️ How it works?", "url": HELP_URL},
+            ]
+        ]
+    }
+
 WELCOME = (
-    "*Welcome to Metridex*\n"
+    "Welcome to Metridex.\n"
     "Send a token address, TX hash, or a link — I'll run a QuickScan.\n\n"
-    "*Commands:* /quickscan, /upgrade, /limits\n"
-    "Help: https://metridex.com/help"
+    "Commands: /quickscan, /upgrade, /limits\n"
+    f"Help: {HELP_URL}"
 )
 UPGRADE_TEXT = (
-    "**Metridex Pro** — full QuickScan access\n"
+    "Metridex Pro — full QuickScan access\n"
     "• Pro $29/mo — fast lane, Deep reports, export\n"
     "• Teams $99/mo — for teams/channels\n"
     "• Day‑Pass $9 — 24h of Pro\n"
     "• Deep Report $3 — one detailed report\n\n"
-    "Choose your access below. How it works: https://metridex.com/help"
+    f"Choose your access below. How it works: {HELP_URL}"
 )
 
 @app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
@@ -84,11 +109,11 @@ def on_message(msg):
     text = (msg.get("text") or "").strip()
 
     if text.lower().startswith("/start"):
-        send_message(chat_id, WELCOME)
+        send_message(chat_id, WELCOME, reply_markup=build_upgrade_keyboard())
         return jsonify({"ok": True})
 
     if text.lower().startswith("/upgrade"):
-        send_message(chat_id, UPGRADE_TEXT)
+        send_message(chat_id, UPGRADE_TEXT, reply_markup=build_upgrade_keyboard())
         return jsonify({"ok": True})
 
     if text.upper().startswith("PASS "):
