@@ -1,5 +1,6 @@
 from __future__ import annotations
 import datetime as _dt
+import datetime as dt
 from typing import Any, Dict, Optional
 
 # ---- helpers ----
@@ -72,6 +73,28 @@ def _level(verdict) -> str:
     except Exception:
         return f"{_get(verdict, 'level', default='—')}"
 
+
+def _pick_color(verdict, market):
+    # Determine badge color:
+    # - If no key market data -> ⚪ (unknown/insufficient)
+    # - Else by level: HIGH -> 🔴, MEDIUM -> 🟡, LOW -> 🟢 (default 🟡)
+    m = market or {}
+    liq = _get(m, "liq") or _get(m, "liquidityUSD") or 0
+    vol = _get(m, "vol24h") or _get(m, "volume24hUSD") or 0
+    fdv = _get(m, "fdv")
+    mc  = _get(m, "mc")
+    if (not liq) and (not vol) and (fdv is None and mc is None):
+        return "⚪"
+    lvl = None
+    try:
+        lvl = getattr(verdict, "level", None)
+    except Exception:
+        lvl = (verdict or {}).get("level")
+    lvl = (lvl or "").upper()
+    if lvl.startswith("HIGH"): return "🔴"
+    if lvl.startswith("MED"):  return "🟡"
+    if lvl.startswith("LOW"):  return "🟢"
+    return "🟡"
 # ---- renderers ----
 def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
@@ -88,7 +111,7 @@ def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str
     src  = _get(market, "source", default="DexScreener")
 
     return (
-        f"*Metridex QuickScan — {pair}* 🟢 ({_score(verdict)})\n"
+        f"*Metridex QuickScan — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})\n"
         f"`{chain}`  •  Price: *{price}*\n"
         f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}\n"
         f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}\n"
@@ -113,7 +136,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     chg24= _fmt_pct(_get(market, "priceChanges", "h24"))
     age  = _fmt_age_days(_get(market, "ageDays"))
     src  = _get(market, "source", default="DexScreener")
-    asof = _fmt_time(_get(market, "asof"))
+    asof = _fmt_time(_get(market, "asof")) or dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     links = _get(market, "links") or {}
     l_dex  = (links or {}).get("dex") or "—"
@@ -121,7 +144,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     l_site = (links or {}).get("site") or "—"
 
     parts = []
-    parts.append(f"*Details — {pair}* 🟢 ({_score(verdict)})")
+    parts.append(f"*Details — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})")
     parts.append(f"*Snapshot*\n• Price: {price}  ({chg5}, {chg1}, {chg24})\n• FDV: {fdv}  • MC: {mc}\n• Liquidity: {liq}  • 24h Volume: {vol}\n• Age: {age}  • Source: {src}\n• As of: {asof}")
     parts.append(f"*Token*\n• Chain: `{chain}`\n• Address: `{token}`")
     parts.append(f"*Pair*\n• Address: `{pair_addr}`\n• Symbol: {pair}")
