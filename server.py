@@ -43,7 +43,7 @@ FREE_DAILY_SCANS = int(os.getenv("FREE_DAILY_SCANS", "2"))
 HINT_CLICKABLE_LINKS = os.getenv("HINT_CLICKABLE_LINKS", "0") == "1"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-PARSE_MODE = "Markdown"
+PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
 
