@@ -237,7 +237,10 @@ def on_message(msg):
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
     try:
-        info = check_lp_lock_v2(market.get("chain","eth"), market.get("pairAddress"))
+        ch_ = (market.get("chain") or "").lower()
+        _map = {"ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op","base":"base","avalanche":"avax","fantom":"ftm"}
+        _short = _map.get(ch_, ch_ or "eth")
+        info = check_lp_lock_v2(_short, market.get("pairAddress"))
         lp = render_lp(info, DEFAULT_LANG)
     except TypeError:
         lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
@@ -334,7 +337,8 @@ def on_callback(cb):
 
     elif action == "LP":
         text = bundle.get("lp", "LP lock: n/a")
-        send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
+        # No keyboard for LP reply (as in legacy bot)
+        send_message(chat_id, text, reply_markup=None)
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
@@ -345,6 +349,8 @@ def on_callback(cb):
         except Exception as e:
             answer_callback_query(cb_id, f"Export failed: {e}", True)
 
+    
+    
     elif action == "ONCHAIN":
         answer_callback_query(cb_id, "Fetching on-chain info…", False)
         if inspect_token is None:
@@ -363,21 +369,43 @@ def on_callback(cb):
         }
         short = chain_map.get(ch, ch or "eth")
         info = inspect_token(short, tok, pair)
-        # Short preview (hide None/empty nicely)
-        owner_val = info.get('owner')
-        renounced_val = info.get('ownerRenounced') if owner_val else None
-        paused_val = info.get('pausable')
-        upgrade_val = info.get('upgradeable')
-        taxes_val = info.get('taxes')
-        maxTx_val = info.get('maxTx')
-        maxWallet_val = info.get('maxWallet')
-        preview = "*On-chain*\n"
-        preview += f"owner: `{owner_val or '—'}`\n"
-        preview += f"renounced: `{renounced_val if owner_val and renounced_val is not None else '—'}`\n"
-        preview += f"paused: `{paused_val if paused_val is not None else '—'}`  upgradeable: `{upgrade_val if upgrade_val is not None else '—'}`\n"
-        preview += f"taxes: `{taxes_val if taxes_val else '—'}`\n"
-        preview += f"maxTx: `{maxTx_val if maxTx_val is not None else '—'}`  maxWallet: `{maxWallet_val if maxWallet_val is not None else '—'}`"
+        parts = ["*On-chain*"]
+        name = info.get("name"); symbol = info.get("symbol"); dec = info.get("decimals")
+        if name or symbol:
+            parts.append("token: `{}` ({})".format(name or "—", symbol or "—"))
+        if dec is not None:
+            parts.append("decimals: `{}`".format(dec))
+        owner_val = info.get("owner")
+        renounced_val = info.get("ownerRenounced") if owner_val is not None else None
+        paused_val = info.get("pausable")
+        upgrade_val = info.get("upgradeable")
+        impl = info.get("implementation")
+        parts.append("owner: `{}`".format(owner_val or "—"))
+        parts.append("renounced: `{}`".format(renounced_val if renounced_val is not None else "—"))
+        parts.append("paused: `{}`  upgradeable: `{}`".format(
+            paused_val if paused_val is not None else "—",
+            upgrade_val if upgrade_val is not None else "—"
+        ))
+        if impl:
+            parts.append("impl: `{}`".format(impl))
+        tactive = info.get("tradingOpen") if info.get("tradingOpen") is not None else info.get("tradingActive")
+        if tactive is not None:
+            parts.append("tradingActive: `{}`".format(tactive))
+        taxes_val = info.get("taxes") or {}
+        tb = taxes_val.get("buy"); ts_ = taxes_val.get("sell")
+        if tb is not None or ts_ is not None:
+            tb_s = "{:.2f}%".format(tb) if isinstance(tb,(int,float)) else "—"
+            ts_s = "{:.2f}%".format(ts_) if isinstance(ts_,(int,float)) else "—"
+            parts.append("taxes: buy {} / sell {}".format(tb_s, ts_s))
+        mx = info.get("maxTx"); mw = info.get("maxWallet")
+        parts.append("maxTx: `{}`  maxWallet: `{}`".format(
+            mx if mx is not None else "—",
+            mw if mw is not None else "—"
+        ))
+        preview = "\n".join(parts)
         send_message(chat_id, preview, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
+
+
 
     elif action == "COPY_CA":
         token = ((bundle.get("market") or {}).get("tokenAddress") or "—")
