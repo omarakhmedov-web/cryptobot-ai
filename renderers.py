@@ -164,4 +164,14 @@ def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
     provider = (info or {}).get("provider") or "—"
     lp = (info or {}).get("lpAddress") or "—"
     until = (info or {}).get("until") or "—"
-    return f"LP lock\nProvider: {provider}\nLP: `{lp}`\nUntil: {until}".replace("\\n", "\n")
+    burned = (info or {}).get("burnedPct")
+    locked = (info or {}).get("lockedPct")
+    lines = [ "LP lock", f"Provider: {provider}", f"LP: `{lp}`" ]
+    if burned is not None:
+        lines.append(f"Burned: {round(float(burned), 2)}%")
+    if locked is not None:
+        lines.append(f"Locked (known): {round(float(locked), 2)}%")
+    lines.append(f"Until: {until}")
+    for lk in (info or {}).get("lockers", [])[:3]:
+        lines.append(f"• {lk.get('locker')}: {lk.get('pct')}%")
+    return "\n".join(lines).replace("\\n", "\n")
