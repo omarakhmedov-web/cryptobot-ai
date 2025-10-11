@@ -17,6 +17,55 @@ CHAIN_RPC_ENV = {
     "ftm":"FTM_RPC_URL_PRIMARY"
 }
 
+# Known locker contracts per chain (conservative baseline)
+DEFAULT_LOCKERS = {
+    "eth": [
+        "0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214",
+        "0x71b5759d73262fbb223956913ecf4ecc51057641",
+        "0xe2fe530c047f2d85298b07d9333c05737f1435fb",
+    ],
+    "bsc": [
+        "0xc765bddb93b0d1c1a88282ba0fa6b2d00e3e0c83",
+        "0x407993575c91ce7643a4d4ccacc9a98c36ee1bbe",
+    ],
+    "polygon": [
+        "0xadb2437e6f65682b85f814fbc12fec0508a7b1d0",
+    ],
+    "arb": [
+        "0x275720567e5955f5f2d53a7a1ab8a0fc643de50e",
+    ],
+    "avax": [
+        "0xa9f6aefa5d56db1205f36c34e6482a6d4979b3bb",
+    ],
+    "base": [
+        "0xc4e637d37113192f4f1f060daebd7758de7f4131",
+    ],
+}
+
+def _parse_addr_list(s: str):
+    return [x.strip().lower() for x in (s or "").split(",") if x and x.strip().startswith("0x")]
+
+def _known_lockers(chain: str):
+    """
+    Resolve locker addresses by priority:
+      1) LP_LOCKER_ADDRS_<CHAINUPPER> (comma-separated)
+      2) LP_LOCKER_ADDRS (global, comma-separated)
+      3) DEFAULT_LOCKERS[chain]
+    """
+    import os
+    ch = (chain or "").lower().strip()
+    env_chain = os.getenv(f"LP_LOCKER_ADDRS_{ch.upper()}", "") or os.getenv(f"LP_LOCKER_ADDRS_{ch}", "")
+    if env_chain:
+        lst = _parse_addr_list(env_chain)
+        if lst:
+            return lst
+    env_global = os.getenv("LP_LOCKER_ADDRS", "")
+    if env_global:
+        lst = _parse_addr_list(env_global)
+        if lst:
+            return lst
+    return list(DEFAULT_LOCKERS.get(ch, []))
+
 DEAD_ADDRS = [
     "0x000000000000000000000000000000000000dead",
     "0x0000000000000000000000000000000000000000",
@@ -70,8 +119,7 @@ def check_lp_lock_v2(chain: str, lp_token_address: str) -> Dict[str, Any]:
         burned_pct = (burned/float(ts))*100.0 if ts else 0.0
 
         # Known lockers
-        lockers_env = (os.getenv("LP_LOCKER_ADDRS","") or "").strip()
-        lockers = [x.strip().lower() for x in lockers_env.split(",") if x.strip()]
+        lockers = _known_lockers(chain)
         locked_total = 0
         details = []
         for lk in lockers:
