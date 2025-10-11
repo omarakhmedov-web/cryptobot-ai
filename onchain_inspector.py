@@ -87,22 +87,39 @@ def _decode_string(hexdata: str) -> str:
     if not hexdata or not hexdata.startswith("0x"):
         return ""
     h = hexdata[2:]
-    # Try dynamic (offset + length + data)
+    # Try fully ABI-compliant dynamic string: [offset][...][length][data]
+    try:
+        if len(h) >= 64:
+            off = int(h[0:64], 16)
+            off_hex = off * 2
+            if off_hex + 64 <= len(h):
+                ln = int(h[off_hex:off_hex+64], 16)
+                data_start = off_hex + 64
+                data_end = data_start + ln * 2
+                if 0 <= ln and data_end <= len(h):
+                    raw = bytes.fromhex(h[data_start:data_end])
+                    s = raw.decode("utf-8", "ignore")
+                    if s:
+                        return s
+    except Exception:
+        pass
+    # Fallback: common simplified layout (offset assumed 0x20)
     try:
         if len(h) >= 128:
             ln = int(h[64:128], 16)
-            if ln >= 0 and 128 + ln*2 <= len(h):
-                raw = bytes.fromhex(h[128:128+ln*2])
-                return raw.decode("utf-8", "ignore") or ""
+            data = h[128:128+ln*2]
+            raw = bytes.fromhex(data)
+            s = raw.decode("utf-8", "ignore")
+            if s:
+                return s
     except Exception:
         pass
-    # Fallback: fixed 32 bytes
+    # Final fallback: fixed 32-byte
     try:
         raw = bytes.fromhex(h)
         return raw.rstrip(b"\x00").decode("utf-8", "ignore") or ""
     except Exception:
         return ""
-
 def _decode_u256(hexdata: str) -> Optional[int]:
     if not hexdata or not hexdata.startswith("0x"):
         return None
