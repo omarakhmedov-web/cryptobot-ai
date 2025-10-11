@@ -1,18 +1,9 @@
 from __future__ import annotations
-import os, re
-from typing import Dict, Any, Optional
+import os
+from typing import Any, Dict, Optional
 import requests
 
-UA = os.getenv("HTTP_UA","MetridexBot/1.0 (+https://metridex.com)")
-HEADERS = {"User-Agent": UA, "Accept": "application/json"}
-RPC_TIMEOUT  = int(os.getenv("PROVIDER_TIMEOUT_SECONDS","8"))
-
-ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
-
-SIG_NAME="0x06fdde03"
-SIG_SYMBOL="0x95d89b41"
-SIG_DECIMALS="0x313ce567"
-
+# --- RPC selection ---
 CHAIN_RPC_ENV = {
     "eth":"ETH_RPC_URL_PRIMARY",
     "bsc":"BSC_RPC_URL_PRIMARY",
@@ -24,186 +15,180 @@ CHAIN_RPC_ENV = {
     "ftm":"FTM_RPC_URL_PRIMARY",
 }
 
+ZERO = "0x0000000000000000000000000000000000000000"
+
+def _rpc_for_chain(short: str) -> Optional[str]:
+    env = CHAIN_RPC_ENV.get((short or "").lower().strip())
+    return (os.getenv(env, "") or "").strip() or None
+
+def _post_json(rpc: str, payload: dict, timeout: int = 8) -> dict:
+    r = requests.post(rpc, json=payload, timeout=timeout)
+    r.raise_for_status()
+    try:
+        return r.json()
+    except Exception:
+        return {}
+
+def _eth_call(rpc: str, to: str, data: str) -> str:
+    try:
+        out = _post_json(rpc, {
+            "jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]
+        })
+        res = out.get("result") or "0x"
+        return res if isinstance(res, str) else "0x"
+    except Exception:
+        return "0x"
+
+def _get_storage_at(rpc: str, addr: str, slot_hex: str) -> str:
+    try:
+        out = _post_json(rpc, {
+            "jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[addr, slot_hex, "latest"]
+        })
+        res = out.get("result") or "0x"
+        return res if isinstance(res, str) else "0x"
+    except Exception:
+        return "0x"
+
+def _as_addr(hexword: str) -> Optional[str]:
+    if not hexword or not hexword.startswith("0x"):
+        return None
+    h = hexword[2:].rjust(64, "0")
+    if len(h) < 40:
+        return None
+    a = "0x" + h[-40:]
+    if a.lower() == ZERO.lower():
+        return a.lower()
+    return a
+
+# --- ERC20 selectors ---
+SIG_NAME      = "0x06fdde03"
+SIG_SYMBOL    = "0x95d89b41"
+SIG_DECIMALS  = "0x313ce567"
+SIG_OWNER     = "0x8da5cb5b"
+SIG_GETOWNER  = "0x8f32d59b"
+SIG__OWNER    = "0x893d20e8"
+SIG_PAUSED    = "0x5c975abb"
+SIG_TR_OPEN   = "0x3f9f0b9b"   # tradingActive()
+SIG_TR_OPEN_2 = "0x5d1532f3"   # isTradingEnabled()
+SIG_BUY_TAX   = "0xcb60b99a"
+SIG__BUY_TAX  = "0x4b750334"
+SIG_SELL_TAX  = "0x2b2a130b"
+SIG__SELL_TAX = "0x9f96e965"
+SIG_MAX_TX    = "0xe5a06d59"
+SIG__MAX_TX   = "0x59f9abfa"
+SIG_MAX_WAL   = "0xeea0f7f8"
+SIG_MAX_WAL_2 = "0x88a9f7a1"
+SIG_IMPL_FN   = "0x5c60da1b"    # implementation()
+
 # EIP-1967 implementation slot
 EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 
-# Common selectors
-SIG_OWNER = "0x8da5cb5b"        # owner()
-SIG_GETOWNER = "0x893d20e8"     # getOwner()
-SIG_PAUSED = "0x5c975abb"       # paused()
-SIG_MAX_TX = "0xe590e0d1"       # maxTxAmount()
-SIG_MAX_WALLET = "0xdc6dd152"   # maxWalletAmount()
-SIG_MINTER_ROLE = "0xd5391393"  # MINTER_ROLE()
-SIG_HAS_ROLE = "0x91d14854"     # hasRole(bytes32,address)
-SIG_MINT_ENABLED = "0x1a53babb"  # mintEnabled()
-SIG_TAX_FEE = "0x3a0f8f39"      # taxFee()
-SIG_TOTAL_FEE = "0x7725c0a1"    # totalFee()
-SIG_BUY_TAX = "0xd295f62e"      # buyTax()
-SIG_SELL_TAX = "0x6f2b3a5f"     # sellTax()
-SIG_DENOMINATOR = "0x5dc88c79"  # denominator()
-SIG_TRADING_OPEN = "0x84d1a69f" # tradingOpen()
-SIG_BLACKLIST = "0xe9f8f4f9"    # isBlacklisted(address)
-
-ZERO = "0x" + "00"*20
-DEAD = "0x000000000000000000000000000000000000dEaD"
-
-def _rpc_for_chain(short: str) -> Optional[str]:
-    env = CHAIN_RPC_ENV.get(short)
-    return (os.getenv(env, "") or "").strip() or None
-
-def _rpc_post(rpc: str, payload: dict) -> dict:
-    r = requests.post(rpc, json=payload, timeout=RPC_TIMEOUT, headers=HEADERS)
-    r.raise_for_status()
-    return r.json()
-
-def _eth_call(rpc: str, to: str, data: str) -> bytes:
-    j = _rpc_post(rpc, {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]})
-    res = j.get("result") or "0x"
-    return bytes.fromhex(res[2:]) if res and res.startswith("0x") else b""
-
-def _read_addr(b: bytes) -> str:
-    if not b or len(b) < 32: return ""
-    return "0x" + b[-20:].hex()
-
-def _read_u256(b: bytes) -> int:
-    if not b or len(b) < 32: return 0
-    return int.from_bytes(b[-32:], "big", signed=False)
-
-def _read_bool(b: bytes) -> Optional[bool]:
-    if not b or len(b) < 32: return None
-    return bool(int.from_bytes(b[-32:], "big") & 1)
-
-def _storage_at(rpc: str, addr: str, slot_hex: str) -> bytes:
-    j = _rpc_post(rpc, {"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[addr, slot_hex, "latest"]})
-    res = j.get("result") or "0x"
-    return bytes.fromhex(res[2:]) if res and res.startswith("0x") else b""
-
-def _try_addr(rpc: str, token: str, selector: str) -> Optional[str]:
+def _decode_string(hexdata: str) -> str:
+    if not hexdata or not hexdata.startswith("0x"):
+        return ""
+    h = hexdata[2:]
+    # Try dynamic (offset + length + data)
     try:
-        return _read_addr(_eth_call(rpc, token, selector)) or None
-    except Exception:
-        return None
-
-def _try_u256(rpc: str, token: str, selector: str) -> Optional[int]:
-    try:
-        return _read_u256(_eth_call(rpc, token, selector)) or None
-    except Exception:
-        return None
-
-def _try_bool(rpc: str, token: str, selector: str) -> Optional[bool]:
-    try:
-        return _read_bool(_eth_call(rpc, token, selector))
-    except Exception:
-        return None
-
-def _is_upgradeable_proxy(rpc: str, token: str) -> bool:
-    try:
-        impl = _read_addr(_eth_call(rpc, token, "0x5c60da1b"))  # implementation()
-        if impl and impl != ZERO: return True
+        if len(h) >= 128:
+            ln = int(h[64:128], 16)
+            if ln >= 0 and 128 + ln*2 <= len(h):
+                raw = bytes.fromhex(h[128:128+ln*2])
+                return raw.decode("utf-8", "ignore") or ""
     except Exception:
         pass
+    # Fallback: fixed 32 bytes
     try:
-        st = _storage_at(rpc, token, EIP1967_IMPL_SLOT)
-        return bool(_read_addr(st))
+        raw = bytes.fromhex(h)
+        return raw.rstrip(b"\x00").decode("utf-8", "ignore") or ""
     except Exception:
-        return False
+        return ""
 
-def _detect_denominator(rpc: str, token: str) -> int:
-    for sig in (SIG_DENOMINATOR,):
-        v = _try_u256(rpc, token, sig)
-        if v and v in (10, 100, 1000, 10000, 100000): return v
-    return 100  # sane default
+def _decode_u256(hexdata: str) -> Optional[int]:
+    if not hexdata or not hexdata.startswith("0x"):
+        return None
+    try:
+        return int(hexdata, 16)
+    except Exception:
+        return None
+
+def _read_addr_try(rpc: str, token: str, selectors: list[str]) -> Optional[str]:
+    for sel in selectors:
+        res = _eth_call(rpc, token, sel)
+        a = _as_addr(res)
+        if a is not None:
+            return a.lower()
+    return None
+
+def _try_bool(rpc: str, token: str, sel: str) -> Optional[bool]:
+    v = _decode_u256(_eth_call(rpc, token, sel))
+    if v is None:
+        return None
+    return v != 0
+
+def _try_u256(rpc: str, token: str, sel: str) -> Optional[int]:
+    return _decode_u256(_eth_call(rpc, token, sel))
 
 def _tax_guess(rpc: str, token: str) -> Dict[str, Optional[float]]:
-    denom = _detect_denominator(rpc, token)
-    def pct(val: Optional[int]) -> Optional[float]:
-        if not val: return None
-        try:
-            return round(float(val) * 100.0/ float(denom), 2)
-        except Exception:
+    b = _try_u256(rpc, token, SIG_BUY_TAX)
+    if b is None:
+        b = _try_u256(rpc, token, SIG__BUY_TAX)
+    s = _try_u256(rpc, token, SIG_SELL_TAX)
+    if s is None:
+        s = _try_u256(rpc, token, SIG__SELL_TAX)
+    def _norm(x):
+        if x is None:
             return None
-    # Try several common names
-    buy = _try_u256(rpc, token, SIG_BUY_TAX) or _try_u256(rpc, token, SIG_TAX_FEE)
-    sell = _try_u256(rpc, token, SIG_SELL_TAX) or _try_u256(rpc, token, SIG_TOTAL_FEE)
-    return {"buy": pct(buy), "sell": pct(sell)}
+        return round(float(x)/100.0, 2) if x > 1000 else float(x)
+    return {"buy": _norm(b), "sell": _norm(s)}
 
-def _mint_capability(rpc: str, token: str) -> Optional[bool]:
-    # Heuristic: if MINTER_ROLE() exists and hasRole() exists, assume minting can be configured.
-    try:
-        role = _eth_call(rpc, token, SIG_MINTER_ROLE)
-        if role and len(role) >= 32:
-            # check hasRole(role, owner) only to see if function exists (call with zero addr)
-            _ = _eth_call(rpc, token, SIG_HAS_ROLE + role.hex() + ("0"*24) + "0"*40)
-            return True
-    except Exception:
-        pass
-    # or direct flag
-    val = _try_bool(rpc, token, SIG_MINT_ENABLED)
-    if val is not None: return val
-    return None
+def _is_upgradeable_proxy(rpc: str, token: str) -> bool:
+    slot_val = _get_storage_at(rpc, token, EIP1967_IMPL_SLOT)
+    a = _as_addr(slot_val)
+    return a is not None and a.lower() != ZERO.lower()
 
 def inspect_token(chain_short: str, token_address: str, pair_address: Optional[str] = None) -> Dict[str, Any]:
     short = (chain_short or "").lower().strip()
     rpc = _rpc_for_chain(short)
-    if not (rpc and ADDR_RE.match(token_address or "")):
+    if not (rpc and isinstance(token_address, str) and token_address.startswith("0x") and len(token_address)==42):
         return {"ok": False, "error":"rpc or token invalid"}
     res: Dict[str, Any] = {"ok": True, "chain": short, "token": token_address}
 
     # ERC-20 meta
-    name_b = _eth_call(rpc, token_address, SIG_NAME)
-    sym_b  = _eth_call(rpc, token_address, SIG_SYMBOL)
-    dec_b  = _eth_call(rpc, token_address, SIG_DECIMALS)
-    res["name"] = _read_str(name_b) or None
-    res["symbol"] = _read_str(sym_b) or None
-    res["decimals"] = _read_u256(dec_b) if dec_b else None
+    name_hex = _eth_call(rpc, token_address, SIG_NAME)
+    sym_hex  = _eth_call(rpc, token_address, SIG_SYMBOL)
+    dec_hex  = _eth_call(rpc, token_address, SIG_DECIMALS)
+    res["name"] = _decode_string(name_hex) or None
+    res["symbol"] = _decode_string(sym_hex) or None
+    res["decimals"] = _decode_u256(dec_hex)
 
     # owner / renounced
-    owner = _try_addr(rpc, token_address, SIG_OWNER) or _try_addr(rpc, token_address, SIG_GETOWNER)
-    res["owner"] = owner or None
-    if owner:
-        res["ownerRenounced"] = owner.lower() in (ZERO.lower(), DEAD.lower())
+    owner = _read_addr_try(rpc, token_address, [SIG_OWNER, SIG_GETOWNER, SIG__OWNER])
+    res["owner"] = owner
+    res["ownerRenounced"] = (owner == ZERO.lower()) if owner is not None else None
 
     # paused / trading open
     res["pausable"] = _try_bool(rpc, token_address, SIG_PAUSED)
-    res["tradingOpen"] = _try_bool(rpc, token_address, SIG_TRADING_OPEN)
+    t1 = _try_bool(rpc, token_address, SIG_TR_OPEN)
+    t2 = _try_bool(rpc, token_address, SIG_TR_OPEN_2)
+    res["tradingActive"] = t1 if t1 is not None else t2
 
     # limits
-    res["maxTx"] = _try_u256(rpc, token_address, SIG_MAX_TX)
-    res["maxWallet"] = _try_u256(rpc, token_address, SIG_MAX_WALLET)
+    res["maxTx"] = _try_u256(rpc, token_address, SIG_MAX_TX) or _try_u256(rpc, token_address, SIG__MAX_TX)
+    res["maxWallet"] = _try_u256(rpc, token_address, SIG_MAX_WAL) or _try_u256(rpc, token_address, SIG_MAX_WAL_2)
 
     # taxes
     res["taxes"] = _tax_guess(rpc, token_address)
 
-    # mint / roles
-    res["mint"] = _mint_capability(rpc, token_address)
-
-    # blacklist capability
-    try:
-        b = _eth_call(rpc, token_address, SIG_BLACKLIST + "0"*64)
-        res["blacklistCap"] = True if b is not None else None
-    except Exception:
-        res["blacklistCap"] = None
-
     # upgradeable proxy?
     res["upgradeable"] = _is_upgradeable_proxy(rpc, token_address)
-    # try to read implementation() address if present
-    try:
-        impl_raw = _eth_call(rpc, token_address, "0x5c60da1b")
-        impl_addr = _read_addr(impl_raw)
-        if impl_addr and impl_addr.lower() != ZERO.lower():
-            res["implementation"] = impl_addr
-    except Exception:
-        pass
+    # Try read implementation() fn too
+    impl_hex = _eth_call(rpc, token_address, SIG_IMPL_FN)
+    impl_addr = _as_addr(impl_hex)
+    if impl_addr and impl_addr.lower() != ZERO.lower():
+        res["implementation"] = impl_addr.lower()
+
+    # Soft fallback: if no name but symbol exists, use symbol as name
+    if (not res.get("name")) and res.get("symbol"):
+        res["name"] = res["symbol"]
 
     return res
-
-def _read_str(raw: bytes) -> str:
-    if not raw: return ""
-    try:
-        return raw.rstrip(b"\x00").decode("utf-8","ignore") or ""
-    except Exception:
-        return ""
-
-def _read_u256(raw: bytes) -> int:
-    if not raw: return 0
-    return int.from_bytes(raw[-32:], "big", signed=False)
