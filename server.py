@@ -369,6 +369,11 @@ def on_callback(cb):
         }
         short = chain_map.get(ch, ch or "eth")
         info = inspect_token(short, tok, pair)
+        if not (isinstance(info, dict) and info.get("ok", True)):
+            missing = short.upper()
+            send_message(chat_id, mdv2_escape(f"On-chain unavailable: RPC not configured for {missing}. Set {missing}_RPC_URL_PRIMARY."),
+                         reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
+            return jsonify({"ok": True})
         # Fallbacks from market data
         mkt_bundle = (bundle.get("market") or {})
         _pair_sym = (mkt_bundle.get("pairSymbol") or "")
@@ -408,7 +413,7 @@ def on_callback(cb):
             mw if mw is not None else "—"
         ))
         preview = "\n".join(parts)
-        send_message(chat_id, preview, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
+        send_message(chat_id, mdv2_escape(preview), reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
 
 
 
