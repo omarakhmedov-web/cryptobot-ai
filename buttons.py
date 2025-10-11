@@ -56,42 +56,31 @@ def build_keyboard(chat_id: int,
 
     if ctx == "quick":
         rows.append([{ "text": "📄 More details", "callback_data": _cb(chat_id, msg_id, "DETAILS") }])
-        rows.append([
-            { "text": "❓ Why?", "callback_data": _cb(chat_id, msg_id, "WHY") },
-            { "text": "ℹ️ Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP") },
-        ])
+        rows.append([{ "text": "❓ Why", "callback_data": _cb(chat_id, msg_id, "WHY") }, { "text": "🧠 Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP") }])
         rows.append([{ "text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN") }])
         rows.append([{ "text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA") }])
         rows.append([
             { "text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT") },
-            { "text": "📄 Report (PDF)", "callback_data": _cb(chat_id, msg_id, "REPORT_PDF") },
+            { "text": "📄 Report (PDF)", "callback_data": _cb(chat_id, msg_id, "REPORT_PDF") }
         ])
         rows.append([{ "text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP") }])
 
     elif ctx == "details":
-        rows.append([
-            { "text": "❓ Why?", "callback_data": _cb(chat_id, msg_id, "WHY") },
-            { "text": "ℹ️ Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP") },
-            { "text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT") }, { "text": "📄 Report (PDF)", "callback_data": _cb(chat_id, msg_id, "REPORT_PDF") },
-        ])
+        rows.append([{ "text": "❓ Why", "callback_data": _cb(chat_id, msg_id, "WHY") }, { "text": "🧠 Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP") }])
         rows.append([{ "text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN") }])
         rows.append([{ "text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA") }])
         rows.append([
             { "text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT") },
-            { "text": "📄 Report (PDF)", "callback_data": _cb(chat_id, msg_id, "REPORT_PDF") },
+            { "text": "📄 Report (PDF)", "callback_data": _cb(chat_id, msg_id, "REPORT_PDF") }
         ])
         rows.append([{ "text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP") }])
 
     elif ctx == "onchain":
-        rows.append([
-            { "text": "❓ Why?", "callback_data": _cb(chat_id, msg_id, "WHY") },
-            { "text": "ℹ️ Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP") },
-            { "text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT") }, { "text": "📄 Report (PDF)", "callback_data": _cb(chat_id, msg_id, "REPORT_PDF") },
-        ])
+        rows.append([{ "text": "❓ Why", "callback_data": _cb(chat_id, msg_id, "WHY") }, { "text": "🧠 Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP") }])
         rows.append([{ "text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA") }])
         rows.append([
             { "text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT") },
-            { "text": "📄 Report (PDF)", "callback_data": _cb(chat_id, msg_id, "REPORT_PDF") },
+            { "text": "📄 Report (PDF)", "callback_data": _cb(chat_id, msg_id, "REPORT_PDF") }
         ])
         rows.append([{ "text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP") }])
 
