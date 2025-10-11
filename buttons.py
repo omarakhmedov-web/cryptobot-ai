@@ -38,7 +38,7 @@ def build_keyboard(chat_id: int,
         if row2: rows.append(row2)
 
         if help_url:
-            rows.append([{"text": "ℹ️ How it works?", "url": help_url}])
+            rows.append([{ "text": "ℹ️ How it works?", "url": help_url }])
 
         return {"inline_keyboard": rows}
 
@@ -46,44 +46,48 @@ def build_keyboard(chat_id: int,
     dex_url = links.get("dex") or None
     scan_url = links.get("scan") or None
     nav = []
-    if dex_url: nav.append({"text": "🟢 Open in DEX", "url": dex_url})
+    if dex_url:
+        btn_text = "🟢 Open in DEX"
+        if "dexscreener.com" in dex_url.lower():
+            btn_text = "🟢 Open on DexScreener"
+        nav.append({"text": btn_text, "url": dex_url})
     if scan_url: nav.append({"text": "🔎 Open in Scan", "url": scan_url})
     if nav: rows.append(nav)
 
     if ctx == "quick":
-        rows.append([{"text": "📄 More details", "callback_data": _cb(chat_id, msg_id, "DETAILS")}])
+        rows.append([{ "text": "📄 More details", "callback_data": _cb(chat_id, msg_id, "DETAILS") }])
         rows.append([
-            {"text": "❓ Why?", "callback_data": _cb(chat_id, msg_id, "WHY")},
-            {"text": "ℹ️ Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP")},
+            { "text": "❓ Why?", "callback_data": _cb(chat_id, msg_id, "WHY") },
+            { "text": "ℹ️ Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP") },
         ])
-        rows.append([{"text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN")}])
-        rows.append([{"text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA")}])
-        rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
+        rows.append([{ "text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN") }])
+        rows.append([{ "text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA") }])
+        rows.append([{ "text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP") }])
 
     elif ctx == "details":
         rows.append([
-            {"text": "❓ Why?", "callback_data": _cb(chat_id, msg_id, "WHY")},
-            {"text": "ℹ️ Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP")},
-            {"text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT")},
+            { "text": "❓ Why?", "callback_data": _cb(chat_id, msg_id, "WHY") },
+            { "text": "ℹ️ Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP") },
+            { "text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT") },
         ])
-        rows.append([{"text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN")}])
-        rows.append([{"text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA")}])
-        rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
+        rows.append([{ "text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN") }])
+        rows.append([{ "text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA") }])
+        rows.append([{ "text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP") }])
 
     elif ctx == "onchain":
         rows.append([
-            {"text": "❓ Why?", "callback_data": _cb(chat_id, msg_id, "WHY")},
-            {"text": "ℹ️ Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP")},
-            {"text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT")},
+            { "text": "❓ Why?", "callback_data": _cb(chat_id, msg_id, "WHY") },
+            { "text": "ℹ️ Why++", "callback_data": _cb(chat_id, msg_id, "WHYPP") },
+            { "text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT") },
         ])
-        rows.append([{"text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA")}])
-        rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
+        rows.append([{ "text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA") }])
+        rows.append([{ "text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP") }])
 
     # Deltas (bottom row for all scan contexts)
     rows.append([
-        {"text": "Δ 5m", "callback_data": _cb(chat_id, msg_id, "DELTA_M5")},
-        {"text": "Δ 1h", "callback_data": _cb(chat_id, msg_id, "DELTA_1H")},
-        {"text": "Δ 6h", "callback_data": _cb(chat_id, msg_id, "DELTA_6H")},
-        {"text": "Δ 24h", "callback_data": _cb(chat_id, msg_id, "DELTA_24H")},
+        { "text": "Δ 5m", "callback_data": _cb(chat_id, msg_id, "DELTA_M5") },
+        { "text": "Δ 1h", "callback_data": _cb(chat_id, msg_id, "DELTA_1H") },
+        { "text": "Δ 6h", "callback_data": _cb(chat_id, msg_id, "DELTA_6H") },
+        { "text": "Δ 24h", "callback_data": _cb(chat_id, msg_id, "DELTA_24H") },
     ])
     return {"inline_keyboard": rows}
