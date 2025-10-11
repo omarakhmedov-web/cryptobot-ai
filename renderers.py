@@ -149,7 +149,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     parts.append(f"*Token*\n• Chain: `{chain}`\n• Address: `{token}`")
     parts.append(f"*Pair*\n• Address: `{pair_addr}`\n• Symbol: {pair}")
     parts.append(f"*Links*\n• DEX: {l_dex}\n• Scan: {l_scan}\n• Site: {l_site}")
-    return "\n\n".join(parts).replace("\\n", "\n")  # safety
+    return "\n".join(parts).replace("\\n", "\n")  # compact
 
 def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     reasons = []
