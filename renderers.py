@@ -76,11 +76,11 @@ def _level(verdict) -> str:
 def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
     chain = _fmt_chain(_get(market, "chain"))
-    price = _fmt_num(_get(market, "price"), prefix="$")
-    fdv = _fmt_num(_get(market, "fdv"), prefix="$")
-    mc  = _fmt_num(_get(market, "mc"), prefix="$")
-    liq = _fmt_num(_get(market, "liq"), prefix="$")
-    vol = _fmt_num(_get(market, "vol24h"), prefix="$")
+    price = _fmt_num(_get(market, "price"), prefix="$" )
+    fdv = _fmt_num(_get(market, "fdv"), prefix="$" )
+    mc  = _fmt_num(_get(market, "mc" ), prefix="$" )
+    liq = _fmt_num(_get(market, "liq"), prefix="$" )
+    vol = _fmt_num(_get(market, "vol24h"), prefix="$" )
     chg5 = _fmt_pct(_get(market, "priceChanges", "m5"))
     chg1 = _fmt_pct(_get(market, "priceChanges", "h1"))
     chg24= _fmt_pct(_get(market, "priceChanges", "h24"))
@@ -88,12 +88,13 @@ def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str
     src  = _get(market, "source", default="DexScreener")
 
     return (
-        f"*Metridex QuickScan — {pair}* 🟢 ({_score(verdict)})\\n"
-        f"`{chain}`  •  Price: *{price}*\\n"
-        f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}\\n"
-        f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}\\n"
+        f"*Metridex QuickScan — {pair}* 🟢 ({_score(verdict)})\n"
+        f"`{chain}`  •  Price: *{price}*\n"
+        f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}\n"
+        f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}\n"
         f"Age: {age}  •  Source: {src}"
-    )
+    ).replace("\\n", "\n")  # safety
+    # Note: upstream server escapes Markdown; we ensure real newlines.
 
 def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
@@ -101,11 +102,11 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     token = _get(market, "tokenAddress", default="—")
     pair_addr = _get(market, "pairAddress", default="—")
 
-    price = _fmt_num(_get(market, "price"), prefix="$")
-    fdv = _fmt_num(_get(market, "fdv"), prefix="$")
-    mc  = _fmt_num(_get(market, "mc"), prefix="$")
-    liq = _fmt_num(_get(market, "liq"), prefix="$")
-    vol = _fmt_num(_get(market, "vol24h"), prefix="$")
+    price = _fmt_num(_get(market, "price"), prefix="$" )
+    fdv = _fmt_num(_get(market, "fdv"), prefix="$" )
+    mc  = _fmt_num(_get(market, "mc" ), prefix="$" )
+    liq = _fmt_num(_get(market, "liq"), prefix="$" )
+    vol = _fmt_num(_get(market, "vol24h"), prefix="$" )
 
     chg5 = _fmt_pct(_get(market, "priceChanges", "m5"))
     chg1 = _fmt_pct(_get(market, "priceChanges", "h1"))
@@ -121,11 +122,11 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
 
     parts = []
     parts.append(f"*Details — {pair}* 🟢 ({_score(verdict)})")
-    parts.append(f"*Snapshot*\\n• Price: {price}  ({chg5}, {chg1}, {chg24})\\n• FDV: {fdv}  • MC: {mc}\\n• Liquidity: {liq}  • 24h Volume: {vol}\\n• Age: {age}  • Source: {src}\\n• As of: {asof}")
-    parts.append(f"*Token*\\n• Chain: `{chain}`\\n• Address: `{token}`")
-    parts.append(f"*Pair*\\n• Address: `{pair_addr}`\\n• Symbol: {pair}")
-    parts.append(f"*Links*\\n• DEX: {l_dex}\\n• Scan: {l_scan}\\n• Site: {l_site}")
-    return "\\n\\n".join(parts)
+    parts.append(f"*Snapshot*\n• Price: {price}  ({chg5}, {chg1}, {chg24})\n• FDV: {fdv}  • MC: {mc}\n• Liquidity: {liq}  • 24h Volume: {vol}\n• Age: {age}  • Source: {src}\n• As of: {asof}")
+    parts.append(f"*Token*\n• Chain: `{chain}`\n• Address: `{token}`")
+    parts.append(f"*Pair*\n• Address: `{pair_addr}`\n• Symbol: {pair}")
+    parts.append(f"*Links*\n• DEX: {l_dex}\n• Scan: {l_scan}\n• Site: {l_site}")
+    return "\n\n".join(parts).replace("\\n", "\n")  # safety
 
 def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     reasons = []
@@ -134,10 +135,10 @@ def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     except Exception:
         reasons = list((verdict or {}).get("reasons") or [])
     if not reasons:
-        return "*Why?*\\n• No specific risk factors detected"
+        return "*Why?*\n• No specific risk factors detected".replace("\\n", "\n")
     header = "*Why?*"
     lines = [f"• {r}" for r in reasons]
-    return "\\n".join([header] + lines)
+    return "\n".join([header] + lines).replace("\\n", "\n")
 
 def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     try:
@@ -146,21 +147,21 @@ def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     except Exception:
         score = (verdict or {}).get("score")
         level = (verdict or {}).get("level")
-    header = f"*Why++ — detailed factors*\\nScore: {score if score is not None else '—'}  •  Level: {level if level is not None else '—'}"
+    header = f"*Why++ — detailed factors*\nScore: {score if score is not None else '—'}  •  Level: {level if level is not None else '—'}"
     reasons = []
     try:
         reasons = list(getattr(verdict, "reasons", []) or [])
     except Exception:
         reasons = list((verdict or {}).get("reasons") or [])
     if not reasons:
-        return header + "\\n\\n(no details)"
+        return (header + "\n\n(no details)").replace("\\n", "\n")
     lines = ["", "*Factors considered:*"]
     for i, r in enumerate(reasons, start=1):
         lines.append(f"{i}. {r}")
-    return "\\n".join([header] + lines)
+    return "\n".join([header] + lines).replace("\\n", "\n")
 
 def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
     provider = (info or {}).get("provider") or "—"
     lp = (info or {}).get("lpAddress") or "—"
     until = (info or {}).get("until") or "—"
-    return f"LP lock\\nProvider: {provider}\\nLP: `{lp}`\\nUntil: {until}"
+    return f"LP lock\nProvider: {provider}\nLP: `{lp}`\nUntil: {until}".replace("\\n", "\n")
