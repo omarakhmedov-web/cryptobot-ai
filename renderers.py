@@ -1,213 +1,166 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
+import datetime as _dt
+from typing import Any, Dict, Optional
 
-# ---------- helpers ----------
-def _abbr_usd(v: Optional[float]) -> str:
+# ---- helpers ----
+def _fmt_num(v: Optional[float], prefix: str = "", none="—") -> str:
+    if v is None: return none
+    try:
+        n = float(v)
+    except Exception:
+        return none
+    absn = abs(n)
+    if absn >= 1_000_000_000:
+        s = f"{n/1_000_000_000:.2f}B"
+    elif absn >= 1_000_000:
+        s = f"{n/1_000_000:.2f}M"
+    elif absn >= 1_000:
+        s = f"{n/1_000:.2f}K"
+    else:
+        s = f"{n:.6f}" if absn < 1 else f"{n:.2f}"
+    return prefix + s
+
+def _fmt_pct(v: Optional[float], none="—") -> str:
+    if v is None: return none
+    try:
+        n = float(v)
+    except Exception:
+        return none
+    arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
+    return f"{arrow} {n:+.2f}%"
+
+def _get(d: Dict[str, Any], *keys, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict): return default
+        cur = cur.get(k)
+    return cur if cur is not None else default
+
+def _fmt_chain(chain: Optional[str]) -> str:
+    return (chain or "—")
+
+def _fmt_age_days(v: Optional[float]) -> str:
     if v is None:
         return "—"
     try:
         n = float(v)
     except Exception:
-        return str(v)
-    t = abs(n)
-    if t >= 1_000_000_000_000:
-        s = f"${n/1_000_000_000_000:.2f}T"
-    elif t >= 1_000_000_000:
-        s = f"${n/1_000_000_000:.2f}B"
-    elif t >= 1_000_000:
-        s = f"${n/1_000_000:.2f}M"
-    elif t >= 1_000:
-        s = f"${n/1_000:.2f}K"
-    else:
-        s = f"${n:.6f}" if t < 1 else f"${n:.2f}"
-    # strip trailing zeros
-    if "000000" in s:
-        s = s.replace("000000", "")
-    while len(s) > 2 and s[-1] == "0" and s[-2] != ".":
-        s = s[:-1]
-    if s.endswith("."):
-        s = s[:-1]
-    return s
-
-def _fmt_pct(v):
-    if v is None or v == "—":
         return "—"
-    try:
-        return f"{float(v):+.2f}%"
-    except Exception:
-        return str(v)
+    if n < 1/24:
+        return f"{round(n*24*60)} min"
+    if n < 1:
+        return f"{round(n*24)} h"
+    return f"{n:.1f} d"
 
-def _age_days(age):
-    if not age:
+def _fmt_time(ts_ms: Optional[int]) -> str:
+    if not ts_ms: return "—"
+    try:
+        dt = _dt.datetime.utcfromtimestamp(int(ts_ms)/1000.0)
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
         return "—"
+
+def _score(verdict) -> str:
     try:
-        d = float(age)
-        return f"{d:.1f}d"
+        return f"{getattr(verdict, 'score', None) or _get(verdict, 'score', default='—')}"
     except Exception:
-        return str(age)
+        return f"{_get(verdict, 'score', default='—')}"
 
-def _level_from_score(score: Optional[float]) -> str:
-    if score is None:
-        return "LOW"
-    s = float(score)
-    if s <= 24: return "LOW"
-    if s <= 49: return "MEDIUM"
-    if s <= 74: return "HIGH"
-    return "CRITICAL"
+def _level(verdict) -> str:
+    try:
+        return f"{getattr(verdict, 'level', None) or _get(verdict, 'level', default='—')}"
+    except Exception:
+        return f"{_get(verdict, 'level', default='—')}"
 
-def _emoji(level: Optional[str], score: Optional[float]) -> str:
-    lvl = (level or _level_from_score(score)).upper()
-    return {"LOW":"🟢","MEDIUM":"🟡","HIGH":"🟠","CRITICAL":"🔴"}.get(lvl,"🟢")
+# ---- renderers ----
+def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
+    pair = _get(market, "pairSymbol", default="—")
+    chain = _fmt_chain(_get(market, "chain"))
+    price = _fmt_num(_get(market, "price"), prefix="$")
+    fdv = _fmt_num(_get(market, "fdv"), prefix="$")
+    mc  = _fmt_num(_get(market, "mc"), prefix="$")
+    liq = _fmt_num(_get(market, "liq"), prefix="$")
+    vol = _fmt_num(_get(market, "vol24h"), prefix="$")
+    chg5 = _fmt_pct(_get(market, "priceChanges", "m5"))
+    chg1 = _fmt_pct(_get(market, "priceChanges", "h1"))
+    chg24= _fmt_pct(_get(market, "priceChanges", "h24"))
+    age  = _fmt_age_days(_get(market, "ageDays"))
+    src  = _get(market, "source", default="DexScreener")
 
-# ---------- WHY reasons synthesis ----------
-def _synth_reasons(verdict: Any, market: Dict[str, Any]) -> List[str]:
-    """Build minimal, copyable reasons if verdict.reasons is empty."""
-    rs: List[str] = []
-    score = getattr(verdict, "score", None)
-    level = getattr(verdict, "level", None)
-    liq = market.get("liq")
-    vol = market.get("vol24h")
-    fdv = market.get("fdv") or market.get("mc")
-    age = market.get("ageDays") or market.get("age")
-    pc = market.get("priceChanges") or {}
-    m5, h1, h24 = pc.get("m5"), pc.get("h1"), pc.get("h24")
+    return (
+        f"*Metridex QuickScan — {pair}* 🟢 ({_score(verdict)})\\n"
+        f"`{chain}`  •  Price: *{price}*\\n"
+        f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}\\n"
+        f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}\\n"
+        f"Age: {age}  •  Source: {src}"
+    )
 
-    # Liquidity
-    if isinstance(liq, (int, float)) and liq > 0:
-        if isinstance(fdv, (int, float)) and fdv > 0 and (liq/fdv) >= 0.01:
-            rs.append(f"LP depth {_abbr_usd(liq)} is healthy vs FDV {_abbr_usd(fdv)}")
-        else:
-            rs.append(f"LP depth {_abbr_usd(liq)} — check slippage on large orders")
-    else:
-        rs.append("LP depth unknown — verify slippage before size")
+def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
+    pair = _get(market, "pairSymbol", default="—")
+    chain = _fmt_chain(_get(market, "chain"))
+    token = _get(market, "tokenAddress", default="—")
+    pair_addr = _get(market, "pairAddress", default="—")
 
-    # Volume / activity
-    if isinstance(vol, (int, float)):
-        if vol >= 500_000:
-            rs.append(f"24h volume {_abbr_usd(vol)} — active market")
-        elif vol > 0:
-            rs.append(f"24h volume {_abbr_usd(vol)} — thin liquidity regime")
+    price = _fmt_num(_get(market, "price"), prefix="$")
+    fdv = _fmt_num(_get(market, "fdv"), prefix="$")
+    mc  = _fmt_num(_get(market, "mc"), prefix="$")
+    liq = _fmt_num(_get(market, "liq"), prefix="$")
+    vol = _fmt_num(_get(market, "vol24h"), prefix="$")
 
-    # Momentum
-    if m5 is not None: rs.append(f"Δ5m {_fmt_pct(m5)}")
-    if h1 is not None: rs.append(f"Δ1h {_fmt_pct(h1)}")
-    if h24 is not None: rs.append(f"Δ24h {_fmt_pct(h24)}")
+    chg5 = _fmt_pct(_get(market, "priceChanges", "m5"))
+    chg1 = _fmt_pct(_get(market, "priceChanges", "h1"))
+    chg24= _fmt_pct(_get(market, "priceChanges", "h24"))
+    age  = _fmt_age_days(_get(market, "ageDays"))
+    src  = _get(market, "source", default="DexScreener")
+    asof = _fmt_time(_get(market, "asof"))
 
-    # Age
-    if isinstance(age, (int, float)):
-        if age >= 180: rs.append(f"Age {age:.0f}d — seasoned")
-        elif age <= 7: rs.append(f"Age {age:.0f}d — very new")
+    links = _get(market, "links") or {}
+    l_dex  = (links or {}).get("dex") or "—"
+    l_scan = (links or {}).get("scan") or "—"
+    l_site = (links or {}).get("site") or "—"
 
-    # On-chain disclaimer
-    rs.append("Taxes/owner functions not verified yet — run On-chain")
+    parts = []
+    parts.append(f"*Details — {pair}* 🟢 ({_score(verdict)})")
+    parts.append(f"*Snapshot*\\n• Price: {price}  ({chg5}, {chg1}, {chg24})\\n• FDV: {fdv}  • MC: {mc}\\n• Liquidity: {liq}  • 24h Volume: {vol}\\n• Age: {age}  • Source: {src}\\n• As of: {asof}")
+    parts.append(f"*Token*\\n• Chain: `{chain}`\\n• Address: `{token}`")
+    parts.append(f"*Pair*\\n• Address: `{pair_addr}`\\n• Symbol: {pair}")
+    parts.append(f"*Links*\\n• DEX: {l_dex}\\n• Scan: {l_scan}\\n• Site: {l_site}")
+    return "\\n\\n".join(parts)
 
-    # Verdict recap
-    if score is not None:
-        rs.append(f"Verdict: {_level_from_score(score)} (score {int(score)})")
-
-    # de-dup, keep order
-    seen = set(); out = []
-    for r in rs:
-        if r not in seen:
-            out.append(r); seen.add(r)
-    return out[:8]
-
-# ---------- Renderers ----------
-def render_quick(verdict: Any, market: Dict[str, Any], opts: Dict[str, Any], lang: str) -> str:
-    pair = market.get("pairSymbol") or "—"
-    chain = market.get("chain") or "—"
-    price = _abbr_usd(market.get("price"))
-    fdv = _abbr_usd(market.get("fdv"))
-    mc  = _abbr_usd(market.get("mc"))
-    liq = _abbr_usd(market.get("liq"))
-    vol = _abbr_usd(market.get("vol24h"))
-    pc = market.get("priceChanges") or {}
-    m5, h1, h24 = _fmt_pct(pc.get("m5")), _fmt_pct(pc.get("h1")), _fmt_pct(pc.get("h24"))
-    age = _age_days(market.get("ageDays") or market.get("age"))
-    source = market.get("source") or "DexScreener"
-
-    score = getattr(verdict, "score", None)
-    level = getattr(verdict, "level", None)
-    emj = _emoji(level, score)
-    sc  = int(score) if isinstance(score, (int, float)) else "—"
-
-    lines = [
-        f"*Metridex QuickScan — {pair}* {emj} ({sc})",
-        f"`{chain}`  •  Price: *{price}*",
-        f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}",
-        f"Vol 24h: {vol}  •  Δ5m {m5}  •  Δ1h {h1}  •  Δ24h {h24}",
-        f"Age: {age}  •  Source: {source}",
-    ]
-    return "\n".join(lines).strip()
-
-def render_details(verdict: Any, market: Dict[str, Any], opts: Dict[str, Any], lang: str) -> str:
-    pair = market.get("pairSymbol") or "—"
-    chain = market.get("chain") or "—"
-    score = getattr(verdict, "score", None)
-    level = _level_from_score(score)
-    emj = _emoji(level, score)
-    lines = [
-        f"*Details — {pair}* {emj} ({int(score) if isinstance(score,(int,float)) else '—'})",
-        f"Chain: `{chain}`",
-        f"Token: `{market.get('tokenAddress') or '—'}`",
-        f"Pair: `{market.get('pairAddress') or '—'}`",
-    ]
-    site = (market.get("links") or {}).get("site")
-    if site:
-        lines.append(f"Site: {site}")
-    return "\n".join(lines).strip()
-
-def render_why(verdict: Any, market_or_lang=None, lang: Optional[str]=None) -> str:
-    """Back-compatible:
-       - render_why(verdict, market, lang)
-       - render_why(verdict, lang)
-       - render_why(verdict)
-    """
-    market: Dict[str, Any] = {}
-    if isinstance(market_or_lang, dict):
-        market = market_or_lang
-    elif isinstance(market_or_lang, str) and lang is None:
-        lang = market_or_lang  # old signature
-    # Try to get reasons from verdict, else synthesize
-    reasons = list(getattr(verdict, "reasons", []) or [])
+def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
+    reasons = []
+    try:
+        reasons = list(getattr(verdict, "reasons", []) or [])
+    except Exception:
+        reasons = list((verdict or {}).get("reasons") or [])
     if not reasons:
-        reasons = _synth_reasons(verdict, market)
-    bullets = reasons[:6]
-    out = ["*Why?*"]
-    for r in bullets:
-        out.append(f"• {r}")
-    return "\n".join(out)
+        return "*Why?*\\n• No specific risk factors detected"
+    header = "*Why?*"
+    lines = [f"• {r}" for r in reasons]
+    return "\\n".join([header] + lines)
 
-def render_whypp(verdict: Any, market_or_lang=None, lang: Optional[str]=None) -> str:
-    """Back-compatible:
-       - render_whypp(verdict, market, lang)
-       - render_whypp(verdict, lang)
-       - render_whypp(verdict)
-    """
-    market: Dict[str, Any] = {}
-    if isinstance(market_or_lang, dict):
-        market = market_or_lang
-    elif isinstance(market_or_lang, str) and lang is None:
-        lang = market_or_lang
-    score = getattr(verdict, "score", None)
-    level = getattr(verdict, "level", None) or _level_from_score(score)
-    reasons = list(getattr(verdict, "reasons", []) or [])
+def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
+    try:
+        score = getattr(verdict, "score", None)
+        level = getattr(verdict, "level", None)
+    except Exception:
+        score = (verdict or {}).get("score")
+        level = (verdict or {}).get("level")
+    header = f"*Why++ — detailed factors*\\nScore: {score if score is not None else '—'}  •  Level: {level if level is not None else '—'}"
+    reasons = []
+    try:
+        reasons = list(getattr(verdict, "reasons", []) or [])
+    except Exception:
+        reasons = list((verdict or {}).get("reasons") or [])
     if not reasons:
-        reasons = _synth_reasons(verdict, market)
-    out = [
-        "*Why++ — detailed factors*",
-        f"Score: {int(score) if isinstance(score,(int,float)) else '—'}  •  Level: {level}",
-        "",
-        "*Factors considered:*",
-    ]
-    for i, r in enumerate(reasons, 1):
-        out.append(f"{i}. {r}")
-    return "\n".join(out)
+        return header + "\\n\\n(no details)"
+    lines = ["", "*Factors considered:*"]
+    for i, r in enumerate(reasons, start=1):
+        lines.append(f"{i}. {r}")
+    return "\\n".join([header] + lines)
 
-def render_lp(lp: Dict[str, Any], lang: Optional[str]=None) -> str:
-    if not lp:
-        return "LP lock: no data"
-    prov = lp.get("provider") or "—"
-    addr = lp.get("lpAddress") or "—"
-    until = lp.get("until") or "—"
-    return f"LP lock\nProvider: {prov}\nLP: `{addr}`\nUntil: {until}"
+def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
+    provider = (info or {}).get("provider") or "—"
+    lp = (info or {}).get("lpAddress") or "—"
+    until = (info or {}).get("until") or "—"
+    return f"LP lock\\nProvider: {provider}\\nLP: `{lp}`\\nUntil: {until}"
