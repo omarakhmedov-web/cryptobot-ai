@@ -1,12 +1,10 @@
-
 from __future__ import annotations
 import os
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 import requests
 
-# ERC20 selectors
-SIG_BALANCEOF = "0x70a08231"
 SIG_TOTALSUPPLY = "0x18160ddd"
+SIG_BALANCEOF   = "0x70a08231"
 
 CHAIN_RPC_ENV = {
     "eth":"ETH_RPC_URL_PRIMARY",
@@ -26,22 +24,23 @@ DEAD_ADDRS = [
 ]
 
 def _rpc(chain: str) -> Optional[str]:
-    env = CHAIN_RPC_ENV.get(chain)
-    if not env:
-        return None
-    return (os.getenv(env,"") or "").strip() or None
+    env = CHAIN_RPC_ENV.get((chain or "").lower().strip())
+    return (os.getenv(env, "") or "").strip() or None
 
 def _eth_call(rpc: str, to: str, data: str) -> bytes:
-    j = requests.post(rpc, json={"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]}, timeout=8).json()
-    res = j.get("result") or "0x"
+    j = {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]}
+    r = requests.post(rpc, json=j, timeout=8)
+    try:
+        res = r.json().get("result") or "0x"
+    except Exception:
+        res = "0x"
     return bytes.fromhex(res[2:]) if res and res.startswith("0x") else b""
 
-def _u256(raw: bytes) -> int:
-    if not raw: return 0
-    return int.from_bytes(raw[-32:], "big", signed=False)
+def _u256(b: bytes) -> int:
+    if not b: return 0
+    return int.from_bytes(b[-32:], "big", signed=False)
 
 def _balance_of(rpc: str, token: str, holder: str) -> int:
-    # selector + left-padded address
     addr = holder.lower().replace("0x","").rjust(64, "0")
     data = SIG_BALANCEOF + addr
     return _u256(_eth_call(rpc, token, data))
@@ -51,34 +50,52 @@ def _total_supply(rpc: str, token: str) -> int:
 
 def check_lp_lock_v2(chain: str, lp_token_address: str) -> Dict[str, Any]:
     """
-    Lite LP lock check via burned balances share.
-    Assumes typical V2 LP (18 decimals). No external APIs.
+    Lite LP lock check: burned % (dead/zero) + optional lockers via env LP_LOCKER_ADDRS.
     """
     rpc = _rpc(chain)
     if not rpc or not lp_token_address:
         return {"provider":"lite-burn-check","lpAddress": lp_token_address or "—","status":"unknown"}
 
     try:
-        ts = _total_supply(rpc, lp_token_address)  # 18 decimals in most V2 LPs
+        ts = _total_supply(rpc, lp_token_address)
         if ts <= 0:
             return {"provider":"lite-burn-check","lpAddress": lp_token_address, "status":"unknown"}
+
         burned = 0
         parts = {}
         for h in DEAD_ADDRS:
             bal = _balance_of(rpc, lp_token_address, h)
             parts[h] = bal
             burned += bal
-        pct = (burned / float(ts)) * 100.0 if ts else 0.0
+        burned_pct = (burned/float(ts))*100.0 if ts else 0.0
+
+        # Known lockers
+        lockers_env = (os.getenv("LP_LOCKER_ADDRS","") or "").strip()
+        lockers = [x.strip().lower() for x in lockers_env.split(",") if x.strip()]
+        locked_total = 0
+        details = []
+        for lk in lockers:
+            bal = _balance_of(rpc, lp_token_address, lk)
+            if bal > 0:
+                pct_lk = (bal/float(ts))*100.0 if ts else 0.0
+                locked_total += bal
+                details.append({"locker": lk, "balance": bal, "pct": round(pct_lk,2)})
+        locked_pct = (locked_total/float(ts))*100.0 if ts else 0.0
+
         status = "none"
-        if pct >= 95: status = "fully-burned"
-        elif pct >= 50: status = "mostly-burned"
-        elif pct >= 5: status = "partially-burned"
+        if burned_pct >= 95: status = "fully-burned"
+        elif burned_pct >= 50: status = "mostly-burned"
+        elif burned_pct >= 5: status = "partially-burned"
         else: status = "low-burn"
+
         return {
-            "provider": "lite-burn-check",
+            "provider":"lite-burn-check",
             "lpAddress": lp_token_address,
-            "burnedPct": pct,
+            "burnedPct": round(burned_pct,2),
+            "lockedPct": round(locked_pct,2) if lockers else None,
+            "lockers": details if details else None,
             "status": status,
+            "until": "—",
             "breakdown": parts
         }
     except Exception as e:
