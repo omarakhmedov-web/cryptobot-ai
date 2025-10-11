@@ -369,8 +369,13 @@ def on_callback(cb):
         }
         short = chain_map.get(ch, ch or "eth")
         info = inspect_token(short, tok, pair)
+        # Fallbacks from market data
+        mkt_bundle = (bundle.get("market") or {})
+        _pair_sym = (mkt_bundle.get("pairSymbol") or "")
+        _pair_left = _pair_sym.split("/", 1)[0] if _pair_sym else None
+
         parts = ["*On-chain*"]
-        name = info.get("name"); symbol = info.get("symbol"); dec = info.get("decimals")
+        name = info.get("name"); symbol = info.get("symbol") or _pair_left; dec = info.get("decimals")
         if name or symbol:
             parts.append("token: `{}` ({})".format(name or "—", symbol or "—"))
         if dec is not None:
