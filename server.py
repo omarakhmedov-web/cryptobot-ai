@@ -301,11 +301,14 @@ def on_callback(cb):
         answer_callback_query(cb_id, "This control expired.", True)
         return jsonify({"ok": True})
 
-    # Idempotency: block duplicate callbacks for 30s
-    if cache_get(data):
-        answer_callback_query(cb_id, "Please wait...", False)
-        return jsonify({"ok": True})
-    cache_set(data, "1", ttl_sec=30)
+    
+    # Idempotency: throttle only *heavy* actions for a short period
+    heavy_actions = {"DETAILS", "ONCHAIN", "REPORT", "REPORT_PDF"}
+    if action in heavy_actions:
+        if cache_get(data):
+            answer_callback_query(cb_id, "Please wait...", False)
+            return jsonify({"ok": True})
+        cache_set(data, "1", ttl_sec=5)
 
     bundle = load_bundle(chat_id, orig_msg_id) or {}
     links = bundle.get("links")
@@ -636,17 +639,18 @@ if __name__ == "__main__":
 
 
 
+
 def _build_html_report(bundle: dict) -> bytes:
     """
-    Creates a premium dark+gold HTML report from the bundle dict.
-    Safe: escapes text and tolerates missing fields.
+    Premium dark+gold HTML report without any logo.
+    Copy CA button is shown alongside Open in DEX / Open in Scan / Website.
     """
     import html, datetime as _dt
     b = bundle or {}
     v = b.get("verdict") or {}
     m = b.get("market") or {}
     links = b.get("links") or {}
-    reasons = b.get("reasons") or []
+
     def g(d, *ks, default="—"):
         cur = d
         for k in ks:
@@ -655,7 +659,6 @@ def _build_html_report(bundle: dict) -> bytes:
             cur = cur.get(k)
         return default if cur is None else cur
 
-    # Data
     pair  = g(m, "pairSymbol", default="—")
     chain = g(m, "chain", default="—")
     price = g(m, "price", default="—")
@@ -663,11 +666,10 @@ def _build_html_report(bundle: dict) -> bytes:
     mc    = g(m, "mc", default=None)
     liq   = g(m, "liq", default=None) or g(m, "liquidityUSD", default=None)
     vol24 = g(m, "vol24h", default=None) or g(m, "volume24hUSD", default=None)
-    ch5   = g(m, "priceChanges", default={}).get("m5")
-    ch1   = g(m, "priceChanges", default={}).get("h1")
-    ch24  = g(m, "priceChanges", default={}).get("h24")
+    ch5   = (g(m, "priceChanges", default={}) or {}).get("m5")
+    ch1   = (g(m, "priceChanges", default={}) or {}).get("h1")
+    ch24  = (g(m, "priceChanges", default={}) or {}).get("h24")
     token = g(m, "tokenAddress", default="—")
-    pair_addr = g(m, "pairAddress", default="—")
     asof_ms = g(m, "asof", default=None)
 
     def money(x):
@@ -675,12 +677,11 @@ def _build_html_report(bundle: dict) -> bytes:
             n = float(x)
         except Exception:
             return "—"
-        absn = abs(n)
-        if absn >= 1_000_000_000: s = f"${n/1_000_000_000:.2f}B"
-        elif absn >= 1_000_000:   s = f"${n/1_000_000:.2f}M"
-        elif absn >= 1_000:       s = f"${n/1_000:.2f}K"
-        else:                     s = f"${n:.6f}" if absn < 1 else f"${n:.2f}"
-        return s
+        a = abs(n)
+        if a >= 1_000_000_000: return f"${n/1_000_000_000:.2f}B"
+        if a >= 1_000_000:     return f"${n/1_000_000:.2f}M"
+        if a >= 1_000:         return f"${n/1_000:.2f}K"
+        return f"${n:.6f}" if a < 1 else f"${n:.2f}"
 
     def pct(x):
         try:
@@ -699,129 +700,93 @@ def _build_html_report(bundle: dict) -> bytes:
     else:
         asof_s = "—"
 
-    level = (g(v, "level", "") or "").upper()
+    level = ( (v.get("level") if isinstance(v, dict) else getattr(v, "level", "")) or "" ).upper()
     if "HIGH" in level:    badge = '<span class="badge high">HIGH</span>'
     elif "MED" in level:   badge = '<span class="badge med">MEDIUM</span>'
     elif "LOW" in level:   badge = '<span class="badge low">LOW</span>'
     elif "UNKNOWN" in level: badge = '<span class="badge unk">UNKNOWN</span>'
     else: badge = '<span class="badge unk">—</span>'
 
-    # Links
     dex_link  = html.escape(g(links, "dex", default="#"))
     scan_link = html.escape(g(links, "scan", default="#"))
     site_link = html.escape(g(links, "site", default="—"))
-
-    # Format money
-    fdv_s = money(fdv)
-    mc_s  = money(mc)
-    liq_s = money(liq)
-    vol_s = money(vol24)
-    p5    = pct(ch5)
-    p1    = pct(ch1)
-    p24   = pct(ch24)
-
-    # Premium CSS
-    style = """
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <style>
-      :root{
-        --bg:#0a0a0c; --card:#111217; --muted:#b8bbc7; --text:#e9e9ee;
-        --gold:#d4af37; --ok:#2fd178; --med:#e5c04d; --bad:#ff5d5d; --unk:#9aa0ab;
-        --chip:#1a1b22; --chipb:#20222b;
-        --mono:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;
-        --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,system-ui,sans-serif;
-      }
-      *{box-sizing:border-box}
-      body{margin:0;padding:32px;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);}
-      .wrap{max-width:980px;margin:0 auto}
-      header{display:flex;align-items:center;gap:14px;margin:6px 0 18px}
-      .logo{width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,#15161d,#0c0d12);display:grid;place-items:center;box-shadow:0 0 0 1px #1f2130, 0 8px 24px rgba(0,0,0,.45)}
-      .logo span{font-weight:700;color:var(--gold);font-size:20px;letter-spacing:.3px}
-      h1{font-size:20px;margin:0 0 2px 0;font-weight:600;letter-spacing:.1px}
-      .sub{color:var(--muted);font-size:12px}
-      .badge{display:inline-block;padding:3px 8px;border-radius:14px;margin-left:8px;font-weight:600;font-size:11px;letter-spacing:.3px}
-      .badge.low{background:rgba(47,209,120,.12);color:var(--ok)}
-      .badge.med{background:rgba(229,192,77,.14);color:var(--med)}
-      .badge.high{background:rgba(255,93,93,.14);color:var(--bad)}
-      .badge.unk{background:rgba(154,160,171,.14);color:var(--unk)}
-      .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0 22px}
-      .kpi{background:var(--card);border-radius:14px;padding:14px 14px 12px;box-shadow:0 1px 0 #1c1e2a inset,0 8px 24px rgba(0,0,0,.3)}
-      .kpi .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-      .kpi .v{font-size:16px;font-weight:600}
-      .chips{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 16px}
-      .chip{background:linear-gradient(180deg,var(--chip),var(--chipb));padding:6px 10px;border-radius:12px;font-size:12px;color:#cfd3df;border:1px solid #202332}
-      .mono{font-family:var(--mono);font-size:12.5px}
-      .card{background:var(--card);border-radius:16px;padding:16px 16px;box-shadow:0 1px 0 #1c1e2a inset,0 10px 32px rgba(0,0,0,.38);margin-bottom:14px}
-      a{color:var(--gold);text-decoration:none} a:hover{text-decoration:underline}
-      footer{margin-top:26px;color:var(--muted);font-size:12px}
-      .links{display:flex;gap:12px;flex-wrap:wrap}
-      .btn{display:inline-block;padding:8px 12px;border-radius:12px;background:#171823;border:1px solid #222436}
-      .btn:hover{background:#1c1e29}
-      .copy{margin-left:auto}
-    </style>
-    <script>
-      function copyCA(txt){
-        try{
-          navigator.clipboard.writeText(txt).then(()=>{
-            alert('Contract address copied');
-          }).catch(()=>{
-            const ta=document.createElement('textarea');ta.value=txt;document.body.appendChild(ta);ta.select();
-            try{document.execCommand('copy');alert('Contract address copied');}finally{document.body.removeChild(ta);}
-          });
-        }catch(e){alert(txt);}
-      }
-    </script>
-    """
-
-    pair_html = html.escape(str(pair))
-    chain_html = html.escape(str(chain))
     token_html = html.escape(str(token))
-    head = f"""<!doctype html><html><head>{style}</head><body><div class="wrap">
-      <header>
-        <div class="logo"><span>M</span></div>
-        <div>
-          <h1>{pair_html} {badge}</h1>
-          <div class="sub">{chain_html} • As of {asof_s}</div>
-        </div>
-        <div class="copy"><a class="btn mono" href="javascript:copyCA('{token_html}')">Copy CA</a></div>
-      </header>
-    """
+
+    style = """
+<meta charset=\"utf-8\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">
+<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>
+<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap\" rel=\"stylesheet\">
+<style>
+  :root{
+    --bg:#0a0a0c; --card:#111217; --muted:#b8bbc7; --text:#e9e9ee;
+    --gold:#d4af37; --ok:#2fd178; --med:#e5c04d; --bad:#ff5d5d; --unk:#9aa0ab;
+    --mono:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:32px;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);}
+  .wrap{max-width:980px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 2px 0;font-weight:600;letter-spacing:.1px}
+  .sub{color:var(--muted);font-size:12px}
+  .badge{display:inline-block;padding:3px 8px;border-radius:14px;margin-left:8px;font-weight:600;font-size:11px;letter-spacing:.3px}
+  .badge.low{background:rgba(47,209,120,.12);color:var(--ok)}
+  .badge.med{background:rgba(229,192,77,.14);color:var(--med)}
+  .badge.high{background:rgba(255,93,93,.14);color:var(--bad)}
+  .badge.unk{background:rgba(154,160,171,.14);color:var(--unk)}
+  .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0 22px}
+  .kpi{background:var(--card);border-radius:14px;padding:14px 14px 12px;box-shadow:0 1px 0 #1c1e2a inset,0 8px 24px rgba(0,0,0,.3)}
+  .kpi .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+  .kpi .v{font-size:16px;font-weight:600}
+  .card{background:var(--card);border-radius:16px;padding:16px 16px;box-shadow:0 1px 0 #1c1e2a inset,0 10px 32px rgba(0,0,0,.38);margin-bottom:14px}
+  .links{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}
+  a{color:var(--gold);text-decoration:none} a:hover{text-decoration:underline}
+  footer{margin-top:26px;color:var(--muted);font-size:12px}
+</style>
+<script>
+  function copyCA(txt){
+    try{
+      navigator.clipboard.writeText(txt).then(()=>{ alert('Contract address copied'); });
+    }catch(e){ alert(txt); }
+  }
+</script>
+"""
+    head = f"<!doctype html><html><head>{style}</head><body><div class='wrap'>"
+    title = f"<h1>{html.escape(str(pair))} {badge}</h1><div class='sub'>{html.escape(str(chain))} • As of {asof_s}</div>"
 
     grid = f"""
-      <div class="grid">
-        <div class="kpi"><div class="k">Price</div><div class="v">{html.escape(str(price))}</div></div>
-        <div class="kpi"><div class="k">FDV</div><div class="v">{fdv_s}</div></div>
-        <div class="kpi"><div class="k">MC</div><div class="v">{mc_s}</div></div>
-        <div class="kpi"><div class="k">Liquidity</div><div class="v">{liq_s}</div></div>
-        <div class="kpi"><div class="k">Volume 24h</div><div class="v">{vol_s}</div></div>
-        <div class="kpi"><div class="k">Delta 5m</div><div class="v">{p5}</div></div>
-        <div class="kpi"><div class="k">Delta 1h</div><div class="v">{p1}</div></div>
-        <div class="kpi"><div class="k">Delta 24h</div><div class="v">{p24}</div></div>
-      </div>
-    """
+<div class="grid">
+  <div class="kpi"><div class="k">Price</div><div class="v">{html.escape(str(price))}</div></div>
+  <div class="kpi"><div class="k">FDV</div><div class="v">{money(fdv)}</div></div>
+  <div class="kpi"><div class="k">MC</div><div class="v">{money(mc)}</div></div>
+  <div class="kpi"><div class="k">Liquidity</div><div class="v">{money(liq)}</div></div>
+  <div class="kpi"><div class="k">Volume 24h</div><div class="v">{money(vol24)}</div></div>
+  <div class="kpi"><div class="k">Δ 5m</div><div class="v">{pct(ch5)}</div></div>
+  <div class="kpi"><div class="k">Δ 1h</div><div class="v">{pct(ch1)}</div></div>
+  <div class="kpi"><div class="k">Δ 24h</div><div class="v">{pct(ch24)}</div></div>
+</div>
+"""
 
-    # Why & Why++ and links
     why = g(b, "why", default="—")
     whypp = g(b, "whypp", default="—")
     links_html = (
         '<div class="links">'
-        + f'<a class="btn" href="{dex_link}">Open in DEX</a>'
-        + f'<a class="btn" href="{scan_link}">Open in Scan</a>'
-        + (f'<a class="btn" href="{site_link}">Website</a>' if site_link and site_link != "—" else '')
+        + (f'<a href="{dex_link}">🟢 Open in DEX</a>' if dex_link and dex_link != "#" else '')
+        + (f'<a href="{scan_link}">🔍 Open in Scan</a>' if scan_link and scan_link != "#" else '')
+        + (f'<a href="{site_link}">🌐 Website</a>' if site_link and site_link not in (None, "—") else '')
+        + (f'<a class="mono" href="javascript:copyCA(\'{token_html}\')">📋 Copy CA</a>' if token_html and token_html != "—" else '')
         + '</div>'
     )
 
-    doc = head + grid + f"""
-      <div class="card"><div class="k">Why?</div><div>{why}</div></div>
-      <div class="card"><div class="k">Why++</div><div>{whypp}</div></div>
-      {links_html}
-      <footer>Generated by Metridex • QuickScan</footer>
-    </div></body></html>"""
-
+    doc = (
+        head + title + grid
+        + f"<div class='card'><div class='k'>Why?</div><div>{why}</div></div>"
+        + f"<div class='card'><div class='k'>Why++</div><div>{whypp}</div></div>"
+        + links_html
+        + "<footer>Generated by Metridex • QuickScan</footer>"
+        + "</div></body></html>"
+    )
     return doc.encode("utf-8")
 
 
