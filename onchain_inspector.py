@@ -9,6 +9,10 @@ RPC_TIMEOUT  = int(os.getenv("PROVIDER_TIMEOUT_SECONDS","8"))
 
 ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
+SIG_NAME="0x06fdde03"
+SIG_SYMBOL="0x95d89b41"
+SIG_DECIMALS="0x313ce567"
+
 CHAIN_RPC_ENV = {
     "eth":"ETH_RPC_URL_PRIMARY",
     "bsc":"BSC_RPC_URL_PRIMARY",
@@ -145,6 +149,14 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
         return {"ok": False, "error":"rpc or token invalid"}
     res: Dict[str, Any] = {"ok": True, "chain": short, "token": token_address}
 
+    # ERC-20 meta
+    name_b = _eth_call(rpc, token_address, SIG_NAME)
+    sym_b  = _eth_call(rpc, token_address, SIG_SYMBOL)
+    dec_b  = _eth_call(rpc, token_address, SIG_DECIMALS)
+    res["name"] = _read_str(name_b) or None
+    res["symbol"] = _read_str(sym_b) or None
+    res["decimals"] = _read_u256(dec_b) if dec_b else None
+
     # owner / renounced
     owner = _try_addr(rpc, token_address, SIG_OWNER) or _try_addr(rpc, token_address, SIG_GETOWNER)
     res["owner"] = owner or None
@@ -153,8 +165,6 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
 
     # paused / trading open
     res["pausable"] = _try_bool(rpc, token_address, SIG_PAUSED)
-
-    # trading open flag is non-standard; if present, good to expose
     res["tradingOpen"] = _try_bool(rpc, token_address, SIG_TRADING_OPEN)
 
     # limits
@@ -167,9 +177,8 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
     # mint / roles
     res["mint"] = _mint_capability(rpc, token_address)
 
-    # blacklist (capability)
+    # blacklist capability
     try:
-        # isBlacklisted(address(0)) — just to probe selector presence
         b = _eth_call(rpc, token_address, SIG_BLACKLIST + "0"*64)
         res["blacklistCap"] = True if b is not None else None
     except Exception:
@@ -177,5 +186,24 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
 
     # upgradeable proxy?
     res["upgradeable"] = _is_upgradeable_proxy(rpc, token_address)
+    # try to read implementation() address if present
+    try:
+        impl_raw = _eth_call(rpc, token_address, "0x5c60da1b")
+        impl_addr = _read_addr(impl_raw)
+        if impl_addr and impl_addr.lower() != ZERO.lower():
+            res["implementation"] = impl_addr
+    except Exception:
+        pass
 
     return res
+
+def _read_str(raw: bytes) -> str:
+    if not raw: return ""
+    try:
+        return raw.rstrip(b"\x00").decode("utf-8","ignore") or ""
+    except Exception:
+        return ""
+
+def _read_u256(raw: bytes) -> int:
+    if not raw: return 0
+    return int.from_bytes(raw[-32:], "big", signed=False)
