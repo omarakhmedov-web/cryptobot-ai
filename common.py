@@ -7,7 +7,7 @@ def now_ts() -> int:
 def dt_utc_iso(ts: int | float | None = None) -> str:
     if ts is None:
         ts = time.time()
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
 
 def parse_iso8601(s: str | None) -> int | None:
     if not s: return None
