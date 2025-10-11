@@ -212,9 +212,9 @@ def on_message(msg):
         market.setdefault("links", {})
 
     # Ensure asof timestamp and pair age
-    if market.get("asof") is None:
+    if not market.get("asof"):
         market["asof"] = int(time.time() * 1000)
-    if market.get("ageDays") is None:
+    if not market.get("ageDays"):
         pc = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
         if pc:
             try:
@@ -352,71 +352,62 @@ def on_callback(cb):
     
     
     elif action == "ONCHAIN":
-        answer_callback_query(cb_id, "Fetching on-chain info…", False)
-        if inspect_token is None:
-            send_message(chat_id, "On-chain module missing.", reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
-            return jsonify({"ok": True})
-        mkt = (bundle.get("market") or {})
-        ch = (mkt.get("chain") or "").lower()
-        tok = mkt.get("tokenAddress")
-        pair = mkt.get("pairAddress")
-        if not tok:
-            send_message(chat_id, "No token found in this message.", reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
-            return jsonify({"ok": True})
-        chain_map = {
-            "ethereum": "eth", "bsc": "bsc", "polygon": "polygon", "arbitrum": "arb", "optimism": "op",
-            "base": "base", "avalanche": "avax", "fantom": "ftm"
-        }
-        short = chain_map.get(ch, ch or "eth")
-        info = inspect_token(short, tok, pair)
-        if not (isinstance(info, dict) and info.get("ok", True)):
-            missing = short.upper()
-            send_message(chat_id, mdv2_escape(f"On-chain unavailable: RPC not configured for {missing}. Set {missing}_RPC_URL_PRIMARY."),
-                         reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
-            return jsonify({"ok": True})
-        # Fallbacks from market data
-        mkt_bundle = (bundle.get("market") or {})
-        _pair_sym = (mkt_bundle.get("pairSymbol") or "")
-        _pair_left = _pair_sym.split("/", 1)[0] if _pair_sym else None
-
-        parts = ["*On-chain*"]
-        name = info.get("name"); symbol = info.get("symbol") or _pair_left; dec = info.get("decimals")
-        if name or symbol:
-            parts.append("token: `{}` ({})".format(name or "—", symbol or "—"))
-        if dec is not None:
-            parts.append("decimals: `{}`".format(dec))
-        owner_val = info.get("owner")
-        renounced_val = info.get("ownerRenounced") if owner_val is not None else None
-        paused_val = info.get("pausable")
-        upgrade_val = info.get("upgradeable")
-        impl = info.get("implementation")
-        parts.append("owner: `{}`".format(owner_val or "—"))
-        parts.append("renounced: `{}`".format(renounced_val if renounced_val is not None else "—"))
-        parts.append("paused: `{}`  upgradeable: `{}`".format(
-            paused_val if paused_val is not None else "—",
-            upgrade_val if upgrade_val is not None else "—"
-        ))
-        if impl:
-            parts.append("impl: `{}`".format(impl))
-        tactive = info.get("tradingOpen") if info.get("tradingOpen") is not None else info.get("tradingActive")
-        if tactive is not None:
-            parts.append("tradingActive: `{}`".format(tactive))
-        taxes_val = info.get("taxes") or {}
-        tb = taxes_val.get("buy"); ts_ = taxes_val.get("sell")
-        if tb is not None or ts_ is not None:
-            tb_s = "{:.2f}%".format(tb) if isinstance(tb,(int,float)) else "—"
-            ts_s = "{:.2f}%".format(ts_) if isinstance(ts_,(int,float)) else "—"
-            parts.append("taxes: buy {} / sell {}".format(tb_s, ts_s))
-        mx = info.get("maxTx"); mw = info.get("maxWallet")
-        parts.append("maxTx: `{}`  maxWallet: `{}`".format(
-            mx if mx is not None else "—",
-            mw if mw is not None else "—"
-        ))
-        preview = "\n".join(parts)
-        send_message(chat_id, mdv2_escape(preview), reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
-
-
-
+        try:
+            answer_callback_query(cb_id, "Fetching on-chain info…", False)
+            if inspect_token is None:
+                send_message(chat_id, "On-chain module missing.", reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
+                return jsonify({"ok": True})
+            mkt = (bundle.get("market") or {})
+            ch = (mkt.get("chain") or "").lower()
+            tok = mkt.get("tokenAddress")
+            pair = mkt.get("pairAddress")
+            if not tok:
+                send_message(chat_id, "No token found in this message.", reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
+                return jsonify({"ok": True})
+            chain_map = {
+                "ethereum": "eth", "bsc": "bsc", "polygon": "polygon", "arbitrum": "arb", "optimism": "op",
+                "base": "base", "avalanche": "avax", "fantom": "ftm"
+            }
+            short = chain_map.get(ch, ch or "eth")
+            info = inspect_token(short, tok, pair)
+            if not (isinstance(info, dict) and info.get("ok", True)):
+                missing = short.upper()
+                send_message(chat_id, f"On-chain unavailable: RPC not configured for {missing}. Set {missing}_RPC_URL_PRIMARY.", reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
+                return jsonify({"ok": True})
+            mkt_bundle = (bundle.get("market") or {})
+            _pair_sym = (mkt_bundle.get("pairSymbol") or "")
+            _pair_left = _pair_sym.split("/", 1)[0] if _pair_sym else None
+            parts = ["*On-chain*"]
+            name = info.get("name"); symbol = info.get("symbol") or _pair_left; dec = info.get("decimals")
+            if name or symbol:
+                parts.append("token: `{}` ({})".format(name or "—", symbol or "—"))
+            if dec is not None:
+                parts.append("decimals: `{}`".format(dec))
+            owner_val = info.get("owner")
+            renounced_val = info.get("ownerRenounced") if owner_val is not None else None
+            paused_val = info.get("pausable")
+            upgrade_val = info.get("upgradeable")
+            impl = info.get("implementation")
+            parts.append("owner: `{}`".format(owner_val or "—"))
+            parts.append("renounced: `{}`".format(renounced_val if renounced_val is not None else "—"))
+            parts.append("paused: `{}`  upgradeable: `{}`".format(paused_val if paused_val is not None else "—", upgrade_val if upgrade_val is not None else "—"))
+            if impl:
+                parts.append("impl: `{}`".format(impl))
+            tactive = info.get("tradingOpen") if info.get("tradingOpen") is not None else info.get("tradingActive")
+            if tactive is not None:
+                parts.append("tradingActive: `{}`".format(tactive))
+            taxes_val = info.get("taxes") or {}
+            tb = taxes_val.get("buy"); ts_ = taxes_val.get("sell")
+            if tb is not None or ts_ is not None:
+                tb_s = "{:.2f}%".format(tb) if isinstance(tb,(int,float)) else "—"
+                ts_s = "{:.2f}%".format(ts_) if isinstance(ts_,(int,float)) else "—"
+                parts.append("taxes: buy {} / sell {}".format(tb_s, ts_s))
+            mx = info.get("maxTx"); mw = info.get("maxWallet")
+            parts.append("maxTx: `{}`  maxWallet: `{}`".format(mx if mx is not None else "—", mw if mw is not None else "—"))
+            preview = "\n".join(parts)
+            send_message(chat_id, preview, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
+        except Exception as e:
+            send_message(chat_id, f"On-chain error: {e}", reply_markup=None)
     elif action == "COPY_CA":
         token = ((bundle.get("market") or {}).get("tokenAddress") or "—")
         answer_callback_query(cb_id, f"{token}", True)
