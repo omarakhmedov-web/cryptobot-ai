@@ -44,9 +44,16 @@ def compute_verdict(market: Dict[str, Any]) -> Verdict:
     mc = _to_float((market or {}).get("mc"))
     token_addr = (market or {}).get("tokenAddress")
 
+    # Handle empty market (no key figures) => UNKNOWN
+    # Keys checked: liq, vol24h, fdv, mc, price
+    price = _to_float((market or {}).get("price"))
+    if all(x is None for x in (liq, vol24, fdv, mc, price)):
+        reasons.append("No market data (liq/vol/FDV/MC/price) — verdict set to UNKNOWN")
+        return Verdict(score=0, level="UNKNOWN", reasons=reasons)
+
     # Liquidity checks
     if liq is None:
-        score += 10; reasons.append("No liquidity data")
+        score += 10; reasons.append("Liquidity data unavailable")
     else:
         if liq < 3000:
             score += 30; reasons.append(f"Very low liquidity (${liq:,.0f})")
@@ -59,7 +66,7 @@ def compute_verdict(market: Dict[str, Any]) -> Verdict:
 
     # Volume checks
     if vol24 is None:
-        score += 5; reasons.append("No 24h volume data")
+        score += 5; reasons.append("24h trading volume unavailable")
     else:
         if vol24 < 5000:
             score += 12; reasons.append(f"Thin 24h volume (${vol24:,.0f})")
@@ -102,7 +109,7 @@ def compute_verdict(market: Dict[str, Any]) -> Verdict:
 
     # Token metadata
     if not token_addr:
-        score += 6; reasons.append("Token address missing")
+        score += 6; reasons.append("Token address not provided")
 
     # Clamp score
     if score < 0: score = 0
