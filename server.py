@@ -1,9 +1,11 @@
 import os, json, re, traceback, requests
+import time
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
+from cache import cache_get, cache_set
 try:
     from dex_client import fetch_market
 except Exception as _e:
@@ -41,11 +43,11 @@ FREE_DAILY_SCANS = int(os.getenv("FREE_DAILY_SCANS", "2"))
 HINT_CLICKABLE_LINKS = os.getenv("HINT_CLICKABLE_LINKS", "0") == "1"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-PARSE_MODE = "MarkdownV2"
+PARSE_MODE = "Markdown"
 
 app = Flask(__name__)
 
-_MD2_SPECIALS = r'_*[]()~`>#+-=|{}.!'
+_MD2_SPECIALS = r'_[]()~>#+-=|{}.!'
 _MD2_PATTERN = re.compile('[' + re.escape(_MD2_SPECIALS) + ']')
 def mdv2_escape(text: str) -> str:
     if text is None: return ""
@@ -187,7 +189,6 @@ def on_message(msg):
         _handle_diag_command(chat_id)
         return jsonify({"ok": True})
 
-
     # Only non-command messages trigger scan
     if text.startswith("/"):
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
@@ -195,8 +196,7 @@ def on_message(msg):
 
     ok, _tier = can_scan(chat_id)
     if not ok:
-        send_message(chat_id, "Free scans exhausted. Use /upgrade.",
-                     reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        send_message(chat_id, "Free scans exhausted. Use /upgrade.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
     # QuickScan flow
@@ -210,6 +210,24 @@ def on_message(msg):
         market.setdefault("sources", [])
         market.setdefault("priceChanges", {})
         market.setdefault("links", {})
+
+    # Ensure asof timestamp and pair age
+    if market.get("asof") is None:
+        market["asof"] = int(time.time() * 1000)
+    if market.get("ageDays") is None:
+        pc = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
+        if pc:
+            try:
+                ts = int(pc)
+            except Exception:
+                ts = None
+            if ts:
+                if ts < 10**12:
+                    ts *= 1000
+                age_days = (time.time()*1000 - ts) / (1000*60*60*24)
+                if age_days < 0:
+                    age_days = 0
+                market["ageDays"] = round(age_days, 2)
 
     verdict = compute_verdict(market)
 
@@ -261,7 +279,7 @@ def on_callback(cb):
     cb_id = cb["id"]
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
-    chat_id = msg.get("chat",{}).get("id")
+    chat_id = msg.get("chat", {}).get("id")
     current_msg_id = msg.get("message_id")
 
     m = parse_cb(data)
@@ -277,35 +295,45 @@ def on_callback(cb):
         answer_callback_query(cb_id, "This control expired.", True)
         return jsonify({"ok": True})
 
+    # Idempotency: block duplicate callbacks for 30s
+    if cache_get(data):
+        answer_callback_query(cb_id, "Please wait...", False)
+        return jsonify({"ok": True})
+    cache_set(data, "1", ttl_sec=30)
+
     bundle = load_bundle(chat_id, orig_msg_id) or {}
     links = bundle.get("links")
 
     if action == "DETAILS":
         answer_callback_query(cb_id, "More details sent.", False)
-        send_message(chat_id, bundle.get("details","(no details)"),
+        send_message(chat_id, bundle.get("details", "(no details)"),
                      reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
 
     elif action == "WHY":
-        txt = bundle.get("why","Why? n/a")
-        send_message(chat_id, "Why?\n" + txt, reply_markup=None)
+        txt = bundle.get("why") or "*Why?*\n• No specific risk factors detected"
+        send_message(chat_id, txt, reply_markup=None)
         answer_callback_query(cb_id, "Why? posted.", False)
 
     elif action == "WHYPP":
-        txt = bundle.get("whypp","Why++ n/a")
+        txt = bundle.get("whypp") or "*Why++* n/a"
         MAX = 3500
         if len(txt) <= MAX:
-            send_message(chat_id, "Why++\n" + txt, reply_markup=None)
+            send_message(chat_id, txt, reply_markup=None)
         else:
-            i = 0
+            chunk = txt[:MAX]
+            txt = txt[MAX:]
+            send_message(chat_id, chunk, reply_markup=None)
+            i = 1
             while txt:
                 i += 1
-                chunk, txt = txt[:MAX], txt[MAX:]
+                chunk_part = txt[:MAX]
+                txt = txt[MAX:]
                 prefix = f"Why++ ({i})\n"
-                send_message(chat_id, prefix + chunk, reply_markup=None if not txt else None)
+                send_message(chat_id, prefix + chunk_part, reply_markup=None)
         answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
-        text = bundle.get("lp","LP lock: n/a")
+        text = bundle.get("lp", "LP lock: n/a")
         send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
         answer_callback_query(cb_id, "LP lock posted.", False)
 
@@ -330,30 +358,33 @@ def on_callback(cb):
             send_message(chat_id, "No token found in this message.", reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
             return jsonify({"ok": True})
         chain_map = {
-            "ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op",
-            "base":"base","avalanche":"avax","fantom":"ftm"
+            "ethereum": "eth", "bsc": "bsc", "polygon": "polygon", "arbitrum": "arb", "optimism": "op",
+            "base": "base", "avalanche": "avax", "fantom": "ftm"
         }
         short = chain_map.get(ch, ch or "eth")
         info = inspect_token(short, tok, pair)
-        # Short preview (MarkdownV2-escaped)
-        preview = ("*On-chain*\n"
-                   f"owner: `{(info.get('owner') or '—')}`\n"
-                   f"renounced: `{(info.get('ownerRenounced') if info.get('owner') else None)}`\n"
-                   f"paused: `{info.get('pausable')}`  upgradeable: `{info.get('upgradeable')}`\n"
-                   f"taxes: `{(info.get('taxes') or {})}`\n"
-                   f"maxTx: `{info.get('maxTx')}`  maxWallet: `{info.get('maxWallet')}`")
+        # Short preview (hide None/empty nicely)
+        owner_val = info.get('owner')
+        renounced_val = info.get('ownerRenounced') if owner_val else None
+        paused_val = info.get('pausable')
+        upgrade_val = info.get('upgradeable')
+        taxes_val = info.get('taxes')
+        maxTx_val = info.get('maxTx')
+        maxWallet_val = info.get('maxWallet')
+        preview = "*On-chain*\n"
+        preview += f"owner: `{owner_val or '—'}`\n"
+        preview += f"renounced: `{renounced_val if owner_val and renounced_val is not None else '—'}`\n"
+        preview += f"paused: `{paused_val if paused_val is not None else '—'}`  upgradeable: `{upgrade_val if upgrade_val is not None else '—'}`\n"
+        preview += f"taxes: `{taxes_val if taxes_val else '—'}`\n"
+        preview += f"maxTx: `{maxTx_val if maxTx_val is not None else '—'}`  maxWallet: `{maxWallet_val if maxWallet_val is not None else '—'}`"
         send_message(chat_id, preview, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="onchain"))
-        try:
-            doc = json.dumps(info, ensure_ascii=False, indent=2).encode("utf-8")
-        except Exception:
-            pass
 
     elif action == "COPY_CA":
         token = ((bundle.get("market") or {}).get("tokenAddress") or "—")
         answer_callback_query(cb_id, f"{token}", True)
 
     elif action.startswith("DELTA_"):
-        send_message(chat_id, bundle.get("details","(no details)"),
+        send_message(chat_id, bundle.get("details", "(no details)"),
                      reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
         answer_callback_query(cb_id, "Posted.", False)
 
@@ -373,7 +404,7 @@ def _http_get_json(url, timeout=10, headers=None):
     if headers: h.update(headers)
     try:
         r = _rq.get(url, timeout=timeout, headers=h)
-        ctype = r.headers.get("content-type","")
+        ctype = r.headers.get("content-type","" )
         try:
             return r.status_code, r.json(), ctype
         except Exception:
@@ -442,7 +473,7 @@ def _diag_make(token_default="0x6982508145454Ce325dDbE47a25d4ec3d2311933"):
         rpc_ok[short] = ("result" in j1 and "result" in j2)
     actions = []
     if not fm_ok: actions.append("dex_client.py: fetch_market() отсутствует — заменить файл.")
-    if ds_direct is False and not ds_proxy: actions.append("DexScreener блокируется — задайте DEXSCREENER_PROXY_BASE (CF worker).")
+    if ds_direct is False and not ds_proxy: actions.append("DexScreener блокируется — задайте DEXSCREENER_PROXY_BASE (CF worker)." )
     if not any(v for v in rpc_ok.values() if v is not None): actions.append("Нет доступных RPC — заполните *_RPC_URL_PRIMARY.")
     if not it_ok: actions.append("onchain_inspector.py не найден — кнопка On-chain будет пустой.")
     summary = {
@@ -471,8 +502,8 @@ def _diag_make(token_default="0x6982508145454Ce325dDbE47a25d4ec3d2311933"):
 
 @app.get("/diag")
 def diag_http():
-    sec = request.args.get("secret","")
-    if sec != os.getenv("DIAG_SECRET",""):
+    sec = request.args.get("secret","" )
+    if sec != os.getenv("DIAG_SECRET","" ):
         return jsonify({"ok": False, "error": "forbidden"}), 403
     token = request.args.get("token") or "0x6982508145454Ce325dDbE47a25d4ec3d2311933"
     res = _diag_make(token)
