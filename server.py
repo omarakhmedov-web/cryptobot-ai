@@ -33,7 +33,6 @@ except Exception:
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
-WEBHOOK_PATH = f"/webhook/{BOT_WEBHOOK_SECRET}" if BOT_WEBHOOK_SECRET else "/webhook/secret-not-set"
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en") or "en"
 
 HELP_URL = os.getenv("HELP_URL", "https://metridex.com/help")
@@ -142,7 +141,7 @@ def safe_render_whypp(verdict, market, lang):
         except TypeError:
             return render_whypp(verdict)
 
-@app.post(WEBHOOK_PATH)
+@app.post(f"/webhook/{BOT_WEBHOOK_SECRET}")
 def webhook():
     try:
         upd = request.get_json(force=True, silent=True) or {}
@@ -280,7 +279,6 @@ def on_message(msg):
     register_scan(chat_id)
     return jsonify({"ok": True})
 
-
 def on_callback(cb):
     cb_id = cb["id"]
     data = cb.get("data") or ""
@@ -301,11 +299,15 @@ def on_callback(cb):
         answer_callback_query(cb_id, "This control expired.", True)
         return jsonify({"ok": True})
 
-    # Idempotency: block duplicate callbacks for 30s
-    if cache_get(data):
-        answer_callback_query(cb_id, "Please wait...", False)
-        return jsonify({"ok": True})
-    cache_set(data, "1", ttl_sec=30)
+    
+    # Idempotency: throttle only *heavy* actions for a short period
+    heavy_actions = {"DETAILS", "ONCHAIN", "REPORT", "REPORT_PDF"}
+    if action in heavy_actions:
+        if cache_get(data):
+            answer_callback_query(cb_id, "Please wait...", False)
+            return jsonify({"ok": True})
+        cache_set(data, "1", ttl_sec=5)
+    
 
     bundle = load_bundle(chat_id, orig_msg_id) or {}
     links = bundle.get("links")
@@ -340,26 +342,14 @@ def on_callback(cb):
 
     elif action == "LP":
         text = bundle.get("lp", "LP lock: n/a")
+        # No keyboard for LP reply (as in legacy bot)
         send_message(chat_id, text, reply_markup=None)
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
         try:
-            # dynamic, human-friendly filename
-            mkt = (bundle.get('market') or {})
-            pair_sym = (mkt.get('pairSymbol') or 'Metridex')
-            ts_ms = mkt.get('asof') or 0
-            try:
-                from datetime import datetime as _dt
-                ts_str = _dt.utcfromtimestamp(int(ts_ms)/1000.0).strftime("%Y-%m-%d_%H%M")
-            except Exception:
-                ts_str = "now"
-            import re as _re
-            safe_pair = _re.sub(r"[^A-Za-z0-9._-]+", "_", str(pair_sym))
-            fname = f"{safe_pair}_Report_{ts_str}.html"
-
             html_bytes = _build_html_report(bundle)
-            send_document(chat_id, fname, html_bytes, caption='Metridex QuickScan report', content_type='text/html')
+            send_document(chat_id, 'Metridex_Report.html', html_bytes, caption='Metridex QuickScan report', content_type='text/html')
             answer_callback_query(cb_id, 'Report exported.', False)
         except Exception as e:
             try:
@@ -369,35 +359,14 @@ def on_callback(cb):
                 answer_callback_query(cb_id, 'Report exported (fallback).', False)
             except Exception as e2:
                 answer_callback_query(cb_id, f'Export failed: {e2}', True)
-    elif action == "REPORT_PDF":
-        try:
-            html_bytes = _build_html_report(bundle)
-            pdf = _html_to_pdf(html_bytes)
-            if not pdf:
-                answer_callback_query(cb_id, "PDF export unavailable on this server.", True)
-            else:
-                mkt = (bundle.get('market') or {})
-                pair_sym = (mkt.get('pairSymbol') or 'Metridex')
-                ts_ms = mkt.get('asof') or 0
-                from datetime import datetime as _dt
-                try:
-                    ts_str = _dt.utcfromtimestamp(int(ts_ms)/1000.0).strftime("%Y-%m-%d_%H%M")
-                except Exception:
-                    ts_str = "now"
-                import re as _re
-                safe_pair = _re.sub(r"[^A-Za-z0-9._-]+", "_", str(pair_sym))
-                fname = f"{safe_pair}_Report_{ts_str}.pdf"
-                send_document(chat_id, fname, pdf, caption='Metridex QuickScan report (PDF)', content_type='application/pdf')
-                answer_callback_query(cb_id, "PDF exported.", False)
-        except Exception as e:
-            answer_callback_query(cb_id, f"PDF export failed: {e}", True)
+
+
+    
+    
     elif action == "ONCHAIN":
-        # On-chain details via live inspect (hardened)
+        # Build on-chain details via live inspect
         mkt = (bundle.get('market') if isinstance(bundle, dict) else None) or {}
-        chain_name = (mkt.get('chain') or '').lower()
-        _map = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance smart chain":"bsc","polygon":"polygon","matic":"polygon",
-                "arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax","fantom":"ftm","ftm":"ftm"}
-        chain_short = _map.get(chain_name, chain_name or "eth")
+        chain_short = (mkt.get('chain') or '').lower()
         token_addr = mkt.get('tokenAddress')
         pair_addr = mkt.get('pairAddress')
         try:
@@ -407,18 +376,9 @@ def on_callback(cb):
         if isinstance(bundle, dict):
             bundle['onchain'] = oc
         ok = bool(oc.get('ok'))
-        def _s(x):
-            try:
-                return str(x) if x is not None else '—'
-            except Exception:
-                return '—'
-        owner_raw = oc.get('owner')
-        owner = owner_raw.lower() if isinstance(owner_raw, str) else ''
-        renounced = oc.get('renounced')
-        if renounced in (None, '—'):
-            if owner in ('0x0000000000000000000000000000000000000000','0x000000000000000000000000000000000000dead'):
-                renounced = True
         token_name = _s(oc.get('token_name') or oc.get('token') or mkt.get('pairSymbol'))
+        owner = _s(oc.get('owner'))
+        renounced = _s(oc.get('renounced'))
         paused = _s(oc.get('paused'))
         upgradeable = _s(oc.get('upgradeable'))
         maxTx = _s(oc.get('maxTx'))
@@ -429,7 +389,7 @@ def on_callback(cb):
             text = (
                 'On-chain\n'
                 f'token: {token_name}\n'
-                f'owner: {_s(owner_raw)}\n'
+                f'owner: {owner}\n'
                 f'renounced: {renounced}\n'
                 f'paused: {paused}  upgradeable: {upgradeable}\n'
                 f'maxTx: {maxTx}  maxWallet: {maxWallet}'
@@ -437,40 +397,46 @@ def on_callback(cb):
         send_message(chat_id, text, reply_markup=None)
         answer_callback_query(cb_id, 'On-chain ready.', False)
 
+    
     elif action == "COPY_CA":
-        mkt = (bundle.get("market") or {})
-        token = (mkt.get("tokenAddress") or "—")
-        send_message(chat_id, f"*Contract address*\n`{token}`", reply_markup=_mk_copy_keyboard(token, links))
-        answer_callback_query(cb_id, "Address ready to copy.", False)
-
+        token = ((bundle.get("market") or {}).get("tokenAddress") or "—")
+        txt = "Contract address\n`{}`".format(token)
+        kb = {"inline_keyboard":[[{"text":"Copy to input","switch_inline_query_current_chat": str(token)}]]}
+        send_message(chat_id, txt, reply_markup=kb, parse_mode="Markdown")
+        answer_callback_query(cb_id, "Address inserted to input.", False)
+    
+    
     elif action.startswith("DELTA_"):
-        mkt = (bundle.get('market') or {})
-        ch = (mkt.get('priceChanges') or {})
-        label = {"DELTA_M5":"Δ5m","DELTA_1H":"Δ1h","DELTA_6H":"Δ6h","DELTA_24H":"Δ24h"}.get(action, "Δ")
-        def _pct(v):
+        label = action.split("_", 1)[1]
+        # Map label to market.priceChanges keys
+        key_map = {"5M":"m5", "1H":"h1", "6H":"h6", "24H":"h24"}
+        pc_key = key_map.get(label.upper())
+        mkt = (bundle.get("market") or {})
+        val = None
+        try:
+            val = ((mkt.get("priceChanges") or {}) or {}).get(pc_key)
+        except Exception:
+            val = None
+        def _pct(x):
             try:
-                n = float(v)
-                arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
-                return f"{arrow} {n:+.2f}%"
+                n = float(x)
+                if n > 0: return f"▲ {n:+.2f}%"
+                if n < 0: return f"▼ {n:+.2f}%"
+                return f"• {n:+.2f}%"
             except Exception:
                 return "—"
-        val = None
-        if action == "DELTA_M5": val = ch.get("m5")
-        elif action == "DELTA_1H": val = ch.get("h1")
-        elif action == "DELTA_6H": val = ch.get("h6") or ch.get("h6h") or ch.get("6h")
-        else: val = ch.get("h24")
-        pair = (mkt.get('pairSymbol') or '—')
-        asof = mkt.get('asof')
-        try:
-            from datetime import datetime as _dt
-            asof_s = _dt.utcfromtimestamp(int(asof)/1000.0).strftime("%H:%M UTC") if asof else "—"
-        except Exception:
-            asof_s = "—"
-        series_key = f"spark:{(mkt.get('tokenAddress') or pair)}:{label}"
-        arr = _append_series(series_key, val)
-        sp = _spark(arr)
-        toast = f"{label}: {_pct(val)} {sp} ({pair}, {asof_s})"
+        pair = (mkt.get("pairSymbol") or "—")
+        asof_ms = mkt.get("asof")
+        from datetime import datetime as _dt
+        asof_s = "—"
+        if isinstance(asof_ms, (int, float)):
+            try:
+                asof_s = _dt.utcfromtimestamp(int(asof_ms)/1000.0).strftime("%H:%M UTC")
+            except Exception:
+                pass
+        toast = f"{label}: {_pct(val)} ({pair}, {asof_s})"
         answer_callback_query(cb_id, toast, False)
+
 
     else:
         answer_callback_query(cb_id, "Unsupported action", True)
@@ -616,29 +582,13 @@ def _handle_diag_command(chat_id: int):
 # === END INLINE DIAGNOSTICS ==================================================
 
 
-
-def _mk_copy_keyboard(token: str, links: dict | None):
-    links = links or {}
-    kb = {"inline_keyboard": []}
-    if token and token != "—":
-        kb["inline_keyboard"].append([{
-            "text": "📋 Copy to input",
-            "switch_inline_query_current_chat": token
-        }])
-    nav = []
-    if links.get("dex"): nav.append({"text": "🟢 Open in DEX", "url": links["dex"]})
-    if links.get("scan"): nav.append({"text": "🔍 Open in Scan", "url": links["scan"]})
-    if nav: kb["inline_keyboard"].append(nav)
-    return kb
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")))
 
 
-
 def _build_html_report(bundle: dict) -> bytes:
     """
-    Creates a premium dark+gold HTML report from the bundle dict.
+    Creates a readable HTML report (dark theme) from the bundle dict.
     Safe: escapes text and tolerates missing fields.
     """
     import html, datetime as _dt
@@ -653,23 +603,8 @@ def _build_html_report(bundle: dict) -> bytes:
             if not isinstance(cur, dict):
                 return default
             cur = cur.get(k)
-        return default if cur is None else cur
-
-    # Data
-    pair  = g(m, "pairSymbol", default="—")
-    chain = g(m, "chain", default="—")
-    price = g(m, "price", default="—")
-    fdv   = g(m, "fdv", default=None)
-    mc    = g(m, "mc", default=None)
-    liq   = g(m, "liq", default=None) or g(m, "liquidityUSD", default=None)
-    vol24 = g(m, "vol24h", default=None) or g(m, "volume24hUSD", default=None)
-    ch5   = g(m, "priceChanges", default={}).get("m5")
-    ch1   = g(m, "priceChanges", default={}).get("h1")
-    ch24  = g(m, "priceChanges", default={}).get("h24")
-    token = g(m, "tokenAddress", default="—")
-    pair_addr = g(m, "pairAddress", default="—")
-    asof_ms = g(m, "asof", default=None)
-
+        return cur if cur not in (None, "") else default
+    esc = lambda s: html.escape(str(s) if s is not None else "—")
     def money(x):
         try:
             n = float(x)
@@ -681,16 +616,7 @@ def _build_html_report(bundle: dict) -> bytes:
         elif absn >= 1_000:       s = f"${n/1_000:.2f}K"
         else:                     s = f"${n:.6f}" if absn < 1 else f"${n:.2f}"
         return s
-
-    def pct(x):
-        try:
-            n = float(x)
-            if n > 0:  return f"▲ {n:+.2f}%"
-            if n < 0:  return f"▼ {n:+.2f}%"
-            return f"• {n:+.2f}%"
-        except Exception:
-            return "—"
-
+    asof_ms = g(m, "asof", default=None)
     if isinstance(asof_ms, (int, float)):
         try:
             asof_s = _dt.datetime.utcfromtimestamp(int(asof_ms)/1000.0).strftime("%Y-%m-%d %H:%M UTC")
@@ -698,198 +624,77 @@ def _build_html_report(bundle: dict) -> bytes:
             asof_s = "—"
     else:
         asof_s = "—"
-
     level = (g(v, "level", "") or "").upper()
-    if "HIGH" in level:    badge = '<span class="badge high">HIGH</span>'
-    elif "MED" in level:   badge = '<span class="badge med">MEDIUM</span>'
-    elif "LOW" in level:   badge = '<span class="badge low">LOW</span>'
-    elif "UNKNOWN" in level: badge = '<span class="badge unk">UNKNOWN</span>'
-    else: badge = '<span class="badge unk">—</span>'
-
-    # Links
-    dex_link  = html.escape(g(links, "dex", default="#"))
-    scan_link = html.escape(g(links, "scan", default="#"))
-    site_link = html.escape(g(links, "site", default="—"))
-
-    # Format money
-    fdv_s = money(fdv)
-    mc_s  = money(mc)
-    liq_s = money(liq)
-    vol_s = money(vol24)
-    p5    = pct(ch5)
-    p1    = pct(ch1)
-    p24   = pct(ch24)
-
-    # Premium CSS
+    if "HIGH" in level:
+        badge = '<span class="badge high">HIGH</span>'
+    elif "MED" in level:
+        badge = '<span class="badge med">MEDIUM</span>'
+    elif "LOW" in level:
+        badge = '<span class="badge low">LOW</span>'
+    elif "UNKNOWN" in level:
+        badge = '<span class="badge unk">UNKNOWN</span>'
+    else:
+        badge = '<span class="badge unk">—</span>'
     style = """
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
-      :root{
-        --bg:#0a0a0c; --card:#111217; --muted:#b8bbc7; --text:#e9e9ee;
-        --gold:#d4af37; --ok:#2fd178; --med:#e5c04d; --bad:#ff5d5d; --unk:#9aa0ab;
-        --chip:#1a1b22; --chipb:#20222b;
-        --mono:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;
-        --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,system-ui,sans-serif;
-      }
-      *{box-sizing:border-box}
-      body{margin:0;padding:32px;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);}
-      .wrap{max-width:980px;margin:0 auto}
-      header{display:flex;align-items:center;gap:14px;margin:6px 0 18px}
-      .logo{width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,#15161d,#0c0d12);display:grid;place-items:center;box-shadow:0 0 0 1px #1f2130, 0 8px 24px rgba(0,0,0,.45)}
-      .logo span{font-weight:700;color:var(--gold);font-size:20px;letter-spacing:.3px}
-      h1{font-size:20px;margin:0 0 2px 0;font-weight:600;letter-spacing:.1px}
-      .sub{color:var(--muted);font-size:12px}
-      .badge{display:inline-block;padding:3px 8px;border-radius:14px;margin-left:8px;font-weight:600;font-size:11px;letter-spacing:.3px}
-      .badge.low{background:rgba(47,209,120,.12);color:var(--ok)}
-      .badge.med{background:rgba(229,192,77,.14);color:var(--med)}
-      .badge.high{background:rgba(255,93,93,.14);color:var(--bad)}
-      .badge.unk{background:rgba(154,160,171,.14);color:var(--unk)}
-      .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0 22px}
-      .kpi{background:var(--card);border-radius:14px;padding:14px 14px 12px;box-shadow:0 1px 0 #1c1e2a inset,0 8px 24px rgba(0,0,0,.3)}
-      .kpi .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-      .kpi .v{font-size:16px;font-weight:600}
-      .chips{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 16px}
-      .chip{background:linear-gradient(180deg,var(--chip),var(--chipb));padding:6px 10px;border-radius:12px;font-size:12px;color:#cfd3df;border:1px solid #202332}
-      .mono{font-family:var(--mono);font-size:12.5px}
-      .card{background:var(--card);border-radius:16px;padding:16px 16px;box-shadow:0 1px 0 #1c1e2a inset,0 10px 32px rgba(0,0,0,.38);margin-bottom:14px}
-      a{color:var(--gold);text-decoration:none} a:hover{text-decoration:underline}
-      footer{margin-top:26px;color:var(--muted);font-size:12px}
-      .links{display:flex;gap:12px;flex-wrap:wrap}
-      .btn{display:inline-block;padding:8px 12px;border-radius:12px;background:#171823;border:1px solid #222436}
-      .btn:hover{background:#1c1e29}
-      .copy{margin-left:auto}
+    body{font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0b0b0d;color:#e6e6e9;margin:0;padding:24px;}
+    .card{background:#111216;border:1px solid #1c1d25;border-radius:16px;box-shadow:0 6px 24px rgba(0,0,0,.25);margin:0 auto 16px;max-width:920px;}
+    .card h2{margin:0;padding:16px 20px;border-bottom:1px solid #1c1d25;font-size:18px}
+    .kv{display:grid;grid-template-columns:220px 1fr;gap:8px;padding:14px 20px}
+    .kv div{padding:4px 0;border-bottom:1px dashed #1e2029}
+    .kv div:nth-child(2n){border-bottom:none}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;margin-left:8px}
+    .low{background:#093f20;color:#7fffb0} .med{background:#3a3000;color:#ffd666} .high{background:#3d0b10;color:#ff8a8a} .unk{background:#2a2c34;color:#aeb3c2}
+    a{color:#93c7ff;text-decoration:none} a:hover{text-decoration:underline}
+    ul{margin:8px 0 16px 22px}
+    code{background:#181a22;padding:2px 6px;border-radius:6px}
+    footer{opacity:.6;text-align:center;margin-top:18px;font-size:12px}
     </style>
     <script>
-      function copyCA(txt){
-        try{
-          navigator.clipboard.writeText(txt).then(()=>{
-            alert('Contract address copied');
-          }).catch(()=>{
-            const ta=document.createElement('textarea');ta.value=txt;document.body.appendChild(ta);ta.select();
-            try{document.execCommand('copy');alert('Contract address copied');}finally{document.body.removeChild(ta);}
-          });
-        }catch(e){alert(txt);}
-      }
+    function copyCA(txt){
+      try{navigator.clipboard.writeText(txt).then(()=>alert('Copied'));}
+      catch(e){alert(txt);}
+    }
     </script>
     """
-
-    pair_html = html.escape(str(pair))
-    chain_html = html.escape(str(chain))
-    token_html = html.escape(str(token))
-    head = f"""<!doctype html><html><head>{style}</head><body><div class="wrap">
-      <header>
-        <div class="logo"><span>M</span></div>
-        <div>
-          <h1>{pair_html} {badge}</h1>
-          <div class="sub">{chain_html} • As of {asof_s}</div>
-        </div>
-        <div class="copy"><a class="btn mono" href="javascript:copyCA('{token_html}')">Copy CA</a></div>
-      </header>
-    """
-
-    grid = f"""
-      <div class="grid">
-        <div class="kpi"><div class="k">Price</div><div class="v">{html.escape(str(price))}</div></div>
-        <div class="kpi"><div class="k">FDV</div><div class="v">{fdv_s}</div></div>
-        <div class="kpi"><div class="k">MC</div><div class="v">{mc_s}</div></div>
-        <div class="kpi"><div class="k">Liquidity</div><div class="v">{liq_s}</div></div>
-        <div class="kpi"><div class="k">Volume 24h</div><div class="v">{vol_s}</div></div>
-        <div class="kpi"><div class="k">Delta 5m</div><div class="v">{p5}</div></div>
-        <div class="kpi"><div class="k">Delta 1h</div><div class="v">{p1}</div></div>
-        <div class="kpi"><div class="k">Delta 24h</div><div class="v">{p24}</div></div>
-      </div>
-    """
-
-    # Why & Why++ and links
-    why = g(b, "why", default="—")
-    whypp = g(b, "whypp", default="—")
-    links_html = (
-        '<div class="links">'
-        + f'<a class="btn" href="{dex_link}">Open in DEX</a>'
-        + f'<a class="btn" href="{scan_link}">Open in Scan</a>'
-        + (f'<a class="btn" href="{site_link}">Website</a>' if site_link and site_link != "—" else '')
-        + '</div>'
-    )
-
-    doc = head + grid + f"""
-      <div class="card"><div class="k">Why?</div><div>{why}</div></div>
-      <div class="card"><div class="k">Why++</div><div>{whypp}</div></div>
-      {links_html}
-      <footer>Generated by Metridex • QuickScan</footer>
-    </div></body></html>"""
-
-    return doc.encode("utf-8")
-
-
-# --- PDF export helper (best-effort) ---
-def _html_to_pdf(html_bytes: bytes) -> bytes | None:
-    """
-    Try converting HTML to PDF using available engines.
-    Order: WeasyPrint -> xhtml2pdf -> pdfkit
-    Returns PDF bytes or None if conversion is not possible.
-    """
-    html_str = html_bytes.decode("utf-8", errors="replace")
-    # WeasyPrint
-    try:
-        from weasyprint import HTML
-        pdf = HTML(string=html_str).write_pdf()
-        if pdf: return pdf
-    except Exception:
-        pass
-    # xhtml2pdf
-    try:
-        from xhtml2pdf import pisa
-        import io
-        out = io.BytesIO()
-        pisa.CreatePDF(io.StringIO(html_str), dest=out)
-        pdf = out.getvalue()
-        if pdf and len(pdf) > 1000:
-            return pdf
-    except Exception:
-        pass
-    # pdfkit (wkhtmltopdf)
-    try:
-        import pdfkit, tempfile
-        with tempfile.NamedTemporaryFile("w", suffix=".html", delete=True, encoding="utf-8") as tmp:
-            tmp.write(html_str); tmp.flush()
-            pdf = pdfkit.from_file(tmp.name, False)
-            if pdf: return pdf
-    except Exception:
-        pass
-    return None
-
-# --- Tiny sparkline helper for Δ-toasts ---
-_SPARK = "▁▂▃▄▅▆▇█"
-def _spark(values):
-    xs = [float(x) for x in values if x is not None]
-    if len(xs) < 2: return ""
-    lo, hi = min(xs), max(xs)
-    if hi - lo < 1e-9: return _SPARK[0]*len(xs)
-    res = []
-    for v in xs:
-        i = int((v - lo) / (hi - lo) * (len(_SPARK)-1))
-        res.append(_SPARK[i])
-    return "".join(res)
-
-def _append_series(key: str, value, maxlen: int = 8):
-    try:
-        raw = cache_get(key)
-        arr = json.loads(raw) if raw else []
-        if not isinstance(arr, list): arr = []
-    except Exception:
-        arr = []
-    try:
-        arr.append(None if value is None else float(value))
-    except Exception:
-        arr.append(None)
-    if len(arr) > maxlen:
-        arr = arr[-maxlen:]
-    cache_set(key, json.dumps(arr), ttl_sec=6*60*60)  # 6h window
-    return arr
+    pair = g(m,"pairSymbol"); chain = g(m,"chain")
+    html_doc = f"""<!doctype html>
+<html><head><meta charset='utf-8'><title>Metridex QuickScan Report</title>{style}</head>
+<body>
+  <div class='card'>
+    <h2>Metridex QuickScan — {esc(pair)} {badge}</h2>
+    <div class='kv'>
+      <div>Score</div><div>{esc(g(v,'score'))}</div>
+      <div>Level</div><div>{esc(g(v,'level'))}</div>
+      <div>Chain</div><div><code>{esc(chain)}</code></div>
+      <div>Token</div><div><code>{esc(g(m,'tokenAddress'))}</code></div>
+      <div>Pair</div><div><code>{esc(g(m,'pairAddress'))}</code></div>
+      <div>Price</div><div>{esc(money(g(m,'price')))}</div>
+      <div>Liquidity</div><div>{esc(money(g(m,'liq')))}</div>
+      <div>FDV / MC</div><div>{esc(money(g(m,'fdv')))} / {esc(money(g(m,'mc')))}</div>
+      <div>Vol (24h)</div><div>{esc(money(g(m,'vol24h')))}</div>
+      <div>As of</div><div>{esc(asof_s)}</div>
+    </div>
+  </div>
+  <div class='card'>
+    <h2>Why / Signals</h2>
+    <div style='padding:0 20px 12px'>
+      <ul>
+        {''.join(f'<li>{esc(r)}</li>' for r in reasons) if reasons else '<li>No specific risk factors detected</li>'}
+      </ul>
+    </div>
+  </div>
+  <div class='card'>
+    <h2>Links</h2>
+    <div class='kv'>
+      <div>Explorer</div><div>{('<a href="'+esc(links.get('scan'))+'">'+esc(links.get('scan'))+'</a>') if links.get('scan') else '—'}</div>
+      <div>DEX</div><div>{('<a href="'+esc(links.get('dex'))+'">'+esc(links.get('dex'))+'</a>') if links.get('dex') else '—'}</div>
+      <div>Website</div><div>{('<a href="'+esc(links.get('site'))+'">'+esc(links.get('site'))+'</a>') if links.get('site') else '—'}</div>
+    </div>
+  </div>
+  <footer>Generated by Metridex • QuickScan</footer>
+</body></html>"""
+    return html_doc.encode("utf-8")
 
 
 def _s(x):
