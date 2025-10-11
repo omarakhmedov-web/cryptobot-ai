@@ -183,11 +183,6 @@ def on_message(msg):
         send_message(chat_id, msg_txt, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
-    if low.startswith("/diag"):
-        _handle_diag_command(chat_id)
-        return jsonify({"ok": True})
-
-
     # Only non-command messages trigger scan
     if text.startswith("/"):
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
@@ -287,21 +282,21 @@ def on_callback(cb):
 
     elif action == "WHY":
         txt = bundle.get("why","Why? n/a")
-        send_message(chat_id, "Why?\n" + txt, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
+        send_message(chat_id, "Why?\n" + txt, reply_markup=None)
         answer_callback_query(cb_id, "Why? posted.", False)
 
     elif action == "WHYPP":
         txt = bundle.get("whypp","Why++ n/a")
         MAX = 3500
         if len(txt) <= MAX:
-            send_message(chat_id, "Why++\n" + txt, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
+            send_message(chat_id, "Why++\n" + txt, reply_markup=None)
         else:
             i = 0
             while txt:
                 i += 1
                 chunk, txt = txt[:MAX], txt[MAX:]
                 prefix = f"Why++ ({i})\n"
-                send_message(chat_id, prefix + chunk, reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details") if not txt else None)
+                send_message(chat_id, prefix + chunk, reply_markup=None)
         answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
@@ -362,158 +357,6 @@ def on_callback(cb):
         answer_callback_query(cb_id, "Unsupported action", True)
 
     return jsonify({"ok": True})
-
-
-# === INLINE DIAGNOSTICS (no shell needed) ====================================
-import os as _os
-
-def _ua():
-    return _os.getenv("HTTP_UA", "MetridexDiag/1.0")
-
-def _http_get_json(url, timeout=10, headers=None):
-    import requests as _rq
-    h = {"User-Agent": _ua(), "Accept": "application/json"}
-    if headers: h.update(headers)
-    try:
-        r = _rq.get(url, timeout=timeout, headers=h)
-        ctype = r.headers.get("content-type","")
-        try:
-            return r.status_code, r.json(), ctype
-        except Exception:
-            return r.status_code, r.text, ctype
-    except Exception as e:
-        return 599, {"error": str(e)}, ""
-
-def _rpc_call(rpc, method, params, timeout=8):
-    import requests as _rq
-    try:
-        r = _rq.post(rpc, json={"jsonrpc":"2.0","id":1,"method":method,"params":params},
-                     timeout=timeout, headers={"User-Agent": _ua()})
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-def _mask(s, keep=4):
-    if not s: return ""
-    return (s[:keep] + "…" + "*"*max(0, len(s)-keep)) if len(s) > keep else "*"*len(s)
-
-def _diag_make(token_default="0x6982508145454Ce325dDbE47a25d4ec3d2311933"):
-    # imports presence
-    try:
-        from dex_client import fetch_market as _fm
-        fm_ok = callable(_fm)
-    except Exception:
-        fm_ok = False
-    try:
-        from onchain_inspector import inspect_token as _it
-        it_ok = callable(_it)
-    except Exception:
-        it_ok = False
-
-    env = {
-        "BOT_WEBHOOK_SECRET": _os.getenv("BOT_WEBHOOK_SECRET",""),
-        "ENABLED_NETWORKS": _os.getenv("ENABLED_NETWORKS",""),
-        "DEXSCREENER_PROXY_BASE": _os.getenv("DEXSCREENER_PROXY_BASE") or _os.getenv("DS_PROXY_BASE") or "",
-        "ETH_RPC_URL_PRIMARY": _os.getenv("ETH_RPC_URL_PRIMARY",""),
-        "BSC_RPC_URL_PRIMARY": _os.getenv("BSC_RPC_URL_PRIMARY",""),
-        "POLYGON_RPC_URL_PRIMARY": _os.getenv("POLYGON_RPC_URL_PRIMARY",""),
-        "BASE_RPC_URL_PRIMARY": _os.getenv("BASE_RPC_URL_PRIMARY",""),
-        "ARB_RPC_URL_PRIMARY": _os.getenv("ARB_RPC_URL_PRIMARY",""),
-        "OP_RPC_URL_PRIMARY": _os.getenv("OP_RPC_URL_PRIMARY",""),
-        "AVAX_RPC_URL_PRIMARY": _os.getenv("AVAX_RPC_URL_PRIMARY",""),
-        "FTM_RPC_URL_PRIMARY": _os.getenv("FTM_RPC_URL_PRIMARY",""),
-        "PUBLIC_URL": _os.getenv("PUBLIC_URL") or _os.getenv("RENDER_EXTERNAL_URL") or "",
-    }
-
-    # DexScreener direct+proxy
-    ds_direct = None; ds_proxy = None
-    tok = token_default
-    code, body, ctype = _http_get_json(f"https://api.dexscreener.com/latest/dex/tokens/{tok}", timeout=10)
-    ds_direct = bool(code == 200 and isinstance(body, dict) and body.get("pairs"))
-
-    proxy = (env["DEXSCREENER_PROXY_BASE"] or "").strip("/")
-    if proxy:
-        code2, body2, ctype2 = _http_get_json(f"{proxy}/latest/dex/tokens/{tok}", timeout=12)
-        ds_proxy = bool(code2 == 200 and isinstance(body2, dict) and body2.get("pairs"))
-
-    # RPC check
-    rpc_ok = {}
-    chain_env = {
-        "eth":"ETH_RPC_URL_PRIMARY", "bsc":"BSC_RPC_URL_PRIMARY", "polygon":"POLYGON_RPC_URL_PRIMARY",
-        "base":"BASE_RPC_URL_PRIMARY", "arb":"ARB_RPC_URL_PRIMARY", "op":"OP_RPC_URL_PRIMARY",
-        "avax":"AVAX_RPC_URL_PRIMARY", "ftm":"FTM_RPC_URL_PRIMARY",
-    }
-    enabled = (env["ENABLED_NETWORKS"] or "eth,bsc,polygon,base,arb,op,avax,ftm").split(",")
-    for short in [x.strip() for x in enabled if x.strip()]:
-        key = chain_env.get(short); rpc = env.get(key) if key else None
-        if not rpc:
-            rpc_ok[short] = None
-            continue
-        j1 = _rpc_call(rpc, "eth_chainId", [])
-        j2 = _rpc_call(rpc, "eth_blockNumber", [])
-        rpc_ok[short] = ("result" in j1 and "result" in j2)
-
-    actions = []
-    if not fm_ok: actions.append("dex_client.py: fetch_market() отсутствует — заменить файл.")
-    if ds_direct is False and not ds_proxy: actions.append("DexScreener блокируется — задайте DEXSCREENER_PROXY_BASE (CF worker).")
-    if not any(v for v in rpc_ok.values() if v is not None): actions.append("Нет доступных RPC — заполните *_RPC_URL_PRIMARY.")
-    if not it_ok: actions.append("onchain_inspector.py не найден — кнопка On-chain будет пустой.")
-
-    summary = {
-        "fetch_market_present": fm_ok,
-        "onchain_present": it_ok,
-        "dexscreener_direct_ok": ds_direct,
-        "dexscreener_proxy_ok": ds_proxy,
-        "rpc_ok": rpc_ok,
-        "env_masked": {
-            "BOT_WEBHOOK_SECRET": _mask(env["BOT_WEBHOOK_SECRET"]),
-            "ENABLED_NETWORKS": env["ENABLED_NETWORKS"] or "(default)",
-            "DEXSCREENER_PROXY_BASE": env["DEXSCREENER_PROXY_BASE"] or "(not set)",
-            "PUBLIC_URL": env["PUBLIC_URL"] or "(not set)",
-            "ETH_RPC_URL_PRIMARY": _mask(env["ETH_RPC_URL_PRIMARY"], keep=12),
-            "BSC_RPC_URL_PRIMARY": _mask(env["BSC_RPC_URL_PRIMARY"], keep=12),
-            "POLYGON_RPC_URL_PRIMARY": _mask(env["POLYGON_RPC_URL_PRIMARY"], keep=12),
-            "BASE_RPC_URL_PRIMARY": _mask(env["BASE_RPC_URL_PRIMARY"], keep=12),
-            "ARB_RPC_URL_PRIMARY": _mask(env["ARB_RPC_URL_PRIMARY"], keep=12),
-            "OP_RPC_URL_PRIMARY": _mask(env["OP_RPC_URL_PRIMARY"], keep=12),
-            "AVAX_RPC_URL_PRIMARY": _mask(env["AVAX_RPC_URL_PRIMARY"], keep=12),
-            "FTM_RPC_URL_PRIMARY": _mask(env["FTM_RPC_URL_PRIMARY"], keep=12),
-        },
-        "next_steps": actions
-    }
-    return summary
-
-@app.get("/diag")
-def diag_http():
-    sec = request.args.get("secret","")
-    if sec != os.getenv("DIAG_SECRET",""):
-        return jsonify({"ok": False, "error": "forbidden"}), 403
-    token = request.args.get("token") or "0x6982508145454Ce325dDbE47a25d4ec3d2311933"
-    res = _diag_make(token)
-    return jsonify({"ok": True, "summary": res})
-
-def _format_diag(summary: dict) -> str:
-    rpc_good = [k for k,v in (summary.get("rpc_ok") or {}).items() if v]
-    lines = []
-    ok = lambda b: "✅" if b else ("❌" if b is False else "—")
-    lines.append(f"*fetch_market()*: {ok(summary.get('fetch_market_present'))}")
-    lines.append(f"*On-chain модуль*: {ok(summary.get('onchain_present'))}")
-    lines.append(f"*DexScreener direct*: {ok(summary.get('dexscreener_direct_ok'))}")
-    lines.append(f"*DexScreener proxy*: {ok(summary.get('dexscreener_proxy_ok'))}")
-    lines.append(f"*RPC OK*: `{','.join(rpc_good) if rpc_good else 'none'}`")
-    steps = summary.get("next_steps") or []
-    if steps:
-        lines.append("\n*NEXT:*")
-        for i,s in enumerate(steps,1):
-            lines.append(f"{i}. {s}")
-    return "\n".join(lines)
-
-def _handle_diag_command(chat_id: int):
-    s = _diag_make()
-    txt = _format_diag(s)
-    send_message(chat_id, txt, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-# === END INLINE DIAGNOSTICS ==================================================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")))
