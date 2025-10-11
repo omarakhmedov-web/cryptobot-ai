@@ -18,6 +18,7 @@ except Exception as _e:
             return {'ok': False, 'error': 'market_fetch_unavailable: ' + _err, 'sources': [], 'links': {}}
 
 from risk_engine import compute_verdict
+import onchain_inspector
 from renderers import render_quick, render_details, render_why, render_whypp, render_lp
 try:
     from lp_lite import check_lp_lock_v2
@@ -82,104 +83,6 @@ def send_document(chat_id: int, filename: str, content_bytes: bytes, caption: st
     payload = {"chat_id": chat_id}
     if caption: payload["caption"] = caption
     return tg("sendDocument", payload, files=files)
-
-
-def _build_html_report(bundle: dict) -> bytes:
-    """
-    Build a human‑readable HTML report instead of dumping raw JSON.
-    """
-    import html, datetime as _dt
-    b = bundle or {}
-    v = b.get("verdict") or {}
-    m = b.get("market") or {}
-    links = b.get("links") or {}
-    reasons = b.get("reasons") or []
-    def g(d, *ks, default="—"):
-        cur = d
-        for k in ks:
-            if not isinstance(cur, dict): return default
-            cur = cur.get(k)
-        return cur if cur not in (None, "") else default
-    asof_ms = g(m, "asof", default=None)
-    if isinstance(asof_ms, (int, float)):
-        try:
-            asof_s = _dt.datetime.utcfromtimestamp(int(asof_ms)/1000.0).strftime("%Y-%m-%d %H:%M UTC")
-        except Exception:
-            asof_s = "—"
-    else:
-        asof_s = "—"
-    # Safe text
-    esc = lambda s: html.escape(str(s) if s is not None else "—")
-    def money(x):
-        try:
-            n = float(x)
-        except Exception:
-            return "—"
-        absn = abs(n)
-        if absn >= 1_000_000_000: s = f"${n/1_000_000_000:.2f}B"
-        elif absn >= 1_000_000:   s = f"${n/1_000_000:.2f}M"
-        elif absn >= 1_000:       s = f"${n/1_000:.2f}K"
-        else:                     s = f"${n:.6f}" if absn < 1 else f"${n:.2f}"
-        return s
-    style = """
-    <style>
-    body{font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0b0b0d;color:#e6e6e9;margin:0;padding:24px;}
-    .card{background:#111216;border:1px solid #1c1d25;border-radius:16px;box-shadow:0 6px 24px rgba(0,0,0,.25);margin:0 auto 16px;max-width:920px;}
-    .card h2{margin:0;padding:16px 20px;border-bottom:1px solid #1c1d25;font-size:18px}
-    .kv{display:grid;grid-template-columns:220px 1fr;gap:8px;padding:14px 20px}
-    .kv div{padding:4px 0;border-bottom:1px dashed #1e2029}
-    .kv div:nth-child(2n){border-bottom:none}
-    .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;margin-left:8px}
-    .low{background:#093f20;color:#7fffb0} .med{background:#3a3000;color:#ffd666} .high{background:#3d0b10;color:#ff8a8a} .unk{background:#2a2c34;color:#aeb3c2}
-    a{color:#93c7ff;text-decoration:none} a:hover{text-decoration:underline}
-    ul{margin:8px 0 16px 22px}
-    code{background:#181a22;padding:2px 6px;border-radius:6px}
-    footer{opacity:.6;text-align:center;margin-top:18px;font-size:12px}
-    </style>
-    """
-    level = (g(v,"level","") or "").upper()
-    if "HIGH" in level: badge = '<span class="badge high">HIGH</span>'
-    elif "MED" in level: badge = '<span class="badge med">MEDIUM</span>'
-    elif "LOW" in level: badge = '<span class="badge low">LOW</span>'
-    else: badge = '<span class="badge unk">UNKNOWN</span>'
-    pair = g(m,"pairSymbol")
-    chain = g(m,"chain")
-    html_doc = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Metridex QuickScan Report</title>{style}</head>
-<body>
-  <div class="card">
-    <h2>Metridex QuickScan — {esc(pair)} {badge}</h2>
-    <div class="kv">
-      <div>Score</div><div>{esc(g(v,'score'))}</div>
-      <div>Chain</div><div><code>{esc(chain)}</code></div>
-      <div>Token</div><div><code>{esc(g(m,'tokenAddress'))}</code></div>
-      <div>Pair</div><div><code>{esc(g(m,'pairAddress'))}</code></div>
-      <div>Price</div><div>{esc(money(g(m,'price')))}</div>
-      <div>Liquidity</div><div>{esc(money(g(m,'liq')))}</div>
-      <div>FDV / MC</div><div>{esc(money(g(m,'fdv')))} / {esc(money(g(m,'mc')))}</div>
-      <div>Vol (24h)</div><div>{esc(money(g(m,'vol24h')))}</div>
-      <div>As of</div><div>{esc(asof_s)}</div>
-    </div>
-  </div>
-  <div class="card">
-    <h2>Why / Signals</h2>
-    <div style="padding:0 20px 12px">
-      <ul>
-        {''.join(f'<li>{esc(r)}</li>' for r in reasons) if reasons else '<li>No specific risk factors detected</li>'}
-      </ul>
-    </div>
-  </div>
-  <div class="card">
-    <h2>Links</h2>
-    <div class="kv">
-      <div>Explorer</div><div>{('<a href="'+esc(links.get('scan'))+'">'+esc(links.get('scan'))+'</a>') if links.get('scan') else '—'}</div>
-      <div>DEX</div><div>{('<a href="'+esc(links.get('dex'))+'">'+esc(links.get('dex'))+'</a>') if links.get('dex') else '—'}</div>
-      <div>Website</div><div>{('<a href="'+esc(links.get('site'))+'">'+esc(links.get('site'))+'</a>') if links.get('site') else '—'}</div>
-    </div>
-  </div>
-  <footer>Generated by Metridex • QuickScan</footer>
-</body></html>"""
-    return html_doc.encode("utf-8")
 
 def parse_cb(data: str):
     m = re.match(r"^v1:(\w+):(\-?\d+):(\-?\d+)$", data or "")
@@ -440,42 +343,55 @@ def on_callback(cb):
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
-
         try:
             html_bytes = _build_html_report(bundle)
-            send_document(chat_id, "Metridex_Report.html", html_bytes, caption="Metridex QuickScan report", content_type="text/html")
-            answer_callback_query(cb_id, "Report exported.", False)
+            send_document(chat_id, 'Metridex_Report.html', html_bytes, caption='Metridex QuickScan report', content_type='text/html')
+            answer_callback_query(cb_id, 'Report exported.', False)
         except Exception as e:
             try:
-                html = "<!doctype html><html><body><pre>" + json.dumps(bundle, ensure_ascii=False, indent=2) + "</pre></body></html>"
-                send_document(chat_id, "Metridex_Report.html", html.encode("utf-8"), caption="Metridex QuickScan report", content_type="text/html")
-                answer_callback_query(cb_id, "Report exported (fallback).", False)
+                import json as _json
+                html = '<!doctype html><html><body><pre>' + _json.dumps(bundle, ensure_ascii=False, indent=2) + '</pre></body></html>'
+                send_document(chat_id, 'Metridex_Report.html', html.encode('utf-8'), caption='Metridex QuickScan report', content_type='text/html')
+                answer_callback_query(cb_id, 'Report exported (fallback).', False)
             except Exception as e2:
-                answer_callback_query(cb_id, f"Export failed: {e2}", True)
-    
+                answer_callback_query(cb_id, f'Export failed: {e2}', True)
+
 
     
     
     elif action == "ONCHAIN":
-        # Safe On-chain renderer (guards None -> '—')
-        oc = (bundle.get('onchain') if isinstance(bundle, dict) else None) or {}
-        token_name = _s(oc.get('token_name') or oc.get('token') or (market.get('pairSymbol') if isinstance(market, dict) else None))
+        # Build on-chain details via live inspect
+        mkt = (bundle.get('market') if isinstance(bundle, dict) else None) or {}
+        chain_short = (mkt.get('chain') or '').lower()
+        token_addr = mkt.get('tokenAddress')
+        pair_addr = mkt.get('pairAddress')
+        try:
+            oc = onchain_inspector.inspect_token(chain_short, token_addr, pair_addr)
+        except Exception as _e:
+            oc = {'ok': False, 'error': str(_e)}
+        if isinstance(bundle, dict):
+            bundle['onchain'] = oc
+        ok = bool(oc.get('ok'))
+        token_name = _s(oc.get('token_name') or oc.get('token') or mkt.get('pairSymbol'))
         owner = _s(oc.get('owner'))
         renounced = _s(oc.get('renounced'))
         paused = _s(oc.get('paused'))
         upgradeable = _s(oc.get('upgradeable'))
         maxTx = _s(oc.get('maxTx'))
         maxWallet = _s(oc.get('maxWallet'))
-        text = (
-            'On-chain\n'
-            f'token: {token_name}\n'
-            f'owner: {owner}\n'
-            f'renounced: {renounced}\n'
-            f'paused: {paused}  upgradeable: {upgradeable}\n'
-            f'maxTx: {maxTx}  maxWallet: {maxWallet}'
-        )
+        if not ok:
+            text = 'On-chain\n' + _s(oc.get('error') or 'inspection failed')
+        else:
+            text = (
+                'On-chain\n'
+                f'token: {token_name}\n'
+                f'owner: {owner}\n'
+                f'renounced: {renounced}\n'
+                f'paused: {paused}  upgradeable: {upgradeable}\n'
+                f'maxTx: {maxTx}  maxWallet: {maxWallet}'
+            )
         send_message(chat_id, text, reply_markup=None)
-        answer_callback_query(cb_id, 'On-chain posted.', False)
+        answer_callback_query(cb_id, 'On-chain ready.', False)
 
     elif action == "COPY_CA":
         token = ((bundle.get("market") or {}).get("tokenAddress") or "—")
@@ -632,6 +548,111 @@ def _handle_diag_command(chat_id: int):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")))
+
+
+def _build_html_report(bundle: dict) -> bytes:
+    """
+    Creates a readable HTML report (dark theme) from the bundle dict.
+    Safe: escapes text and tolerates missing fields.
+    """
+    import html, datetime as _dt
+    b = bundle or {}
+    v = b.get("verdict") or {}
+    m = b.get("market") or {}
+    links = b.get("links") or {}
+    reasons = b.get("reasons") or []
+    def g(d, *ks, default="—"):
+        cur = d
+        for k in ks:
+            if not isinstance(cur, dict):
+                return default
+            cur = cur.get(k)
+        return cur if cur not in (None, "") else default
+    esc = lambda s: html.escape(str(s) if s is not None else "—")
+    def money(x):
+        try:
+            n = float(x)
+        except Exception:
+            return "—"
+        absn = abs(n)
+        if absn >= 1_000_000_000: s = f"${n/1_000_000_000:.2f}B"
+        elif absn >= 1_000_000:   s = f"${n/1_000_000:.2f}M"
+        elif absn >= 1_000:       s = f"${n/1_000:.2f}K"
+        else:                     s = f"${n:.6f}" if absn < 1 else f"${n:.2f}"
+        return s
+    asof_ms = g(m, "asof", default=None)
+    if isinstance(asof_ms, (int, float)):
+        try:
+            asof_s = _dt.datetime.utcfromtimestamp(int(asof_ms)/1000.0).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            asof_s = "—"
+    else:
+        asof_s = "—"
+    level = (g(v, "level", "") or "").upper()
+    if "HIGH" in level:
+        badge = '<span class="badge high">HIGH</span>'
+    elif "MED" in level:
+        badge = '<span class="badge med">MEDIUM</span>'
+    elif "LOW" in level:
+        badge = '<span class="badge low">LOW</span>'
+    elif "UNKNOWN" in level:
+        badge = '<span class="badge unk">UNKNOWN</span>'
+    else:
+        badge = '<span class="badge unk">—</span>'
+    style = """
+    <style>
+    body{font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0b0b0d;color:#e6e6e9;margin:0;padding:24px;}
+    .card{background:#111216;border:1px solid #1c1d25;border-radius:16px;box-shadow:0 6px 24px rgba(0,0,0,.25);margin:0 auto 16px;max-width:920px;}
+    .card h2{margin:0;padding:16px 20px;border-bottom:1px solid #1c1d25;font-size:18px}
+    .kv{display:grid;grid-template-columns:220px 1fr;gap:8px;padding:14px 20px}
+    .kv div{padding:4px 0;border-bottom:1px dashed #1e2029}
+    .kv div:nth-child(2n){border-bottom:none}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;margin-left:8px}
+    .low{background:#093f20;color:#7fffb0} .med{background:#3a3000;color:#ffd666} .high{background:#3d0b10;color:#ff8a8a} .unk{background:#2a2c34;color:#aeb3c2}
+    a{color:#93c7ff;text-decoration:none} a:hover{text-decoration:underline}
+    ul{margin:8px 0 16px 22px}
+    code{background:#181a22;padding:2px 6px;border-radius:6px}
+    footer{opacity:.6;text-align:center;margin-top:18px;font-size:12px}
+    </style>
+    """
+    pair = g(m,"pairSymbol"); chain = g(m,"chain")
+    html_doc = f"""<!doctype html>
+<html><head><meta charset='utf-8'><title>Metridex QuickScan Report</title>{style}</head>
+<body>
+  <div class='card'>
+    <h2>Metridex QuickScan — {esc(pair)} {badge}</h2>
+    <div class='kv'>
+      <div>Score</div><div>{esc(g(v,'score'))}</div>
+      <div>Level</div><div>{esc(g(v,'level'))}</div>
+      <div>Chain</div><div><code>{esc(chain)}</code></div>
+      <div>Token</div><div><code>{esc(g(m,'tokenAddress'))}</code></div>
+      <div>Pair</div><div><code>{esc(g(m,'pairAddress'))}</code></div>
+      <div>Price</div><div>{esc(money(g(m,'price')))}</div>
+      <div>Liquidity</div><div>{esc(money(g(m,'liq')))}</div>
+      <div>FDV / MC</div><div>{esc(money(g(m,'fdv')))} / {esc(money(g(m,'mc')))}</div>
+      <div>Vol (24h)</div><div>{esc(money(g(m,'vol24h')))}</div>
+      <div>As of</div><div>{esc(asof_s)}</div>
+    </div>
+  </div>
+  <div class='card'>
+    <h2>Why / Signals</h2>
+    <div style='padding:0 20px 12px'>
+      <ul>
+        {''.join(f'<li>{esc(r)}</li>' for r in reasons) if reasons else '<li>No specific risk factors detected</li>'}
+      </ul>
+    </div>
+  </div>
+  <div class='card'>
+    <h2>Links</h2>
+    <div class='kv'>
+      <div>Explorer</div><div>{('<a href="'+esc(links.get('scan'))+'">'+esc(links.get('scan'))+'</a>') if links.get('scan') else '—'}</div>
+      <div>DEX</div><div>{('<a href="'+esc(links.get('dex'))+'">'+esc(links.get('dex'))+'</a>') if links.get('dex') else '—'}</div>
+      <div>Website</div><div>{('<a href="'+esc(links.get('site'))+'">'+esc(links.get('site'))+'</a>') if links.get('site') else '—'}</div>
+    </div>
+  </div>
+  <footer>Generated by Metridex • QuickScan</footer>
+</body></html>"""
+    return html_doc.encode("utf-8")
 
 
 def _s(x):
