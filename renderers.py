@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import datetime as _dt
 from typing import Any, Dict, Optional, List
 
@@ -116,6 +117,39 @@ def _pick_color(verdict, market):
     if lvl.startswith("LOW"):  return "🟢"
     return "🟡"
 
+# --- chain-aware tiers for Why++ (align with risk_engine) ---
+def _short_chain(market: Dict[str, Any]) -> str:
+    ch = (market or {}).get("chain") or ""
+    ch = str(ch).strip().lower()
+    mp = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance smart chain":"bsc","polygon":"polygon","matic":"polygon",
+          "arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax",
+          "fantom":"ftm","ftm":"ftm","sol":"sol","solana":"sol"}
+    return mp.get(ch, ch)
+
+def _env_num(key: str, default: int) -> int:
+    try:
+        v = os.getenv(key)
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except Exception:
+        return default
+
+BASE = {
+    "eth":     {"LIQ_POSITIVE": 1_000_000, "LIQ_LOW": 200_000, "VOL_ACTIVE": 2_000_000, "VOL_THIN": 25_000},
+    "bsc":     {"LIQ_POSITIVE":   300_000, "LIQ_LOW":  60_000, "VOL_ACTIVE":   600_000, "VOL_THIN": 12_000},
+    "polygon": {"LIQ_POSITIVE":   200_000, "LIQ_LOW":  40_000, "VOL_ACTIVE":   400_000, "VOL_THIN":  8_000},
+}
+FALLBACK = {"LIQ_POSITIVE": 25_000, "LIQ_LOW": 10_000, "VOL_ACTIVE": 50_000, "VOL_THIN": 5_000}
+
+def _tiers(market: Dict[str, Any]) -> Dict[str, int]:
+    short = _short_chain(market)
+    t = dict(FALLBACK)
+    t.update(BASE.get(short, {}))
+    for k in ("LIQ_POSITIVE","LIQ_LOW","VOL_ACTIVE","VOL_THIN"):
+        t[k] = _env_num(f"{k}_{short.upper()}", _env_num(k, t[k]))
+    return t
+
 # ---- renderers ----
 def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
@@ -140,8 +174,7 @@ def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str
         f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}\n"
         f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}\n"
         f"Age: {age}  •  Source: {src_line}  •  as of {asof}"
-    ).replace("\\n", "\n")
-
+    ).replace("\n", "\n")
 
 def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
@@ -187,7 +220,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         ssl = web.get('ssl') or {}
         way = web.get('wayback') or {}
         parts.append("*Website intel*" + f"\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}" + f"\n• SSL: ok={ssl.get('ok') if ssl.get('ok') is not None else 'n/a'}, expires {ssl.get('expires') or 'n/a'}" + f"\n• Wayback first: {way.get('first') or 'n/a'}")
-    return "\n".join(parts).replace("\\n", "\n")
+    return "\n".join(parts).replace("\n", "\n")
 
 def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     # Take up to 3 key reasons, deduplicated
@@ -209,16 +242,18 @@ def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
         return "*Why?*\n• No specific risk factors detected"
     header = "*Why?*"
     lines = [f"• {r}" for r in uniq]
-    return "\n".join([header] + lines).replace("\\n", "\n")
+    return "\n".join([header] + lines).replace("\n", "\n")
 
 def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
-    # Weighted Top-3 positives and Top-3 risks
+    # Weighted Top-3 positives and Top-3 risks (chain-aware)
     m = market or {}
     pos: List[tuple[str,int]] = []
     risk: List[tuple[str,int]] = []
 
     def add_pos(label:str, w:int): pos.append((label,w))
     def add_risk(label:str, w:int): risk.append((label,w))
+
+    t = _tiers(m)
 
     liq = _get(m, "liq")
     vol = _get(m, "vol24h")
@@ -227,18 +262,18 @@ def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     fdv = _get(m, "fdv"); mc = _get(m, "mc")
 
     try:
-        if isinstance(liq,(int,float)) and liq >= 25000: add_pos(f"Healthy liquidity (${liq:,.0f})", 3)
-        if isinstance(vol,(int,float)) and vol >= 50000: add_pos(f"Active 24h volume (${vol:,.0f})", 2)
-        if isinstance(age,(int,float)) and age >= 7: add_pos(f"Established >1 week (~{age:.1f}d)", 2)
-        if isinstance(ch24,(int,float)) and -30 < ch24 < 80: add_pos(f"Moderate 24h move ({ch24:+.0f}%)", 1)
+        if isinstance(liq,(int,float)) and liq >= t["LIQ_POSITIVE"]: add_pos(f"Healthy liquidity (${liq:,.0f})", 3)
+        if isinstance(vol,(int,float)) and vol >= t["VOL_ACTIVE"]:   add_pos(f"Active 24h volume (${vol:,.0f})", 2)
+        if isinstance(age,(int,float)) and age >= 7:                 add_pos(f"Established >1 week (~{age:.1f}d)", 2)
+        if isinstance(ch24,(int,float)) and -30 < ch24 < 80:         add_pos(f"Moderate 24h move ({ch24:+.0f}%)", 1)
     except Exception:
         pass
 
     try:
         if liq is None: add_risk("Liquidity unknown", 2)
-        elif isinstance(liq,(int,float)) and liq < 10000: add_risk(f"Low liquidity (${liq:,.0f})", 3)
+        elif isinstance(liq,(int,float)) and liq < t["LIQ_LOW"]: add_risk(f"Low liquidity (${liq:,.0f})", 3)
         if vol is None: add_risk("24h volume unknown", 1)
-        elif isinstance(vol,(int,float)) and vol < 5000: add_risk(f"Thin 24h volume (${vol:,.0f})", 2)
+        elif isinstance(vol,(int,float)) and vol < t["VOL_THIN"]: add_risk(f"Thin 24h volume (${vol:,.0f})", 2)
         if isinstance(ch24,(int,float)) and (ch24 > 100 or ch24 < -70): add_risk(f"Extreme 24h move ({ch24:+.0f}%)", 2)
         if age is None: add_risk("Pair age unknown", 2)
         elif isinstance(age,(int,float)) and age < 1: add_risk("Newly created pair (<1d)", 3)
@@ -259,7 +294,7 @@ def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
         lines.append("_Top risks_")
         for label, w in risk:
             lines.append(f"• {label} (w={w})")
-    return "\n".join(lines).replace("\\n", "\n")
+    return "\n".join(lines).replace("\n", "\n")
 
 def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
     p = info or {}
@@ -308,4 +343,3 @@ def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
         lines.append(f"• Unlocks: {until}")
     lines.append(f"• LP token: `{addr}`")
     return "\n".join(lines)
-
