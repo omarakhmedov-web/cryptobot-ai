@@ -73,8 +73,33 @@ DEAD_ADDRS = [
 ]
 
 def _rpc(chain: str) -> Optional[str]:
-    env = CHAIN_RPC_ENV.get((chain or "").lower().strip())
-    return (os.getenv(env, "") or "").strip() or None
+    ch = (chain or '').lower().strip()
+    env_primary = CHAIN_RPC_ENV.get(ch)
+    cand = []
+    if env_primary:
+        cand.append(env_primary)
+    # Fallbacks: <CHAIN>_RPC_URL and uppercase variants
+    cand.append(f"{ch.upper()}_RPC_URL_PRIMARY")
+    cand.append(f"{ch}_RPC_URL_PRIMARY")
+    cand.append(f"{ch.upper()}_RPC_URL")
+    cand.append(f"{ch}_RPC_URL")
+    # Common aliases
+    alias = {
+        'eth': ['ETHEREUM_RPC_URL', 'MAINNET_RPC_URL'],
+        'bsc': ['BSC_MAINNET_RPC_URL', 'BNB_RPC_URL'],
+        'polygon': ['POLYGON_MAINNET_RPC_URL', 'MATIC_RPC_URL'],
+        'arb': ['ARBITRUM_RPC_URL'],
+        'op': ['OPTIMISM_RPC_URL'],
+        'avax': ['AVALANCHE_RPC_URL'],
+        'ftm': ['FANTOM_RPC_URL'],
+        'base': ['BASE_RPC_URL']
+    }.get(ch, [])
+    cand.extend(alias)
+    for key in cand:
+        val = (os.getenv(key, '') or '').strip()
+        if val:
+            return val
+    return None
 
 def _eth_call(rpc: str, to: str, data: str) -> bytes:
     j = {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]}
