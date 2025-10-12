@@ -1,5 +1,7 @@
 from __future__ import annotations
 import os
+import requests as _rq
+import time
 import datetime as _dt
 from typing import Any, Dict, Optional, List
 import re as _re
@@ -162,7 +164,249 @@ def _human_status(s: str) -> str:
 # Set env RDAP_COUNTRY_PLACEHOLDER=0 to disable showing "Country: —" when country is missing.
 _RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "1") not in ("0", "false", "False", ""))
 
+# ---- domain coolness flags ----
+_WAYBACK_SUMMARY = (os.getenv("WAYBACK_SUMMARY", "1") not in ("0","false","False",""))
+_WAYBACK_TIMEOUT_S = float(os.getenv("WAYBACK_TIMEOUT_S", "2.5"))
+_wb_cache: Dict[str, Any] = {}
+
+_RDAP_SHOW_NS = (os.getenv("RDAP_SHOW_NS", "1") not in ("0","false","False",""))
+_RDAP_DNSSEC_CHECK = (os.getenv("RDAP_DNSSEC_CHECK", "1") not in ("0","false","False",""))
+_RDAP_SHOW_ABUSE = (os.getenv("RDAP_SHOW_ABUSE", "1") not in ("0","false","False",""))
+_RDAP_STATUS_CASE = os.getenv("RDAP_STATUS_CASE", "title")   # "title" | "lower" | "raw"
+
+_WEB_HEAD_CHECK = (os.getenv("WEB_HEAD_CHECK", "1") not in ("0","false","False",""))
+_WEB_TIMEOUT_S = float(os.getenv("WEB_TIMEOUT_S", "2.0"))
+_WEB_SHOW_HSTS = (os.getenv("WEB_SHOW_HSTS", "1") not in ("0","false","False",""))
+_WEB_SHOW_ROBOTS = (os.getenv("WEB_SHOW_ROBOTS", "0") not in ("0","false","False",""))
+_WEB_REDIRECTS_COMPACT = (os.getenv("WEB_REDIRECTS_COMPACT", "1") not in ("0","false","False",""))
+
+_DNS_DMARC_CHECK = (os.getenv("DNS_DMARC_CHECK", "1") not in ("0","false","False",""))
+_DNS_SPF_CHECK = (os.getenv("DNS_SPF_CHECK", "1") not in ("0","false","False",""))
+_DOH_URL = os.getenv("DOH_URL", "https://dns.google/resolve")
+
+_DETAILS_BADGES = (os.getenv("DETAILS_BADGES", "1") not in ("0","false","False",""))
+_RISK_DOMAIN_WEIGHT = int(os.getenv("RISK_DOMAIN_WEIGHT", "3"))  # cap magnitude
+
+REGISTRAR_URL_TRIM = (os.getenv("REGISTRAR_URL_TRIM", "1") not in ("0","false","False",""))
+NAMESERVERS_LIMIT = int(os.getenv("NAMESERVERS_LIMIT", "2"))
+HSTS_SHOW_MAXAGE_ONLY = (os.getenv("HSTS_SHOW_MAXAGE_ONLY", "1") not in ("0","false","False",""))
+RDAP_DNSSEC_SHOW_UNSIGNED = (os.getenv("RDAP_DNSSEC_SHOW_UNSIGNED", "0") not in ("0","false","False",""))
+BADGE_WAYBACK = (os.getenv("BADGE_WAYBACK", "1") not in ("0","false","False",""))
+DOMAIN_EMOJI_BAR = (os.getenv("DOMAIN_EMOJI_BAR", "1") not in ("0","false","False",""))
+
+# Simple in-process TTL caches for network checks
+_CACHE_TTL = int(os.getenv("WEB_CACHE_TTL", "1800"))
+_rdap_cache: Dict[str, Any] = {}
+_web_cache: Dict[str, Any] = {}
+_dns_cache: Dict[str, Any] = {}
+
+def _status_case(s: str) -> str:
+    t = _human_status(s)  # already splits/case lowers
+    if _RDAP_STATUS_CASE == "title":
+        return " ".join(w.capitalize() for w in t.split())
+    elif _RDAP_STATUS_CASE == "lower":
+        return t
+    return s  # raw
+
+def _cache_get(cache: Dict[str, Any], key: str):
+    item = cache.get(key)
+    if not item: return None
+    ts, val = item
+    if time.time() - ts > _CACHE_TTL:
+        cache.pop(key, None)
+        return None
+    return val
+
+def _cache_put(cache: Dict[str, Any], key: str, val: Any):
+    cache[key] = (time.time(), val)
+    return val
+
+def _http_head_or_get(url: str, allow_redirects: bool=True):
+    try:
+        r = _rq.get(url, timeout=_WEB_TIMEOUT_S, allow_redirects=allow_redirects, headers={
+            "User-Agent": "MetridexBot/1.0 (+https://metridex.com)"
+        })
+        return r
+    except Exception:
+        return None
+
+def _web_probe(domain: str) -> Dict[str, Any]:
+    if not _WEB_HEAD_CHECK: return {}
+    key = f"web:{domain}"
+    cached = _cache_get(_web_cache, key)
+    if cached is not None: return cached
+
+    info: Dict[str, Any] = {"https_enforced": None, "redirects": [], "server": None, "x_powered_by": None, "hsts": None, "robots": None}
+    try:
+        r = _http_head_or_get(f"http://{domain}", allow_redirects=True)
+        final_url = r.url if r is not None else None
+        if r is not None:
+            chain = [h.url for h in r.history] + ([r.url] if r.url else [])
+            compact = []
+            for u in chain[:4]:
+                try:
+                    from urllib.parse import urlparse
+                    pu = urlparse(u)
+                    compact.append(f"{pu.scheme}://{pu.netloc}")
+                except Exception:
+                    compact.append(u)
+            info["redirects"] = compact
+            info["https_enforced"] = bool(final_url and final_url.startswith("https://"))
+        r2 = _http_head_or_get(f"https://{domain}", allow_redirects=True)
+        if r2 is not None:
+            info["server"] = r2.headers.get("Server")
+            info["x_powered_by"] = r2.headers.get("X-Powered-By")
+            if _WEB_SHOW_HSTS:
+                hsts = r2.headers.get("Strict-Transport-Security")
+                if hsts:
+                    info["hsts"] = hsts
+        if _WEB_SHOW_ROBOTS:
+            try:
+                r3 = _rq.get(f"https://{domain}/robots.txt", timeout=_WEB_TIMEOUT_S, allow_redirects=True)
+                info["robots"] = (r3.status_code == 200, len(r3.text) if hasattr(r3, "text") else None)
+            except Exception:
+                info["robots"] = (False, None)
+    except Exception:
+        pass
+    return _cache_put(_web_cache, key, info)
+
+def _doh_txt(name: str):
+    key = f"dns:{name}"
+    cached = _cache_get(_dns_cache, key)
+    if cached is not None: return cached
+    out = []
+    try:
+        r = _rq.get(_DOH_URL, params={"name": name, "type": "TXT"}, timeout=_WEB_TIMEOUT_S)
+        if r.ok:
+            j = r.json()
+            for ans in j.get("Answer", []) or []:
+                data = ans.get("data")
+                if not data: continue
+                txt = data.strip('"').replace('" "', '')
+                out.append(txt)
+    except Exception:
+        pass
+    return _cache_put(_dns_cache, key, out)
+
+def _check_dmarc(domain: str):
+    if not _DNS_DMARC_CHECK: return None
+    try:
+        txts = _doh_txt(f"_dmarc.{domain}")
+        policy = None
+        for t in txts:
+            if "v=DMARC1" in t:
+                m = _re.search(r"\\bp=([a-zA-Z]+)", t)
+                if m:
+                    policy = m.group(1).lower()
+                    break
+        return policy or "none"
+    except Exception:
+        return None
+
+def _check_spf(domain: str):
+    if not _DNS_SPF_CHECK: return None
+    try:
+        txts = _doh_txt(domain)
+        for t in txts:
+            if t.lower().startswith("v=spf1"):
+                return True
+        return False
+    except Exception:
+        return None
+
+def _rdap_extract_extras(rdap: Dict[str, Any]):
+    extras = {"registrar_url": None, "nameservers": [], "dnssec": None, "abuse": None}
+    try:
+        for link in (rdap.get("links") or []):
+            rel = link.get("rel")
+            href = link.get("href")
+            if isinstance(href, str) and href.startswith("http"):
+                if rel in ("related", "self"):
+                    extras["registrar_url"] = href
+                    break
+        for ns in (rdap.get("nameservers") or [])[:3]:
+            n = ns.get("ldhName") or ns.get("objectClassName")
+            if n: extras["nameservers"].append(n.lower())
+        sd = rdap.get("secureDNS") or {}
+        if isinstance(sd, dict):
+            if sd.get("delegationSigned") or sd.get("dsData"):
+                extras["dnssec"] = "signed"
+            else:
+                extras["dnssec"] = "unsigned"
+        abuse_email = None; abuse_phone = None
+        for ent in (rdap.get("entities") or []):
+            roles = [str(x).lower() for x in (ent.get("roles") or [])]
+            if any("abuse" in r for r in roles):
+                vcard = ent.get("vcardArray")
+                try:
+                    for item in (vcard[1] if isinstance(vcard, list) and len(vcard) > 1 else []):
+                        if item and item[0] == "email" and len(item) > 3:
+                            abuse_email = item[3]
+                        if item and item[0] == "tel" and len(item) > 3:
+                            abuse_phone = item[3]
+                except Exception:
+                    pass
+        if abuse_email or abuse_phone:
+            extras["abuse"] = (abuse_email, abuse_phone)
+    except Exception:
+        pass
+    return extras
+
+def _domain_badges(domain: str, rdap_extras, web, dmarc, spf):
+    badges = []
+    if web.get("https_enforced") is True: badges.append("HTTPS enforced")
+    if web.get("hsts"): badges.append("HSTS")
+    if rdap_extras.get("dnssec") == "signed": badges.append("DNSSEC")
+    if dmarc in ("reject", "quarantine"): badges.append(f"DMARC {dmarc}")
+    if spf is True: badges.append("SPF present")
+    return badges[:6]
+
+def _domain_subscore(rdap_extras, web, dmarc, spf):
+    s = 0
+    if web.get("https_enforced"): s += 1
+    if web.get("hsts"): s += 1
+    if rdap_extras.get("dnssec") == "signed": s += 1
+    if dmarc == "reject": s += 1
+    elif dmarc == "none": s -= 1
+    if not web.get("https_enforced") and not web.get("hsts"): s -= 1
+    if spf is True: s += 0
+    # cap
+    if s > _RISK_DOMAIN_WEIGHT: s = _RISK_DOMAIN_WEIGHT
+    if s < -_RISK_DOMAIN_WEIGHT: s = -_RISK_DOMAIN_WEIGHT
+    return s
+
 # ---- renderers ----
+
+def _wayback_summary(domain: str):
+    if not _WAYBACK_SUMMARY or not isinstance(domain, str): 
+        return None
+    key = f"wb:{domain}"
+    cached = _cache_get(_wb_cache, key)
+    if cached is not None: 
+        return cached
+    out = {"ok": False, "first": None, "last": None, "url": f"https://web.archive.org/web/*/{domain}"}
+    try:
+        base = "https://web.archive.org/cdx/search/cdx"
+        params_first = {"url": domain, "output": "json", "fl": "timestamp", "filter": "statuscode:200", "limit": "1", "from": "19960101", "to": "99991231", "sort": "ascending"}
+        r1 = _rq.get(base, params=params_first, timeout=_WAYBACK_TIMEOUT_S)
+        if r1.ok:
+            j1 = r1.json()
+            # fl=timestamp => rows are [["timestamp"], ["YYYYMMDDhhmmss"]]
+            if isinstance(j1, list) and len(j1) >= 2 and isinstance(j1[1], list) and j1[1]:
+                ts1 = j1[1][0]
+                out["first"] = f"{ts1[0:4]}-{ts1[4:6]}-{ts1[6:8]}"
+        params_last = dict(params_first); params_last["sort"] = "descending"
+        r2 = _rq.get(base, params=params_last, timeout=_WAYBACK_TIMEOUT_S)
+        if r2.ok:
+            j2 = r2.json()
+            if isinstance(j2, list) and len(j2) >= 2 and isinstance(j2[1], list) and j2[1]:
+                ts2 = j2[1][0]
+                out["last"] = f"{ts2[0:4]}-{ts2[4:6]}-{ts2[6:8]}"
+        out["ok"] = bool(out["first"] or out["last"])
+    except Exception:
+        pass
+    return _cache_put(_wb_cache, key, out)
+
 def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
     chain = _fmt_chain(_get(market, "chain"))
@@ -264,7 +508,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                     try:
                         _st = list(_rd["status"])[:4]
                         if _st:
-                            _rd_lines.append("• Status: " + ", ".join(_human_status(x) for x in _st))
+                            _rd_lines.append("• Status: " + ", ".join(_status_case(x) for x in _st))
                     except Exception:
                         pass
                 if _rd.get("flags"):     _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
