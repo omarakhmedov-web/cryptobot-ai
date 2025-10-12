@@ -204,29 +204,24 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
 
     parts: List[str] = []
     parts.append(f"*Details — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})")
-    parts.append(
-        "*Snapshot*"
-        f"
-• Price: {price}  ({chg5}, {chg1}, {chg24})"
-        f"
-• FDV: {fdv}  • MC: {mc}"
-        f"
-• Liquidity: {liq}  • 24h Volume: {vol}"
-        f"
-• Age: {age}  • Source: {src_}"
-        f"
-• As of: {asof}"
-    )
-    parts.append(f"*Token*
-• Chain: `{chain}`
-• Address: `{token}`")
-    parts.append(f"*Pair*
-• Address: `{pair_addr}`
-• Symbol: {pair}")
+
+    snapshot_lines = [
+        "*Snapshot*",
+        f"• Price: {price}  ({chg5}, {chg1}, {chg24})",
+        f"• FDV: {fdv}  • MC: {mc}",
+        f"• Liquidity: {liq}  • 24h Volume: {vol}",
+        f"• Age: {age}  • Source: {src_}",
+        f"• As of: {asof}",
+    ]
+    parts.append("\n".join(snapshot_lines))
+
+    parts.append(f"*Token*\n• Chain: `{chain}`\n• Address: `{token}`")
+    parts.append(f"*Pair*\n• Address: `{pair_addr}`\n• Symbol: {pair}")
 
     # RDAP / WHOIS (optional)
+    import os as _os
     try:
-        _enable_rdap = os.getenv("ENABLE_RDAP", "1").lower() in ("1","true","yes")
+        _enable_rdap = _os.getenv("ENABLE_RDAP", "1").lower() in ("1","true","yes")
     except Exception:
         _enable_rdap = True
     if _enable_rdap and l_site and l_site != "—":
@@ -247,19 +242,17 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 if _rd.get("age_days") is not None: _rd_lines.append(f"• Domain age: {_rd['age_days']} d")
                 if _rd.get("country"):   _rd_lines.append(f"• Country: {_rd['country']}")
                 if _rd.get("flags"):     _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
-                parts.append("
-".join(_rd_lines))
+                parts.append("\n".join(_rd_lines))
 
     # Links (text) — hidden by default, we have buttons
-    _show_links = os.getenv("SHOW_LINKS_IN_DETAILS", "0").lower() in ("1","true","yes")
+    _show_links = _os.getenv("SHOW_LINKS_IN_DETAILS", "0").lower() in ("1","true","yes")
     if _show_links:
         ll = ["*Links*"]
         if l_dex and l_dex != "—": ll.append(f"• DEX: {l_dex}")
         if (links or {}).get("dexscreener"): ll.append(f"• DexScreener: {(links or {}).get('dexscreener')}")
         if l_scan and l_scan != "—": ll.append(f"• Scan: {l_scan}")
         if l_site and l_site != "—": ll.append(f"• Site: {l_site}")
-        parts.append("
-".join(ll))
+        parts.append("\n".join(ll))
 
     # Website intel (if provided via ctx)
     web = (ctx or {}).get("webintel") or {}
@@ -269,20 +262,15 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         way = web.get("wayback") or {}
         parts.append(
             "*Website intel*"
-            + f"
-• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
-            + f"
-• SSL: ok={ssl.get('ok') if ssl.get('ok') is not None else 'n/a'}, expires {ssl.get('expires') or 'n/a'}"
-            + f"
-• Wayback first: {way.get('first') or 'n/a'}"
+            + f"\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
+            + f"\n• SSL: ok={ssl.get('ok') if ssl.get('ok') is not None else 'n/a'}, expires {ssl.get('expires') or 'n/a'}"
+            + f"\n• Wayback first: {way.get('first') or 'n/a'}"
         )
 
-    return "
-".join(parts).replace("
-", "
-")
+    return "\n".join(parts)
 
-def render_why
+
+
 
 def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     # Take up to 3 key reasons, deduplicated
