@@ -810,7 +810,8 @@ pre {{ white-space:pre-wrap; }}
 # --- Safe HTML report builder (dark, no logos) ---
 def _build_html_report_safe(bundle: dict) -> bytes:
     try:
-        def _s(x): return str(x) if x is not None else "—"
+        def _s(x): 
+            return str(x) if x is not None else "—"
         def _fmt_time(v):
             try:
                 ts = int(v)
@@ -838,15 +839,38 @@ def _build_html_report_safe(bundle: dict) -> bytes:
                 return f"{arrow} {n:+.2f}%"
             except Exception:
                 return "—"
+        def _fmt_chain(c):
+            c = (str(c) if c is not None else "—").strip().lower()
+            mp = {
+                "ethereum":"Ethereum","eth":"Ethereum",
+                "bsc":"BSC","binance smart chain":"BSC",
+                "polygon":"Polygon","matic":"Polygon",
+                "arbitrum":"Arbitrum","arb":"Arbitrum",
+                "optimism":"Optimism","op":"Optimism",
+                "base":"Base",
+                "avalanche":"Avalanche","avax":"Avalanche",
+                "fantom":"Fantom","ftm":"Fantom",
+                "sol":"Solana","solana":"Solana",
+            }
+            return mp.get(c, c.capitalize() if c else "—")
+        def _fmt_age(v):
+            try:
+                d = float(v)
+                if d < 1/24:   return "<1h"
+                if d < 1:      return f"{d*24:.1f}h"
+                return f"{d:.1f}d"
+            except Exception:
+                return "—"
+
+
 
         m = bundle.get("market") or {}
         v = bundle.get("verdict") or {}
         why  = bundle.get("why")  or "Why: n/a"
         whyp = bundle.get("whypp") or "Why++: n/a"
         lp   = bundle.get("lp")   or "LP: n/a"
-
         pair = _s(m.get("pairSymbol"))
-        chain= _s(m.get("chain"))
+        chain= _fmt_chain(m.get("chain"))
         price= _fmt_num(m.get("price"))
         fdv  = _fmt_num(m.get("fdv"))
         mc   = _fmt_num(m.get("mc"))
@@ -856,7 +880,12 @@ def _build_html_report_safe(bundle: dict) -> bytes:
         chg1 = _fmt_pct((m.get("priceChanges") or {}).get("h1"))
         chg24= _fmt_pct((m.get("priceChanges") or {}).get("h24"))
         asof = _fmt_time(m.get("asof"))
+        age  = _fmt_age(m.get("ageDays"))
         score = _s((v.get("score") if isinstance(v, dict) else getattr(v, "score", None)))
+        level = (v.get("level") if isinstance(v, dict) else getattr(v, "level", "")) or ""
+        score_ui = ("15" if (str(score) in ("0","0.0") and str(level).lower().startswith("low")) else str(score))
+
+
 
         html = (
             "<!doctype html><html><head><meta charset='utf-8'/>"
@@ -869,13 +898,13 @@ def _build_html_report_safe(bundle: dict) -> bytes:
             ".pill{display:inline-block;background:#1f2937;border-radius:999px;padding:3px 8px;margin-left:8px;color:#f59e0b;font-weight:600}"
             "a{color:#93c5fd}"
             "</style></head><body>"
-            "<h1>Metridex QuickScan — " + pair + " <span class='pill'>Score: " + score + "</span></h1>"
+            "<h1>Metridex QuickScan — " + pair + " <span class='pill'>Score: " + score_ui + "</span></h1>"
             "<div class='meta'>"
             "<div>Chain: " + chain + "</div><div>Price: " + price + "</div>"
             "<div>FDV: " + fdv + "</div><div>MC: " + mc + "</div>"
             "<div>Liquidity: " + liq + "</div><div>Vol 24h: " + vol + "</div>"
             "<div>Δ5m: " + chg5 + "</div><div>Δ1h: " + chg1 + "</div>"
-            "<div>Δ24h: " + chg24 + "</div><div>As of: " + asof + "</div>"
+            "<div>Δ24h: " + chg24 + "</div><div>Age: " + age + "</div><div>As of: " + asof + "</div>"
             "</div>"
             "<div class='block'><pre>" + str(why)  + "</pre></div>"
             "<div class='block'><pre>" + str(whyp) + "</pre></div>"
