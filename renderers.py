@@ -169,7 +169,13 @@ def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str
     src_line = ", ".join([str(s) for s in sources if s]) or str(src)
 
     return (
-        f"*Metridex QuickScan — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})\n"
+        f"*Metridex QuickScan — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})\\nimport re as _re
+def _human_status(s: str) -> str:
+    if not isinstance(s, str):
+        return str(s)
+    s = s.replace("_", " ").replace("-", " ")
+    s = _re.sub(r'(?<!^)([A-Z])', r' \1', s)  # split CamelCase
+    return s.lower()\nn"
         f"`{chain}`  •  Price: *{price}*\n"
         f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}\n"
         f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}\n"
@@ -243,6 +249,13 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 if _rd.get("expires"):   _rd_lines.append(f"• Expires: {_rd['expires']}")
                 if _rd.get("age_days") is not None: _rd_lines.append(f"• Domain age: {_rd['age_days']} d")
                 if _rd.get("country"):   _rd_lines.append(f"• Country: {_rd['country']}")
+                if _rd.get("status"):
+                    try:
+                        _st = list(_rd["status"])[:4]
+                        if _st:
+                            _rd_lines.append("• Status: " + ", ".join(_human_status(x) for x in _st))
+                    except Exception:
+                        pass
                 if _rd.get("flags"):     _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
                 parts.append("\n".join(_rd_lines))
 
