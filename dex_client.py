@@ -46,6 +46,24 @@ SCAN_HOST = {
     "solana": "solscan.io",
 }
 
+def _swap_url(chain: str, token: str) -> str | None:
+    c = (chain or '').lower()
+    t = (token or '').strip()
+    if not t:
+        return None
+    if c in ('ethereum','eth','arbitrum','arb','optimism','op','base'):
+        return f"https://app.uniswap.org/#/swap?outputCurrency={t}"
+    if c in ('bsc','binance smart chain','bnb'):
+        return f"https://pancakeswap.finance/swap?outputCurrency={t}"
+    if c in ('polygon','matic'):
+        return f"https://quickswap.exchange/#/swap?outputCurrency={t}"
+    if c in ('avalanche','avax'):
+        return f"https://traderjoexyz.com/trade?outputCurrency={t}"
+    if c in ('fantom','ftm'):
+        return f"https://spookyswap.finance/swap?outputCurrency={t}"
+    return None
+
+
 ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 TX_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
@@ -192,11 +210,11 @@ def _normalize_market(ds: Dict[str, Any]) -> Dict[str, Any]:
             m["ageDays"] = round(float(ds["age"])/86400, 1)
         except Exception:
             pass
-    # DEX link
-    if m.get("pairAddress") and m.get("chain"):
-        m["links"]["dex"] = f"https://dexscreener.com/{m['chain']}/{m['pairAddress']}"
-    # Website
-    site = (ds.get("info") or {}).get("website")
+# DexScreener + DEX links
+    if m.get('pairAddress') and m.get('chain'):
+        m['links']['dexscreener'] = f"https://dexscreener.com/{m['chain']}/{m['pairAddress']}"
+        swap = _swap_url(m.get('chain'), m.get('tokenAddress'))
+        if swap: m['links']['dex'] = swap
     if site: m["links"]["site"] = site
     # Scan link (token)
     ch = (m.get("chain") or "").lower()
@@ -351,7 +369,14 @@ def fetch_market(_pos: str | None = None, *, chain: str | None = None, token: st
             m = _ds_by_pair(ch_short, pair)
             if m.get("ok"):
                 _add_onchain_source(m)
-                return m
+    try:
+        fdv = float(m.get('fdv')) if m.get('fdv') is not None else None
+        mc  = float(m.get('mc')) if m.get('mc') is not None else None
+        if fdv is not None and mc is not None and fdv < mc:
+            m['fdv'] = mc
+    except Exception:
+        pass
+    return m
 
     out = {"ok": False, "error": "no market found", "sources": [], "chain": chain or "—", "links": {}}
     if token: out["tokenAddress"] = token
