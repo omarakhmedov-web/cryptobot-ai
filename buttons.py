@@ -60,12 +60,12 @@ def build_keyboard(chat_id: int,
         nav.append({"text": "🟢 Open in DEX", "url": dex_url})
     if scan_url:
         nav.append({"text": "🔎 Open in Scan", "url": scan_url})
-    if nav:
+    if nav and ctx != "details":
         rows.append(nav)
 
     # Separate DexScreener row (distinct from DEX)
     ds_link = ds_url or (dex_url if is_ds(dex_url) else None)
-    if ds_link:
+    if ds_link and ctx != "details":
         rows.append([{"text": "🟢 Open on DexScreener", "url": ds_link}])
 
     # ---------------- CONTEXT-SPECIFIC ACTIONS ----------------
@@ -84,15 +84,8 @@ def build_keyboard(chat_id: int,
         rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
 
     elif ctx == "details":
-        # In details we also keep a compact nav row with Copy CA
-        row = []
-        if dex_url and not is_ds(dex_url):
-            row.append({"text": "🟢 Open in DEX", "url": dex_url})
-        if scan_url:
-            row.append({"text": "🔎 Open in Scan", "url": scan_url})
-        row.append({"text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA")})
-        if row:
-            rows.append(row)
+        # In details we avoid repeating DEX/Scan nav; keep only Copy CA for cleanliness
+        rows.append([{"text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA")}])
 
         rows.append([
             {"text": "❓ Why?",  "callback_data": _cb(chat_id, msg_id, "WHY")},
