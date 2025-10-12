@@ -354,9 +354,8 @@ def on_callback(cb):
         answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
-        # NOTE: Keep LP clean: no extra nav keyboard to avoid duplicates
         text = bundle.get("lp", "LP lock: n/a")
-        send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
+        send_message(chat_id, text, reply_markup=None)
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
@@ -380,7 +379,11 @@ def on_callback(cb):
         except Exception as e:
             try:
                 import json as _json
-                html = '<!doctype html><html><body><pre>' + _json.dumps(bundle, ensure_ascii=False, indent=2) + '</pre></body></html>'
+                pretty = _json.dumps(bundle, ensure_ascii=False, indent=2)
+                html = ("<!doctype html><html><head><meta charset='utf-8'/>"
+                        "<style>body{background:#0b0b0f;color:#e7e5e4;font-family:Inter,Arial,sans-serif;margin:24px}" 
+                        "pre{background:#13151a;border:1px solid #262626;border-radius:12px;padding:12px;white-space:pre-wrap}</style></head>"
+                        "<body><h1>Metridex Report (fallback)</h1><pre>"+pretty+"</pre></body></html>")
                 send_document(chat_id, 'Metridex_Report.html', html.encode('utf-8'), caption='Metridex QuickScan report', content_type='text/html; charset=utf-8')
                 answer_callback_query(cb_id, 'Report exported (fallback).', False)
             except Exception as e2:
@@ -480,23 +483,15 @@ def on_callback(cb):
                 return f"{arrow} {n:+.2f}%"
             except Exception:
                 return "—"
-        val = None
-        if action == "DELTA_M5": val = ch.get("m5")
-        elif action == "DELTA_1H": val = ch.get("h1")
-        elif action == "DELTA_6H": val = ch.get("h6") or ch.get("h6h") or ch.get("6h")
-        else: val = ch.get("h24")
-        pair = (mkt.get('pairSymbol') or '—')
-        asof = mkt.get('asof')
-        try:
-            from datetime import datetime as _dt
-            asof_s = _dt.utcfromtimestamp(int(asof)/1000.0).strftime("%H:%M UTC") if asof else "—"
-        except Exception:
-            asof_s = "—"
-        series_key = f"spark:{(mkt.get('tokenAddress') or pair)}:{label}"
-        arr = _append_series(series_key, val)
-        sp = _spark(arr)
-        toast = f"{label}: {_pct(val)} {sp} ({pair}, {asof_s})"
-        answer_callback_query(cb_id, toast, False)
+        if action == "DELTA_M5":
+            val = ch.get("m5")
+        elif action == "DELTA_1H":
+            val = ch.get("h1")
+        elif action == "DELTA_6H":
+            val = ch.get("h6") or ch.get("h6h") or ch.get("6h")
+        else:
+            val = ch.get("h24")
+        answer_callback_query(cb_id, f"{label}: {_pct(val)}", True)
 
     else:
         answer_callback_query(cb_id, "Unsupported action", True)
