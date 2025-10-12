@@ -178,19 +178,16 @@ def _normalize_market(ds: Dict[str, Any]) -> Dict[str, Any]:
         "links": {},
         "asof": int(time.time()*1000),
     }
-    # Age derivation from DexScreener timestamps if present
-    try:
-        # prefer pairCreatedAt (ms), fallback 'age' (seconds)
-        pcat = ds.get("pairCreatedAt") or ds.get("pairCreatedAtMs")
-        if pcat:
+    # Age derivation: prefer pairCreatedAt (ms), fallback 'age' (seconds)
+    pcat = ds.get("pairCreatedAt") or ds.get("pairCreatedAtMs")
+    if pcat:
+        try:
             ts_ms = int(pcat)
             if ts_ms < 10**12: ts_ms *= 1000
             m["ageDays"] = round((time.time()*1000 - ts_ms) / (1000*60*60*24), 2)
-        elif ds.get("age"):
-            m["ageDays"] = round(float(ds["age"]) / 86400, 1)
-    except Exception:
-        pass
-    if ds.get("age"):
+        except Exception:
+            pass
+    elif ds.get("age"):
         try:
             m["ageDays"] = round(float(ds["age"])/86400, 1)
         except Exception:
@@ -207,15 +204,12 @@ def _normalize_market(ds: Dict[str, Any]) -> Dict[str, Any]:
     if host and m.get("tokenAddress"):
         m["links"]["scan"] = f"https://{host}/token/{m['tokenAddress']}"
     # FDV/MC normalization if supplies available
-    total_supply = (ds.get("fdvInfo") or {}).get("totalSupply") or (ds.get("supply") or {}).get("total")
-    circ_supply = (ds.get("marketCapInfo") or {}).get("circulating") or (ds.get("supply") or {}).get("circulating")
-    price = m.get("price")
     try:
+        total_supply = (ds.get("fdvInfo") or {}).get("totalSupply") or (ds.get("supply") or {}).get("total")
+        circ_supply  = (ds.get("marketCapInfo") or {}).get("circulating") or (ds.get("supply") or {}).get("circulating")
+        price = m.get("price")
         if (m.get("fdv") in (None, 0)) and total_supply and price:
             m["fdv"] = float(total_supply) * float(price)
-    except Exception:
-        pass
-    try:
         if (m.get("mc") in (None, 0)) and circ_supply and price:
             m["mc"] = float(circ_supply) * float(price)
     except Exception:
@@ -236,20 +230,6 @@ def _ds_by_pair(chain: str, pair: str) -> Dict[str, Any]:
     # Prefer highest USD liquidity
     best = max(pairs, key=lambda x: ((x.get("liquidity") or {}).get("usd") or 0))
     m = _normalize_market(best); m["ok"] = True
-    # FDV/MC normalization if supplies available
-    total_supply = (ds.get("fdvInfo") or {}).get("totalSupply") or (ds.get("supply") or {}).get("total")
-    circ_supply = (ds.get("marketCapInfo") or {}).get("circulating") or (ds.get("supply") or {}).get("circulating")
-    price = m.get("price")
-    try:
-        if (m.get("fdv") in (None, 0)) and total_supply and price:
-            m["fdv"] = float(total_supply) * float(price)
-    except Exception:
-        pass
-    try:
-        if (m.get("mc") in (None, 0)) and circ_supply and price:
-            m["mc"] = float(circ_supply) * float(price)
-    except Exception:
-        pass
     return m
 
 def _ds_by_token(chain: str, token: str) -> Dict[str, Any]:
@@ -270,20 +250,6 @@ def _ds_by_token(chain: str, token: str) -> Dict[str, Any]:
         return (is_req_chain + is_base, float(liq))
     best = max(pairs, key=score)
     m = _normalize_market(best); m["ok"] = True; m["tokenAddress"] = token
-    # FDV/MC normalization if supplies available
-    total_supply = (ds.get("fdvInfo") or {}).get("totalSupply") or (ds.get("supply") or {}).get("total")
-    circ_supply = (ds.get("marketCapInfo") or {}).get("circulating") or (ds.get("supply") or {}).get("circulating")
-    price = m.get("price")
-    try:
-        if (m.get("fdv") in (None, 0)) and total_supply and price:
-            m["fdv"] = float(total_supply) * float(price)
-    except Exception:
-        pass
-    try:
-        if (m.get("mc") in (None, 0)) and circ_supply and price:
-            m["mc"] = float(circ_supply) * float(price)
-    except Exception:
-        pass
     return m
 
 # -------- Optional on-chain enrichment --------
@@ -370,42 +336,14 @@ def fetch_market(_pos: str | None = None, *, chain: str | None = None, token: st
         m = _ds_by_pair(ch, pair) if pair else _ds_by_token(ch, token)
         if m.get("ok"):
             _add_onchain_source(m)
-            # FDV/MC normalization if supplies available
-    total_supply = (ds.get("fdvInfo") or {}).get("totalSupply") or (ds.get("supply") or {}).get("total")
-    circ_supply = (ds.get("marketCapInfo") or {}).get("circulating") or (ds.get("supply") or {}).get("circulating")
-    price = m.get("price")
-    try:
-        if (m.get("fdv") in (None, 0)) and total_supply and price:
-            m["fdv"] = float(total_supply) * float(price)
-    except Exception:
-        pass
-    try:
-        if (m.get("mc") in (None, 0)) and circ_supply and price:
-            m["mc"] = float(circ_supply) * float(price)
-    except Exception:
-        pass
-    return m
+            return m
 
     # Token only -> best pair across chains
     if token and not pair:
         m = _ds_by_token(None, token)
         if m.get("ok"):
             _add_onchain_source(m)
-            # FDV/MC normalization if supplies available
-    total_supply = (ds.get("fdvInfo") or {}).get("totalSupply") or (ds.get("supply") or {}).get("total")
-    circ_supply = (ds.get("marketCapInfo") or {}).get("circulating") or (ds.get("supply") or {}).get("circulating")
-    price = m.get("price")
-    try:
-        if (m.get("fdv") in (None, 0)) and total_supply and price:
-            m["fdv"] = float(total_supply) * float(price)
-    except Exception:
-        pass
-    try:
-        if (m.get("mc") in (None, 0)) and circ_supply and price:
-            m["mc"] = float(circ_supply) * float(price)
-    except Exception:
-        pass
-    return m
+            return m
 
     # Pair only -> try across enabled chains
     if pair and not chain:
@@ -413,21 +351,7 @@ def fetch_market(_pos: str | None = None, *, chain: str | None = None, token: st
             m = _ds_by_pair(ch_short, pair)
             if m.get("ok"):
                 _add_onchain_source(m)
-                # FDV/MC normalization if supplies available
-    total_supply = (ds.get("fdvInfo") or {}).get("totalSupply") or (ds.get("supply") or {}).get("total")
-    circ_supply = (ds.get("marketCapInfo") or {}).get("circulating") or (ds.get("supply") or {}).get("circulating")
-    price = m.get("price")
-    try:
-        if (m.get("fdv") in (None, 0)) and total_supply and price:
-            m["fdv"] = float(total_supply) * float(price)
-    except Exception:
-        pass
-    try:
-        if (m.get("mc") in (None, 0)) and circ_supply and price:
-            m["mc"] = float(circ_supply) * float(price)
-    except Exception:
-        pass
-    return m
+                return m
 
     out = {"ok": False, "error": "no market found", "sources": [], "chain": chain or "—", "links": {}}
     if token: out["tokenAddress"] = token
