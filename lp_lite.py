@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 from typing import Dict, Any, Optional
 import requests
+LP_RPC_TIMEOUT_SEC = int(os.getenv('LP_RPC_TIMEOUT_SEC', '8'))
 
 SIG_TOTALSUPPLY = "0x18160ddd"
 SIG_BALANCEOF   = "0x70a08231"
@@ -100,7 +101,7 @@ def _rpc(chain: str) -> Optional[str]:
 
 def _eth_call(rpc: str, to: str, data: str) -> bytes:
     j = {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]}
-    r = requests.post(rpc, json=j, timeout=8)
+    r = requests.post(rpc, json=j, timeout=LP_RPC_TIMEOUT_SEC)
     try:
         res = r.json().get("result") or "0x"
     except Exception:
