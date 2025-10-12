@@ -1,26 +1,56 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+import os
 
-# --- Tunable thresholds (aligned with Why++ heuristics) ---
-LIQ_POSITIVE      = 25_000     # >= — healthy
-LIQ_LOW           = 10_000     # < — low
-LIQ_VERY_LOW      = 3_000      # < — very low
+# --- Default thresholds (fallbacks) ---
+DEFAULTS = {
+    "LIQ_POSITIVE": 25_000,
+    "LIQ_LOW": 10_000,
+    "LIQ_VERY_LOW": 3_000,
+    "VOL_ACTIVE": 50_000,
+    "VOL_THIN": 5_000,
+}
 
-VOL_ACTIVE        = 50_000     # >= — active
-VOL_THIN          = 5_000      # < — thin
+# --- Chain-aware baselines (can be tuned) ---
+# Rationale: on Ethereum depth requirements are materially higher than on BSC/Polygon.
+CHAIN_BASE = {
+    "eth":     {"LIQ_POSITIVE": 1_000_000, "LIQ_LOW": 200_000, "LIQ_VERY_LOW": 50_000,  "VOL_ACTIVE": 2_000_000, "VOL_THIN": 25_000},
+    "bsc":     {"LIQ_POSITIVE":   300_000, "LIQ_LOW":  60_000, "LIQ_VERY_LOW": 12_000,  "VOL_ACTIVE":   600_000, "VOL_THIN": 12_000},
+    "polygon": {"LIQ_POSITIVE":   200_000, "LIQ_LOW":  40_000, "LIQ_VERY_LOW":  8_000,  "VOL_ACTIVE":   400_000, "VOL_THIN":  8_000},
+    # other chains fall back to DEFAULTS
+}
 
-DELTA24_PUMP2     = 300        # > — parabolic
-DELTA24_PUMP1     = 100        # > — strong
-DELTA24_DUMP      = -70        # < — severe dump
-DELTA24_OK_LOW    = -30        # -30% .. +80% ~ moderate band
-DELTA24_OK_HIGH   = 80
+def _env_num(key: str, default: int) -> int:
+    try:
+        v = os.getenv(key)
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except Exception:
+        return default
 
-AGE_WEEK_D        = 7.0        # >= — established
-AGE_DAY_D         = 1.0        # < — <1d
-AGE_HOUR_D        = 1.0/24.0   # < — <1h
+def _short_chain(market: Dict[str, Any]) -> str:
+    ch = (market or {}).get("chain") or ""
+    ch = str(ch).strip().lower()
+    mp = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance smart chain":"bsc","polygon":"polygon","matic":"polygon",
+          "arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax",
+          "fantom":"ftm","ftm":"ftm","sol":"sol","solana":"sol"}
+    return mp.get(ch, ch)
 
-FDV_MC_RISK       = 5.0        # ratio > — watch
+def _thresholds(market: Dict[str, Any]) -> Dict[str, int]:
+    short = _short_chain(market)
+    base = dict(DEFAULTS)
+    base.update(CHAIN_BASE.get(short, {}))
+    # Env overrides (global and per-chain). Example: LIQ_POSITIVE_ETH=1500000
+    def maybe_override(name: str) -> None:
+        nonlocal base, short
+        base[name] = _env_num(name, base[name])
+        per_chain = _env_num(f"{name}_{short.upper()}", base[name])
+        base[name] = per_chain
+    for k in ("LIQ_POSITIVE","LIQ_LOW","LIQ_VERY_LOW","VOL_ACTIVE","VOL_THIN"):
+        maybe_override(k)
+    return base
 
 @dataclass
 class Verdict:
@@ -48,13 +78,15 @@ def _bucket(score: int) -> str:
 
 def compute_verdict(market: Dict[str, Any]) -> Verdict:
     """
-    Transparent, defensive risk scoring based on market signals.
+    Chain-aware risk scoring.
     Reasons include both risk flags and positives (to feed Why/Why++ consistently).
     """
     reasons: List[str] = []
     score = 0
 
     m = market or {}
+    thr = _thresholds(m)
+
     liq     = _to_float(m.get("liq"))
     vol24   = _to_float(m.get("vol24h"))
     delta24 = _to_float((m.get("priceChanges") or {}).get("h24"))
@@ -62,8 +94,12 @@ def compute_verdict(market: Dict[str, Any]) -> Verdict:
     age_d   = _to_float(m.get("ageDays"))
     fdv     = _to_float(m.get("fdv"))
     mc      = _to_float(m.get("mc"))
-    token   = m.get("tokenAddress")
     price   = _to_float(m.get("price"))
+
+    # Explicit "not tradable" / no-pool case
+    if (not m.get("ok")) and (m.get("pairAddress") in (None, "", "—")) and (liq is None) and (vol24 is None):
+        reasons.append("No pools (not tradable)")
+        return Verdict(score=80, level="HIGH", reasons=reasons)
 
     # Unknown / empty market
     if all(x is None for x in (liq, vol24, fdv, mc, price)):
@@ -74,11 +110,11 @@ def compute_verdict(market: Dict[str, Any]) -> Verdict:
     if liq is None:
         score += 10; reasons.append("Liquidity data unavailable")
     else:
-        if liq < LIQ_VERY_LOW:
+        if liq < thr["LIQ_VERY_LOW"]:
             score += 30; reasons.append(f"Very low liquidity (${liq:,.0f})")
-        elif liq < LIQ_LOW:
+        elif liq < thr["LIQ_LOW"]:
             score += 18; reasons.append(f"Low liquidity (${liq:,.0f})")
-        elif liq < LIQ_POSITIVE:
+        elif liq < thr["LIQ_POSITIVE"]:
             score += 8;  reasons.append(f"Modest liquidity (${liq:,.0f})")
         else:
             reasons.append(f"Healthy liquidity (${liq:,.0f})")
@@ -87,65 +123,40 @@ def compute_verdict(market: Dict[str, Any]) -> Verdict:
     if vol24 is None:
         score += 5; reasons.append("24h trading volume unavailable")
     else:
-        if vol24 < VOL_THIN:
+        if vol24 < thr["VOL_THIN"]:
             score += 12; reasons.append(f"Thin 24h volume (${vol24:,.0f})")
-        elif vol24 < VOL_ACTIVE:
+        elif vol24 < thr["VOL_ACTIVE"]:
             score += 5;  reasons.append(f"Modest 24h volume (${vol24:,.0f})")
         else:
             reasons.append(f"Active trading (${vol24:,.0f} / 24h)")
 
-    # Momentum / Volatility
+    # Price action
     if delta24 is not None:
-        if delta24 > DELTA24_PUMP2:
-            score += 22; reasons.append(f"Parabolic 24h pump (+{delta24:.0f}%)")
-        elif delta24 > DELTA24_PUMP1:
-            score += 12; reasons.append(f"Strong 24h pump (+{delta24:.0f}%)")
-        elif delta24 < DELTA24_DUMP:
-            score += 10; reasons.append(f"Severe 24h dump ({delta24:.0f}%)")
-        elif DELTA24_OK_LOW < delta24 < DELTA24_OK_HIGH:
+        if delta24 > 300:  # parabolic pumps
+            score += 12; reasons.append(f"Extreme 24h move ({delta24:+.0f}%)")
+        elif delta24 > 100:
+            score += 6;  reasons.append(f"Strong 24h move ({delta24:+.0f}%)")
+        elif delta24 < -70:
+            score += 10; reasons.append(f"Severe 24h drawdown ({delta24:+.0f}%)")
+        elif -30 < delta24 < 80:
             reasons.append(f"Moderate 24h move ({delta24:+.0f}%)")
 
-    if delta5m is not None and abs(delta5m) > 50:
-        score += 8; reasons.append(f"Extreme 5m volatility ({delta5m:+.0f}%)")
-
-    # Age
+    # Age risks/positives
     if age_d is None:
-        score += 8; reasons.append("Unknown pair age")
+        score += 6; reasons.append("Pair age unknown")
     else:
-        if age_d < AGE_HOUR_D:
-            score += 28; reasons.append("Pair is <1h old")
-        elif age_d < AGE_DAY_D:
-            score += 20; reasons.append("Pair is <1 day old")
-        elif age_d < AGE_WEEK_D:
-            score += 10; reasons.append("Pair is <1 week old")
-        else:
-            reasons.append(f"Established pair (~{age_d:.1f}d)")
+        if age_d < 1/24:
+            score += 18; reasons.append("Just launched (<1h)")
+        elif age_d < 1:
+            score += 12; reasons.append("Newly created pair (<1d)")
+        elif age_d >= 7:
+            reasons.append(f"Established >1 week (~{age_d:.1f}d)")
 
-    # FDV / MC
-    if fdv is not None and mc is not None and fdv > 0 and mc > 0:
-        ratio = fdv / mc
-        if ratio > FDV_MC_RISK:
-            score += 6; reasons.append(f"FDV/MC unusually high (~{ratio:.1f}x)")
-    else:
-        reasons.append("FDV/MC not available")
+    # FDV/MC sanity
+    if fdv is not None and mc is not None and mc > 0:
+        ratio = fdv/mc
+        if ratio > 5.0:
+            score += 3; reasons.append(f"FDV/MC high (~{ratio:.1f}x)")
 
-    # Token metadata
-    if not token:
-        score += 6; reasons.append("Token address not provided")
-
-    # Clamp & bucket
-    if score < 0: score = 0
-    if score > 100: score = 100
     level = _bucket(score)
-
-    if not reasons:
-        reasons.append("No specific risk flags")
-
-    # De-duplicate reasons preserving order
-    seen = set()
-    deduped: List[str] = []
-    for r in reasons:
-        if r and r not in seen:
-            deduped.append(r); seen.add(r)
-
-    return Verdict(score=score, level=level, reasons=deduped)
+    return Verdict(score=score, level=level, reasons=reasons)
