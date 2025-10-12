@@ -193,6 +193,7 @@ HSTS_SHOW_MAXAGE_ONLY = (os.getenv("HSTS_SHOW_MAXAGE_ONLY", "1") not in ("0","fa
 RDAP_DNSSEC_SHOW_UNSIGNED = (os.getenv("RDAP_DNSSEC_SHOW_UNSIGNED", "0") not in ("0","false","False",""))
 BADGE_WAYBACK = (os.getenv("BADGE_WAYBACK", "1") not in ("0","false","False",""))
 DOMAIN_EMOJI_BAR = (os.getenv("DOMAIN_EMOJI_BAR", "1") not in ("0","false","False",""))
+RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG")
 
 # Simple in-process TTL caches for network checks
 _CACHE_TTL = int(os.getenv("WEB_CACHE_TTL", "1800"))
