@@ -1,5 +1,6 @@
 import os, json, re, traceback, requests
 import time
+import importlib
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
@@ -553,6 +554,9 @@ def _diag_make(token_default="0x6982508145454Ce325dDbE47a25d4ec3d2311933"):
         "OP_RPC_URL_PRIMARY": _os.getenv("OP_RPC_URL_PRIMARY",""),
         "AVAX_RPC_URL_PRIMARY": _os.getenv("AVAX_RPC_URL_PRIMARY",""),
         "FTM_RPC_URL_PRIMARY": _os.getenv("FTM_RPC_URL_PRIMARY",""),
+        "RENDERERS_FILE_HINT": str(getattr(importlib.import_module("renderers"), "__file__", "n/a")),
+        "RENDERERS_TAG_HINT": str(getattr(importlib.import_module("renderers"), "RENDERER_BUILD_TAG", "n/a")),
+
         "PUBLIC_URL": _os.getenv("PUBLIC_URL") or _os.getenv("RENDER_EXTERNAL_URL") or "",
     }
     ds_direct = None; ds_proxy = None
@@ -630,6 +634,17 @@ def _format_diag(summary: dict) -> str:
         lines.append("\n*NEXT:*")
         for i,s in enumerate(steps,1):
             lines.append(f"{i}. {s}")
+
+# Show active renderers module
+try:
+    _mod = importlib.import_module("renderers")
+    _mod_file = getattr(_mod, "__file__", "n/a")
+    _mod_tag = getattr(_mod, "RENDERER_BUILD_TAG", "n/a")
+    lines.append(f"*Renderer file*: {_mod_file}")
+    lines.append(f"*Renderer tag*: {_mod_tag}")
+except Exception as _e:
+    lines.append(f"*Renderer import error*: {type(_e).__name__}: {_e}")
+    
     return "\n".join(lines)
 
 def _handle_diag_command(chat_id: int):
