@@ -59,6 +59,7 @@ def build_keyboard(chat_id: int,
 
         # Separate button: Open on DexScreener (if link available)
         ds_link = ds_url or (dex_url if (dex_url and "dexscreener.com" in dex_url.lower()) else None)
+        if dex_url and "dexscreener.com" in (dex_url or '').lower(): dex_url = None
         if ds_link:
             rows.append([{ "text": "🟢 Open on DexScreener", "url": ds_link }])
 
@@ -84,6 +85,7 @@ def build_keyboard(chat_id: int,
         if nav: rows.append(nav)
 
         ds_link = ds_url or (dex_url if (dex_url and "dexscreener.com" in dex_url.lower()) else None)
+        if dex_url and "dexscreener.com" in (dex_url or '').lower(): dex_url = None
         if ds_link:
             rows.append([{ "text": "🟢 Open on DexScreener", "url": ds_link }])
 
