@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import datetime as _dt
 from typing import Any, Dict, Optional, List
+import re as _re
 
 # ---- helpers ----
 def _fmt_num(v: Optional[float], prefix: str = "", none: str = "—") -> str:
@@ -168,19 +169,15 @@ def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str
     sources = _get(market, "sources") or ([src] if src else [])
     src_line = ", ".join([str(s) for s in sources if s]) or str(src)
 
-    return (
-        f"*Metridex QuickScan — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})\\nimport re as _re
-def _human_status(s: str) -> str:
-    if not isinstance(s, str):
-        return str(s)
-    s = s.replace("_", " ").replace("-", " ")
-    s = _re.sub(r'(?<!^)([A-Z])', r' \1', s)  # split CamelCase
-    return s.lower()\nn"
-        f"`{chain}`  •  Price: *{price}*\n"
-        f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}\n"
-        f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}\n"
-        f"Age: {age}  •  Source: {src_line}  •  as of {asof}"
-    ).replace("\n", "\n")
+    header = f"*Metridex QuickScan — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})"
+    lines = [
+        header,
+        f"`{chain}`  •  Price: *{price}*",
+        f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}",
+        f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}",
+        f"Age: {age}  •  Source: {src_line}  •  as of {asof}",
+    ]
+    return "\n".join(lines)
 
 def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
