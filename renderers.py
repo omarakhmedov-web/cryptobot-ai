@@ -263,10 +263,49 @@ def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
 
 def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
     p = info or {}
-    burned = bool(p.get("burned")) or (str(p.get("status") or "").lower() == "burned")
+    status_raw = str(p.get("status") or "").lower()
+    burned_flag = bool(p.get("burned")) or status_raw in ("burned","fully-burned")
+    burned_pct = p.get("burnedPct")
+    locked_pct = p.get("lockedPct")
+    lockers = p.get("lockers") or []
     until = p.get("until") or "—"
-    if burned:
-        return "*LP lock (lite)*\n• Burned (LP to 0x…dead)"
+    addr = p.get("lpAddress") or "—"
+
+    def fmt_pct(v):
+        try:
+            return f"{float(v):.2f}%"
+        except Exception:
+            return "—"
+
+    lines = ["*LP lock (lite)*"]
+    if burned_flag or (isinstance(burned_pct,(int,float)) and burned_pct >= 95):
+        bp = fmt_pct(burned_pct) if burned_pct is not None else "≥95%"
+        lines.append(f"• Burned: {bp} (LP → 0x…dead)")
+    elif isinstance(burned_pct,(int,float)):
+        # status buckets
+        if burned_pct >= 50:
+            lines.append(f"• Mostly burned: {fmt_pct(burned_pct)}")
+        elif burned_pct >= 5:
+            lines.append(f"• Partially burned: {fmt_pct(burned_pct)}")
+        else:
+            lines.append(f"• Burned: {fmt_pct(burned_pct)}")
+    else:
+        lines.append("• Burned: —")
+
+    if isinstance(locked_pct,(int,float)) and locked_pct > 0:
+        lines.append(f"• Locked via lockers: {fmt_pct(locked_pct)}")
+
+    if lockers:
+        for lk in lockers[:5]:
+            addr_short = (lk.get("locker","") or "—")
+            bal = lk.get("balance")
+            pct = lk.get("pct")
+            try:
+                bal_s = f"{int(bal):,}" if isinstance(bal,int) else str(bal)
+            except Exception:
+                bal_s = str(bal)
+            lines.append(f"  · {addr_short} — {bal_s} ({fmt_pct(pct)})")
     if until not in ("—", None, ""):
-        return "*LP lock (lite)*\n• Until: " + str(until)
-    return "*LP lock (lite)*\n• Unknown / Not detected"
+        lines.append(f"• Unlocks: {until}")
+    lines.append(f"• LP token: `{addr}`")
+    return "\n".join(lines)
