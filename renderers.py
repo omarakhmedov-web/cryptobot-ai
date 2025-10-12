@@ -79,19 +79,15 @@ def _fmt_time(ts_ms: Optional[int]) -> str:
         return "—"
 
 def _score(verdict) -> str:
-    # Unified score presentation: clamp 0→15 when level reads LOW, to keep UI consistent.
     try:
         v = getattr(verdict, "score", None) or _get(verdict, "score", default=None)
     except Exception:
         v = _get(verdict, "score", default=None)
-    lvl = (_level(verdict) or "").lower()
-    if (v == 0) and lvl.startswith("low"):
-        return "15"
     if v in (None, "—", ""):
+        lvl = (_level(verdict) or "").lower()
         if lvl.startswith("low"): return "15"
         if lvl.startswith("med"): return "50"
-        if lvl.startswith("high"): return "75"
-        if lvl.startswith("critical"): return "90"
+        if lvl.startswith("high"): return "85"
         return "—"
     return f"{v}"
 
@@ -211,12 +207,42 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     parts.append(f"*Snapshot*\n• Price: {price}  ({chg5}, {chg1}, {chg24})\n• FDV: {fdv}  • MC: {mc}\n• Liquidity: {liq}  • 24h Volume: {vol}\n• Age: {age}  • Source: {src_}\n• As of: {asof}")
     parts.append(f"*Token*\n• Chain: `{chain}`\n• Address: `{token}`")
     parts.append(f"*Pair*\n• Address: `{pair_addr}`\n• Symbol: {pair}")
+    # RDAP / WHOIS (optional)
+try:
+    _enable_rdap = os.getenv("ENABLE_RDAP", "1").lower() in ("1","true","yes")
+except Exception:
+    _enable_rdap = True
+if _enable_rdap and l_site and l_site != "—":
+    try:
+        from rdap_client import lookup as _rdap_lookup
+    except Exception:
+        _rdap_lookup = None
+    if _rdap_lookup:
+        try:
+            _rd = _rdap_lookup(l_site)
+        except Exception:
+            _rd = None
+        if _rd:
+            _rd_lines = ["*WHOIS/RDAP*"]
+            if _rd.get("registrar"): _rd_lines.append(f"• Registrar: {_rd['registrar']}")
+            if _rd.get("created"):   _rd_lines.append(f"• Created: {_rd['created']}")
+            if _rd.get("expires"):   _rd_lines.append(f"• Expires: {_rd['expires']}")
+            if _rd.get("age_days") is not None: _rd_lines.append(f"• Domain age: {_rd['age_days']} d")
+            if _rd.get("country"):   _rd_lines.append(f"• Country: {_rd['country']}")
+            if _rd.get("flags"):     _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
+            parts.append("
+".join(_rd_lines))
+
+# Links (text) — hidden by default, we have buttons
+_show_links = os.getenv("SHOW_LINKS_IN_DETAILS", "0").lower() in ("1","true","yes")
+if _show_links:
     ll = ["*Links*"]
     if l_dex and l_dex != "—": ll.append(f"• DEX: {l_dex}")
     if (links or {}).get("dexscreener"): ll.append(f"• DexScreener: {(links or {}).get('dexscreener')}")
     if l_scan and l_scan != "—": ll.append(f"• Scan: {l_scan}")
     if l_site and l_site != "—": ll.append(f"• Site: {l_site}")
-    parts.append("\n".join(ll))
+    parts.append("
+".join(ll))
     # Web intel summary if provided via ctx['webintel']
     web = (ctx or {}).get('webintel') or {}
     if web:
