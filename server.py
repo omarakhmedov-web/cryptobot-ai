@@ -203,7 +203,12 @@ def on_message(msg):
         return jsonify({"ok": True})
 
     # QuickScan flow
-    market = fetch_market(text) or {}
+    try:
+        market = fetch_market(text) or {}
+    except Exception as e:
+        print('QUICKSCAN ERROR (fetch_market)', e, traceback.format_exc())
+        market = {}
+
     if not market.get("ok"):
         if re.match(r"^0x[a-fA-F0-9]{64}$", text):
             pass
