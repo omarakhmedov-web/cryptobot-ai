@@ -1,0 +1,26 @@
+name: Apply age fallback (safe)
+on:
+  workflow_dispatch:
+    inputs:
+      dex_client_path:
+        description: 'Path to dex_client.py (e.g., dex_client.py or src/metridex/dex_client.py)'
+        required: true
+        default: 'dex_client.py'
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run patcher
+        run: python apply_age_fallback_safe.py "${{ github.event.inputs.dex_client_path }}"
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: make age fallback optional & safe"
+          title: "Apply optional age fallback to dex_client"
+          body: "Auto-applied optional on-chain age fallback (safe import, helper, injection in success paths)."
+          branch: chore/age-fallback
