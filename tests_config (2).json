@@ -1,0 +1,56 @@
+{
+  "cases": [
+    {
+      "name": "PEPE (ETH)",
+      "file": "PEPE_WETH_Report_2025-10-12_1709.html",
+      "expected": {
+        "score": "15",
+        "chain": "Ethereum",
+        "pair_contains": "PEPE/WETH",
+        "dex_domain": "app.uniswap.org",
+        "scan_domain": "etherscan.io",
+        "ds_domain": "dexscreener.com",
+        "age_required": true
+      }
+    },
+    {
+      "name": "QUICK (Polygon)",
+      "file": "QUICK_WETH_Report_2025-10-12_1711.html",
+      "expected": {
+        "score": "20",
+        "chain": "Polygon",
+        "pair_contains": "QUICK/WETH",
+        "dex_domain": "quickswap.exchange",
+        "scan_domain": "polygonscan.com",
+        "ds_domain": "dexscreener.com",
+        "age_required": true
+      }
+    },
+    {
+      "name": "CAKE (BSC)",
+      "file": "Cake_WBNB_Report_2025-10-12_1711.html",
+      "expected": {
+        "score": "6",
+        "chain": "BSC",
+        "pair_contains": "Cake/WBNB",
+        "dex_domain": "pancakeswap.finance",
+        "scan_domain": "bscscan.com",
+        "ds_domain": "dexscreener.com",
+        "age_required": false
+      }
+    },
+    {
+      "name": "Unknown / No pools",
+      "file": "Metridex_Report_2025-10-12_1712.html",
+      "expected": {
+        "score": "80",
+        "chain": "—",
+        "pair_contains": "—",
+        "dex_domain": null,
+        "scan_domain": null,
+        "ds_domain": null,
+        "age_required": false
+      }
+    }
+  ]
+}
