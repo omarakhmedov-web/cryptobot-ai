@@ -110,6 +110,7 @@ def _pick_color(verdict, market):
     except Exception:
         lvl = (verdict or {}).get("level")
     lvl = (lvl or "").upper()
+    if ("SCAM" in lvl) or ("MALICIOUS" in lvl) or ("RUG" in lvl) or ("FRAUD" in lvl): return "🔴"
     if lvl.startswith("HIGH"): return "🔴"
     if lvl.startswith("MED"):  return "🟡"
     if lvl.startswith("LOW"):  return "🟢"
@@ -165,6 +166,8 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     l_dex  = (links or {}).get("dex") or "—"
     l_scan = (links or {}).get("scan") or "—"
     l_site = (links or {}).get("site") or "—"
+    if isinstance(l_site, dict):
+        l_site = l_site.get("url") or l_site.get("label") or "—"
 
     parts = []
     parts.append(f"*Details — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})")
