@@ -45,6 +45,8 @@ TEAMS_URL = os.getenv("TEAMS_URL", "https://metridex.com/upgrade/teams")
 FREE_DAILY_SCANS = int(os.getenv("FREE_DAILY_SCANS", "2"))
 HINT_CLICKABLE_LINKS = os.getenv("HINT_CLICKABLE_LINKS", "0") == "1"
 
+CALLBACK_DEDUP_TTL_SEC = int(os.getenv("CALLBACK_DEDUP_TTL_SEC", "30"))
+
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
 
@@ -320,7 +322,7 @@ def on_callback(cb):
         if cache_get(idem_key):
             answer_callback_query(cb_id, "Please wait…", False)
             return jsonify({"ok": True})
-        cache_set(idem_key, "1", ttl_sec=30)
+        cache_set(idem_key, "1", ttl_sec=CALLBACK_DEDUP_TTL_SEC)
 
     bundle = load_bundle(chat_id, orig_msg_id) or {}
     links = bundle.get("links")
@@ -809,6 +811,15 @@ pre {{ white-space:pre-wrap; }}
 def _build_html_report_safe(bundle: dict) -> bytes:
     try:
         def _s(x): return str(x) if x is not None else "—"
+        def _fmt_time(v):
+            try:
+                ts = int(v)
+                if ts < 10**12:
+                    ts *= 1000
+                from datetime import datetime as _dt
+                return _dt.utcfromtimestamp(ts/1000.0).strftime("%Y-%m-%d %H:%M UTC")
+            except Exception:
+                return "—"
         def _fmt_num(v, prefix="$"):
             try:
                 n = float(v)
@@ -844,7 +855,7 @@ def _build_html_report_safe(bundle: dict) -> bytes:
         chg5 = _fmt_pct((m.get("priceChanges") or {}).get("m5"))
         chg1 = _fmt_pct((m.get("priceChanges") or {}).get("h1"))
         chg24= _fmt_pct((m.get("priceChanges") or {}).get("h24"))
-        asof = _s(m.get("asof"))
+        asof = _fmt_time(m.get("asof"))
         score = _s((v.get("score") if isinstance(v, dict) else getattr(v, "score", None)))
 
         html = (
@@ -864,7 +875,7 @@ def _build_html_report_safe(bundle: dict) -> bytes:
             "<div>FDV: " + fdv + "</div><div>MC: " + mc + "</div>"
             "<div>Liquidity: " + liq + "</div><div>Vol 24h: " + vol + "</div>"
             "<div>Δ5m: " + chg5 + "</div><div>Δ1h: " + chg1 + "</div>"
-            "<div>Δ24h: " + chg24 + "</div><div>Asof: " + asof + "</div>"
+            "<div>Δ24h: " + chg24 + "</div><div>As of: " + asof + "</div>"
             "</div>"
             "<div class='block'><pre>" + str(why)  + "</pre></div>"
             "<div class='block'><pre>" + str(whyp) + "</pre></div>"
