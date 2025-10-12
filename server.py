@@ -6,6 +6,7 @@ from limits import can_scan, register_scan
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
 from cache import cache_get, cache_set
+from webintel import analyze_website
 try:
     from dex_client import fetch_market
 except Exception as _e:
@@ -250,6 +251,11 @@ def on_message(msg):
         lp = "LP lock: unknown"
 
     links = (market.get("links") or {})
+    web = {}
+    try:
+        web = analyze_website(links.get("site"))
+    except Exception:
+        web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
     bundle = {
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
         "reasons": list(getattr(verdict, "reasons", []) or []),
@@ -262,7 +268,7 @@ def on_message(msg):
             "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
         },
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "site": links.get("site")},
-        "details": details, "why": why, "whypp": whypp, "lp": lp
+        "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
     }
 
     sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links, ctx="quick"))
@@ -303,12 +309,13 @@ def on_callback(cb):
 
     
     # Idempotency: throttle only *heavy* actions for a short period
-    heavy_actions = {"DETAILS", "ONCHAIN", "REPORT", "REPORT_PDF"}
+    heavy_actions = {"DETAILS", "ONCHAIN", "REPORT", "REPORT_PDF", "WHY", "WHYPP", "LP"}
+    idem_key = f"cb:{chat_id}:{orig_msg_id}:{action}"
     if action in heavy_actions:
-        if cache_get(data):
-            answer_callback_query(cb_id, "Please wait...", False)
+        if cache_get(idem_key):
+            answer_callback_query(cb_id, "Please wait…", False)
             return jsonify({"ok": True})
-        cache_set(data, "1", ttl_sec=5)
+        cache_set(idem_key, "1", ttl_sec=30)
 
     bundle = load_bundle(chat_id, orig_msg_id) or {}
     links = bundle.get("links")
@@ -362,13 +369,13 @@ def on_callback(cb):
             fname = f"{safe_pair}_Report_{ts_str}.html"
 
             html_bytes = _build_html_report(bundle)
-            send_document(chat_id, fname, html_bytes, caption='Metridex QuickScan report', content_type='text/html')
+            send_document(chat_id, fname, html_bytes, caption='Metridex QuickScan report', content_type='text/html; charset=utf-8')
             answer_callback_query(cb_id, 'Report exported.', False)
         except Exception as e:
             try:
                 import json as _json
                 html = '<!doctype html><html><body><pre>' + _json.dumps(bundle, ensure_ascii=False, indent=2) + '</pre></body></html>'
-                send_document(chat_id, 'Metridex_Report.html', html.encode('utf-8'), caption='Metridex QuickScan report', content_type='text/html')
+                send_document(chat_id, 'Metridex_Report.html', html.encode('utf-8'), caption='Metridex QuickScan report', content_type='text/html; charset=utf-8')
                 answer_callback_query(cb_id, 'Report exported (fallback).', False)
             except Exception as e2:
                 answer_callback_query(cb_id, f'Export failed: {e2}', True)
@@ -394,51 +401,61 @@ def on_callback(cb):
                 answer_callback_query(cb_id, "PDF exported.", False)
         except Exception as e:
             answer_callback_query(cb_id, f"PDF export failed: {e}", True)
+    
+
     elif action == "ONCHAIN":
-        # On-chain details via live inspect (hardened)
+        # On-chain details via live inspect (hardened) with guard on unknown chain
         mkt = (bundle.get('market') if isinstance(bundle, dict) else None) or {}
-        chain_name = (mkt.get('chain') or '').lower()
-        _map = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance smart chain":"bsc","polygon":"polygon","matic":"polygon",
-                "arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax","fantom":"ftm","ftm":"ftm"}
-        chain_short = _map.get(chain_name, chain_name or "eth")
-        token_addr = mkt.get('tokenAddress')
-        pair_addr = mkt.get('pairAddress')
-        try:
-            oc = onchain_inspector.inspect_token(chain_short, token_addr, pair_addr)
-        except Exception as _e:
-            oc = {'ok': False, 'error': str(_e)}
-        if isinstance(bundle, dict):
-            bundle['onchain'] = oc
-        ok = bool(oc.get('ok'))
-        def _s(x):
-            try:
-                return str(x) if x is not None else '—'
-            except Exception:
-                return '—'
-        owner_raw = oc.get('owner')
-        owner = owner_raw.lower() if isinstance(owner_raw, str) else ''
-        renounced = oc.get('renounced')
-        if renounced in (None, '—'):
-            if owner in ('0x0000000000000000000000000000000000000000','0x000000000000000000000000000000000000dead'):
-                renounced = True
-        token_name = _s(oc.get('token_name') or oc.get('token') or mkt.get('pairSymbol'))
-        paused = _s(oc.get('paused'))
-        upgradeable = _s(oc.get('upgradeable'))
-        maxTx = _s(oc.get('maxTx'))
-        maxWallet = _s(oc.get('maxWallet'))
-        if not ok:
-            text = 'On-chain\n' + _s(oc.get('error') or 'inspection failed')
+        chain_name = (mkt.get('chain') or '').strip().lower()
+        if not chain_name:
+            send_message(chat_id, "On-chain\nUnsupported/unknown chain", reply_markup=None)
+            answer_callback_query(cb_id, "On-chain not available", False)
         else:
-            text = (
-                'On-chain\n'
-                f'token: {token_name}\n'
-                f'owner: {_s(owner_raw)}\n'
-                f'renounced: {renounced}\n'
-                f'paused: {paused}  upgradeable: {upgradeable}\n'
-                f'maxTx: {maxTx}  maxWallet: {maxWallet}'
-            )
-        send_message(chat_id, text, reply_markup=None)
-        answer_callback_query(cb_id, 'On-chain ready.', False)
+            _map = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance smart chain":"bsc","polygon":"polygon","matic":"polygon",
+                    "arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax","fantom":"ftm","ftm":"ftm"}
+            chain_short = _map.get(chain_name, chain_name)
+            token_addr = mkt.get('tokenAddress')
+            pair_addr = mkt.get('pairAddress')
+            if chain_short not in _map.values():
+                send_message(chat_id, "On-chain\nUnsupported/unknown chain", reply_markup=None)
+                answer_callback_query(cb_id, "On-chain not available", False)
+            else:
+                try:
+                    oc = onchain_inspector.inspect_token(chain_short, token_addr, pair_addr)
+                except Exception as _e:
+                    oc = {'ok': False, 'error': str(_e)}
+                if isinstance(bundle, dict):
+                    bundle['onchain'] = oc
+                ok = bool(oc.get('ok'))
+                def _s(x):
+                    try:
+                        return str(x) if x is not None else '—'
+                    except Exception:
+                        return '—'
+                owner_raw = oc.get('owner')
+                owner = owner_raw.lower() if isinstance(owner_raw, str) else ''
+                renounced = oc.get('renounced')
+                if renounced in (None, '—'):
+                    if owner in ('0x0000000000000000000000000000000000000000','0x000000000000000000000000000000000000dead'):
+                        renounced = True
+                token_name = _s(oc.get('token_name') or oc.get('token') or mkt.get('pairSymbol'))
+                paused = _s(oc.get('paused'))
+                upgradeable = _s(oc.get('upgradeable'))
+                maxTx = _s(oc.get('maxTx'))
+                maxWallet = _s(oc.get('maxWallet'))
+                if not ok:
+                    text = 'On-chain\n' + _s(oc.get('error') or 'inspection failed')
+                else:
+                    text = (
+                        'On-chain\n'
+                        f'token: {token_name}\n'
+                        f'owner: {_s(owner_raw)}\n'
+                        f'renounced: {renounced}\n'
+                        f'paused: {paused}  upgradeable: {upgradeable}\n'
+                        f'maxTx: {maxTx}  maxWallet: {maxWallet}'
+                    )
+                send_message(chat_id, text, reply_markup=None)
+                answer_callback_query(cb_id, 'On-chain ready.', False)
 
     elif action == "COPY_CA":
         mkt = (bundle.get("market") or {})
@@ -641,226 +658,148 @@ if __name__ == "__main__":
 
 
 def _build_html_report(bundle: dict) -> bytes:
-    """
-    Premium dark+gold HTML report without any logo.
-    Copy CA button is shown alongside Open in DEX / Open in Scan / Website.
-    """
+    """Premium dark+gold HTML report (no logos, no markdown)."""
     import html, datetime as _dt
     b = bundle or {}
     v = b.get("verdict") or {}
     m = b.get("market") or {}
     links = b.get("links") or {}
+    web = b.get("webintel") or {}
 
-    def g(d, *ks, default="—"):
-        cur = d
+    def g(d, *ks, default="n/a"):
+        cur = d or {}
         for k in ks:
             if not isinstance(cur, dict):
                 return default
             cur = cur.get(k)
         return default if cur is None else cur
 
+    def fmt_money(x):
+        try:
+            n = float(x)
+        except Exception:
+            return '<span class="muted">n/a</span>'
+        a = abs(n)
+        if a >= 1_000_000_000: s = f"${n/1_000_000_000:.2f}B"
+        elif a >= 1_000_000:   s = f"${n/1_000_000:.2f}M"
+        elif a >= 1_000:       s = f"${n/1_000:.2f}K"
+        else:                  s = f"${n:.6f}" if a < 1 else f"${n:.2f}"
+        return s
+
+    def fmt_pct(x):
+        try:
+            n = float(x)
+            arrow = "▲" if n>0 else ("▼" if n<0 else "•")
+            return f"{arrow} {n:+.2f}%"
+        except Exception:
+            return '<span class="muted">n/a</span>'
+
+    def fmt_chain(c):
+        c = (c or "").strip().lower()
+        mp = {"ethereum":"Ethereum","eth":"Ethereum","bsc":"BSC","binance smart chain":"BSC","polygon":"Polygon","matic":"Polygon",
+              "arbitrum":"Arbitrum","arb":"Arbitrum","optimism":"Optimism","op":"Optimism","base":"Base","avalanche":"Avalanche",
+              "avax":"Avalanche","fantom":"Fantom","ftm":"Fantom","sol":"Solana","solana":"Solana"}
+        return mp.get(c, c.capitalize() if c else "—")
+
+    def fmt_time_ms(ts):
+        try:
+            ts = int(ts)
+            if ts < 10**12: ts *= 1000
+            return _dt.datetime.utcfromtimestamp(ts/1000.0).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            return "—"
+
     pair  = g(m, "pairSymbol", default="—")
-    chain = g(m, "chain", default="—")
-    price = g(m, "price", default="—")
+    chain = fmt_chain(g(m, "chain", default="—"))
+    price = fmt_money(g(m, "price", default=None))
     fdv   = g(m, "fdv", default=None)
     mc    = g(m, "mc", default=None)
     liq   = g(m, "liq", default=None) or g(m, "liquidityUSD", default=None)
     vol24 = g(m, "vol24h", default=None) or g(m, "volume24hUSD", default=None)
-    ch5   = (g(m, "priceChanges", default={}) or {}).get("m5")
-    ch1   = (g(m, "priceChanges", default={}) or {}).get("h1")
-    ch24  = (g(m, "priceChanges", default={}) or {}).get("h24")
+    ch5   = g(m, "priceChanges","m5", default=None)
+    ch1   = g(m, "priceChanges","h1", default=None)
+    ch24  = g(m, "priceChanges","h24", default=None)
     token = g(m, "tokenAddress", default="—")
-    asof_ms = g(m, "asof", default=None)
+    asof  = fmt_time_ms(g(m, "asof", default=None))
 
-    def money(x):
-        try:
-            n = float(x)
-        except Exception:
-            return "—"
-        a = abs(n)
-        if a >= 1_000_000_000: return f"${n/1_000_000_000:.2f}B"
-        if a >= 1_000_000:     return f"${n/1_000_000:.2f}M"
-        if a >= 1_000:         return f"${n/1_000:.2f}K"
-        return f"${n:.6f}" if a < 1 else f"${n:.2f}"
+    whois = g(web, "whois", default={})
+    ssl   = g(web, "ssl", default={})
+    way   = g(web, "wayback", default={})
 
-    def pct(x):
-        try:
-            n = float(x)
-            if n > 0:  return f"▲ {n:+.2f}%"
-            if n < 0:  return f"▼ {n:+.2f}%"
-            return f"• {n:+.2f}%"
-        except Exception:
-            return "—"
+    kpi_fdv = fmt_money(fdv) if fdv not in (None,"n/a") else '<span class="muted">n/a</span>'
+    kpi_mc  = fmt_money(mc)  if mc  not in (None,"n/a") else '<span class="muted">n/a</span>'
+    kpi_liq = fmt_money(liq) if liq not in (None,"n/a") else '<span class="muted">n/a</span>'
+    kpi_vol = fmt_money(vol24) if vol24 not in (None,"n/a") else '<span class="muted">n/a</span>'
 
-    if isinstance(asof_ms, (int, float)):
-        try:
-            asof_s = _dt.datetime.utcfromtimestamp(int(asof_ms)/1000.0).strftime("%Y-%m-%d %H:%M UTC")
-        except Exception:
-            asof_s = "—"
-    else:
-        asof_s = "—"
+    why = b.get("why") or "Why: n/a"
+    whypp = b.get("whypp") or "Why++: n/a"
+    lp = b.get("lp") or "LP: n/a"
 
-    level = ( (v.get("level") if isinstance(v, dict) else getattr(v, "level", "")) or "" ).upper()
-    if "HIGH" in level:    badge = '<span class="badge high">HIGH</span>'
-    elif "MED" in level:   badge = '<span class="badge med">MEDIUM</span>'
-    elif "LOW" in level:   badge = '<span class="badge low">LOW</span>'
-    elif "UNKNOWN" in level: badge = '<span class="badge unk">UNKNOWN</span>'
-    else: badge = '<span class="badge unk">—</span>'
-
-    dex_link  = html.escape(g(links, "dex", default="#"))
-    scan_link = html.escape(g(links, "scan", default="#"))
-    site_link = html.escape(g(links, "site", default="—"))
-    token_html = html.escape(str(token))
-
-    style = """
-<meta charset=\"utf-8\">
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">
-<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>
-<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap\" rel=\"stylesheet\">
+    html_doc = f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{html.escape(str(pair))} — Metridex QuickScan</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  :root{
-    --bg:#0a0a0c; --card:#111217; --muted:#b8bbc7; --text:#e9e9ee;
-    --gold:#d4af37; --ok:#2fd178; --med:#e5c04d; --bad:#ff5d5d; --unk:#9aa0ab;
-    --mono:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;
-    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,system-ui,sans-serif;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;padding:32px;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);}
-  .wrap{max-width:980px;margin:0 auto}
-  h1{font-size:20px;margin:0 0 2px 0;font-weight:600;letter-spacing:.1px}
-  .sub{color:var(--muted);font-size:12px}
-  .badge{display:inline-block;padding:3px 8px;border-radius:14px;margin-left:8px;font-weight:600;font-size:11px;letter-spacing:.3px}
-  .badge.low{background:rgba(47,209,120,.12);color:var(--ok)}
-  .badge.med{background:rgba(229,192,77,.14);color:var(--med)}
-  .badge.high{background:rgba(255,93,93,.14);color:var(--bad)}
-  .badge.unk{background:rgba(154,160,171,.14);color:var(--unk)}
-  .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0 22px}
-  .kpi{background:var(--card);border-radius:14px;padding:14px 14px 12px;box-shadow:0 1px 0 #1c1e2a inset,0 8px 24px rgba(0,0,0,.3)}
-  .kpi .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-  .kpi .v{font-size:16px;font-weight:600}
-  .card{background:var(--card);border-radius:16px;padding:16px 16px;box-shadow:0 1px 0 #1c1e2a inset,0 10px 32px rgba(0,0,0,.38);margin-bottom:14px}
-  .links{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}
-  a{color:var(--gold);text-decoration:none} a:hover{text-decoration:underline}
-  footer{margin-top:26px;color:var(--muted);font-size:12px}
+body {{ background:#0b0b0f; color:#e7e7ea; font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif; margin:0; }}
+.wrap {{ max-width:1024px; margin:0 auto; padding:24px; }}
+h1 {{ font-weight:600; font-size:20px; margin:0 0 8px; }}
+h2 {{ font-weight:600; font-size:16px; margin:24px 0 8px; color:#f0d98a; }}
+.grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }}
+.card {{ background:#121218; border:1px solid #1f1f27; border-radius:12px; padding:16px; }}
+.muted {{ color:#9aa0a6; }}
+.badge {{ padding:2px 8px; border-radius:999px; background:#1f1f27; border:1px solid #2b2b34; font-size:12px; }}
+.row {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+.kv b {{ color:#fff; }}
+.btns a {{ color:#111; background:#f0d98a; padding:10px 14px; border-radius:10px; text-decoration:none; display:inline-block; }}
+.btns a.secondary {{ background:#2b2b34; color:#e7e7ea; }}
+pre {{ white-space:pre-wrap; }}
 </style>
-<script>
-  function copyCA(txt){
-    try{
-      navigator.clipboard.writeText(txt).then(()=>{ alert('Contract address copied'); });
-    }catch(e){ alert(txt); }
-  }
-</script>
-"""
-    head = f"<!doctype html><html><head>{style}</head><body><div class='wrap'>"
-    title = f"<h1>{html.escape(str(pair))} {badge}</h1><div class='sub'>{html.escape(str(chain))} • As of {asof_s}</div>"
+</head>
+<body>
+<div class="wrap">
+  <h1>{html.escape(str(pair))} <span class="badge">{html.escape(chain)}</span></h1>
+  <div class="row muted">as of {html.escape(asof)}</div>
+  <div class="grid" style="margin-top:12px">
+    <div class="card"><div class="kv"><div class="muted">Price</div><b>{price}</b></div><div class="muted">{fmt_pct(ch5)} • {fmt_pct(ch1)} • {fmt_pct(ch24)}</div></div>
+    <div class="card"><div class="kv"><div class="muted">FDV</div><b>{kpi_fdv}</b></div></div>
+    <div class="card"><div class="kv"><div class="muted">Market Cap</div><b>{kpi_mc}</b></div></div>
+    <div class="card"><div class="kv"><div class="muted">Liquidity / 24h Vol</div><b>{kpi_liq}</b><div class="muted">{kpi_vol}</div></div></div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <div class="row btns">
+      {'<a href="'+html.escape(links.get('dex'))+'" target="_blank">🟢 Open in DEX</a>' if links.get('dex') else ''}
+      {'<a href="'+html.escape(links.get('scan'))+'" target="_blank">🔍 Open in Scan</a>' if links.get('scan') else ''}
+      {'<a href="'+html.escape(links.get('site'))+'" target="_blank" class="secondary">🌐 Website</a>' if links.get('site') else ''}
+    </div>
+    <div class="row" style="margin-top:8px"><span class="muted">Contract:</span> <code>{html.escape(str(token))}</code></div>
+  </div>
 
-    grid = f"""
-<div class="grid">
-  <div class="kpi"><div class="k">Price</div><div class="v">{html.escape(str(price))}</div></div>
-  <div class="kpi"><div class="k">FDV</div><div class="v">{money(fdv)}</div></div>
-  <div class="kpi"><div class="k">MC</div><div class="v">{money(mc)}</div></div>
-  <div class="kpi"><div class="k">Liquidity</div><div class="v">{money(liq)}</div></div>
-  <div class="kpi"><div class="k">Volume 24h</div><div class="v">{money(vol24)}</div></div>
-  <div class="kpi"><div class="k">Δ 5m</div><div class="v">{pct(ch5)}</div></div>
-  <div class="kpi"><div class="k">Δ 1h</div><div class="v">{pct(ch1)}</div></div>
-  <div class="kpi"><div class="k">Δ 24h</div><div class="v">{pct(ch24)}</div></div>
+  <h2>Why</h2>
+  <div class="card"><pre>{html.escape(why.replace('*',''))}</pre></div>
+
+  <h2>Why++</h2>
+  <div class="card"><pre>{html.escape(whypp.replace('*',''))}</pre></div>
+
+  <h2>LP lock (lite)</h2>
+  <div class="card"><pre>{html.escape(lp.replace('*',''))}</pre></div>
+
+  <h2>Website intel</h2>
+  <div class="card">
+    <div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div><div class="muted">WHOIS Created</div><b>{html.escape(str(g(whois,'created', default='n/a')))}</b></div>
+      <div><div class="muted">Registrar</div><b>{html.escape(str(g(whois,'registrar', default='n/a')))}</b></div>
+      <div><div class="muted">Wayback first</div><b>{html.escape(str(g(way,'first', default='n/a')))}</b></div>
+    </div>
+    <div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr)); margin-top:8px">
+      <div><div class="muted">SSL OK</div><b>{html.escape(str(g(ssl,'ok', default='n/a')))}</b></div>
+      <div><div class="muted">SSL Expires</div><b>{html.escape(str(g(ssl,'expires', default='n/a')))}</b></div>
+      <div><div class="muted">SSL Issuer</div><b>{html.escape(str(g(ssl,'issuer', default='n/a')))}</b></div>
+    </div>
+  </div>
 </div>
-"""
+</body>
+</html>'''
+    return html_doc.encode("utf-8")
 
-    why = g(b, "why", default="—")
-    whypp = g(b, "whypp", default="—")
-    links_html = (
-        '<div class="links">'
-        + (f'<a href="{dex_link}">🟢 Open in DEX</a>' if dex_link and dex_link != "#" else '')
-        + (f'<a href="{scan_link}">🔍 Open in Scan</a>' if scan_link and scan_link != "#" else '')
-        + (f'<a href="{site_link}">🌐 Website</a>' if site_link and site_link not in (None, "—") else '')
-        + (f'<a class="mono" href="javascript:copyCA(\'{token_html}\')">📋 Copy CA</a>' if token_html and token_html != "—" else '')
-        + '</div>'
-    )
-
-    doc = (
-        head + title + grid
-        + f"<div class='card'><div class='k'>Why?</div><div>{why}</div></div>"
-        + f"<div class='card'><div class='k'>Why++</div><div>{whypp}</div></div>"
-        + links_html
-        + "<footer>Generated by Metridex • QuickScan</footer>"
-        + "</div></body></html>"
-    )
-    return doc.encode("utf-8")
-
-
-# --- PDF export helper (best-effort) ---
-def _html_to_pdf(html_bytes: bytes) -> bytes | None:
-    """
-    Try converting HTML to PDF using available engines.
-    Order: WeasyPrint -> xhtml2pdf -> pdfkit
-    Returns PDF bytes or None if conversion is not possible.
-    """
-    html_str = html_bytes.decode("utf-8", errors="replace")
-    # WeasyPrint
-    try:
-        from weasyprint import HTML
-        pdf = HTML(string=html_str).write_pdf()
-        if pdf: return pdf
-    except Exception:
-        pass
-    # xhtml2pdf
-    try:
-        from xhtml2pdf import pisa
-        import io
-        out = io.BytesIO()
-        pisa.CreatePDF(io.StringIO(html_str), dest=out)
-        pdf = out.getvalue()
-        if pdf and len(pdf) > 1000:
-            return pdf
-    except Exception:
-        pass
-    # pdfkit (wkhtmltopdf)
-    try:
-        import pdfkit, tempfile
-        with tempfile.NamedTemporaryFile("w", suffix=".html", delete=True, encoding="utf-8") as tmp:
-            tmp.write(html_str); tmp.flush()
-            pdf = pdfkit.from_file(tmp.name, False)
-            if pdf: return pdf
-    except Exception:
-        pass
-    return None
-
-# --- Tiny sparkline helper for Δ-toasts ---
-_SPARK = "▁▂▃▄▅▆▇█"
-def _spark(values):
-    xs = [float(x) for x in values if x is not None]
-    if len(xs) < 2: return ""
-    lo, hi = min(xs), max(xs)
-    if hi - lo < 1e-9: return _SPARK[0]*len(xs)
-    res = []
-    for v in xs:
-        i = int((v - lo) / (hi - lo) * (len(_SPARK)-1))
-        res.append(_SPARK[i])
-    return "".join(res)
-
-def _append_series(key: str, value, maxlen: int = 8):
-    try:
-        raw = cache_get(key)
-        arr = json.loads(raw) if raw else []
-        if not isinstance(arr, list): arr = []
-    except Exception:
-        arr = []
-    try:
-        arr.append(None if value is None else float(value))
-    except Exception:
-        arr.append(None)
-    if len(arr) > maxlen:
-        arr = arr[-maxlen:]
-    cache_set(key, json.dumps(arr), ttl_sec=6*60*60)  # 6h window
-    return arr
-
-
-def _s(x):
-    if x is None:
-        return '—'
-    try:
-        return str(x)
-    except Exception:
-        return '—'
