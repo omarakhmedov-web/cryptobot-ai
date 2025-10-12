@@ -253,7 +253,7 @@ def on_message(msg):
     links = (market.get("links") or {})
     web = {}
     try:
-        web = analyze_website(links.get("site"))
+        web = analyze_website(links.get("site")) if links.get("site") else {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
     except Exception:
         web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
     bundle = {
@@ -802,4 +802,3 @@ pre {{ white-space:pre-wrap; }}
 </body>
 </html>'''
     return html_doc.encode("utf-8")
-
