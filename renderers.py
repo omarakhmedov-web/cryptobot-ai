@@ -151,6 +151,13 @@ def _tiers(market: Dict[str, Any]) -> Dict[str, int]:
         t[k] = _env_num(f"{k}_{short.upper()}", _env_num(k, t[k]))
     return t
 
+def _human_status(s: str) -> str:
+    if not isinstance(s, str):
+        return str(s)
+    s = s.replace("_", " ").replace("-", " ")
+    s = _re.sub(r'(?<!^)([A-Z])', r' \1', s)
+    return s.lower()
+
 # ---- renderers ----
 def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
