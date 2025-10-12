@@ -38,7 +38,6 @@ def _iso_date(s: Optional[str]) -> Optional[str]:
         dt = datetime.fromisoformat(s.replace("Z","+00:00"))
         return dt.date().isoformat()
     except Exception:
-        # last resort: just return original
         return s
 
 def _fetch_rdap_json(domain: str) -> Optional[Dict[str, Any]]:
@@ -51,7 +50,28 @@ def _fetch_rdap_json(domain: str) -> Optional[Dict[str, Any]]:
         return None
     return None
 
-def _normalize_rdap(raw: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_registrar_info(entities: List[Dict[str, Any]]):
+    registrar = None
+    registrar_id = None
+    for ent in entities or []:
+        roles = ent.get("roles") or []
+        if "registrar" in roles:
+            # name
+            vcard = ent.get("vcardArray", [None, []])[1]
+            for it in vcard:
+                if it and it[0] == "fn":
+                    registrar = it[3]
+                    break
+            # IANA id
+            for pid in ent.get("publicIds", []) or []:
+                t = (pid.get("type") or "").lower()
+                if "iana" in t and "registrar" in t and pid.get("identifier"):
+                    registrar_id = f"{pid.get('identifier')}"
+                    break
+            break
+    return registrar, registrar_id
+
+def _normalize_rdap(domain: str, raw: Dict[str, Any]) -> Dict[str, Any]:
     def _get(obj, key, default=None):
         if isinstance(obj, dict):
             return obj.get(key, default)
@@ -61,15 +81,7 @@ def _normalize_rdap(raw: Dict[str, Any]) -> Dict[str, Any]:
     created_raw = events.get("registration") or events.get("created")
     expires_raw = events.get("expiration")
 
-    registrar = None
-    for ent in _get(raw, "entities", []) or []:
-        roles = ent.get("roles") or []
-        if "registrar" in roles:
-            vcard = ent.get("vcardArray", [None, []])[1]
-            for it in vcard:
-                if it and it[0] == "fn":
-                    registrar = it[3]
-                    break
+    registrar, registrar_id = _extract_registrar_info(_get(raw, "entities", []) or [])
 
     ns = [n.get("ldhName") for n in _get(raw, "nameservers", []) or [] if isinstance(n, dict) and n.get("ldhName")]
     status = _get(raw, "status", []) or []
@@ -101,7 +113,9 @@ def _normalize_rdap(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not registrar: flags.append("registrar_unknown")
 
     return {
+        "domain": domain,
         "registrar": registrar,
+        "registrar_id": registrar_id,
         "created": created_iso,
         "expires": expires_iso,
         "status": status,
@@ -155,7 +169,9 @@ def _normalize_whois(domain: str) -> Optional[Dict[str, Any]]:
     if not registrar: flags.append("registrar_unknown")
 
     return {
+        "domain": domain,
         "registrar": registrar,
+        "registrar_id": None,
         "created": created_iso,
         "expires": expires_iso,
         "status": [],
@@ -175,7 +191,7 @@ def lookup(site_url: str) -> Optional[Dict[str, Any]]:
         return hit["val"]
 
     raw = _fetch_rdap_json(domain)
-    res = _normalize_rdap(raw) if raw else None
+    res = _normalize_rdap(domain, raw) if raw else None
 
     if not res and ENABLE_WHOIS_FALLBACK:
         res = _normalize_whois(domain)
