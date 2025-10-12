@@ -193,7 +193,7 @@ HSTS_SHOW_MAXAGE_ONLY = (os.getenv("HSTS_SHOW_MAXAGE_ONLY", "1") not in ("0","fa
 RDAP_DNSSEC_SHOW_UNSIGNED = (os.getenv("RDAP_DNSSEC_SHOW_UNSIGNED", "0") not in ("0","false","False",""))
 BADGE_WAYBACK = (os.getenv("BADGE_WAYBACK", "1") not in ("0","false","False",""))
 DOMAIN_EMOJI_BAR = (os.getenv("DOMAIN_EMOJI_BAR", "1") not in ("0","false","False",""))
-RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG")
+RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG", "v9")
 
 # Simple in-process TTL caches for network checks
 _CACHE_TTL = int(os.getenv("WEB_CACHE_TTL", "1800"))
@@ -377,6 +377,73 @@ def _domain_subscore(rdap_extras, web, dmarc, spf):
     return s
 
 # ---- renderers ----
+
+def _resolve_domain(_rd: dict, market: dict, ctx: dict) -> str | None:
+    """Find a domain to probe, from RDAP, ctx, or market links.
+    Returns bare hostname like "pepe.vip" without scheme/path.
+    """
+    def _host_from_url(u: str):
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(u.strip())
+            host = p.netloc or p.path  # tolerate "example.com" without scheme
+            host = host.strip().lstrip("*.").split("/")[0]
+            # remove leading "www."
+            if host.lower().startswith("www."):
+                host = host[4:]
+            return host or None
+        except Exception:
+            return None
+    # 1) explicit ctx
+    dom = None
+    try:
+        cdom = ctx.get("domain") if isinstance(ctx, dict) else None
+        if isinstance(cdom, str) and cdom:
+            dom = _host_from_url(cdom) or cdom
+    except Exception:
+        pass
+    # 2) market.links.site
+    if not dom and isinstance(market, dict):
+        try:
+            site = ((market.get("links") or {}).get("site")) or market.get("site")
+            if isinstance(site, str):
+                dom = _host_from_url(site) or dom
+        except Exception:
+            pass
+    # 3) common RDAP keys
+    if not dom and isinstance(_rd, dict):
+        for k in ("ldhName","unicodeName","domain","name","handle"):
+            v = _rd.get(k)
+            if isinstance(v, str) and v:
+                candidate = v.strip().lstrip("*.")
+                if "." in candidate and "/" not in candidate and " " not in candidate:
+                    dom = candidate
+                    break
+    # 4) brute-force scan RDAP values for something that looks like a domain
+    if not dom and isinstance(_rd, dict):
+        pat = _re.compile(r"(?i)\\b([a-z0-9][a-z0-9-]{0,62}\\.)+[a-z]{2,}\\b")
+        try:
+            def scan(obj):
+                out = []
+                if isinstance(obj, dict):
+                    for vv in obj.values():
+                        out.extend(scan(vv))
+                elif isinstance(obj, list):
+                    for vv in obj:
+                        out.extend(scan(vv))
+                elif isinstance(obj, str):
+                    for m in pat.finditer(obj):
+                        out.append(m.group(0))
+                return out
+            cand = scan(_rd)
+            for x in cand:
+                if x:
+                    dom = x.lstrip("*.")
+                    break
+        except Exception:
+            pass
+    return dom
+
 
 def _wayback_summary(domain: str):
     if not _WAYBACK_SUMMARY or not isinstance(domain, str): 
