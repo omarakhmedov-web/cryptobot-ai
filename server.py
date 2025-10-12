@@ -1,5 +1,8 @@
 import os, json, re, traceback, requests
 import time
+import renderers_mdx as _mdx
+import sys
+sys.stderr.write(f"[BOOT] Using renderers module: {_mdx.__file__} | tag={getattr(_mdx, 'RENDERER_BUILD_TAG', None)}\n")
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
@@ -20,7 +23,7 @@ except Exception as _e:
 
 from risk_engine import compute_verdict
 import onchain_inspector
-from renderers import render_quick, render_details, render_why, render_whypp, render_lp
+from renderers_mdx import render_quick, render_details, render_why, render_whypp, render_lp
 try:
     from lp_lite import check_lp_lock_v2
 except Exception:
@@ -617,22 +620,6 @@ def diag_http():
     return jsonify({"ok": True, "summary": res})
 
 def _format_diag(summary: dict) -> str:
-    rpc_good = [k for k, v in (summary.get("rpc_ok") or {}).items() if v]
-    lines = []
-    ok = lambda b: "✅" if b else ("❌" if b is False else "—")
-    lines.append(f"*fetch_market()*: {ok(summary.get('fetch_market_present'))}")
-    lines.append(f"*On-chain модуль*: {ok(summary.get('onchain_present'))}")
-    lines.append(f"*DexScreener direct*: {ok(summary.get('dexscreener_direct_ok'))}")
-    lines.append(f"*DexScreener proxy*: {ok(summary.get('dexscreener_proxy_ok'))}")
-    lines.append(f"*RPC OK*: `{','.join(rpc_good) if rpc_good else 'none'}`")
-    steps = summary.get("next_steps") or []
-    if steps:
-        lines.append("\n*NEXT:*")
-        for i, s in enumerate(steps, 1):
-            lines.append(f"{i}. {s}")
-    return "\n".join(lines)
-
-
     rpc_good = [k for k,v in (summary.get("rpc_ok") or {}).items() if v]
     lines = []
     ok = lambda b: "✅" if b else ("❌" if b is False else "—")
