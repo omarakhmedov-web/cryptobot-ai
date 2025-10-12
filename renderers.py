@@ -79,9 +79,16 @@ def _fmt_time(ts_ms: Optional[int]) -> str:
 
 def _score(verdict) -> str:
     try:
-        return f"{getattr(verdict, 'score', None) or _get(verdict, 'score', default='—')}"
+        v = getattr(verdict, "score", None) or _get(verdict, "score", default=None)
     except Exception:
-        return f"{_get(verdict, 'score', default='—')}"
+        v = _get(verdict, "score", default=None)
+    if v in (None, "—", ""):
+        lvl = (_level(verdict) or "").lower()
+        if lvl.startswith("low"): return "15"
+        if lvl.startswith("med"): return "50"
+        if lvl.startswith("high"): return "85"
+        return "—"
+    return f"{v}"
 
 def _level(verdict) -> str:
     try:
@@ -164,7 +171,12 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     parts.append(f"*Snapshot*\n• Price: {price}  ({chg5}, {chg1}, {chg24})\n• FDV: {fdv}  • MC: {mc}\n• Liquidity: {liq}  • 24h Volume: {vol}\n• Age: {age}  • Source: {src_}\n• As of: {asof}")
     parts.append(f"*Token*\n• Chain: `{chain}`\n• Address: `{token}`")
     parts.append(f"*Pair*\n• Address: `{pair_addr}`\n• Symbol: {pair}")
-    parts.append(f"*Links*\n• DEX: {l_dex}\n• Scan: {l_scan}\n• Site: {l_site}")
+    ll = ["*Links*"]
+    if l_dex and l_dex != "—": ll.append(f"• DEX: {l_dex}")
+    if (links or {}).get("dexscreener"): ll.append(f"• DexScreener: {(links or {}).get('dexscreener')}")
+    if l_scan and l_scan != "—": ll.append(f"• Scan: {l_scan}")
+    if l_site and l_site != "—": ll.append(f"• Site: {l_site}")
+    parts.append("\n".join(ll))
     # Web intel summary if provided via ctx['webintel']
     web = (ctx or {}).get('webintel') or {}
     if web:
