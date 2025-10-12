@@ -67,7 +67,7 @@ def tg(method, payload=None, files=None, timeout=12):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-def send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx="onchain")):
+def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown', disable_web_page_preview=None):
     data = {"chat_id": chat_id, "text": mdv2_escape(str(text)), "parse_mode": PARSE_MODE}
     if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
     return tg("sendMessage", data)
@@ -355,7 +355,7 @@ def on_callback(cb):
 
     elif action == "LP":
         text = bundle.get("lp", "LP lock: n/a")
-        send_message(chat_id, text, reply_markup=None)
+        send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
@@ -459,7 +459,7 @@ def on_callback(cb):
                         f'paused: {paused}  upgradeable: {upgradeable}\n'
                         f'maxTx: {maxTx}  maxWallet: {maxWallet}'
                     )
-                send_message(chat_id, text, reply_markup=None)
+                send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
                 answer_callback_query(cb_id, 'On-chain ready.', False)
 
     elif action == "COPY_CA":
