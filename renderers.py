@@ -282,7 +282,6 @@ def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
         bp = fmt_pct(burned_pct) if burned_pct is not None else "≥95%"
         lines.append(f"• Burned: {bp} (LP → 0x…dead)")
     elif isinstance(burned_pct,(int,float)):
-        # status buckets
         if burned_pct >= 50:
             lines.append(f"• Mostly burned: {fmt_pct(burned_pct)}")
         elif burned_pct >= 5:
@@ -309,3 +308,4 @@ def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
         lines.append(f"• Unlocks: {until}")
     lines.append(f"• LP token: `{addr}`")
     return "\n".join(lines)
+
