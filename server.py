@@ -354,6 +354,7 @@ def on_callback(cb):
         answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
+        # NOTE: Keep LP clean: no extra nav keyboard to avoid duplicates
         text = bundle.get("lp", "LP lock: n/a")
         send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
         answer_callback_query(cb_id, "LP lock posted.", False)
