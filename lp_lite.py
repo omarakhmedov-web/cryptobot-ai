@@ -75,30 +75,27 @@ DEAD_ADDRS = [
 def _rpc(chain: str) -> Optional[str]:
     ch = (chain or '').lower().strip()
     env_primary = CHAIN_RPC_ENV.get(ch)
-    cand = []
-    if env_primary:
-        cand.append(env_primary)
-    # Fallbacks: <CHAIN>_RPC_URL and uppercase variants
-    cand.append(f"{ch.upper()}_RPC_URL_PRIMARY")
-    cand.append(f"{ch}_RPC_URL_PRIMARY")
-    cand.append(f"{ch.upper()}_RPC_URL")
-    cand.append(f"{ch}_RPC_URL")
-    # Common aliases
+    candidates = []
+    if env_primary: candidates.append(env_primary)
+    # common fallbacks
+    candidates += [
+        f"{ch.upper()}_RPC_URL_PRIMARY", f"{ch}_RPC_URL_PRIMARY",
+        f"{ch.upper()}_RPC_URL", f"{ch}_RPC_URL"
+    ]
     alias = {
-        'eth': ['ETHEREUM_RPC_URL', 'MAINNET_RPC_URL'],
-        'bsc': ['BSC_MAINNET_RPC_URL', 'BNB_RPC_URL'],
-        'polygon': ['POLYGON_MAINNET_RPC_URL', 'MATIC_RPC_URL'],
+        'eth': ['ETHEREUM_RPC_URL','MAINNET_RPC_URL'],
+        'bsc': ['BSC_MAINNET_RPC_URL','BNB_RPC_URL'],
+        'polygon': ['POLYGON_MAINNET_RPC_URL','MATIC_RPC_URL'],
         'arb': ['ARBITRUM_RPC_URL'],
         'op': ['OPTIMISM_RPC_URL'],
         'avax': ['AVALANCHE_RPC_URL'],
         'ftm': ['FANTOM_RPC_URL'],
-        'base': ['BASE_RPC_URL']
+        'base': ['BASE_RPC_URL'],
     }.get(ch, [])
-    cand.extend(alias)
-    for key in cand:
-        val = (os.getenv(key, '') or '').strip()
-        if val:
-            return val
+    candidates += alias
+    for k in candidates:
+        v = (os.getenv(k, '') or '').strip()
+        if v: return v
     return None
 
 def _eth_call(rpc: str, to: str, data: str) -> bytes:
