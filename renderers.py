@@ -1,733 +1,943 @@
-from __future__ import annotations
-import os
-import requests as _rq
+import os, json, re, traceback, requests
 import time
-import datetime as _dt
-from typing import Any, Dict, Optional, List
-import re as _re
+import importlib
+from flask import Flask, request, jsonify
 
-# ---- helpers ----
-def _fmt_num(v: Optional[float], prefix: str = "", none: str = "—") -> str:
-    if v is None:
-        return none
+from limits import can_scan, register_scan
+from state import store_bundle, load_bundle
+from buttons import build_keyboard
+from cache import cache_get, cache_set
+from webintel import analyze_website
+try:
+    from dex_client import fetch_market
+except Exception as _e:
     try:
-        n = float(v)
-    except Exception:
-        return none
-    a = abs(n)
-    if a >= 1_000_000_000:
-        s = f"{n/1_000_000_000:.2f}B"
-    elif a >= 1_000_000:
-        s = f"{n/1_000_000:.2f}M"
-    elif a >= 1_000:
-        s = f"{n/1_000:.2f}K"
-    else:
-        s = f"{n:.6f}" if a < 1 else f"{n:.2f}"
-    return prefix + s
+        import dex_client as _dex
+        fetch_market = getattr(_dex, 'fetch_market')
+    except Exception as _e2:
+        _err = str(_e2)
+        def fetch_market(*args, **kwargs):
+            return {'ok': False, 'error': 'market_fetch_unavailable: ' + _err, 'sources': [], 'links': {}}
 
-def _fmt_pct(v: Optional[float], none: str = "—") -> str:
-    if v is None:
-        return none
+from risk_engine import compute_verdict
+import onchain_inspector
+from renderers import render_quick, render_details, render_why, render_whypp, render_lp
+try:
+    from lp_lite import check_lp_lock_v2
+except Exception:
+    def check_lp_lock_v2(chain, lp_addr):
+        return {"provider": "lite-burn-check", "lpAddress": lp_addr or "—", "until": "—"}
+
+try:
+    from onchain_inspector import inspect_token
+except Exception:
+    inspect_token = None
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
+WEBHOOK_PATH = f"/webhook/{BOT_WEBHOOK_SECRET}" if BOT_WEBHOOK_SECRET else "/webhook/secret-not-set"
+DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en") or "en"
+
+HELP_URL = os.getenv("HELP_URL", "https://metridex.com/help")
+DEEP_REPORT_URL = os.getenv("DEEP_REPORT_URL", "https://metridex.com/upgrade/deep-report")
+DAY_PASS_URL = os.getenv("DAY_PASS_URL", "https://metridex.com/upgrade/day-pass")
+PRO_URL = os.getenv("PRO_URL", "https://metridex.com/upgrade/pro")
+TEAMS_URL = os.getenv("TEAMS_URL", "https://metridex.com/upgrade/teams")
+FREE_DAILY_SCANS = int(os.getenv("FREE_DAILY_SCANS", "2"))
+HINT_CLICKABLE_LINKS = os.getenv("HINT_CLICKABLE_LINKS", "0") == "1"
+
+CALLBACK_DEDUP_TTL_SEC = int(os.getenv("CALLBACK_DEDUP_TTL_SEC", "30"))
+
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+PARSE_MODE = "MarkdownV2"
+
+app = Flask(__name__)
+
+_MD2_SPECIALS = r'_[]()~>#+-=|{}.!'
+_MD2_PATTERN = re.compile('[' + re.escape(_MD2_SPECIALS) + ']')
+def mdv2_escape(text: str) -> str:
+    if text is None: return ""
+    return _MD2_PATTERN.sub(lambda m: '\\' + m.group(0), str(text))
+
+def tg(method, payload=None, files=None, timeout=12):
+    payload = payload or {}
     try:
-        n = float(v)
-    except Exception:
-        return none
-    arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
-    return f"{arrow} {n:+.2f}%"
+        r = requests.post(f"{TELEGRAM_API}/{method}", data=payload, files=files, timeout=timeout)
+        try:
+            return r.json()
+        except Exception:
+            return {"ok": False, "status_code": r.status_code, "text": r.text}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
-def _get(d: Dict[str, Any], *keys, default=None):
-    cur = d
-    for k in keys:
-        if not isinstance(cur, dict):
-            return default
-        cur = cur.get(k)
-    return default if cur is None else cur
+def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown', disable_web_page_preview=None):
+    data = {"chat_id": chat_id, "text": mdv2_escape(str(text)), "parse_mode": PARSE_MODE}
+    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+    return tg("sendMessage", data)
 
-def _fmt_chain(chain: Optional[str]) -> str:
-    m = (chain or "—").strip().lower()
-    if m in ("eth","ethereum"): return "Ethereum"
-    if m in ("bsc","binance smart chain","bnb"): return "BSC"
-    if m in ("polygon","matic"): return "Polygon"
-    if m in ("arbitrum","arb"): return "Arbitrum"
-    if m in ("optimism","op"): return "Optimism"
-    if m in ("base",): return "Base"
-    if m in ("avalanche","avax"): return "Avalanche"
-    if m in ("fantom","ftm"): return "Fantom"
-    if m in ("solana","sol"): return "Solana"
-    return m.capitalize() if m and m != "—" else "—"
+def send_message_raw(chat_id, text, reply_markup=None):
+    data = {"chat_id": chat_id, "text": str(text)}
+    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+    return tg("sendMessage", data)
 
-def _fmt_age_days(v: Optional[float]) -> str:
-    if v is None:
-        return "—"
+def answer_callback_query(cb_id, text, show_alert=False):
+    return tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": str(text), "show_alert": bool(show_alert)})
+
+def send_document(chat_id: int, filename: str, content_bytes: bytes, caption: str | None = None, content_type: str = "application/json"):
+    files = { "document": (filename, content_bytes, content_type) }
+    payload = {"chat_id": chat_id}
+    if caption: payload["caption"] = caption
+    return tg("sendDocument", payload, files=files)
+
+def parse_cb(data: str):
+    m = re.match(r"^v1:(\w+):(\-?\d+):(\-?\d+)$", data or "")
+    if not m: return None
+    return m.group(1), int(m.group(2)), int(m.group(3))
+
+def _pricing_links():
+    return {
+        "deep_report": DEEP_REPORT_URL,
+        "day_pass": DAY_PASS_URL,
+        "pro": PRO_URL,
+        "teams": TEAMS_URL,
+        "help": HELP_URL,
+    }
+
+def build_hint_quickscan(clickable: bool) -> str:
+    pair_example = "https://dexscreener.com/ethereum/0x..." if clickable else "dexscreener[.]com/ethereum/0x…"
+    return (
+        "Paste a *token address*, *TX hash* or *URL* to scan.\n"
+        "Examples:\n"
+        "`0x6982508145454ce325ddbe47a25d4ec3d2311933`  — ERC-20\n"
+        f"{pair_example} — pair\n\n"
+        "Then tap *More details* / *Why?* / *On-chain* for deeper info."
+    )
+
+WELCOME = (
+    "Welcome to Metridex.\n"
+    "Send a token address, TX hash, or a link — I'll run a QuickScan.\n\n"
+    "Commands: /quickscan, /upgrade, /limits\n"
+    f"Help: {HELP_URL}"
+)
+UPGRADE_TEXT = (
+    "Metridex Pro — full QuickScan access\n"
+    "• Pro $29/mo — fast lane, Deep reports, export\n"
+    "• Teams $99/mo — for teams/channels\n"
+    "• Day-Pass $9 — 24h of Pro\n"
+    "• Deep Report $3 — one detailed report\n\n"
+    f"Choose your access below. How it works: {HELP_URL}"
+)
+
+def safe_render_why(verdict, market, lang):
     try:
-        n = float(v)
-    except Exception:
-        return "—"
-    if n < 1/24:
-        return f"{round(n*24*60)} min"
-    if n < 1:
-        return f"{round(n*24)} h"
-    return f"{n:.1f} d"
+        return render_why(verdict, market, lang)
+    except TypeError:
+        try:
+            return render_why(verdict, lang)
+        except TypeError:
+            return render_why(verdict)
 
-def _fmt_time(ts_ms: Optional[int]) -> str:
-    if ts_ms is None:
-        return "—"
+def safe_render_whypp(verdict, market, lang):
     try:
-        ts = int(ts_ms)
-        if ts < 10**12:  # seconds -> ms
-            ts *= 1000
-        dt = _dt.datetime.utcfromtimestamp(ts/1000.0)
-        return dt.strftime("%Y-%m-%d %H:%M UTC")
-    except Exception:
-        return "—"
+        return render_whypp(verdict, market, lang)
+    except TypeError:
+        try:
+            return render_whypp(verdict, lang)
+        except TypeError:
+            return render_whypp(verdict)
 
-def _score(verdict) -> str:
+@app.post(WEBHOOK_PATH)
+def webhook():
     try:
-        v = getattr(verdict, "score", None) or _get(verdict, "score", default=None)
-    except Exception:
-        v = _get(verdict, "score", default=None)
-    if v in (None, "—", ""):
-        lvl = (_level(verdict) or "").lower()
-        if lvl.startswith("low"): return "15"
-        if lvl.startswith("med"): return "50"
-        if lvl.startswith("high"): return "85"
-        return "—"
-    return f"{v}"
+        upd = request.get_json(force=True, silent=True) or {}
+        if "message" in upd: return on_message(upd["message"])
+        if "edited_message" in upd: return on_message(upd["edited_message"])
+        if "callback_query" in upd: return on_callback(upd["callback_query"])
+        return jsonify({"ok": True})
+    except Exception as e:
+        print("WEBHOOK ERROR", e, traceback.format_exc())
+        return jsonify({"ok": True})
 
-def _level(verdict) -> str:
+def on_message(msg):
+    chat_id = msg["chat"]["id"]
+    text = (msg.get("text") or "").strip()
+    low = text.lower()
+
+    if low.startswith("/start"):
+        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+
+    if low.startswith("/upgrade"):
+        send_message(chat_id, UPGRADE_TEXT, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+
+    if low.startswith("/quickscan"):
+        send_message(chat_id, build_hint_quickscan(HINT_CLICKABLE_LINKS), reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+
+    if low.startswith("/limits"):
+        try:
+            ok, tier = can_scan(chat_id)
+            plan = (tier or "Free")
+            allowed = "✅ allowed now" if ok else "⛔ not allowed now"
+        except Exception:
+            plan, allowed = "Free", "—"
+        msg_txt = (
+            f"*Plan:* {plan}\n"
+            f"*Free quota:* {FREE_DAILY_SCANS}/day\n"
+            f"*Now:* {allowed}\n\n"
+            "Upgrade for unlimited scans: /upgrade"
+        )
+        send_message(chat_id, msg_txt, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+
+    if low.startswith("/diag"):
+        _handle_diag_command(chat_id)
+        return jsonify({"ok": True})
+
+    # Only non-command messages trigger scan
+    if text.startswith("/"):
+        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+
+    ok, _tier = can_scan(chat_id)
+    if not ok:
+        send_message(chat_id, "Free scans exhausted. Use /upgrade.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+
+    # QuickScan flow
     try:
-        return f"{getattr(verdict, 'level', None) or _get(verdict, 'level', default='—')}"
-    except Exception:
-        return f"{_get(verdict, 'level', default='—')}"
+        market = fetch_market(text) or {}
+    except Exception as e:
+        print('QUICKSCAN ERROR (fetch_market)', e, traceback.format_exc())
+        market = {}
 
-def _pick_color(verdict, market):
-    m = market or {}
-    liq = _get(m, "liq") or _get(m, "liquidityUSD") or 0
-    vol = _get(m, "vol24h") or _get(m, "volume24hUSD") or 0
-    fdv = _get(m, "fdv")
-    mc  = _get(m, "mc")
-    if (not liq) and (not vol) and (fdv is None and mc is None):
-        return "⚪"
-    lvl = None
-    try:
-        lvl = getattr(verdict, "level", None)
-    except Exception:
-        lvl = (verdict or {}).get("level")
-    lvl = (lvl or "").upper()
-    if ("SCAM" in lvl) or ("MALICIOUS" in lvl) or ("RUG" in lvl) or ("FRAUD" in lvl): return "🔴"
-    if lvl.startswith("HIGH"): return "🔴"
-    if lvl.startswith("MED"):  return "🟡"
-    if lvl.startswith("LOW"):  return "🟢"
-    return "🟡"
+    if not market.get("ok"):
+        if re.match(r"^0x[a-fA-F0-9]{64}$", text):
+            pass
+        elif re.match(r"^0x[a-fA-F0-9]{40}$", text):
+            market.setdefault("tokenAddress", text)
+        market.setdefault("chain", market.get("chain") or "—")
+        market.setdefault("sources", [])
+        market.setdefault("priceChanges", {})
+        market.setdefault("links", {})
 
-# --- chain-aware tiers for Why++ (align with risk_engine) ---
-def _short_chain(market: Dict[str, Any]) -> str:
-    ch = (market or {}).get("chain") or ""
-    ch = str(ch).strip().lower()
-    mp = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance smart chain":"bsc","polygon":"polygon","matic":"polygon",
-          "arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax",
-          "fantom":"ftm","ftm":"ftm","sol":"sol","solana":"sol"}
-    return mp.get(ch, ch)
-
-def _env_num(key: str, default: int) -> int:
-    try:
-        v = os.getenv(key)
-        if v is None or v == "":
-            return default
-        return int(float(v))
-    except Exception:
-        return default
-
-BASE = {
-    "eth":     {"LIQ_POSITIVE": 1_000_000, "LIQ_LOW": 200_000, "VOL_ACTIVE": 2_000_000, "VOL_THIN": 25_000},
-    "bsc":     {"LIQ_POSITIVE":   300_000, "LIQ_LOW":  60_000, "VOL_ACTIVE":   600_000, "VOL_THIN": 12_000},
-    "polygon": {"LIQ_POSITIVE":   200_000, "LIQ_LOW":  40_000, "VOL_ACTIVE":   400_000, "VOL_THIN":  8_000},
-}
-FALLBACK = {"LIQ_POSITIVE": 25_000, "LIQ_LOW": 10_000, "VOL_ACTIVE": 50_000, "VOL_THIN": 5_000}
-
-def _tiers(market: Dict[str, Any]) -> Dict[str, int]:
-    short = _short_chain(market)
-    t = dict(FALLBACK)
-    t.update(BASE.get(short, {}))
-    for k in ("LIQ_POSITIVE","LIQ_LOW","VOL_ACTIVE","VOL_THIN"):
-        t[k] = _env_num(f"{k}_{short.upper()}", _env_num(k, t[k]))
-    return t
-
-def _human_status(s: str) -> str:
-    if not isinstance(s, str):
-        return str(s)
-    s = s.replace("_", " ").replace("-", " ")
-    s = _re.sub(r'(?<!^)([A-Z])', r' \1', s)
-    return s.lower()
-
-# RDAP country placeholder flag (default ON):
-# Set env RDAP_COUNTRY_PLACEHOLDER=0 to disable showing "Country: —" when country is missing.
-_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "1") not in ("0", "false", "False", ""))
-
-# ---- domain coolness flags ----
-_WAYBACK_SUMMARY = (os.getenv("WAYBACK_SUMMARY", "1") not in ("0","false","False",""))
-_WAYBACK_TIMEOUT_S = float(os.getenv("WAYBACK_TIMEOUT_S", "2.5"))
-_wb_cache: Dict[str, Any] = {}
-
-_RDAP_SHOW_NS = (os.getenv("RDAP_SHOW_NS", "1") not in ("0","false","False",""))
-_RDAP_DNSSEC_CHECK = (os.getenv("RDAP_DNSSEC_CHECK", "1") not in ("0","false","False",""))
-_RDAP_SHOW_ABUSE = (os.getenv("RDAP_SHOW_ABUSE", "1") not in ("0","false","False",""))
-_RDAP_STATUS_CASE = os.getenv("RDAP_STATUS_CASE", "title")   # "title" | "lower" | "raw"
-
-_WEB_HEAD_CHECK = (os.getenv("WEB_HEAD_CHECK", "1") not in ("0","false","False",""))
-_WEB_TIMEOUT_S = float(os.getenv("WEB_TIMEOUT_S", "2.0"))
-_WEB_SHOW_HSTS = (os.getenv("WEB_SHOW_HSTS", "1") not in ("0","false","False",""))
-_WEB_SHOW_ROBOTS = (os.getenv("WEB_SHOW_ROBOTS", "0") not in ("0","false","False",""))
-_WEB_REDIRECTS_COMPACT = (os.getenv("WEB_REDIRECTS_COMPACT", "1") not in ("0","false","False",""))
-
-_DNS_DMARC_CHECK = (os.getenv("DNS_DMARC_CHECK", "1") not in ("0","false","False",""))
-_DNS_SPF_CHECK = (os.getenv("DNS_SPF_CHECK", "1") not in ("0","false","False",""))
-_DOH_URL = os.getenv("DOH_URL", "https://dns.google/resolve")
-
-_DETAILS_BADGES = (os.getenv("DETAILS_BADGES", "1") not in ("0","false","False",""))
-_RISK_DOMAIN_WEIGHT = int(os.getenv("RISK_DOMAIN_WEIGHT", "3"))  # cap magnitude
-
-REGISTRAR_URL_TRIM = (os.getenv("REGISTRAR_URL_TRIM", "1") not in ("0","false","False",""))
-NAMESERVERS_LIMIT = int(os.getenv("NAMESERVERS_LIMIT", "2"))
-HSTS_SHOW_MAXAGE_ONLY = (os.getenv("HSTS_SHOW_MAXAGE_ONLY", "1") not in ("0","false","False",""))
-RDAP_DNSSEC_SHOW_UNSIGNED = (os.getenv("RDAP_DNSSEC_SHOW_UNSIGNED", "0") not in ("0","false","False",""))
-BADGE_WAYBACK = (os.getenv("BADGE_WAYBACK", "1") not in ("0","false","False",""))
-DOMAIN_EMOJI_BAR = (os.getenv("DOMAIN_EMOJI_BAR", "1") not in ("0","false","False",""))
-RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG", "v9")
-
-# Simple in-process TTL caches for network checks
-_CACHE_TTL = int(os.getenv("WEB_CACHE_TTL", "1800"))
-_rdap_cache: Dict[str, Any] = {}
-_web_cache: Dict[str, Any] = {}
-_dns_cache: Dict[str, Any] = {}
-
-def _status_case(s: str) -> str:
-    t = _human_status(s)  # already splits/case lowers
-    if _RDAP_STATUS_CASE == "title":
-        return " ".join(w.capitalize() for w in t.split())
-    elif _RDAP_STATUS_CASE == "lower":
-        return t
-    return s  # raw
-
-def _cache_get(cache: Dict[str, Any], key: str):
-    item = cache.get(key)
-    if not item: return None
-    ts, val = item
-    if time.time() - ts > _CACHE_TTL:
-        cache.pop(key, None)
-        return None
-    return val
-
-def _cache_put(cache: Dict[str, Any], key: str, val: Any):
-    cache[key] = (time.time(), val)
-    return val
-
-def _http_head_or_get(url: str, allow_redirects: bool=True):
-    try:
-        r = _rq.get(url, timeout=_WEB_TIMEOUT_S, allow_redirects=allow_redirects, headers={
-            "User-Agent": "MetridexBot/1.0 (+https://metridex.com)"
-        })
-        return r
-    except Exception:
-        return None
-
-def _web_probe(domain: str) -> Dict[str, Any]:
-    if not _WEB_HEAD_CHECK: return {}
-    key = f"web:{domain}"
-    cached = _cache_get(_web_cache, key)
-    if cached is not None: return cached
-
-    info: Dict[str, Any] = {"https_enforced": None, "redirects": [], "server": None, "x_powered_by": None, "hsts": None, "robots": None}
-    try:
-        r = _http_head_or_get(f"http://{domain}", allow_redirects=True)
-        final_url = r.url if r is not None else None
-        if r is not None:
-            chain = [h.url for h in r.history] + ([r.url] if r.url else [])
-            compact = []
-            for u in chain[:4]:
-                try:
-                    from urllib.parse import urlparse
-                    pu = urlparse(u)
-                    compact.append(f"{pu.scheme}://{pu.netloc}")
-                except Exception:
-                    compact.append(u)
-            info["redirects"] = compact
-            info["https_enforced"] = bool(final_url and final_url.startswith("https://"))
-        r2 = _http_head_or_get(f"https://{domain}", allow_redirects=True)
-        if r2 is not None:
-            info["server"] = r2.headers.get("Server")
-            info["x_powered_by"] = r2.headers.get("X-Powered-By")
-            if _WEB_SHOW_HSTS:
-                hsts = r2.headers.get("Strict-Transport-Security")
-                if hsts:
-                    info["hsts"] = hsts
-        if _WEB_SHOW_ROBOTS:
+    # Ensure asof timestamp and pair age
+    if not market.get("asof"):
+        market["asof"] = int(time.time() * 1000)
+    if not market.get("ageDays"):
+        pc = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
+        if pc:
             try:
-                r3 = _rq.get(f"https://{domain}/robots.txt", timeout=_WEB_TIMEOUT_S, allow_redirects=True)
-                info["robots"] = (r3.status_code == 200, len(r3.text) if hasattr(r3, "text") else None)
+                ts = int(pc)
             except Exception:
-                info["robots"] = (False, None)
-    except Exception:
-        pass
-    return _cache_put(_web_cache, key, info)
+                ts = None
+            if ts:
+                if ts < 10**12:
+                    ts *= 1000
+                age_days = (time.time()*1000 - ts) / (1000*60*60*24)
+                if age_days < 0:
+                    age_days = 0
+                market["ageDays"] = round(age_days, 2)
 
-def _doh_txt(name: str):
-    key = f"dns:{name}"
-    cached = _cache_get(_dns_cache, key)
-    if cached is not None: return cached
-    out = []
-    try:
-        r = _rq.get(_DOH_URL, params={"name": name, "type": "TXT"}, timeout=_WEB_TIMEOUT_S)
-        if r.ok:
-            j = r.json()
-            for ans in j.get("Answer", []) or []:
-                data = ans.get("data")
-                if not data: continue
-                txt = data.strip('"').replace('" "', '')
-                out.append(txt)
-    except Exception:
-        pass
-    return _cache_put(_dns_cache, key, out)
+    verdict = compute_verdict(market)
 
-def _check_dmarc(domain: str):
-    if not _DNS_DMARC_CHECK: return None
-    try:
-        txts = _doh_txt(f"_dmarc.{domain}")
-        policy = None
-        for t in txts:
-            if "v=DMARC1" in t:
-                m = _re.search(r"\\bp=([a-zA-Z]+)", t)
-                if m:
-                    policy = m.group(1).lower()
-                    break
-        return policy or "none"
-    except Exception:
-        return None
+    quick = render_quick(verdict, market, {}, DEFAULT_LANG)
+    details = render_details(verdict, market, {}, DEFAULT_LANG)
+    why = safe_render_why(verdict, market, DEFAULT_LANG)
+    whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
-def _check_spf(domain: str):
-    if not _DNS_SPF_CHECK: return None
     try:
-        txts = _doh_txt(domain)
-        for t in txts:
-            if t.lower().startswith("v=spf1"):
-                return True
-        return False
+        ch_ = (market.get("chain") or "").lower()
+        _map = {"ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op","base":"base","avalanche":"avax","fantom":"ftm"}
+        _short = _map.get(ch_, ch_ or "eth")
+        info = check_lp_lock_v2(_short, market.get("pairAddress"))
+        lp = render_lp(info, DEFAULT_LANG)
+    except TypeError:
+        lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
     except Exception:
-        return None
+        lp = "LP lock: unknown"
 
-def _rdap_extract_extras(rdap: Dict[str, Any]):
-    extras = {"registrar_url": None, "nameservers": [], "dnssec": None, "abuse": None}
+    links = (market.get("links") or {})
+    web = {}
     try:
-        for link in (rdap.get("links") or []):
-            rel = link.get("rel")
-            href = link.get("href")
-            if isinstance(href, str) and href.startswith("http"):
-                if rel in ("related", "self"):
-                    extras["registrar_url"] = href
-                    break
-        for ns in (rdap.get("nameservers") or [])[:3]:
-            n = ns.get("ldhName") or ns.get("objectClassName")
-            if n: extras["nameservers"].append(n.lower())
-        sd = rdap.get("secureDNS") or {}
-        if isinstance(sd, dict):
-            if sd.get("delegationSigned") or sd.get("dsData"):
-                extras["dnssec"] = "signed"
+        web = analyze_website(links.get("site")) if links.get("site") else {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
+    except Exception:
+        web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
+    bundle = {
+        "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
+        "reasons": list(getattr(verdict, "reasons", []) or []),
+        "market": {
+            "pairSymbol": market.get("pairSymbol"), "chain": market.get("chain"),
+            "price": market.get("price"), "fdv": market.get("fdv"), "mc": market.get("mc"),
+            "liq": market.get("liq"), "vol24h": market.get("vol24h"),
+            "priceChanges": market.get("priceChanges") or {},
+            "tokenAddress": market.get("tokenAddress"), "pairAddress": market.get("pairAddress"),
+            "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
+        },
+        "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
+        "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
+    }
+
+    sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links, ctx="quick"))
+    msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
+    if msg_id:
+        store_bundle(chat_id, msg_id, bundle)
+        try:
+            tg("editMessageReplyMarkup", {
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "reply_markup": json.dumps(build_keyboard(chat_id, msg_id, links, ctx="quick"))
+            })
+        except Exception as e:
+            print("editMessageReplyMarkup failed:", e)
+    register_scan(chat_id)
+    return jsonify({"ok": True})
+
+
+def on_callback(cb):
+    cb_id = cb["id"]
+    data = cb.get("data") or ""
+    msg = cb.get("message") or {}
+    chat_id = msg.get("chat", {}).get("id")
+    current_msg_id = msg.get("message_id")
+
+    m = parse_cb(data)
+    if not m:
+        answer_callback_query(cb_id, "Unsupported action", True)
+        return jsonify({"ok": True})
+    action, orig_msg_id, orig_chat_id = m
+
+    if orig_msg_id == 0:
+        orig_msg_id = current_msg_id
+
+    if chat_id != orig_chat_id and orig_chat_id != 0:
+        answer_callback_query(cb_id, "This control expired.", True)
+        return jsonify({"ok": True})
+
+    
+    # Idempotency: throttle only *heavy* actions for a short period
+    heavy_actions = {"DETAILS", "ONCHAIN", "REPORT", "REPORT_PDF", "WHY", "WHYPP", "LP"}
+    idem_key = f"cb:{chat_id}:{orig_msg_id}:{action}"
+    if action in heavy_actions:
+        if cache_get(idem_key):
+            answer_callback_query(cb_id, "Please wait…", False)
+            return jsonify({"ok": True})
+        cache_set(idem_key, "1", ttl_sec=CALLBACK_DEDUP_TTL_SEC)
+
+    bundle = load_bundle(chat_id, orig_msg_id) or {}
+    links = bundle.get("links")
+
+    if action == "DETAILS":
+        answer_callback_query(cb_id, "More details sent.", False)
+        send_message(chat_id, bundle.get("details", "(no details)"),
+                     reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
+
+    elif action == "WHY":
+        txt = bundle.get("why") or "*Why?*\n• No specific risk factors detected"
+        send_message(chat_id, txt, reply_markup=None)
+        answer_callback_query(cb_id, "Why? posted.", False)
+
+    elif action == "WHYPP":
+        txt = bundle.get("whypp") or "*Why++* n/a"
+        MAX = 3500
+        if len(txt) <= MAX:
+            send_message(chat_id, txt, reply_markup=None)
+        else:
+            chunk = txt[:MAX]
+            txt = txt[MAX:]
+            send_message(chat_id, chunk, reply_markup=None)
+            i = 1
+            while txt:
+                i += 1
+                chunk_part = txt[:MAX]
+                txt = txt[MAX:]
+                prefix = f"Why++ ({i})\n"
+                send_message(chat_id, prefix + chunk_part, reply_markup=None)
+        answer_callback_query(cb_id, "Why++ posted.", False)
+
+    elif action == "LP":
+        text = bundle.get("lp", "LP lock: n/a")
+        send_message(chat_id, text, reply_markup=None)
+        answer_callback_query(cb_id, "LP lock posted.", False)
+
+    elif action == "REPORT":
+        try:
+            # dynamic, human-friendly filename
+            mkt = (bundle.get('market') or {})
+            pair_sym = (mkt.get('pairSymbol') or 'Metridex')
+            ts_ms = mkt.get('asof') or 0
+            try:
+                from datetime import datetime as _dt
+                ts_str = _dt.utcfromtimestamp(int(ts_ms)/1000.0).strftime("%Y-%m-%d_%H%M")
+            except Exception:
+                ts_str = "now"
+            import re as _re
+            safe_pair = _re.sub(r"[^A-Za-z0-9._-]+", "_", str(pair_sym))
+            fname = f"{safe_pair}_Report_{ts_str}.html"
+
+            html_bytes = _build_html_report_safe(bundle)
+            send_document(chat_id, fname, html_bytes, caption='Metridex QuickScan report', content_type='text/html; charset=utf-8')
+            answer_callback_query(cb_id, 'Report exported.', False)
+        except Exception as e:
+            try:
+                import json as _json
+                pretty = _json.dumps(bundle, ensure_ascii=False, indent=2)
+                html = ("<!doctype html><html><head><meta charset='utf-8'/>"
+                        "<style>body{background:#0b0b0f;color:#e7e5e4;font-family:Inter,Arial,sans-serif;margin:24px}" 
+                        "pre{background:#13151a;border:1px solid #262626;border-radius:12px;padding:12px;white-space:pre-wrap}</style></head>"
+                        "<body><h1>Metridex Report (fallback)</h1><pre>"+pretty+"</pre></body></html>")
+                send_document(chat_id, 'Metridex_Report.html', html.encode('utf-8'), caption='Metridex QuickScan report', content_type='text/html; charset=utf-8')
+                answer_callback_query(cb_id, 'Report exported (fallback).', False)
+            except Exception as e2:
+                answer_callback_query(cb_id, f'Export failed: {e2}', True)
+    elif action == "REPORT_PDF":
+        try:
+            html_bytes = _build_html_report_safe(bundle)
+            pdf = _html_to_pdf(html_bytes)
+            if not pdf:
+                answer_callback_query(cb_id, "PDF export unavailable on this server.", True)
             else:
-                extras["dnssec"] = "unsigned"
-        abuse_email = None; abuse_phone = None
-        for ent in (rdap.get("entities") or []):
-            roles = [str(x).lower() for x in (ent.get("roles") or [])]
-            if any("abuse" in r for r in roles):
-                vcard = ent.get("vcardArray")
+                mkt = (bundle.get('market') or {})
+                pair_sym = (mkt.get('pairSymbol') or 'Metridex')
+                ts_ms = mkt.get('asof') or 0
+                from datetime import datetime as _dt
                 try:
-                    for item in (vcard[1] if isinstance(vcard, list) and len(vcard) > 1 else []):
-                        if item and item[0] == "email" and len(item) > 3:
-                            abuse_email = item[3]
-                        if item and item[0] == "tel" and len(item) > 3:
-                            abuse_phone = item[3]
+                    ts_str = _dt.utcfromtimestamp(int(ts_ms)/1000.0).strftime("%Y-%m-%d_%H%M")
                 except Exception:
-                    pass
-        if abuse_email or abuse_phone:
-            extras["abuse"] = (abuse_email, abuse_phone)
-    except Exception:
-        pass
-    return extras
+                    ts_str = "now"
+                import re as _re
+                safe_pair = _re.sub(r"[^A-Za-z0-9._-]+", "_", str(pair_sym))
+                fname = f"{safe_pair}_Report_{ts_str}.pdf"
+                send_document(chat_id, fname, pdf, caption='Metridex QuickScan report (PDF)', content_type='application/pdf')
+                answer_callback_query(cb_id, "PDF exported.", False)
+        except Exception as e:
+            answer_callback_query(cb_id, f"PDF export failed: {e}", True)
+    
 
-def _domain_badges(domain: str, rdap_extras, web, dmarc, spf):
-    badges = []
-    if web.get("https_enforced") is True: badges.append("HTTPS enforced")
-    if web.get("hsts"): badges.append("HSTS")
-    if rdap_extras.get("dnssec") == "signed": badges.append("DNSSEC")
-    if dmarc in ("reject", "quarantine"): badges.append(f"DMARC {dmarc}")
-    if spf is True: badges.append("SPF present")
-    return badges[:6]
+    elif action == "ONCHAIN":
+        # On-chain details via live inspect (hardened) with guard on unknown chain
+        mkt = (bundle.get('market') if isinstance(bundle, dict) else None) or {}
+        chain_name = (mkt.get('chain') or '').strip().lower()
+        if not chain_name:
+            send_message(chat_id, "On-chain\nUnsupported/unknown chain", reply_markup=None)
+            answer_callback_query(cb_id, "On-chain not available", False)
+        else:
+            _map = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance smart chain":"bsc","polygon":"polygon","matic":"polygon",
+                    "arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax","fantom":"ftm","ftm":"ftm"}
+            chain_short = _map.get(chain_name, chain_name)
+            token_addr = mkt.get('tokenAddress')
+            pair_addr = mkt.get('pairAddress')
+            if chain_short not in _map.values():
+                send_message(chat_id, "On-chain\nUnsupported/unknown chain", reply_markup=None)
+                answer_callback_query(cb_id, "On-chain not available", False)
+            else:
+                try:
+                    oc = onchain_inspector.inspect_token(chain_short, token_addr, pair_addr)
+                except Exception as _e:
+                    oc = {'ok': False, 'error': str(_e)}
+                if isinstance(bundle, dict):
+                    bundle['onchain'] = oc
+                ok = bool(oc.get('ok'))
+                def _s(x):
+                    try:
+                        return str(x) if x is not None else '—'
+                    except Exception:
+                        return '—'
+                owner_raw = oc.get('owner')
+                owner = owner_raw.lower() if isinstance(owner_raw, str) else ''
+                renounced = oc.get('renounced')
+                if renounced in (None, '—'):
+                    if owner in ('0x0000000000000000000000000000000000000000','0x000000000000000000000000000000000000dead'):
+                        renounced = True
+                token_name = _s(oc.get('token_name') or oc.get('token') or mkt.get('pairSymbol'))
+                paused = _s(oc.get('paused'))
+                upgradeable = _s(oc.get('upgradeable'))
+                maxTx = _s(oc.get('maxTx'))
+                maxWallet = _s(oc.get('maxWallet'))
+                if not ok:
+                    text = 'On-chain\n' + _s(oc.get('error') or 'inspection failed')
+                else:
+                    text = (
+                        'On-chain\n'
+                        f'token: {token_name}\n'
+                        f'owner: {_s(owner_raw)}\n'
+                        f'renounced: {renounced}\n'
+                        f'paused: {paused}  upgradeable: {upgradeable}\n'
+                        f'maxTx: {maxTx}  maxWallet: {maxWallet}'
+                    )
+                send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
+                answer_callback_query(cb_id, 'On-chain ready.', False)
 
-def _domain_subscore(rdap_extras, web, dmarc, spf):
-    s = 0
-    if web.get("https_enforced"): s += 1
-    if web.get("hsts"): s += 1
-    if rdap_extras.get("dnssec") == "signed": s += 1
-    if dmarc == "reject": s += 1
-    elif dmarc == "none": s -= 1
-    if not web.get("https_enforced") and not web.get("hsts"): s -= 1
-    if spf is True: s += 0
-    # cap
-    if s > _RISK_DOMAIN_WEIGHT: s = _RISK_DOMAIN_WEIGHT
-    if s < -_RISK_DOMAIN_WEIGHT: s = -_RISK_DOMAIN_WEIGHT
-    return s
+    elif action == "COPY_CA":
+        mkt = (bundle.get("market") or {})
+        token = (mkt.get("tokenAddress") or "—")
+        send_message(chat_id, f"*Contract address*\n`{token}`", reply_markup=_mk_copy_keyboard(token, links))
+        answer_callback_query(cb_id, "Address ready to copy.", False)
 
-# ---- renderers ----
+    elif action.startswith("DELTA_"):
+        mkt = (bundle.get('market') or {})
+        ch = (mkt.get('priceChanges') or {})
+        label = {"DELTA_M5":"Δ5m","DELTA_1H":"Δ1h","DELTA_6H":"Δ6h","DELTA_24H":"Δ24h"}.get(action, "Δ")
+        def _pct(v):
+            try:
+                n = float(v)
+                arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
+                return f"{arrow} {n:+.2f}%"
+            except Exception:
+                return "—"
+        if action == "DELTA_M5":
+            val = ch.get("m5")
+        elif action == "DELTA_1H":
+            val = ch.get("h1")
+        elif action == "DELTA_6H":
+            val = ch.get("h6") or ch.get("h6h") or ch.get("6h")
+        else:
+            val = ch.get("h24")
+        answer_callback_query(cb_id, f"{label}: {_pct(val)}", False)
 
-def _resolve_domain(_rd: dict, market: dict, ctx: dict) -> str | None:
-    """Find a domain to probe, from RDAP, ctx, or market links.
-    Returns bare hostname like "pepe.vip" without scheme/path.
-    """
-    def _host_from_url(u: str):
-        try:
-            from urllib.parse import urlparse
-            p = urlparse(u.strip())
-            host = p.netloc or p.path  # tolerate "example.com" without scheme
-            host = host.strip().lstrip("*.").split("/")[0]
-            # remove leading "www."
-            if host.lower().startswith("www."):
-                host = host[4:]
-            return host or None
-        except Exception:
-            return None
-    # 1) explicit ctx
-    dom = None
+    else:
+        answer_callback_query(cb_id, "Unsupported action", True)
+
+    return jsonify({"ok": True})
+
+
+# === INLINE DIAGNOSTICS (no shell needed) ====================================
+import os as _os
+def _ua():
+    return _os.getenv("HTTP_UA", "MetridexDiag/1.0")
+def _http_get_json(url, timeout=10, headers=None):
+    import requests as _rq
+    h = {"User-Agent": _ua(), "Accept": "application/json"}
+    if headers: h.update(headers)
     try:
-        cdom = ctx.get("domain") if isinstance(ctx, dict) else None
-        if isinstance(cdom, str) and cdom:
-            dom = _host_from_url(cdom) or cdom
-    except Exception:
-        pass
-    # 2) market.links.site
-    if not dom and isinstance(market, dict):
+        r = _rq.get(url, timeout=timeout, headers=h)
+        ctype = r.headers.get("content-type","" )
         try:
-            site = ((market.get("links") or {}).get("site")) or market.get("site")
-            if isinstance(site, str):
-                dom = _host_from_url(site) or dom
+            return r.status_code, r.json(), ctype
         except Exception:
-            pass
-    # 3) common RDAP keys
-    if not dom and isinstance(_rd, dict):
-        for k in ("ldhName","unicodeName","domain","name","handle"):
-            v = _rd.get(k)
-            if isinstance(v, str) and v:
-                candidate = v.strip().lstrip("*.")
-                if "." in candidate and "/" not in candidate and " " not in candidate:
-                    dom = candidate
-                    break
-    # 4) brute-force scan RDAP values for something that looks like a domain
-    if not dom and isinstance(_rd, dict):
-        pat = _re.compile(r"(?i)\\b([a-z0-9][a-z0-9-]{0,62}\\.)+[a-z]{2,}\\b")
-        try:
-            def scan(obj):
-                out = []
-                if isinstance(obj, dict):
-                    for vv in obj.values():
-                        out.extend(scan(vv))
-                elif isinstance(obj, list):
-                    for vv in obj:
-                        out.extend(scan(vv))
-                elif isinstance(obj, str):
-                    for m in pat.finditer(obj):
-                        out.append(m.group(0))
-                return out
-            cand = scan(_rd)
-            for x in cand:
-                if x:
-                    dom = x.lstrip("*.")
-                    break
-        except Exception:
-            pass
-    return dom
-
-
-def _wayback_summary(domain: str):
-    if not _WAYBACK_SUMMARY or not isinstance(domain, str): 
-        return None
-    key = f"wb:{domain}"
-    cached = _cache_get(_wb_cache, key)
-    if cached is not None: 
-        return cached
-    out = {"ok": False, "first": None, "last": None, "url": f"https://web.archive.org/web/*/{domain}"}
+            return r.status_code, r.text, ctype
+    except Exception as e:
+        return 599, {"error": str(e)}, ""
+def _rpc_call(rpc, method, params, timeout=8):
+    import requests as _rq
     try:
-        base = "https://web.archive.org/cdx/search/cdx"
-        params_first = {"url": domain, "output": "json", "fl": "timestamp", "filter": "statuscode:200", "limit": "1", "from": "19960101", "to": "99991231", "sort": "ascending"}
-        r1 = _rq.get(base, params=params_first, timeout=_WAYBACK_TIMEOUT_S)
-        if r1.ok:
-            j1 = r1.json()
-            # fl=timestamp => rows are [["timestamp"], ["YYYYMMDDhhmmss"]]
-            if isinstance(j1, list) and len(j1) >= 2 and isinstance(j1[1], list) and j1[1]:
-                ts1 = j1[1][0]
-                out["first"] = f"{ts1[0:4]}-{ts1[4:6]}-{ts1[6:8]}"
-        params_last = dict(params_first); params_last["sort"] = "descending"
-        r2 = _rq.get(base, params=params_last, timeout=_WAYBACK_TIMEOUT_S)
-        if r2.ok:
-            j2 = r2.json()
-            if isinstance(j2, list) and len(j2) >= 2 and isinstance(j2[1], list) and j2[1]:
-                ts2 = j2[1][0]
-                out["last"] = f"{ts2[0:4]}-{ts2[4:6]}-{ts2[6:8]}"
-        out["ok"] = bool(out["first"] or out["last"])
+        r = _rq.post(rpc, json={"jsonrpc":"2.0","id":1,"method":method,"params":params},
+                     timeout=timeout, headers={"User-Agent": _ua()})
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+def _mask(s, keep=4):
+    if not s: return ""
+    return (s[:keep] + "…" + "*"*max(0, len(s)-keep)) if len(s) > keep else "*"*len(s)
+def _diag_make(token_default="0x6982508145454Ce325dDbE47a25d4ec3d2311933"):
+    try:
+        from dex_client import fetch_market as _fm
+        fm_ok = callable(_fm)
     except Exception:
-        pass
-    return _cache_put(_wb_cache, key, out)
+        fm_ok = False
+    try:
+        from onchain_inspector import inspect_token as _it
+        it_ok = callable(_it)
+    except Exception:
+        it_ok = False
+    env = {
+        "BOT_WEBHOOK_SECRET": _os.getenv("BOT_WEBHOOK_SECRET",""),
+        "ENABLED_NETWORKS": _os.getenv("ENABLED_NETWORKS",""),
+        "DEXSCREENER_PROXY_BASE": _os.getenv("DEXSCREENER_PROXY_BASE") or _os.getenv("DS_PROXY_BASE") or "",
+        "ETH_RPC_URL_PRIMARY": _os.getenv("ETH_RPC_URL_PRIMARY",""),
+        "BSC_RPC_URL_PRIMARY": _os.getenv("BSC_RPC_URL_PRIMARY",""),
+        "POLYGON_RPC_URL_PRIMARY": _os.getenv("POLYGON_RPC_URL_PRIMARY",""),
+        "BASE_RPC_URL_PRIMARY": _os.getenv("BASE_RPC_URL_PRIMARY",""),
+        "ARB_RPC_URL_PRIMARY": _os.getenv("ARB_RPC_URL_PRIMARY",""),
+        "OP_RPC_URL_PRIMARY": _os.getenv("OP_RPC_URL_PRIMARY",""),
+        "AVAX_RPC_URL_PRIMARY": _os.getenv("AVAX_RPC_URL_PRIMARY",""),
+        "FTM_RPC_URL_PRIMARY": _os.getenv("FTM_RPC_URL_PRIMARY",""),
+        "RENDERERS_FILE_HINT": str(getattr(importlib.import_module("renderers"), "__file__", "n/a")),
+        "RENDERERS_TAG_HINT": str(getattr(importlib.import_module("renderers"), "RENDERER_BUILD_TAG", "n/a")),
 
-def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
-    pair = _get(market, "pairSymbol", default="—")
-    chain = _fmt_chain(_get(market, "chain"))
-    price = _fmt_num(_get(market, "price"), prefix="$")
-    fdv = _fmt_num(_get(market, "fdv"), prefix="$")
-    mc  = _fmt_num(_get(market, "mc" ), prefix="$")
-    liq = _fmt_num(_get(market, "liq"), prefix="$")
-    vol = _fmt_num(_get(market, "vol24h"), prefix="$")
-    chg5 = _fmt_pct(_get(market, "priceChanges", "m5"))
-    chg1 = _fmt_pct(_get(market, "priceChanges", "h1"))
-    chg24= _fmt_pct(_get(market, "priceChanges", "h24"))
-    age  = _fmt_age_days(_get(market, "ageDays"))
-    asof = _fmt_time(_get(market, "asof"))
-    src  = _get(market, "source", default="DexScreener")
-    sources = _get(market, "sources") or ([src] if src else [])
-    src_line = ", ".join([str(s) for s in sources if s]) or str(src)
+        "PUBLIC_URL": _os.getenv("PUBLIC_URL") or _os.getenv("RENDER_EXTERNAL_URL") or "",
+    }
+    ds_direct = None; ds_proxy = None
+    tok = token_default
+    code, body, ctype = _http_get_json(f"https://api.dexscreener.com/latest/dex/tokens/{tok}", timeout=10)
+    ds_direct = bool(code == 200 and isinstance(body, dict) and body.get("pairs"))
+    proxy = (env["DEXSCREENER_PROXY_BASE"] or "").strip("/")
+    if proxy:
+        code2, body2, ctype2 = _http_get_json(f"{proxy}/latest/dex/tokens/{tok}", timeout=12)
+        ds_proxy = bool(code2 == 200 and isinstance(body2, dict) and body2.get("pairs"))
+    rpc_ok = {}
+    chain_env = {
+        "eth":"ETH_RPC_URL_PRIMARY", "bsc":"BSC_RPC_URL_PRIMARY", "polygon":"POLYGON_RPC_URL_PRIMARY",
+        "base":"BASE_RPC_URL_PRIMARY", "arb":"ARB_RPC_URL_PRIMARY", "op":"OP_RPC_URL_PRIMARY",
+        "avax":"AVAX_RPC_URL_PRIMARY", "ftm":"FTM_RPC_URL_PRIMARY",
+    }
+    enabled = (env["ENABLED_NETWORKS"] or "eth,bsc,polygon,base,arb,op,avax,ftm").split(",")
+    for short in [x.strip() for x in enabled if x.strip()]:
+        key = chain_env.get(short); rpc = env.get(key) if key else None
+        if not rpc:
+            rpc_ok[short] = None
+            continue
+        j1 = _rpc_call(rpc, "eth_chainId", [])
+        j2 = _rpc_call(rpc, "eth_blockNumber", [])
+        rpc_ok[short] = ("result" in j1 and "result" in j2)
+    actions = []
+    if not fm_ok: actions.append("dex_client.py: fetch_market() отсутствует — заменить файл.")
+    if ds_direct is False and not ds_proxy: actions.append("DexScreener блокируется — задайте DEXSCREENER_PROXY_BASE (CF worker)." )
+    if not any(v for v in rpc_ok.values() if v is not None): actions.append("Нет доступных RPC — заполните *_RPC_URL_PRIMARY.")
+    if not it_ok: actions.append("onchain_inspector.py не найден — кнопка On-chain будет пустой.")
+    summary = {
+        "fetch_market_present": fm_ok,
+        "onchain_present": it_ok,
+        "dexscreener_direct_ok": ds_direct,
+        "dexscreener_proxy_ok": ds_proxy,
+        "rpc_ok": rpc_ok,
+        "env_masked": {
+            "BOT_WEBHOOK_SECRET": _mask(env["BOT_WEBHOOK_SECRET"]),
+            "ENABLED_NETWORKS": env["ENABLED_NETWORKS"] or "(default)",
+            "DEXSCREENER_PROXY_BASE": env["DEXSCREENER_PROXY_BASE"] or "(not set)",
+            "PUBLIC_URL": env["PUBLIC_URL"] or "(not set)",
+            "ETH_RPC_URL_PRIMARY": _mask(env["ETH_RPC_URL_PRIMARY"], keep=12),
+            "BSC_RPC_URL_PRIMARY": _mask(env["BSC_RPC_URL_PRIMARY"], keep=12),
+            "POLYGON_RPC_URL_PRIMARY": _mask(env["POLYGON_RPC_URL_PRIMARY"], keep=12),
+            "BASE_RPC_URL_PRIMARY": _mask(env["BASE_RPC_URL_PRIMARY"], keep=12),
+            "ARB_RPC_URL_PRIMARY": _mask(env["ARB_RPC_URL_PRIMARY"], keep=12),
+            "OP_RPC_URL_PRIMARY": _mask(env["OP_RPC_URL_PRIMARY"], keep=12),
+            "AVAX_RPC_URL_PRIMARY": _mask(env["AVAX_RPC_URL_PRIMARY"], keep=12),
+            "FTM_RPC_URL_PRIMARY": _mask(env["FTM_RPC_URL_PRIMARY"], keep=12),
+        },
+        "next_steps": actions
+    }
+    return summary
 
-    header = f"*Metridex QuickScan — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})"
-    lines = [
-        header,
-        f"`{chain}`  •  Price: *{price}*",
-        f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}",
-        f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}",
-        f"Age: {age}  •  Source: {src_line}  •  as of {asof}",
-    ]
+@app.get("/diag")
+def diag_http():
+    sec = request.args.get("secret","" )
+    if sec != os.getenv("DIAG_SECRET","" ):
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    token = request.args.get("token") or "0x6982508145454Ce325dDbE47a25d4ec3d2311933"
+    res = _diag_make(token)
+    return jsonify({"ok": True, "summary": res})
+
+def _format_diag(summary: dict) -> str:
+    rpc_good = [k for k,v in (summary.get("rpc_ok") or {}).items() if v]
+    lines = []
+    ok = lambda b: "✅" if b else ("❌" if b is False else "—")
+    lines.append(f"*fetch_market()*: {ok(summary.get('fetch_market_present'))}")
+    lines.append(f"*On-chain модуль*: {ok(summary.get('onchain_present'))}")
+    lines.append(f"*DexScreener direct*: {ok(summary.get('dexscreener_direct_ok'))}")
+    lines.append(f"*DexScreener proxy*: {ok(summary.get('dexscreener_proxy_ok'))}")
+    lines.append(f"*RPC OK*: `{','.join(rpc_good) if rpc_good else 'none'}`")
+    steps = summary.get("next_steps") or []
+    if steps:
+        lines.append("\n*NEXT:*")
+        for i,s in enumerate(steps,1):
+            lines.append(f"{i}. {s}")
+
+# Show active renderers module
+try:
+    _mod = importlib.import_module("renderers")
+    _mod_file = getattr(_mod, "__file__", "n/a")
+    _mod_tag = getattr(_mod, "RENDERER_BUILD_TAG", "n/a")
+    lines.append(f"*Renderer file*: {_mod_file}")
+    lines.append(f"*Renderer tag*: {_mod_tag}")
+except Exception as _e:
+    lines.append(f"*Renderer import error*: {type(_e).__name__}: {_e}")
+    
     return "\n".join(lines)
 
-def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
-    pair = _get(market, "pairSymbol", default="—")
-    chain = _fmt_chain(_get(market, "chain"))
-    token = _get(market, "tokenAddress", default="—")
-    pair_addr = _get(market, "pairAddress", default="—")
+def _handle_diag_command(chat_id: int):
+    s = _diag_make()
+    txt = _format_diag(s)
+    send_message(chat_id, txt, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+# === END INLINE DIAGNOSTICS ==================================================
 
-    price = _fmt_num(_get(market, "price"), prefix="$")
-    fdv = _fmt_num(_get(market, "fdv"), prefix="$")
-    mc  = _fmt_num(_get(market, "mc" ), prefix="$")
-    liq = _fmt_num(_get(market, "liq"), prefix="$")
-    vol = _fmt_num(_get(market, "vol24h"), prefix="$")
 
-    chg5  = _fmt_pct(_get(market, "priceChanges", "m5"))
-    chg1  = _fmt_pct(_get(market, "priceChanges", "h1"))
-    chg24 = _fmt_pct(_get(market, "priceChanges", "h24"))
-    age   = _fmt_age_days(_get(market, "ageDays"))
-    src_  = _get(market, "source", default="DexScreener")
-    asof  = _fmt_time(_get(market, "asof"))
 
-    links = _get(market, "links") or {}
-    l_dex  = (links or {}).get("dex") or "—"
-    l_scan = (links or {}).get("scan") or "—"
-    l_site = (links or {}).get("site") or "—"
-    if isinstance(l_site, dict):
-        l_site = l_site.get("url") or l_site.get("label") or "—"
+def _mk_copy_keyboard(token: str, links: dict | None):
+    links = links or {}
+    kb = {"inline_keyboard": []}
+    if token and token != "—":
+        kb["inline_keyboard"].append([{
+            "text": "📋 Copy to input",
+            "switch_inline_query_current_chat": token
+        }])
+    nav = []
+    if links.get("dex"): nav.append({"text": "🟢 Open in DEX", "url": links["dex"]})
+    if links.get("scan"): nav.append({"text": "🔍 Open in Scan", "url": links["scan"]})
+    if nav: kb["inline_keyboard"].append(nav)
+    return kb
 
-    parts: List[str] = []
-    parts.append(f"*Details — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})")
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")))
 
-    snapshot_lines = [
-        "*Snapshot*",
-        f"• Price: {price}  ({chg5}, {chg1}, {chg24})",
-        f"• FDV: {fdv}  • MC: {mc}",
-        f"• Liquidity: {liq}  • 24h Volume: {vol}",
-        f"• Age: {age}  • Source: {src_}",
-        f"• As of: {asof}",
-    ]
-    parts.append("\n".join(snapshot_lines))
 
-    parts.append(f"*Token*\n• Chain: `{chain}`\n• Address: `{token}`")
-    parts.append(f"*Pair*\n• Address: `{pair_addr}`\n• Symbol: {pair}")
 
-    # RDAP / WHOIS (optional)
-    import os as _os
-    try:
-        _enable_rdap = _os.getenv("ENABLE_RDAP", "1").lower() in ("1","true","yes")
-    except Exception:
-        _enable_rdap = True
-    if _enable_rdap and l_site and l_site != "—":
+
+def _build_html_report(bundle: dict) -> bytes:
+    """Premium dark+gold HTML report (no logos, no markdown)."""
+    import html, datetime as _dt
+    b = bundle or {}
+    v = b.get("verdict") or {}
+    m = b.get("market") or {}
+    links = b.get("links") or {}
+    web = b.get("webintel") or {}
+
+    def g(d, *ks, default="n/a"):
+        cur = d or {}
+        for k in ks:
+            if not isinstance(cur, dict):
+                return default
+            cur = cur.get(k)
+        return default if cur is None else cur
+
+    def fmt_money(x):
         try:
-            from rdap_client import lookup as _rdap_lookup
+            n = float(x)
         except Exception:
-            _rdap_lookup = None
-        if _rdap_lookup:
-            try:
-                _rd = _rdap_lookup(l_site)
-            except Exception:
-                _rd = None
-            if _rd:
-                _rd_lines = ["*WHOIS/RDAP*"]
-                if _rd.get("domain"):    _rd_lines.append(f"• Domain: {_rd['domain']}")
-                if _rd.get("registrar"): _rd_lines.append(f"• Registrar: {_rd['registrar']}")
-                if _rd.get("registrar_id"): _rd_lines.append(f"• Registrar IANA ID: {_rd['registrar_id']}")
-                if _rd.get("created"):   _rd_lines.append(f"• Created: {_rd['created']}")
-                if _rd.get("expires"):   _rd_lines.append(f"• Expires: {_rd['expires']}")
-                if _rd.get("age_days") is not None: _rd_lines.append(f"• Domain age: {_rd['age_days']} d")
-                if _rd.get("country"):
-                    _rd_lines.append(f"• Country: {_rd['country']}")
-                elif _RDAP_COUNTRY_PLACEHOLDER:
-                    _rd_lines.append("• Country: —")
-                if _rd.get("status"):
-                    try:
-                        _st = list(_rd["status"])[:4]
-                        if _st:
-                            _rd_lines.append("• Status: " + ", ".join(_status_case(x) for x in _st))
-                    except Exception:
-                        pass
-                if _rd.get("flags"):     _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
-                parts.append("\n".join(_rd_lines))
+            return '<span class="muted">n/a</span>'
+        a = abs(n)
+        if a >= 1_000_000_000: s = f"${n/1_000_000_000:.2f}B"
+        elif a >= 1_000_000:   s = f"${n/1_000_000:.2f}M"
+        elif a >= 1_000:       s = f"${n/1_000:.2f}K"
+        else:                  s = f"${n:.6f}" if a < 1 else f"${n:.2f}"
+        return s
 
-    # Links (text) — hidden by default, we have buttons
-    _show_links = _os.getenv("SHOW_LINKS_IN_DETAILS", "0").lower() in ("1","true","yes")
-    if _show_links:
-        ll = ["*Links*"]
-        if l_dex and l_dex != "—": ll.append(f"• DEX: {l_dex}")
-        if (links or {}).get("dexscreener"): ll.append(f"• DexScreener: {(links or {}).get('dexscreener')}")
-        if l_scan and l_scan != "—": ll.append(f"• Scan: {l_scan}")
-        if l_site and l_site != "—": ll.append(f"• Site: {l_site}")
-        parts.append("\n".join(ll))
-
-    # Website intel (if provided via ctx)
-    web = (ctx or {}).get("webintel") or {}
-    if web:
-        who = web.get("whois") or {}
-        ssl = web.get("ssl") or {}
-        way = web.get("wayback") or {}
-        parts.append(
-            "*Website intel*"
-            + f"\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
-            + f"\n• SSL: ok={ssl.get('ok') if ssl.get('ok') is not None else 'n/a'}, expires {ssl.get('expires') or 'n/a'}"
-            + f"\n• Wayback first: {way.get('first') or 'n/a'}"
-        )
-
-    return "\n".join(parts)
-
-
-
-
-def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
-    # Take up to 3 key reasons, deduplicated
-    reasons: List[str] = []
-    try:
-        reasons = list(getattr(verdict, "reasons", []) or [])
-    except Exception:
-        reasons = list((verdict or {}).get("reasons") or [])
-    seen = set()
-    uniq = []
-    for r in reasons:
-        if not r: continue
-        if r in seen: continue
-        seen.add(r)
-        uniq.append(r)
-        if len(uniq) >= 3:
-            break
-    if not uniq:
-        return "*Why?*\n• No specific risk factors detected"
-    header = "*Why?*"
-    lines = [f"• {r}" for r in uniq]
-    return "\n".join([header] + lines).replace("\n", "\n")
-
-def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
-    # Weighted Top-3 positives and Top-3 risks (chain-aware)
-    m = market or {}
-    pos: List[tuple[str,int]] = []
-    risk: List[tuple[str,int]] = []
-
-    def add_pos(label:str, w:int): pos.append((label,w))
-    def add_risk(label:str, w:int): risk.append((label,w))
-
-    t = _tiers(m)
-
-    liq = _get(m, "liq")
-    vol = _get(m, "vol24h")
-    ch24 = _get(m, "priceChanges","h24")
-    age = _get(m, "ageDays")
-    fdv = _get(m, "fdv"); mc = _get(m, "mc")
-
-    try:
-        if isinstance(liq,(int,float)) and liq >= t["LIQ_POSITIVE"]: add_pos(f"Healthy liquidity (${liq:,.0f})", 3)
-        if isinstance(vol,(int,float)) and vol >= t["VOL_ACTIVE"]:   add_pos(f"Active 24h volume (${vol:,.0f})", 2)
-        if isinstance(age,(int,float)) and age >= 7:                 add_pos(f"Established >1 week (~{age:.1f}d)", 2)
-        if isinstance(ch24,(int,float)) and -30 < ch24 < 80:         add_pos(f"Moderate 24h move ({ch24:+.0f}%)", 1)
-    except Exception:
-        pass
-
-    try:
-        if liq is None: add_risk("Liquidity unknown", 2)
-        elif isinstance(liq,(int,float)) and liq < t["LIQ_LOW"]: add_risk(f"Low liquidity (${liq:,.0f})", 3)
-        if vol is None: add_risk("24h volume unknown", 1)
-        elif isinstance(vol,(int,float)) and vol < t["VOL_THIN"]: add_risk(f"Thin 24h volume (${vol:,.0f})", 2)
-        if isinstance(ch24,(int,float)) and (ch24 > 100 or ch24 < -70): add_risk(f"Extreme 24h move ({ch24:+.0f}%)", 2)
-        if age is None: add_risk("Pair age unknown", 2)
-        elif isinstance(age,(int,float)) and age < 1: add_risk("Newly created pair (<1d)", 3)
-        if isinstance(fdv,(int,float)) and isinstance(mc,(int,float)) and mc>0 and fdv/mc>5:
-            add_risk(f"FDV/MC high (~{fdv/mc:.1f}x)", 1)
-    except Exception:
-        pass
-
-    pos = sorted(pos, key=lambda x: (-x[1], x[0]))[:3]
-    risk = sorted(risk, key=lambda x: (-x[1], x[0]))[:3]
-
-    lines = ["*Why++*"]
-    if pos:
-        lines.append("_Top positives_")
-        for label, w in pos:
-            lines.append(f"• {label} (w={w})")
-    if risk:
-        lines.append("_Top risks_")
-        for label, w in risk:
-            lines.append(f"• {label} (w={w})")
-    return "\n".join(lines).replace("\n", "\n")
-
-def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
-    p = info or {}
-    status_raw = str(p.get("status") or "").lower()
-    burned_flag = bool(p.get("burned")) or status_raw in ("burned","fully-burned")
-    burned_pct = p.get("burnedPct")
-    locked_pct = p.get("lockedPct")
-    lockers = p.get("lockers") or []
-    until = p.get("until") or "—"
-    addr = p.get("lpAddress") or "—"
-
-    def fmt_pct(v):
+    def fmt_pct(x):
         try:
-            return f"{float(v):.2f}%"
+            n = float(x)
+            arrow = "▲" if n>0 else ("▼" if n<0 else "•")
+            return f"{arrow} {n:+.2f}%"
+        except Exception:
+            return '<span class="muted">n/a</span>'
+
+    def fmt_chain(c):
+        c = (c or "").strip().lower()
+        mp = {"ethereum":"Ethereum","eth":"Ethereum","bsc":"BSC","binance smart chain":"BSC","polygon":"Polygon","matic":"Polygon",
+              "arbitrum":"Arbitrum","arb":"Arbitrum","optimism":"Optimism","op":"Optimism","base":"Base","avalanche":"Avalanche",
+              "avax":"Avalanche","fantom":"Fantom","ftm":"Fantom","sol":"Solana","solana":"Solana"}
+        return mp.get(c, c.capitalize() if c else "—")
+
+    def fmt_time_ms(ts):
+        try:
+            ts = int(ts)
+            if ts < 10**12: ts *= 1000
+            return _dt.datetime.utcfromtimestamp(ts/1000.0).strftime("%Y-%m-%d %H:%M UTC")
         except Exception:
             return "—"
 
-    lines = ["*LP lock (lite)*"]
-    if burned_flag or (isinstance(burned_pct,(int,float)) and burned_pct >= 95):
-        bp = fmt_pct(burned_pct) if burned_pct is not None else "≥95%"
-        lines.append(f"• Burned: {bp} (LP → 0x…dead)")
-    elif isinstance(burned_pct,(int,float)):
-        if burned_pct >= 50:
-            lines.append(f"• Mostly burned: {fmt_pct(burned_pct)}")
-        elif burned_pct >= 5:
-            lines.append(f"• Partially burned: {fmt_pct(burned_pct)}")
-        else:
-            lines.append(f"• Burned: {fmt_pct(burned_pct)}")
-    else:
-        lines.append("• Burned: —")
+    pair  = g(m, "pairSymbol", default="—")
+    chain = fmt_chain(g(m, "chain", default="—"))
+    price = fmt_money(g(m, "price", default=None))
+    fdv   = g(m, "fdv", default=None)
+    mc    = g(m, "mc", default=None)
+    liq   = g(m, "liq", default=None) or g(m, "liquidityUSD", default=None)
+    vol24 = g(m, "vol24h", default=None) or g(m, "volume24hUSD", default=None)
+    ch5   = g(m, "priceChanges","m5", default=None)
+    ch1   = g(m, "priceChanges","h1", default=None)
+    ch24  = g(m, "priceChanges","h24", default=None)
+    token = g(m, "tokenAddress", default="—")
+    asof  = fmt_time_ms(g(m, "asof", default=None))
 
-    if isinstance(locked_pct,(int,float)) and locked_pct > 0:
-        lines.append(f"• Locked via lockers: {fmt_pct(locked_pct)}")
+    whois = g(web, "whois", default={})
+    ssl   = g(web, "ssl", default={})
+    way   = g(web, "wayback", default={})
 
-    if lockers:
-        for lk in lockers[:5]:
-            addr_short = (lk.get("locker","") or "—")
-            bal = lk.get("balance")
-            pct = lk.get("pct")
+    kpi_fdv = fmt_money(fdv) if fdv not in (None,"n/a") else '<span class="muted">n/a</span>'
+    kpi_mc  = fmt_money(mc)  if mc  not in (None,"n/a") else '<span class="muted">n/a</span>'
+    kpi_liq = fmt_money(liq) if liq not in (None,"n/a") else '<span class="muted">n/a</span>'
+    kpi_vol = fmt_money(vol24) if vol24 not in (None,"n/a") else '<span class="muted">n/a</span>'
+
+    why = b.get("why") or "Why: n/a"
+    whypp = b.get("whypp") or "Why++: n/a"
+    lp = b.get("lp") or "LP: n/a"
+
+    html_doc = f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{html.escape(str(pair))} — Metridex QuickScan</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body {{ background:#0b0b0f; color:#e7e7ea; font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif; margin:0; }}
+.wrap {{ max-width:1024px; margin:0 auto; padding:24px; }}
+h1 {{ font-weight:600; font-size:20px; margin:0 0 8px; }}
+h2 {{ font-weight:600; font-size:16px; margin:24px 0 8px; color:#f0d98a; }}
+.grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }}
+.card {{ background:#121218; border:1px solid #1f1f27; border-radius:12px; padding:16px; }}
+.muted {{ color:#9aa0a6; }}
+.badge {{ padding:2px 8px; border-radius:999px; background:#1f1f27; border:1px solid #2b2b34; font-size:12px; }}
+.row {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+.kv b {{ color:#fff; }}
+.btns a {{ color:#111; background:#f0d98a; padding:10px 14px; border-radius:10px; text-decoration:none; display:inline-block; }}
+.btns a.secondary {{ background:#2b2b34; color:#e7e7ea; }}
+pre {{ white-space:pre-wrap; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>{html.escape(str(pair))} <span class="badge">{html.escape(chain)}</span></h1>
+  <div class="row muted">as of {html.escape(asof)}</div>
+  <div class="grid" style="margin-top:12px">
+    <div class="card"><div class="kv"><div class="muted">Price</div><b>{price}</b></div><div class="muted">{fmt_pct(ch5)} • {fmt_pct(ch1)} • {fmt_pct(ch24)}</div></div>
+    <div class="card"><div class="kv"><div class="muted">FDV</div><b>{kpi_fdv}</b></div></div>
+    <div class="card"><div class="kv"><div class="muted">Market Cap</div><b>{kpi_mc}</b></div></div>
+    <div class="card"><div class="kv"><div class="muted">Liquidity / 24h Vol</div><b>{kpi_liq}</b><div class="muted">{kpi_vol}</div></div></div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <div class="row btns">
+      {'<a href="'+html.escape(links.get('dex'))+'" target="_blank">🟢 Open in DEX</a>' if links.get('dex') else ''}
+      {'<a href="'+html.escape(links.get('scan'))+'" target="_blank">🔍 Open in Scan</a>' if links.get('scan') else ''}
+      {'<a href="'+html.escape(links.get('site'))+'" target="_blank" class="secondary">🌐 Website</a>' if links.get('site') else ''}
+    </div>
+    <div class="row" style="margin-top:8px"><span class="muted">Contract:</span> <code>{html.escape(str(token))}</code></div>
+  </div>
+
+  <h2>Why</h2>
+  <div class="card"><pre>{html.escape(why.replace('*',''))}</pre></div>
+
+  <h2>Why++</h2>
+  <div class="card"><pre>{html.escape(whypp.replace('*',''))}</pre></div>
+
+  <h2>LP lock (lite)</h2>
+  <div class="card"><pre>{html.escape(lp.replace('*',''))}</pre></div>
+
+  <h2>Website intel</h2>
+  <div class="card">
+    <div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div><div class="muted">WHOIS Created</div><b>{html.escape(str(g(whois,'created', default='n/a')))}</b></div>
+      <div><div class="muted">Registrar</div><b>{html.escape(str(g(whois,'registrar', default='n/a')))}</b></div>
+      <div><div class="muted">Wayback first</div><b>{html.escape(str(g(way,'first', default='n/a')))}</b></div>
+    </div>
+    <div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr)); margin-top:8px">
+      <div><div class="muted">SSL OK</div><b>{html.escape(str(g(ssl,'ok', default='n/a')))}</b></div>
+      <div><div class="muted">SSL Expires</div><b>{html.escape(str(g(ssl,'expires', default='n/a')))}</b></div>
+      <div><div class="muted">SSL Issuer</div><b>{html.escape(str(g(ssl,'issuer', default='n/a')))}</b></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>'''
+    return html_doc.encode("utf-8")
+
+
+# --- Safe HTML report builder (dark, no logos) ---
+def _build_html_report_safe(bundle: dict) -> bytes:
+    try:
+        def _s(x): 
+            return str(x) if x is not None else "—"
+        def _fmt_time(v):
             try:
-                bal_s = f"{int(bal):,}" if isinstance(bal,int) else str(bal)
+                ts = int(v)
+                if ts < 10**12:
+                    ts *= 1000
+                from datetime import datetime as _dt
+                return _dt.utcfromtimestamp(ts/1000.0).strftime("%Y-%m-%d %H:%M UTC")
             except Exception:
-                bal_s = str(bal)
-            lines.append(f"  · {addr_short} — {bal_s} ({fmt_pct(pct)})")
-    if until not in ("—", None, ""):
-        lines.append(f"• Unlocks: {until}")
-    lines.append(f"• LP token: `{addr}`")
-    return "\n".join(lines)
+                return "—"
+        def _fmt_num(v, prefix="$"):
+            try:
+                n = float(v)
+            except Exception:
+                return "—"
+            a = abs(n)
+            if a >= 1_000_000_000: s = f"{n/1_000_000_000:.2f}B"
+            elif a >= 1_000_000:  s = f"{n/1_000_000:.2f}M"
+            elif a >= 1_000:      s = f"{n/1_000:.2f}K"
+            else:                 s = f"{n:.6f}" if a < 1 else f"{n:.2f}"
+            return prefix + s
+        def _fmt_pct(v):
+            try:
+                n = float(v)
+                arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
+                return f"{arrow} {n:+.2f}%"
+            except Exception:
+                return "—"
+        def _fmt_chain(c):
+            c = (str(c) if c is not None else "—").strip().lower()
+            mp = {
+                "ethereum":"Ethereum","eth":"Ethereum",
+                "bsc":"BSC","binance smart chain":"BSC",
+                "polygon":"Polygon","matic":"Polygon",
+                "arbitrum":"Arbitrum","arb":"Arbitrum",
+                "optimism":"Optimism","op":"Optimism",
+                "base":"Base",
+                "avalanche":"Avalanche","avax":"Avalanche",
+                "fantom":"Fantom","ftm":"Fantom",
+                "sol":"Solana","solana":"Solana",
+            }
+            return mp.get(c, c.capitalize() if c else "—")
+        def _fmt_age(v):
+            try:
+                d = float(v)
+                if d < 1/24:   return "<1h"
+                if d < 1:      return f"{d*24:.1f}h"
+                return f"{d:.1f}d"
+            except Exception:
+                return "—"
+
+
+
+        m = bundle.get("market") or {}
+        v = bundle.get("verdict") or {}
+        why  = bundle.get("why")  or "Why: n/a"
+        whyp = bundle.get("whypp") or "Why++: n/a"
+        lp   = bundle.get("lp")   or "LP: n/a"
+        pair = _s(m.get("pairSymbol"))
+        chain= _fmt_chain(m.get("chain"))
+        price= _fmt_num(m.get("price"))
+        fdv  = _fmt_num(m.get("fdv"))
+        mc   = _fmt_num(m.get("mc"))
+        liq  = _fmt_num(m.get("liq"))
+        vol  = _fmt_num(m.get("vol24h"))
+        chg5 = _fmt_pct((m.get("priceChanges") or {}).get("m5"))
+        chg1 = _fmt_pct((m.get("priceChanges") or {}).get("h1"))
+        chg24= _fmt_pct((m.get("priceChanges") or {}).get("h24"))
+        asof = _fmt_time(m.get("asof"))
+        age  = _fmt_age(m.get("ageDays"))
+        score = _s((v.get("score") if isinstance(v, dict) else getattr(v, "score", None)))
+        level = (v.get("level") if isinstance(v, dict) else getattr(v, "level", "")) or ""
+        score_ui = ("15" if (str(score) in ("0","0.0") and str(level).lower().startswith("low")) else str(score))
+
+
+
+        html = (
+            "<!doctype html><html><head><meta charset='utf-8'/>"
+            "<title>Metridex QuickScan — " + pair + "</title>"
+            "<style>"
+            "body{background:#0b0b0f;color:#e7e5e4;font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;margin:24px}"
+            "h1{font-size:24px;margin:0 0 12px}"
+            ".meta,.block pre{background:#13151a;border:1px solid #262626;border-radius:12px;padding:12px}"
+            ".meta{margin:12px 0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}"
+            ".pill{display:inline-block;background:#1f2937;border-radius:999px;padding:3px 8px;margin-left:8px;color:#f59e0b;font-weight:600}"
+            "a{color:#93c5fd}"
+            "</style></head><body>"
+            "<h1>Metridex QuickScan — " + pair + " <span class='pill'>Score: " + score_ui + "</span></h1>"
+            "<div class='meta'>"
+            "<div>Chain: " + chain + "</div><div>Price: " + price + "</div>"
+            "<div>FDV: " + fdv + "</div><div>MC: " + mc + "</div>"
+            "<div>Liquidity: " + liq + "</div><div>Vol 24h: " + vol + "</div>"
+            "<div>Δ5m: " + chg5 + "</div><div>Δ1h: " + chg1 + "</div>"
+            "<div>Δ24h: " + chg24 + "</div><div>Age: " + age + "</div><div>As of: " + asof + "</div>"
+            "</div>"
+            "<div class='block'><pre>" + str(why)  + "</pre></div>"
+            "<div class='block'><pre>" + str(whyp) + "</pre></div>"
+            "<div class='block'><pre>" + str(lp)   + "</pre></div>"
+            "</body></html>"
+        )
+        return html.encode("utf-8")
+    except Exception:
+        try:
+            import json as _json
+            pretty = _json.dumps(bundle, ensure_ascii=False, indent=2)
+        except Exception:
+            pretty = str(bundle)
+        html = (
+            "<!doctype html><html><head><meta charset='utf-8'/>"
+            "<style>body{background:#0b0b0f;color:#e7e5e4;font-family:Inter,Arial,sans-serif;margin:24px}"
+            "pre{background:#13151a;border:1px solid #262626;border-radius:12px;padding:12px;white-space:pre-wrap}</style></head>"
+            "<body><h1>Metridex Report (fallback)</h1><pre>" + pretty + "</pre></body></html>"
+        )
+        return html.encode("utf-8")
+
