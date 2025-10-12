@@ -236,17 +236,13 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 _rd = None
             if _rd:
                 _rd_lines = ["*WHOIS/RDAP*"]
+                if _rd.get("domain"):    _rd_lines.append(f"• Domain: {_rd['domain']}")
                 if _rd.get("registrar"): _rd_lines.append(f"• Registrar: {_rd['registrar']}")
+                if _rd.get("registrar_id"): _rd_lines.append(f"• Registrar IANA ID: {_rd['registrar_id']}")
                 if _rd.get("created"):   _rd_lines.append(f"• Created: {_rd['created']}")
                 if _rd.get("expires"):   _rd_lines.append(f"• Expires: {_rd['expires']}")
                 if _rd.get("age_days") is not None: _rd_lines.append(f"• Domain age: {_rd['age_days']} d")
                 if _rd.get("country"):   _rd_lines.append(f"• Country: {_rd['country']}")
-                if _rd.get("status"):
-                    try:
-                        _st = list(_rd["status"])[:4]
-                        if _st: _rd_lines.append("• Status: " + ", ".join(_st))
-                    except Exception:
-                        pass
                 if _rd.get("flags"):     _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
                 parts.append("\n".join(_rd_lines))
 
