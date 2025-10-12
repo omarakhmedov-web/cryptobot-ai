@@ -117,6 +117,39 @@ def _pick_color(verdict, market):
     if lvl.startswith("LOW"):  return "🟢"
     return "🟡"
 
+# --- chain-aware tiers for Why++ (align with risk_engine) ---
+def _short_chain(market: Dict[str, Any]) -> str:
+    ch = (market or {}).get("chain") or ""
+    ch = str(ch).strip().lower()
+    mp = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance smart chain":"bsc","polygon":"polygon","matic":"polygon",
+          "arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax",
+          "fantom":"ftm","ftm":"ftm","sol":"sol","solana":"sol"}
+    return mp.get(ch, ch)
+
+def _env_num(key: str, default: int) -> int:
+    try:
+        v = os.getenv(key)
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except Exception:
+        return default
+
+BASE = {
+    "eth":     {"LIQ_POSITIVE": 1_000_000, "LIQ_LOW": 200_000, "VOL_ACTIVE": 2_000_000, "VOL_THIN": 25_000},
+    "bsc":     {"LIQ_POSITIVE":   300_000, "LIQ_LOW":  60_000, "VOL_ACTIVE":   600_000, "VOL_THIN": 12_000},
+    "polygon": {"LIQ_POSITIVE":   200_000, "LIQ_LOW":  40_000, "VOL_ACTIVE":   400_000, "VOL_THIN":  8_000},
+}
+FALLBACK = {"LIQ_POSITIVE": 25_000, "LIQ_LOW": 10_000, "VOL_ACTIVE": 50_000, "VOL_THIN": 5_000}
+
+def _tiers(market: Dict[str, Any]) -> Dict[str, int]:
+    short = _short_chain(market)
+    t = dict(FALLBACK)
+    t.update(BASE.get(short, {}))
+    for k in ("LIQ_POSITIVE","LIQ_LOW","VOL_ACTIVE","VOL_THIN"):
+        t[k] = _env_num(f"{k}_{short.upper()}", _env_num(k, t[k]))
+    return t
+
 # ---- renderers ----
 def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
@@ -186,8 +219,9 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     parts.append(f"*Pair*\n• Address: `{pair_addr}`\n• Symbol: {pair}")
 
     # RDAP / WHOIS (optional)
+    import os as _os
     try:
-        _enable_rdap = os.getenv("ENABLE_RDAP", "1").lower() in ("1","true","yes")
+        _enable_rdap = _os.getenv("ENABLE_RDAP", "1").lower() in ("1","true","yes")
     except Exception:
         _enable_rdap = True
     if _enable_rdap and l_site and l_site != "—":
@@ -213,11 +247,11 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                         if _st: _rd_lines.append("• Status: " + ", ".join(_st))
                     except Exception:
                         pass
-                if _rd.get("flags"): _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
+                if _rd.get("flags"):     _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
                 parts.append("\n".join(_rd_lines))
 
     # Links (text) — hidden by default, we have buttons
-    _show_links = os.getenv("SHOW_LINKS_IN_DETAILS", "0").lower() in ("1","true","yes")
+    _show_links = _os.getenv("SHOW_LINKS_IN_DETAILS", "0").lower() in ("1","true","yes")
     if _show_links:
         ll = ["*Links*"]
         if l_dex and l_dex != "—": ll.append(f"• DEX: {l_dex}")
@@ -240,3 +274,128 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         )
 
     return "\n".join(parts)
+
+
+
+
+def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
+    # Take up to 3 key reasons, deduplicated
+    reasons: List[str] = []
+    try:
+        reasons = list(getattr(verdict, "reasons", []) or [])
+    except Exception:
+        reasons = list((verdict or {}).get("reasons") or [])
+    seen = set()
+    uniq = []
+    for r in reasons:
+        if not r: continue
+        if r in seen: continue
+        seen.add(r)
+        uniq.append(r)
+        if len(uniq) >= 3:
+            break
+    if not uniq:
+        return "*Why?*\n• No specific risk factors detected"
+    header = "*Why?*"
+    lines = [f"• {r}" for r in uniq]
+    return "\n".join([header] + lines).replace("\n", "\n")
+
+def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
+    # Weighted Top-3 positives and Top-3 risks (chain-aware)
+    m = market or {}
+    pos: List[tuple[str,int]] = []
+    risk: List[tuple[str,int]] = []
+
+    def add_pos(label:str, w:int): pos.append((label,w))
+    def add_risk(label:str, w:int): risk.append((label,w))
+
+    t = _tiers(m)
+
+    liq = _get(m, "liq")
+    vol = _get(m, "vol24h")
+    ch24 = _get(m, "priceChanges","h24")
+    age = _get(m, "ageDays")
+    fdv = _get(m, "fdv"); mc = _get(m, "mc")
+
+    try:
+        if isinstance(liq,(int,float)) and liq >= t["LIQ_POSITIVE"]: add_pos(f"Healthy liquidity (${liq:,.0f})", 3)
+        if isinstance(vol,(int,float)) and vol >= t["VOL_ACTIVE"]:   add_pos(f"Active 24h volume (${vol:,.0f})", 2)
+        if isinstance(age,(int,float)) and age >= 7:                 add_pos(f"Established >1 week (~{age:.1f}d)", 2)
+        if isinstance(ch24,(int,float)) and -30 < ch24 < 80:         add_pos(f"Moderate 24h move ({ch24:+.0f}%)", 1)
+    except Exception:
+        pass
+
+    try:
+        if liq is None: add_risk("Liquidity unknown", 2)
+        elif isinstance(liq,(int,float)) and liq < t["LIQ_LOW"]: add_risk(f"Low liquidity (${liq:,.0f})", 3)
+        if vol is None: add_risk("24h volume unknown", 1)
+        elif isinstance(vol,(int,float)) and vol < t["VOL_THIN"]: add_risk(f"Thin 24h volume (${vol:,.0f})", 2)
+        if isinstance(ch24,(int,float)) and (ch24 > 100 or ch24 < -70): add_risk(f"Extreme 24h move ({ch24:+.0f}%)", 2)
+        if age is None: add_risk("Pair age unknown", 2)
+        elif isinstance(age,(int,float)) and age < 1: add_risk("Newly created pair (<1d)", 3)
+        if isinstance(fdv,(int,float)) and isinstance(mc,(int,float)) and mc>0 and fdv/mc>5:
+            add_risk(f"FDV/MC high (~{fdv/mc:.1f}x)", 1)
+    except Exception:
+        pass
+
+    pos = sorted(pos, key=lambda x: (-x[1], x[0]))[:3]
+    risk = sorted(risk, key=lambda x: (-x[1], x[0]))[:3]
+
+    lines = ["*Why++*"]
+    if pos:
+        lines.append("_Top positives_")
+        for label, w in pos:
+            lines.append(f"• {label} (w={w})")
+    if risk:
+        lines.append("_Top risks_")
+        for label, w in risk:
+            lines.append(f"• {label} (w={w})")
+    return "\n".join(lines).replace("\n", "\n")
+
+def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
+    p = info or {}
+    status_raw = str(p.get("status") or "").lower()
+    burned_flag = bool(p.get("burned")) or status_raw in ("burned","fully-burned")
+    burned_pct = p.get("burnedPct")
+    locked_pct = p.get("lockedPct")
+    lockers = p.get("lockers") or []
+    until = p.get("until") or "—"
+    addr = p.get("lpAddress") or "—"
+
+    def fmt_pct(v):
+        try:
+            return f"{float(v):.2f}%"
+        except Exception:
+            return "—"
+
+    lines = ["*LP lock (lite)*"]
+    if burned_flag or (isinstance(burned_pct,(int,float)) and burned_pct >= 95):
+        bp = fmt_pct(burned_pct) if burned_pct is not None else "≥95%"
+        lines.append(f"• Burned: {bp} (LP → 0x…dead)")
+    elif isinstance(burned_pct,(int,float)):
+        if burned_pct >= 50:
+            lines.append(f"• Mostly burned: {fmt_pct(burned_pct)}")
+        elif burned_pct >= 5:
+            lines.append(f"• Partially burned: {fmt_pct(burned_pct)}")
+        else:
+            lines.append(f"• Burned: {fmt_pct(burned_pct)}")
+    else:
+        lines.append("• Burned: —")
+
+    if isinstance(locked_pct,(int,float)) and locked_pct > 0:
+        lines.append(f"• Locked via lockers: {fmt_pct(locked_pct)}")
+
+    if lockers:
+        for lk in lockers[:5]:
+            addr_short = (lk.get("locker","") or "—")
+            bal = lk.get("balance")
+            pct = lk.get("pct")
+            try:
+                bal_s = f"{int(bal):,}" if isinstance(bal,int) else str(bal)
+            except Exception:
+                bal_s = str(bal)
+            lines.append(f"  · {addr_short} — {bal_s} ({fmt_pct(pct)})")
+    if until not in ("—", None, ""):
+        lines.append(f"• Unlocks: {until}")
+    lines.append(f"• LP token: `{addr}`")
+    return "\n".join(lines)
