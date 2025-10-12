@@ -158,6 +158,10 @@ def _human_status(s: str) -> str:
     s = _re.sub(r'(?<!^)([A-Z])', r' \1', s)
     return s.lower()
 
+# RDAP country placeholder flag (default ON):
+# Set env RDAP_COUNTRY_PLACEHOLDER=0 to disable showing "Country: —" when country is missing.
+_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "1") not in ("0", "false", "False", ""))
+
 # ---- renderers ----
 def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
@@ -252,7 +256,10 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 if _rd.get("created"):   _rd_lines.append(f"• Created: {_rd['created']}")
                 if _rd.get("expires"):   _rd_lines.append(f"• Expires: {_rd['expires']}")
                 if _rd.get("age_days") is not None: _rd_lines.append(f"• Domain age: {_rd['age_days']} d")
-                if _rd.get("country"):   _rd_lines.append(f"• Country: {_rd['country']}")
+                if _rd.get("country"):
+                    _rd_lines.append(f"• Country: {_rd['country']}")
+                elif _RDAP_COUNTRY_PLACEHOLDER:
+                    _rd_lines.append("• Country: —")
                 if _rd.get("status"):
                     try:
                         _st = list(_rd["status"])[:4]
