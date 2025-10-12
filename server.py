@@ -67,7 +67,7 @@ def tg(method, payload=None, files=None, timeout=12):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx="onchain")):
     data = {"chat_id": chat_id, "text": mdv2_escape(str(text)), "parse_mode": PARSE_MODE}
     if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
     return tg("sendMessage", data)
@@ -272,7 +272,7 @@ def on_message(msg):
             "tokenAddress": market.get("tokenAddress"), "pairAddress": market.get("pairAddress"),
             "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
         },
-        "links": {"dex": links.get("dex"), "scan": links.get("scan"), "site": links.get("site")},
+        "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
         "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
     }
 
