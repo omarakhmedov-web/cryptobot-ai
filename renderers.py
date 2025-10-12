@@ -79,15 +79,19 @@ def _fmt_time(ts_ms: Optional[int]) -> str:
         return "—"
 
 def _score(verdict) -> str:
+    # Unified score presentation: clamp 0→15 when level reads LOW, to keep UI consistent.
     try:
         v = getattr(verdict, "score", None) or _get(verdict, "score", default=None)
     except Exception:
         v = _get(verdict, "score", default=None)
+    lvl = (_level(verdict) or "").lower()
+    if (v == 0) and lvl.startswith("low"):
+        return "15"
     if v in (None, "—", ""):
-        lvl = (_level(verdict) or "").lower()
         if lvl.startswith("low"): return "15"
         if lvl.startswith("med"): return "50"
-        if lvl.startswith("high"): return "85"
+        if lvl.startswith("high"): return "75"
+        if lvl.startswith("critical"): return "90"
         return "—"
     return f"{v}"
 
