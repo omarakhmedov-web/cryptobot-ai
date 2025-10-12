@@ -200,6 +200,7 @@ def _normalize_market(ds: Dict[str, Any]) -> Dict[str, Any]:
         'priceChanges': {
             'm5': pc.get('m5'),
             'h1': pc.get('h1') or pc.get('1h'),
+            'h6': pc.get('h6') or pc.get('6h') or pc.get('h6h'),
             'h24': pc.get('h24') or pc.get('24h'),
         },
         'ageDays': None,
