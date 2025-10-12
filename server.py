@@ -373,7 +373,7 @@ def on_callback(cb):
             safe_pair = _re.sub(r"[^A-Za-z0-9._-]+", "_", str(pair_sym))
             fname = f"{safe_pair}_Report_{ts_str}.html"
 
-            html_bytes = _build_html_report(bundle)
+            html_bytes = _build_html_report_safe(bundle)
             send_document(chat_id, fname, html_bytes, caption='Metridex QuickScan report', content_type='text/html; charset=utf-8')
             answer_callback_query(cb_id, 'Report exported.', False)
         except Exception as e:
@@ -390,7 +390,7 @@ def on_callback(cb):
                 answer_callback_query(cb_id, f'Export failed: {e2}', True)
     elif action == "REPORT_PDF":
         try:
-            html_bytes = _build_html_report(bundle)
+            html_bytes = _build_html_report_safe(bundle)
             pdf = _html_to_pdf(html_bytes)
             if not pdf:
                 answer_callback_query(cb_id, "PDF export unavailable on this server.", True)
@@ -491,7 +491,7 @@ def on_callback(cb):
             val = ch.get("h6") or ch.get("h6h") or ch.get("6h")
         else:
             val = ch.get("h24")
-        answer_callback_query(cb_id, f"{label}: {_pct(val)}", True)
+        answer_callback_query(cb_id, f"{label}: {_pct(val)}", False)
 
     else:
         answer_callback_query(cb_id, "Unsupported action", True)
@@ -803,3 +803,86 @@ pre {{ white-space:pre-wrap; }}
 </body>
 </html>'''
     return html_doc.encode("utf-8")
+
+
+# --- Safe HTML report builder (dark, no logos) ---
+def _build_html_report_safe(bundle: dict) -> bytes:
+    try:
+        def _s(x): return str(x) if x is not None else "—"
+        def _fmt_num(v, prefix="$"):
+            try:
+                n = float(v)
+            except Exception:
+                return "—"
+            a = abs(n)
+            if a >= 1_000_000_000: s = f"{n/1_000_000_000:.2f}B"
+            elif a >= 1_000_000:  s = f"{n/1_000_000:.2f}M"
+            elif a >= 1_000:      s = f"{n/1_000:.2f}K"
+            else:                 s = f"{n:.6f}" if a < 1 else f"{n:.2f}"
+            return prefix + s
+        def _fmt_pct(v):
+            try:
+                n = float(v)
+                arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
+                return f"{arrow} {n:+.2f}%"
+            except Exception:
+                return "—"
+
+        m = bundle.get("market") or {}
+        v = bundle.get("verdict") or {}
+        why  = bundle.get("why")  or "Why: n/a"
+        whyp = bundle.get("whypp") or "Why++: n/a"
+        lp   = bundle.get("lp")   or "LP: n/a"
+
+        pair = _s(m.get("pairSymbol"))
+        chain= _s(m.get("chain"))
+        price= _fmt_num(m.get("price"))
+        fdv  = _fmt_num(m.get("fdv"))
+        mc   = _fmt_num(m.get("mc"))
+        liq  = _fmt_num(m.get("liq"))
+        vol  = _fmt_num(m.get("vol24h"))
+        chg5 = _fmt_pct((m.get("priceChanges") or {}).get("m5"))
+        chg1 = _fmt_pct((m.get("priceChanges") or {}).get("h1"))
+        chg24= _fmt_pct((m.get("priceChanges") or {}).get("h24"))
+        asof = _s(m.get("asof"))
+        score = _s((v.get("score") if isinstance(v, dict) else getattr(v, "score", None)))
+
+        html = (
+            "<!doctype html><html><head><meta charset='utf-8'/>"
+            "<title>Metridex QuickScan — " + pair + "</title>"
+            "<style>"
+            "body{background:#0b0b0f;color:#e7e5e4;font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;margin:24px}"
+            "h1{font-size:24px;margin:0 0 12px}"
+            ".meta,.block pre{background:#13151a;border:1px solid #262626;border-radius:12px;padding:12px}"
+            ".meta{margin:12px 0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}"
+            ".pill{display:inline-block;background:#1f2937;border-radius:999px;padding:3px 8px;margin-left:8px;color:#f59e0b;font-weight:600}"
+            "a{color:#93c5fd}"
+            "</style></head><body>"
+            "<h1>Metridex QuickScan — " + pair + " <span class='pill'>Score: " + score + "</span></h1>"
+            "<div class='meta'>"
+            "<div>Chain: " + chain + "</div><div>Price: " + price + "</div>"
+            "<div>FDV: " + fdv + "</div><div>MC: " + mc + "</div>"
+            "<div>Liquidity: " + liq + "</div><div>Vol 24h: " + vol + "</div>"
+            "<div>Δ5m: " + chg5 + "</div><div>Δ1h: " + chg1 + "</div>"
+            "<div>Δ24h: " + chg24 + "</div><div>Asof: " + asof + "</div>"
+            "</div>"
+            "<div class='block'><pre>" + str(why)  + "</pre></div>"
+            "<div class='block'><pre>" + str(whyp) + "</pre></div>"
+            "<div class='block'><pre>" + str(lp)   + "</pre></div>"
+            "</body></html>"
+        )
+        return html.encode("utf-8")
+    except Exception:
+        try:
+            import json as _json
+            pretty = _json.dumps(bundle, ensure_ascii=False, indent=2)
+        except Exception:
+            pretty = str(bundle)
+        html = (
+            "<!doctype html><html><head><meta charset='utf-8'/>"
+            "<style>body{background:#0b0b0f;color:#e7e5e4;font-family:Inter,Arial,sans-serif;margin:24px}"
+            "pre{background:#13151a;border:1px solid #262626;border-radius:12px;padding:12px;white-space:pre-wrap}</style></head>"
+            "<body><h1>Metridex Report (fallback)</h1><pre>" + pretty + "</pre></body></html>"
+        )
+        return html.encode("utf-8")
+
