@@ -3,6 +3,7 @@ import os, re, time
 from typing import Dict, Any, Optional, Tuple, List
 from urllib.parse import urlparse
 import requests
+from age_fallback import resolve_pair_age_days
 
 # ===== Config =====
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT_SECONDS","10"))
@@ -147,7 +148,7 @@ def _normalize_market(ds: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
 
-    return m
+    return _apply_age_fallback(m)
 
 def _to_float(x: Any) -> Optional[float]:
     try:
@@ -186,6 +187,21 @@ def _ds_pair_url(chain: str, pair: str) -> Optional[str]:
     if c == '—' or not pair: return None
     return f"https://dexscreener.com/{c}/{pair}"
 
+
+def _apply_age_fallback(m: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        if not m.get("ageDays"):
+            ch = m.get("chain")
+            pair = m.get("pairAddress")
+            if ch and pair:
+                age = resolve_pair_age_days(ch, pair)
+                if age is not None:
+                    m["ageDays"] = age
+                    m["asof"] = int(time.time() * 1000)
+    except Exception:
+        pass
+    return _apply_age_fallback(m)
+
 # ===== DexScreener adapters =====
 def _ds_by_pair(chain: str | None, pair: str) -> Dict[str, Any]:
     if not pair: return {"ok": False, "error": "no pair"}
@@ -199,7 +215,8 @@ def _ds_by_pair(chain: str | None, pair: str) -> Dict[str, Any]:
         return {"ok": False, "error": "no pairs"}
     best = max(pairs, key=lambda x: ((x.get("liquidity") or {}).get("usd") or 0))
     m = _normalize_market(best); m["ok"] = True
-    return m
+    m = _apply_age_fallback(m)
+    return _apply_age_fallback(m)
 
 def _ds_by_token(token: str) -> Dict[str, Any]:
     if not token: return {"ok": False, "error": "no token"}
@@ -212,7 +229,8 @@ def _ds_by_token(token: str) -> Dict[str, Any]:
     # Prefer best liquidity
     best = max(pairs, key=lambda x: ((x.get("liquidity") or {}).get("usd") or 0))
     m = _normalize_market(best); m["ok"] = True
-    return m
+    m = _apply_age_fallback(m)
+    return _apply_age_fallback(m)
 
 # ===== Query parsing =====
 ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -272,24 +290,24 @@ def fetch_market(_pos: str | None = None, *, chain: str | None = None, token: st
     if token and not pair:
         m = _ds_by_token(token)
         if m.get("ok"):
-            return m
+            return _apply_age_fallback(m)
 
     # Pair only -> try with chain hint or across enabled
     if pair and not chain:
         for ch in enabled_networks():
             m = _ds_by_pair(ch, pair)
-            if m.get("ok"): return m
+            if m.get("ok"): return _apply_age_fallback(m)
 
     # Pair + chain hint
     if pair and chain:
         m = _ds_by_pair(chain, pair)
-        if m.get("ok"): return m
+        if m.get("ok"): return _apply_age_fallback(m)
 
     # Token + chain hint (rare)
     if token and chain:
         m = _ds_by_token(token)
         if m.get("ok") and (m.get("chain") == DS_CHAIN_FROM_SHORT.get(chain, chain)):
-            return m
+            return _apply_age_fallback(m)
 
     # Not found -> structured "no pools" market
     out = {"ok": False, "error": "no market found", "sources": ['DexScreener'], "chain": chain or "—", "links": {}}
