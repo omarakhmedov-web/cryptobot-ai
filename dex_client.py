@@ -1,4 +1,3 @@
-# AUTOFIXED FROM UPLOADED v2 (1) — do not edit in-place; copy to repo as dex_client.py
 from __future__ import annotations
 import os, time, re
 from typing import Dict, Any, Optional
@@ -174,63 +173,87 @@ def _ds_get(path: str) -> tuple[int, Any]:
 
 # -------- Normalization --------
 def _normalize_market(ds: Dict[str, Any]) -> Dict[str, Any]:
+    # Robust extraction with fallbacks
+    base_sym = ((ds.get('baseToken') or {}).get('symbol') or ds.get('symbol') or '?')
+    quote_sym = ((ds.get('quoteToken') or {}).get('symbol') or ds.get('quoteSymbol') or '?')
+    pair_symbol = ds.get('pairSymbol') or f"{base_sym}/{quote_sym}"
+    price = ds.get('priceUsd')
+    try:
+        price = float(price) if price is not None else None
+    except Exception:
+        price = None
+    liq = ((ds.get('liquidity') or {}).get('usd')
+           or ds.get('liquidityUsd') or ds.get('liquidityUSD'))
+    try:
+        liq = float(liq) if liq is not None else None
+    except Exception:
+        liq = None
+    pc = ds.get('priceChange') or {}
     m = {
-        "pairSymbol": f"{ds.get('baseToken',{}).get('symbol','?')}/{ds.get('quoteToken',{}).get('symbol','?')}",
-        "chain": ds.get("chainId") or ds.get("chain") or "—",
-        "price": float(ds.get("priceUsd") or 0) or None,
-        "fdv": ds.get("fdv"),
-        "mc": ds.get("marketCap"),
-        "liq": (ds.get("liquidity") or {}).get("usd"),
-        "vol24h": (ds.get("volume") or {}).get("h24"),
-        "priceChanges": {
-            "m5": (ds.get("priceChange") or {}).get("m5"),
-            "h1": (ds.get("priceChange") or {}).get("h1"),
-            "h24": (ds.get("priceChange") or {}).get("h24"),
+        'pairSymbol': pair_symbol,
+        'chain': ds.get('chainId') or ds.get('chain') or '—',
+        'price': price,
+        'fdv': ds.get('fdv'),
+        'mc': ds.get('marketCap'),
+        'liq': liq,
+        'vol24h': (ds.get('volume') or {}).get('h24'),
+        'priceChanges': {
+            'm5': pc.get('m5'),
+            'h1': pc.get('h1') or pc.get('1h'),
+            'h24': pc.get('h24') or pc.get('24h'),
         },
-        "ageDays": None,
-        "pairAddress": ds.get("pairAddress"),
-        "baseAddress": (ds.get("baseToken") or {}).get("address"),
-        "quoteAddress": (ds.get("quoteToken") or {}).get("address"),
-        "tokenAddress": (ds.get("baseToken") or {}).get("address"),
-        "sources": ["DexScreener"],
-        "source": "DexScreener",
-        "links": {},
-        "asof": int(time.time()*1000),
+        'ageDays': None,
+        'pairAddress': ds.get('pairAddress'),
+        'baseAddress': (ds.get('baseToken') or {}).get('address'),
+        'quoteAddress': (ds.get('quoteToken') or {}).get('address'),
+        'tokenAddress': (ds.get('baseToken') or {}).get('address'),
+        'sources': ['DexScreener'],
+        'links': {}
     }
-    # Age derivation: prefer pairCreatedAt (ms), fallback 'age' (seconds)
-    pcat = ds.get("pairCreatedAt") or ds.get("pairCreatedAtMs")
+    # Scan link (token)
+    ch = (m.get('chain') or '').lower()
+    host = SCAN_HOST.get(ch)
+    if host and m.get('tokenAddress'):
+        m['links']['scan'] = f"https://{host}/token/{m['tokenAddress']}"
+    # Site
+    site = (ds.get('info') or {}).get('website') or ((ds.get('info') or {}).get('websites') or [None])[0]
+    if site:
+        m['links']['site'] = site
+    # Age derivation
+    pcat = ds.get('pairCreatedAt') or ds.get('pairCreatedAtMs')
     if pcat:
         try:
             ts_ms = int(pcat)
             if ts_ms < 10**12: ts_ms *= 1000
-            m["ageDays"] = round((time.time()*1000 - ts_ms) / (1000*60*60*24), 2)
+            m['ageDays'] = round((time.time()*1000 - ts_ms) / (1000*60*60*24), 2)
         except Exception:
             pass
-    elif ds.get("age"):
+    elif ds.get('age'):
         try:
-            m["ageDays"] = round(float(ds["age"])/86400, 1)
+            m['ageDays'] = round(float(ds['age'])/86400, 1)
         except Exception:
             pass
-# DexScreener + DEX links
+    # Dex links
     if m.get('pairAddress') and m.get('chain'):
         m['links']['dexscreener'] = f"https://dexscreener.com/{m['chain']}/{m['pairAddress']}"
         swap = _swap_url(m.get('chain'), m.get('tokenAddress'))
         if swap: m['links']['dex'] = swap
-    
-    # Scan link (token)
-    ch = (m.get("chain") or "").lower()
-    host = SCAN_HOST.get(ch)
-    if host and m.get("tokenAddress"):
-        m["links"]["scan"] = f"https://{host}/token/{m['tokenAddress']}"
-    # FDV/MC normalization if supplies available
+    # FDV/MC normalization if possible
     try:
-        total_supply = (ds.get("fdvInfo") or {}).get("totalSupply") or (ds.get("supply") or {}).get("total")
-        circ_supply  = (ds.get("marketCapInfo") or {}).get("circulating") or (ds.get("supply") or {}).get("circulating")
-        price = m.get("price")
-        if (m.get("fdv") in (None, 0)) and total_supply and price:
-            m["fdv"] = float(total_supply) * float(price)
-        if (m.get("mc") in (None, 0)) and circ_supply and price:
-            m["mc"] = float(circ_supply) * float(price)
+        total_supply = (ds.get('fdvInfo') or {}).get('totalSupply') or (ds.get('supply') or {}).get('total')
+        circ_supply  = (ds.get('marketCapInfo') or {}).get('circulating') or (ds.get('supply') or {}).get('circulating')
+        if (m.get('fdv') in (None, 0)) and total_supply and price:
+            m['fdv'] = float(total_supply) * float(price)
+        if (m.get('mc') in (None, 0)) and circ_supply and price:
+            m['mc'] = float(circ_supply) * float(price)
+    except Exception:
+        pass
+    # Enforce FDV >= MC if both numeric
+    try:
+        fdv = float(m.get('fdv')) if m.get('fdv') is not None else None
+        mc  = float(m.get('mc')) if m.get('mc') is not None else None
+        if fdv is not None and mc is not None and fdv < mc:
+            m['fdv'] = mc
     except Exception:
         pass
     return m
@@ -334,125 +357,50 @@ def _parse_query(q: str) -> tuple[str|None, str|None, str|None]:
     # Plain addresses / tx
     if ADDR_RE.match(q): return None, q, None
     if TX_RE.match(q):   return None, None, None
-    return None, None, None
+    return None, None, Nonet
 
 __all__ = ['fetch_market']
 
 
 # ---- Ensure public API is present ----
-
-
 def fetch_market(_pos: str | None = None, *, chain: str | None = None, token: str | None = None, pair: str | None = None) -> dict:
-    """
-    Resolve query into a market snapshot. Never raises. Always returns a dict with keys:
-      chain, symbol, price, fdv, mc, liquidity, vol24h, delta_5m, delta_1h, delta_24h,
-      age_days, token_address, pair_address, dex_url, scan_url, site, source, ok
-    """
-    try:
-        # Resolve positional by parsing if explicit args not provided
-        if _pos and not (chain or token or pair):
-            c, t, p = _parse_query(_pos)
-            chain = chain or c
-            token = token or t
-            pair  = pair  or p
+    # Resolve positional by parsing
+    if _pos and not (chain or token or pair):
+        c,t,p = _parse_query(_pos); chain = chain or c; token = token or t; pair = pair or p
 
-        # If 'chain' accidentally carries a token address
-        if chain and ADDR_RE.match(chain):
-            token, chain = chain, None
+    # If token accidentally passed as "chain"
+    if chain and ADDR_RE.match(chain):
+        token = token or chain; chain = None
 
-        market = None
+    # Direct target
+    if chain and (pair or token):
+        ch = (chain or "").strip().lower()
+        m = _ds_by_pair(ch, pair) if pair else _ds_by_token(ch, token)
+        if m.get("ok"):
+            _add_onchain_source(m)
+            return m
 
-        # Priority 1: explicit chain with token/pair
-        if chain and (pair or token):
-            ch = (chain or "").strip().lower()
-            market = _ds_by_pair(ch, pair) if pair else _ds_by_token(ch, token)
-            if market.get("ok"):
-                _add_onchain_source(market)
+    # Token only -> best pair across chains
+    if token and not pair:
+        m = _ds_by_token(None, token)
+        if m.get("ok"):
+            _add_onchain_source(m)
+            return m
 
-        # Priority 2: token only across chains
-        if (market is None or not market.get("ok")) and token and not pair:
-            market = _ds_by_token(None, token)
-            if market.get("ok"):
-                _add_onchain_source(market)
+    # Pair only -> try across enabled chains
+    if pair and not chain:
+        for ch_short in enabled_networks():
+            m = _ds_by_pair(ch_short, pair)
+            if m.get("ok"):
+                _add_onchain_source(m)
+                return m
 
-        # Priority 3: pair only across enabled chains
-        if (market is None or not market.get("ok")) and pair and not chain:
-            for ch_short in enabled_networks():
-                cand = _ds_by_pair(ch_short, pair)
-                if cand.get("ok"):
-                    _add_onchain_source(cand)
-                    market = cand
-                    break
+    out = {"ok": False, "error": "no market found", "sources": [], "chain": chain or "—", "links": {}}
+    if token: out["tokenAddress"] = token
+    if pair:  out["pairAddress"] = pair
+    return out
 
-        # If still nothing, return graceful unknown
-        if not market or not market.get("ok"):
-            # Map to renderer-friendly keys
-            return {
-                "ok": False,
-                "chain": (chain or "—"),
-                "symbol": None,
-                "price": None,
-                "fdv": None,
-                "mc": None,
-                "liquidity": None,
-                "vol24h": None,
-                "delta_5m": None,
-                "delta_1h": None,
-                "delta_24h": None,
-                "age_days": None,
-                "token_address": token or None,
-                "pair_address": None,
-                "dex_url": None,
-                "scan_url": None,
-                "site": None,
-                "source": "DexScreener",
-            }
-
-        # Normalize FDV/MC (ensure FDV >= MC if both present)
-        try:
-            fdv = float(market.get('fdv')) if market.get('fdv') is not None else None
-            mc  = float(market.get('mc')) if market.get('mc') is not None else None
-            if fdv is not None and mc is not None and fdv < mc:
-                market['fdv'] = mc
-        except Exception:
-            pass
-
-        # Build renderer-friendly output
-        ch = (market.get("chain") or "").lower()
-        symbol = market.get("pairSymbol") or None
-        token_addr = market.get("tokenAddress") or (market.get("baseAddress") if isinstance(market.get("baseAddress"), str) else None)
-        pair_addr  = market.get("pairAddress")
-        dex_url    = (market.get("links") or {}).get("dexscreener")
-        scan_host  = SCAN_HOST.get(ch)
-        scan_url   = f"https://{scan_host}/token/{token_addr}" if scan_host and token_addr else None
-
-        return {
-            "ok": True,
-            "chain": ch or None,
-            "symbol": symbol,
-            "price": market.get("price"),
-            "fdv": market.get("fdv"),
-            "mc": market.get("mc"),
-            "liquidity": market.get("liq"),
-            "vol24h": market.get("vol24h"),
-            "delta_5m": (market.get("priceChanges") or {}).get("m5"),
-            "delta_1h": (market.get("priceChanges") or {}).get("h1"),
-            "delta_24h": (market.get("priceChanges") or {}).get("h24"),
-            "age_days": market.get("ageDays"),
-            "token_address": token_addr,
-            "pair_address": pair_addr,
-            "dex_url": dex_url,
-            "scan_url": scan_url,
-            "site": (market.get("links") or {}).get("site"),
-            "source": "DexScreener",
-        }
-    except Exception as e:
-        # Absolute fallback: never crash upstream
-        return {
-            "ok": False, "error": str(e), "chain": (chain or "—"), "symbol": None,
-            "price": None, "fdv": None, "mc": None, "liquidity": None, "vol24h": None,
-            "delta_5m": None, "delta_1h": None, "delta_24h": None, "age_days": None,
-            "token_address": token or None, "pair_address": pair or None,
-            "dex_url": None, "scan_url": None, "site": None, "source": "DexScreener",
-        }
-
+try:
+    __all__ = list(set((__all__ if '__all__' in globals() else []) + ['fetch_market']))
+except Exception:
+    __all__ = ['fetch_market']
