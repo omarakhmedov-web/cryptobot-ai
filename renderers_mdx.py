@@ -598,19 +598,17 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         who = web.get("whois") or {}
         ssl = web.get("ssl") or {}
         way = web.get("wayback") or {}
-
-# Fallback WHOIS from market['domain'] if webintel is missing/empty
-try:
-    dom_block = (market or {}).get("domain") or {}
-    if dom_block:
-        # Only fill if missing
-        if not who.get("created") and dom_block.get("created"):
-            who["created"] = dom_block.get("created")
-        if not who.get("registrar") and dom_block.get("registrar"):
-            who["registrar"] = dom_block.get("registrar")
-        web["whois"] = who
-except Exception:
-    pass
+        # Fallback WHOIS from market['domain'] if webintel is missing/empty
+        try:
+            dom_block = (market or {}).get('domain') or {}
+            if dom_block:
+                if not who.get('created') and dom_block.get('created'):
+                    who['created'] = dom_block.get('created')
+                if not who.get('registrar') and dom_block.get('registrar'):
+                    who['registrar'] = dom_block.get('registrar')
+                web['whois'] = who
+        except Exception:
+            pass
         parts.append(
             "*Website intel*"
             + f"\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
