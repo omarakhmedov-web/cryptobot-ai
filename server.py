@@ -110,6 +110,61 @@ def _whois_info(host: str):
     except Exception:
         return {"created": None, "registrar": None}
 
+def _ssl_info(host: str):
+    try:
+        ctx = _ssl.create_default_context()
+        with socket.create_connection((host, 443), timeout=_WE_TIMEOUT) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+        exp = None
+        if cert and "notAfter" in cert:
+            try:
+                import datetime as dt
+                # already imported as _dt above, but keep robust
+                exp = dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").strftime("%Y-%m-%d")
+            except Exception:
+                exp = cert.get("notAfter")
+        return {"ok": True, "expires": exp, "issuer": None}
+    except Exception:
+        return {"ok": None, "expires": None, "issuer": None}
+
+
+
+# --- Website intel helpers (RDAP WHOIS fallback, TLS + HTTP HEAD, Wayback) ---
+import socket, ssl as _ssl, datetime as _dt, os as _os
+import requests as _rq
+
+_WE_TIMEOUT = float(_os.getenv("WEBINTEL_TIMEOUT_S", "2.5"))
+_WE_HEAD_TIMEOUT = float(_os.getenv("WEBINTEL_HEAD_TIMEOUT_S", "2.0"))
+
+def _rdap_whois(host: str):
+    try:
+        r = _rq.get(f"https://rdap.org/domain/{host}", timeout=_WE_TIMEOUT)
+        if not r.ok:
+            return {"created": None, "registrar": None}
+        j = r.json()
+        created = None
+        registrar = None
+        for ev in (j.get("events") or []):
+            if isinstance(ev, dict) and str(ev.get("eventAction","")).lower().startswith("registration"):
+                d = ev.get("eventDate")
+                if isinstance(d, str) and len(d) >= 10:
+                    created = d[:10]
+                    break
+        for ent in (j.get("entities") or []):
+            roles = ent.get("roles") or []
+            if any(str(r).lower() == "registrar" for r in roles):
+                v = ent.get("vcardArray")
+                if isinstance(v, list) and len(v) >= 2 and isinstance(v[1], list):
+                    for item in v[1]:
+                        if isinstance(item, list) and len(item) >= 4 and item[0] == "fn":
+                            registrar = item[3]
+                            break
+                if registrar:
+                    break
+        return {"created": created, "registrar": registrar}
+    except Exception:
+        return {"created": None, "registrar": None}
 
 def _ssl_info(host: str):
     exp = None
@@ -152,12 +207,41 @@ def analyze_website(site_url: str | None):
                 "wayback": {"first": None}}
     who = _whois_info(host)
     # RDAP fallback to fill missing fields
-    wr = _rdap_whois(host)
-    who = {"created": who.get("created") or wr.get("created"),
-           "registrar": who.get("registrar") or wr.get("registrar")}
+    if not (who.get("created") and who.get("registrar")):
+        wr = _rdap_whois(host)
+        who = {"created": who.get("created") or wr.get("created"),
+               "registrar": who.get("registrar") or wr.get("registrar")}
     ssl = _ssl_info(host)
     wb  = _wayback_first(host)
     return {"whois": who, "ssl": ssl, "wayback": {"first": wb}, "host": host, "wayback_url": f"https://web.archive.org/web/*/{host}"}
+
+def _wayback_first(host: str):
+    import requests
+    try:
+        base = "https://web.archive.org/cdx/search/cdx"
+        r = requests.get(base, params={
+            "url": host, "output": "json", "fl": "timestamp", "filter": "statuscode:200", "limit": "1",
+            "from": "19960101", "to": "99991231", "sort": "ascending"
+        }, timeout=_WE_TIMEOUT)
+        if r.ok:
+            j = r.json()
+            if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and j[1]:
+                ts = j[1][0]
+                return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+    except Exception:
+        pass
+    return None
+
+
+    host = _host_from_url(site_url) if site_url else None
+    if not host:
+        return {"whois": {"created": None, "registrar": None},
+                "ssl": {"ok": None, "expires": None, "issuer": None},
+                "wayback": {"first": None}}
+    who = _whois_info(host)
+    ssl = _ssl_info(host)
+    wb  = _wayback_first(host)
+    return {"whois": who, "ssl": ssl, "wayback": {"first": wb}}
 
 from flask import Flask, request, jsonify
 
@@ -195,50 +279,6 @@ BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
 WEBHOOK_PATH = f"/webhook/{BOT_WEBHOOK_SECRET}" if BOT_WEBHOOK_SECRET else "/webhook/secret-not-set"
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en")
 
-def _site_from_dexscreener(market: dict) -> str | None:
-    """Best-effort: fetch website from DexScreener API if not provided by market.links.site"""
-    try:
-        links = market.get("links") or {}
-        # If the full dexscreener pair URL is present, try to parse chain/pair
-        ds_url = links.get("dexscreener") or ""
-        pair_addr = (market.get("pairAddress") or "").strip()
-        chain = (market.get("chain") or "").strip().lower()
-        if not chain and "dexscreener.com" in ds_url:
-            # crude parse: .../chain/pairAddress
-            parts = ds_url.strip("/").split("/")
-            # find 'dexscreener.com' and take the next two segments
-            for i,p in enumerate(parts):
-                if "dexscreener.com" in p and i+2 < len(parts):
-                    chain = parts[i+1].lower()
-                    pair_addr = parts[i+2]
-                    break
-        if not chain:
-            return None
-        if not pair_addr:
-            return None
-        # call DexScreener API
-        import requests as _rq
-        url = f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair_addr}"
-        r = _rq.get(url, timeout=2.5)
-        if not r.ok:
-            return None
-        j = r.json()
-        pairs = j.get("pairs") or []
-        if not pairs:
-            return None
-        info = pairs[0].get("info") or {}
-        # Various shapes they've used historically
-        website = None
-        # sometimes it's 'websites': ['https://example.com', ...]
-        ws = info.get("websites") or info.get("webLinks") or []
-        if isinstance(ws, list) and ws:
-            website = ws[0]
-        if not website:
-            website = info.get("website") or info.get("url")
-        return website
-    except Exception:
-        return None
-
 def build_webintel_ctx(market: dict) -> dict:
     try:
         links = (market.get("links") or {})
@@ -248,65 +288,23 @@ def build_webintel_ctx(market: dict) -> dict:
         site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
     except Exception:
         site_url = os.getenv("WEBINTEL_SITE_OVERRIDE")
-
-    # If сайт не указан, но есть доменное имя в market['domain'], используем его.
-    try:
-        domain_block = market.get("domain") or {}
-        if (not site_url) and isinstance(domain_block, dict) and domain_block.get("name"):
-            site_url = domain_block.get("name")
-    except Exception:
-        domain_block = {}
-
-    # DexScreener fallback if site_url still empty
-    try:
-        if not site_url:
-            site_url = _site_from_dexscreener(market)
-            if site_url:
-                print(f"WEBINTEL: site_url from DexScreener: {site_url}")
-    except Exception:
-        pass
-
     # defaults
     web = {
         "whois": {"created": None, "registrar": None},
         "ssl": {"ok": None, "expires": None, "issuer": None},
         "wayback": {"first": None}
     }
-
-    # Основной сбор website intel (best-effort)
     try:
         if site_url:
             web = analyze_website(site_url)
     except Exception:
         pass
-
-    # Детерминированный fallback: заполняем WHOIS из domain_block, если пусто
     try:
-        if isinstance(domain_block, dict):
-            who = web.setdefault("whois", {"created": None, "registrar": None})
-            if not who.get("created") and domain_block.get("created"):
-                who["created"] = domain_block.get("created")
-            if not who.get("registrar") and domain_block.get("registrar"):
-                who["registrar"] = domain_block.get("registrar")
-    except Exception:
-        pass
-
-    # Возвращаем и сам домен-строку для рендерера (если нужно)
-    try:
-        dom = derive_domain(site_url) if site_url else (domain_block.get("name") if isinstance(domain_block, dict) else None)
+        dom = derive_domain(site_url)
     except Exception:
         dom = None
-
-    # --- Flatten webintel for renderers expecting flat keys ---
     try:
-        who = (web.get("whois") or {}) if isinstance(web, dict) else {}
-        ssl = (web.get("ssl") or {}) if isinstance(web, dict) else {}
-        wb  = (web.get("wayback") or {}) if isinstance(web, dict) else {}
-        web["whois_created"]   = who.get("created")
-        web["whois_registrar"] = who.get("registrar")
-        web["ssl_ok"]          = ssl.get("ok")
-        web["ssl_expires"]     = ssl.get("expires")
-        web["wayback_first"]   = wb.get("first")
+        web = _enrich_webintel_fallback(dom, web)
     except Exception:
         pass
     return {"webintel": web, "domain": dom}
@@ -389,7 +387,6 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
-print("[WEBINTEL HOTFIX v2025-10-13] loaded")
 
 _MD2_SPECIALS = r'_[]()~>#+-=|{}.!'
 _MD2_PATTERN = re.compile('[' + re.escape(_MD2_SPECIALS) + ']')
@@ -578,13 +575,41 @@ def on_message(msg):
                     age_days = 0
                 market["ageDays"] = round(age_days, 2)
 
-    
     verdict = compute_verdict(market)
+    # --- precompute website intel and pass into ctx so renderers can show it ---
+    links = (market.get("links") or {})
+    web = {
 
-    # Build context with webintel once
-    ctx = build_webintel_ctx(market)
+        "whois": {"created": None, "registrar": None},
+
+        "ssl": {"ok": None, "expires": None, "issuer": None},
+
+        "wayback": {"first": None}
+
+    }
+
+    try:
+
+        site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
+
+        if site_url:
+
+            web = analyze_website(site_url)
+
+    except Exception:
+
+        pass
+
+    web = _enrich_webintel_fallback(derive_domain(site_url), web)
+    # >>> FIX: pass precomputed webintel into ctx so renderers see it
+    try:
+        _dom = derive_domain(site_url)
+    except Exception:
+        _dom = None
+    ctx = {"webintel": web or {}, "domain": _dom}
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+    # Reuse same ctx (no re-computation)
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
@@ -601,7 +626,6 @@ def on_message(msg):
         lp = "LP lock: unknown"
 
     links = (market.get("links") or {})
-
     bundle = {
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
         "reasons": list(getattr(verdict, "reasons", []) or []),
@@ -614,7 +638,7 @@ def on_message(msg):
             "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
         },
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
-        "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": ctx.get("webintel")
+        "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
     }
 
     sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links, ctx="quick"))
