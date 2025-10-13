@@ -296,7 +296,7 @@ def _check_dmarc(domain: str):
         policy = None
         for t in txts:
             if "v=DMARC1" in t:
-                m = _re.search(r"\\bp=([a-zA-Z]+)", t)
+                m = _re.search(r"\bp=([a-zA-Z]+)", t)
                 if m:
                     policy = m.group(1).lower()
                     break
@@ -421,7 +421,7 @@ def _resolve_domain(_rd: dict, market: dict, ctx: dict) -> str | None:
                     break
     # 4) brute-force scan RDAP values for something that looks like a domain
     if not dom and isinstance(_rd, dict):
-        pat = _re.compile(r"(?i)\\b([a-z0-9][a-z0-9-]{0,62}\\.)+[a-z]{2,}\\b")
+        pat = _re.compile(r"(?i)\b([a-z0-9][a-z0-9-]{0,62}\.)+[a-z]{2,}\b")
         try:
             def scan(obj):
                 out = []
@@ -591,78 +591,76 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         if l_scan and l_scan != "—": ll.append(f"• Scan: {l_scan}")
         if l_site and l_site != "—": ll.append(f"• Site: {l_site}")
         parts.append("\n".join(ll))
-    # Website intel (robust; tolerate empty/missing ctx keys)
-web = (ctx or {}).get("webintel") or {"whois": {}, "ssl": {}, "wayback": {}}
-who = (web.get("whois") or {}) if isinstance(web, dict) else {}
-ssl = (web.get("ssl") or {}) if isinstance(web, dict) else {}
-way = (web.get("wayback") or {}) if isinstance(web, dict) else {}
 
-# Also accept flattened keys from server (if any)
-try:
-    if not who.get("created") and isinstance(web, dict):
-        wc = web.get("whois_created") or web.get("created")
-        if wc: who["created"] = wc
-    if not who.get("registrar") and isinstance(web, dict):
-        wr = web.get("whois_registrar") or web.get("registrar")
-        if wr: who["registrar"] = wr
-    if (ssl.get("ok") is None) and isinstance(web, dict):
-        so = web.get("ssl_ok")
-        if so is not None: ssl["ok"] = so
-    if not ssl.get("expires") and isinstance(web, dict):
-        se = web.get("ssl_expires")
-        if se: ssl["expires"] = se
-    if not way.get("first") and isinstance(web, dict):
-        wf = web.get("wayback_first")
-        if wf: way["first"] = wf
-except Exception:
-    pass
+    # Website intel (robust; tolerate empty/missing ctx keys) — FIXED INDENT
+    web = (ctx or {}).get("webintel") or {"whois": {}, "ssl": {}, "wayback": {}}
+    who = (web.get("whois") or {}) if isinstance(web, dict) else {}
+    ssl = (web.get("ssl") or {}) if isinstance(web, dict) else {}
+    way = (web.get("wayback") or {}) if isinstance(web, dict) else {}
 
-# Fallback WHOIS from market['domain'] with multiple common key variants
-def _pick(*vals):
-    for v in vals:
-        if v not in (None, "", "n/a", "N/A", "—"):
-            return v
-    return None
+    # Also accept flattened keys from server (if any)
+    try:
+        if not who.get("created") and isinstance(web, dict):
+            wc = web.get("whois_created") or web.get("created")
+            if wc: who["created"] = wc
+        if not who.get("registrar") and isinstance(web, dict):
+            wr = web.get("whois_registrar") or web.get("registrar")
+            if wr: who["registrar"] = wr
+        if (ssl.get("ok") is None) and isinstance(web, dict):
+            so = web.get("ssl_ok")
+            if so is not None: ssl["ok"] = so
+        if not ssl.get("expires") and isinstance(web, dict):
+            se = web.get("ssl_expires")
+            if se: ssl["expires"] = se
+        if not way.get("first") and isinstance(web, dict):
+            wf = web.get("wayback_first")
+            if wf: way["first"] = wf
+    except Exception:
+        pass
 
-dom_block = (market or {}).get("domain") or {}
-who_created = _pick(
-    who.get("created"),
-    dom_block.get("created"), dom_block.get("creationDate"), dom_block.get("createdAt"),
-    dom_block.get("registered"), dom_block.get("registeredAt"),
-    (ctx or {}).get("whois", {}).get("created"),
-)
-who_registrar = _pick(
-    who.get("registrar"),
-    dom_block.get("registrar"), dom_block.get("registrarName"),
-    dom_block.get("registrar_url"), dom_block.get("registrarUrl"),
-    (ctx or {}).get("whois", {}).get("registrar"),
-)
+    # Fallback WHOIS from market['domain'] with multiple common key variants
+    def _pick(*vals):
+        for v in vals:
+            if v not in (None, "", "n/a", "N/A", "—"):
+                return v
+        return None
 
-# If still missing, reuse RDAP result from above (if present in this function scope)
-try:
-    _rd_local = locals().get("_rd")
-    if isinstance(_rd_local, dict):
-        if not who_created:   who_created = _rd_local.get("created")
-        if not who_registrar: who_registrar = _rd_local.get("registrar")
-except Exception:
-    pass
+    dom_block = (market or {}).get("domain") or {}
+    who_created = _pick(
+        who.get("created"),
+        dom_block.get("created"), dom_block.get("creationDate"), dom_block.get("createdAt"),
+        dom_block.get("registered"), dom_block.get("registeredAt"),
+        (ctx or {}).get("whois", {}).get("created"),
+    )
+    who_registrar = _pick(
+        who.get("registrar"),
+        dom_block.get("registrar"), dom_block.get("registrarName"),
+        dom_block.get("registrar_url"), dom_block.get("registrarUrl"),
+        (ctx or {}).get("whois", {}).get("registrar"),
+    )
 
-if who_created or who_registrar:
-    who["created"] = who_created
-    who["registrar"] = who_registrar
-    web["whois"] = who
+    # If still missing, reuse RDAP result from above (if present in this function scope)
+    try:
+        _rd_local = locals().get("_rd")
+        if isinstance(_rd_local, dict):
+            if not who_created:   who_created = _rd_local.get("created")
+            if not who_registrar: who_registrar = _rd_local.get("registrar")
+    except Exception:
+        pass
 
-parts.append(
-    "*Website intel*"
-    + f"\\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
-    + f"\\n• SSL: ok={{ssl.get('ok') if ssl.get('ok') is not None else 'n/a'}}, expires {ssl.get('expires') or 'n/a'}"
-    + f"\\n• Wayback first: {way.get('first') or 'n/a'}"
-)
+    if who_created or who_registrar:
+        who["created"] = who_created
+        who["registrar"] = who_registrar
+        web["whois"] = who
 
+    parts.append(
+        "*Website intel*"
+        + f"\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
+        + f"\n• SSL: ok={(ssl.get('ok') if ssl.get('ok') is not None else 'n/a')}, expires {ssl.get('expires') or 'n/a'}"
+        + f"\n• Wayback first: {way.get('first') or 'n/a'}"
+    )
 
     return "\n".join(parts)
-
-
 
 
 def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
