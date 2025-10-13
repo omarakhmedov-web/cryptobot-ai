@@ -204,25 +204,46 @@ def build_webintel_ctx(market: dict) -> dict:
         site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
     except Exception:
         site_url = os.getenv("WEBINTEL_SITE_OVERRIDE")
+
+    # If сайт не указан, но есть доменное имя в market['domain'], используем его.
+    try:
+        domain_block = market.get("domain") or {}
+        if (not site_url) and isinstance(domain_block, dict) and domain_block.get("name"):
+            site_url = domain_block.get("name")
+    except Exception:
+        domain_block = {}
+
     # defaults
     web = {
         "whois": {"created": None, "registrar": None},
         "ssl": {"ok": None, "expires": None, "issuer": None},
         "wayback": {"first": None}
     }
+
+    # Основной сбор website intel (best-effort)
     try:
         if site_url:
             web = analyze_website(site_url)
     except Exception:
         pass
+
+    # Детерминированный fallback: заполняем WHOIS из domain_block, если пусто
     try:
-        dom = derive_domain(site_url)
-    except Exception:
-        dom = None
-    try:
-        web = _enrich_webintel_fallback(dom, web)
+        if isinstance(domain_block, dict):
+            who = web.setdefault("whois", {"created": None, "registrar": None})
+            if not who.get("created") and domain_block.get("created"):
+                who["created"] = domain_block.get("created")
+            if not who.get("registrar") and domain_block.get("registrar"):
+                who["registrar"] = domain_block.get("registrar")
     except Exception:
         pass
+
+    # Возвращаем и сам домен-строку для рендерера (если нужно)
+    try:
+        dom = derive_domain(site_url) if site_url else (domain_block.get("name") if isinstance(domain_block, dict) else None)
+    except Exception:
+        dom = None
+
     return {"webintel": web, "domain": dom}
 
 
