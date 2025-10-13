@@ -484,7 +484,30 @@ def on_message(msg):
     verdict = compute_verdict(market)
     # --- precompute website intel and pass into ctx so renderers can show it ---
     links = (market.get("links") or {})
+    web = {
+
+        "whois": {"created": None, "registrar": None},
+
+        "ssl": {"ok": None, "expires": None, "issuer": None},
+
+        "wayback": {"first": None}
+
+    }
+
+    try:
+
+        site_url = links.get("site")
+
+        if site_url:
+
+            web = analyze_website(site_url)
+
+    except Exception:
+
+        pass
+
     ctx = {"webintel": web, "domain": derive_domain(links.get("site"))}
+
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
@@ -1165,4 +1188,3 @@ def _build_html_report_safe(bundle: dict) -> bytes:
             "<body><h1>Metridex Report (fallback)</h1><pre>" + pretty + "</pre></body></html>"
         )
         return html.encode("utf-8")
-
