@@ -689,6 +689,13 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 ssl['ok'] = _tls['ok']
             if (not ssl.get('expires')) and _tls.get('expires'):
                 ssl['expires'] = _tls['expires']
+        # TLS WWW fallback
+        if _domain_to_probe and (ssl.get('ok') is None or not ssl.get('expires')):
+            _tls2 = _tls_probe('www.' + _domain_to_probe)
+            if ssl.get('ok') is None and (_tls2.get('ok') is not None):
+                ssl['ok'] = _tls2['ok']
+            if (not ssl.get('expires')) and _tls2.get('expires'):
+                ssl['expires'] = _tls2['expires']
         # HTTP(S) fallback: if TLS failed but HTTPS is enforced, consider SSL ok=True
         if _domain_to_probe and (ssl.get('ok') is None):
             _wp = _web_probe(_domain_to_probe)
@@ -699,6 +706,11 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
             _wb = _wayback_summary(_domain_to_probe)
             if isinstance(_wb, dict) and _wb.get('first'):
                 way['first'] = _wb['first']
+            # Wayback WWW fallback
+            if not way.get('first'):
+                _wb2 = _wayback_summary('www.' + _domain_to_probe)
+                if isinstance(_wb2, dict) and _wb2.get('first'):
+                    way['first'] = _wb2['first']
 
     parts.append(
         "*Website intel*"
