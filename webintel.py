@@ -2,6 +2,25 @@ import os, json
 from typing import Optional, Dict, Any
 import requests as _rq
 from urllib.parse import urlparse
+
+from typing import Optional, Dict, Any
+try:
+    from cache import cache_get, cache_set
+except Exception:
+    def cache_get(_): return None
+    def cache_set(*args, **kwargs): pass
+
+try:
+    from common import normalize_url
+except Exception:
+    def normalize_url(url: str) -> str:
+        u = str(url or "").strip()
+        if not u:
+            return ""
+        if u.startswith("http://") or u.startswith("https://"):
+            return u
+        return "https://" + u.lstrip("/")
+
 from cache import cache_get, cache_set
 from common import normalize_url
 
