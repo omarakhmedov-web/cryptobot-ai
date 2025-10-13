@@ -195,6 +195,50 @@ BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
 WEBHOOK_PATH = f"/webhook/{BOT_WEBHOOK_SECRET}" if BOT_WEBHOOK_SECRET else "/webhook/secret-not-set"
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en")
 
+def _site_from_dexscreener(market: dict) -> str | None:
+    """Best-effort: fetch website from DexScreener API if not provided by market.links.site"""
+    try:
+        links = market.get("links") or {}
+        # If the full dexscreener pair URL is present, try to parse chain/pair
+        ds_url = links.get("dexscreener") or ""
+        pair_addr = (market.get("pairAddress") or "").strip()
+        chain = (market.get("chain") or "").strip().lower()
+        if not chain and "dexscreener.com" in ds_url:
+            # crude parse: .../chain/pairAddress
+            parts = ds_url.strip("/").split("/")
+            # find 'dexscreener.com' and take the next two segments
+            for i,p in enumerate(parts):
+                if "dexscreener.com" in p and i+2 < len(parts):
+                    chain = parts[i+1].lower()
+                    pair_addr = parts[i+2]
+                    break
+        if not chain:
+            return None
+        if not pair_addr:
+            return None
+        # call DexScreener API
+        import requests as _rq
+        url = f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair_addr}"
+        r = _rq.get(url, timeout=2.5)
+        if not r.ok:
+            return None
+        j = r.json()
+        pairs = j.get("pairs") or []
+        if not pairs:
+            return None
+        info = pairs[0].get("info") or {}
+        # Various shapes they've used historically
+        website = None
+        # sometimes it's 'websites': ['https://example.com', ...]
+        ws = info.get("websites") or info.get("webLinks") or []
+        if isinstance(ws, list) and ws:
+            website = ws[0]
+        if not website:
+            website = info.get("website") or info.get("url")
+        return website
+    except Exception:
+        return None
+
 def build_webintel_ctx(market: dict) -> dict:
     try:
         links = (market.get("links") or {})
@@ -212,6 +256,15 @@ def build_webintel_ctx(market: dict) -> dict:
             site_url = domain_block.get("name")
     except Exception:
         domain_block = {}
+
+    # DexScreener fallback if site_url still empty
+    try:
+        if not site_url:
+            site_url = _site_from_dexscreener(market)
+            if site_url:
+                print(f"WEBINTEL: site_url from DexScreener: {site_url}")
+    except Exception:
+        pass
 
     # defaults
     web = {
@@ -243,7 +296,6 @@ def build_webintel_ctx(market: dict) -> dict:
         dom = derive_domain(site_url) if site_url else (domain_block.get("name") if isinstance(domain_block, dict) else None)
     except Exception:
         dom = None
-
     return {"webintel": web, "domain": dom}
 
 
