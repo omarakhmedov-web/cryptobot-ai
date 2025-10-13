@@ -88,7 +88,6 @@ from limits import can_scan, register_scan
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
 from cache import cache_get, cache_set
-from webintel import analyze_website
 try:
     from dex_client import fetch_market
 except Exception as _e:
@@ -322,9 +321,17 @@ def on_message(msg):
                 market["ageDays"] = round(age_days, 2)
 
     verdict = compute_verdict(market)
+    # --- precompute website intel and pass into ctx so renderers can show it ---
+    links = (market.get("links") or {})
+    web = {}
+    try:
+        web = analyze_website(links.get("site")) if links.get("site") else {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
+    except Exception:
+        web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
+    ctx = {"webintel": web}
 
-    quick = render_quick(verdict, market, {}, DEFAULT_LANG)
-    details = render_details(verdict, market, {}, DEFAULT_LANG)
+    quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+    details = render_details(verdict, market, ctx, DEFAULT_LANG)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
