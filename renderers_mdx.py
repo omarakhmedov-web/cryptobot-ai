@@ -167,7 +167,7 @@ _RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "1") not in (
 
 # ---- domain coolness flags ----
 _WAYBACK_SUMMARY = (os.getenv("WAYBACK_SUMMARY", "1") not in ("0","false","False",""))
-_WAYBACK_TIMEOUT_S = float(os.getenv("WAYBACK_TIMEOUT_S", "2.5"))
+_WAYBACK_TIMEOUT_S = float(os.getenv("WAYBACK_TIMEOUT_S", "3.5"))
 _wb_cache: Dict[str, Any] = {}
 
 _RDAP_SHOW_NS = (os.getenv("RDAP_SHOW_NS", "1") not in ("0","false","False",""))
@@ -176,7 +176,7 @@ _RDAP_SHOW_ABUSE = (os.getenv("RDAP_SHOW_ABUSE", "1") not in ("0","false","False
 _RDAP_STATUS_CASE = os.getenv("RDAP_STATUS_CASE", "title")   # "title" | "lower" | "raw"
 
 _WEB_HEAD_CHECK = (os.getenv("WEB_HEAD_CHECK", "1") not in ("0","false","False",""))
-_WEB_TIMEOUT_S = float(os.getenv("WEB_TIMEOUT_S", "2.0"))
+_WEB_TIMEOUT_S = float(os.getenv("WEB_TIMEOUT_S", "4.0"))
 _WEB_SHOW_HSTS = (os.getenv("WEB_SHOW_HSTS", "1") not in ("0","false","False",""))
 _WEB_SHOW_ROBOTS = (os.getenv("WEB_SHOW_ROBOTS", "0") not in ("0","false","False",""))
 _WEB_REDIRECTS_COMPACT = (os.getenv("WEB_REDIRECTS_COMPACT", "1") not in ("0","false","False",""))
@@ -689,6 +689,11 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 ssl['ok'] = _tls['ok']
             if (not ssl.get('expires')) and _tls.get('expires'):
                 ssl['expires'] = _tls['expires']
+        # HTTP(S) fallback: if TLS failed but HTTPS is enforced, consider SSL ok=True
+        if _domain_to_probe and (ssl.get('ok') is None):
+            _wp = _web_probe(_domain_to_probe)
+            if isinstance(_wp, dict) and _wp.get('https_enforced') is True:
+                ssl['ok'] = True
         # Wayback probe if missing
         if not way.get('first'):
             _wb = _wayback_summary(_domain_to_probe)
