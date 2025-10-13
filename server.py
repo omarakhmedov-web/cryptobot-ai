@@ -296,6 +296,19 @@ def build_webintel_ctx(market: dict) -> dict:
         dom = derive_domain(site_url) if site_url else (domain_block.get("name") if isinstance(domain_block, dict) else None)
     except Exception:
         dom = None
+
+    # --- Flatten webintel for renderers expecting flat keys ---
+    try:
+        who = (web.get("whois") or {}) if isinstance(web, dict) else {}
+        ssl = (web.get("ssl") or {}) if isinstance(web, dict) else {}
+        wb  = (web.get("wayback") or {}) if isinstance(web, dict) else {}
+        web["whois_created"]   = who.get("created")
+        web["whois_registrar"] = who.get("registrar")
+        web["ssl_ok"]          = ssl.get("ok")
+        web["ssl_expires"]     = ssl.get("expires")
+        web["wayback_first"]   = wb.get("first")
+    except Exception:
+        pass
     return {"webintel": web, "domain": dom}
 
 
@@ -376,6 +389,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
+print("[WEBINTEL HOTFIX v2025-10-13] loaded")
 
 _MD2_SPECIALS = r'_[]()~>#+-=|{}.!'
 _MD2_PATTERN = re.compile('[' + re.escape(_MD2_SPECIALS) + ']')
