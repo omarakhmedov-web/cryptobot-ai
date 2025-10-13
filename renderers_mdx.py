@@ -591,30 +591,74 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         if l_scan and l_scan != "—": ll.append(f"• Scan: {l_scan}")
         if l_site and l_site != "—": ll.append(f"• Site: {l_site}")
         parts.append("\n".join(ll))
+    # Website intel (robust; tolerate empty/missing ctx keys)
+web = (ctx or {}).get("webintel") or {"whois": {}, "ssl": {}, "wayback": {}}
+who = (web.get("whois") or {}) if isinstance(web, dict) else {}
+ssl = (web.get("ssl") or {}) if isinstance(web, dict) else {}
+way = (web.get("wayback") or {}) if isinstance(web, dict) else {}
 
-    # Website intel (if provided via ctx)
-    web = (ctx or {}).get("webintel") or {}
-    if web:
-        who = web.get("whois") or {}
-        ssl = web.get("ssl") or {}
-        way = web.get("wayback") or {}
-        # Fallback WHOIS from market['domain'] if webintel is missing/empty
-        try:
-            dom_block = (market or {}).get('domain') or {}
-            if dom_block:
-                if not who.get('created') and dom_block.get('created'):
-                    who['created'] = dom_block.get('created')
-                if not who.get('registrar') and dom_block.get('registrar'):
-                    who['registrar'] = dom_block.get('registrar')
-                web['whois'] = who
-        except Exception:
-            pass
-        parts.append(
-            "*Website intel*"
-            + f"\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
-            + f"\n• SSL: ok={ssl.get('ok') if ssl.get('ok') is not None else 'n/a'}, expires {ssl.get('expires') or 'n/a'}"
-            + f"\n• Wayback first: {way.get('first') or 'n/a'}"
-        )
+# Also accept flattened keys from server (if any)
+try:
+    if not who.get("created") and isinstance(web, dict):
+        wc = web.get("whois_created") or web.get("created")
+        if wc: who["created"] = wc
+    if not who.get("registrar") and isinstance(web, dict):
+        wr = web.get("whois_registrar") or web.get("registrar")
+        if wr: who["registrar"] = wr
+    if (ssl.get("ok") is None) and isinstance(web, dict):
+        so = web.get("ssl_ok")
+        if so is not None: ssl["ok"] = so
+    if not ssl.get("expires") and isinstance(web, dict):
+        se = web.get("ssl_expires")
+        if se: ssl["expires"] = se
+    if not way.get("first") and isinstance(web, dict):
+        wf = web.get("wayback_first")
+        if wf: way["first"] = wf
+except Exception:
+    pass
+
+# Fallback WHOIS from market['domain'] with multiple common key variants
+def _pick(*vals):
+    for v in vals:
+        if v not in (None, "", "n/a", "N/A", "—"):
+            return v
+    return None
+
+dom_block = (market or {}).get("domain") or {}
+who_created = _pick(
+    who.get("created"),
+    dom_block.get("created"), dom_block.get("creationDate"), dom_block.get("createdAt"),
+    dom_block.get("registered"), dom_block.get("registeredAt"),
+    (ctx or {}).get("whois", {}).get("created"),
+)
+who_registrar = _pick(
+    who.get("registrar"),
+    dom_block.get("registrar"), dom_block.get("registrarName"),
+    dom_block.get("registrar_url"), dom_block.get("registrarUrl"),
+    (ctx or {}).get("whois", {}).get("registrar"),
+)
+
+# If still missing, reuse RDAP result from above (if present in this function scope)
+try:
+    _rd_local = locals().get("_rd")
+    if isinstance(_rd_local, dict):
+        if not who_created:   who_created = _rd_local.get("created")
+        if not who_registrar: who_registrar = _rd_local.get("registrar")
+except Exception:
+    pass
+
+if who_created or who_registrar:
+    who["created"] = who_created
+    who["registrar"] = who_registrar
+    web["whois"] = who
+
+parts.append(
+    "*Website intel*"
+    + f"\\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
+    + f"\\n• SSL: ok={{ssl.get('ok') if ssl.get('ok') is not None else 'n/a'}}, expires {ssl.get('expires') or 'n/a'}"
+    + f"\\n• Wayback first: {way.get('first') or 'n/a'}"
+)
+
 
     return "\n".join(parts)
 
