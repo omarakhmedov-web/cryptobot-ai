@@ -1,9 +1,9 @@
-import os, json
-from typing import Optional, Dict, Any
+import os, json, socket, ssl
+from typing import Optional, Dict, Any, Tuple
 import requests as _rq
 from urllib.parse import urlparse
 
-from typing import Optional, Dict, Any
+# --- Caching & utils (tolerant to absence) -----------------------------------
 try:
     from cache import cache_get, cache_set
 except Exception:
@@ -21,13 +21,12 @@ except Exception:
             return u
         return "https://" + u.lstrip("/")
 
-from cache import cache_get, cache_set
-from common import normalize_url
-
 TTL = int(os.getenv("CACHE_TTL_WEB_SEC", "172800"))
 _WE_TIMEOUT = float(os.getenv("WEBINTEL_TIMEOUT_S", "2.5"))
 _WE_HEAD_TIMEOUT = float(os.getenv("WEBINTEL_HEAD_TIMEOUT_S", "2.0"))
+_WE_TLS_TIMEOUT = float(os.getenv("WEBINTEL_TLS_TIMEOUT_S", "4.0"))
 
+# --- Helpers -----------------------------------------------------------------
 def derive_domain(url: Optional[str]) -> Optional[str]:
     if not url:
         return None
@@ -45,6 +44,7 @@ def derive_domain(url: Optional[str]) -> Optional[str]:
         return None
 
 def _rdap_whois(host: str) -> Dict[str, Any]:
+    """Fetch basic WHOIS via RDAP aggregator; tolerant on failure."""
     try:
         r = _rq.get(f"https://rdap.org/domain/{host}", timeout=_WE_TIMEOUT)
         if not r.ok:
@@ -52,6 +52,7 @@ def _rdap_whois(host: str) -> Dict[str, Any]:
         j = r.json()
         created = None
         registrar = None
+        # creation date from events
         for ev in (j.get("events") or []):
             try:
                 act = str(ev.get("eventAction") or "").lower()
@@ -62,6 +63,7 @@ def _rdap_whois(host: str) -> Dict[str, Any]:
                         break
             except Exception:
                 pass
+        # registrar from entities->vcardArray
         for ent in (j.get("entities") or []):
             try:
                 roles = [str(x).lower() for x in (ent.get("roles") or [])]
@@ -80,7 +82,8 @@ def _rdap_whois(host: str) -> Dict[str, Any]:
     except Exception:
         return {"created": None, "registrar": None}
 
-def _https_head_ok(host: str) -> Dict[str, Any]:
+def _https_head_probe(host: str) -> Dict[str, Any]:
+    """Lightweight reachability + headers. Does not validate cert."""
     ok = None; server = None; hsts = None
     try:
         r = _rq.head(f"https://{host}", allow_redirects=True, timeout=_WE_HEAD_TIMEOUT)
@@ -92,11 +95,47 @@ def _https_head_ok(host: str) -> Dict[str, Any]:
         pass
     return {"ok": ok, "_server": server, "_hsts": hsts}
 
+def _https_tls_info(host: str) -> Tuple[Optional[bool], Optional[str], Optional[str]]:
+    """Perform TLS handshake to obtain notAfter and issuer CN.
+    Returns (ssl_ok, expires_iso, issuer_cn). All None on failure.
+    """
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, 443), timeout=_WE_TLS_TIMEOUT) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+        not_after = cert.get("notAfter")
+        issuer = cert.get("issuer")  # tuple of tuples like ((('countryName','US'),), (('organizationName','...'),), (('commonName','R3'),))
+        issuer_cn = None
+        if isinstance(issuer, tuple):
+            for grp in issuer:
+                if isinstance(grp, tuple):
+                    for kv in grp:
+                        try:
+                            if len(kv) >= 2 and kv[0] == 'commonName':
+                                issuer_cn = kv[1]
+                                raise StopIteration
+                        except StopIteration:
+                            break
+        expires_iso = None
+        if not_after:
+            # e.g. 'Dec 16 14:26:31 2025 GMT'
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+                expires_iso = dt.date().isoformat()
+            except Exception:
+                expires_iso = None
+        return True, expires_iso, issuer_cn
+    except Exception:
+        return None, None, None
+
 def _wayback_first(host: str) -> Optional[str]:
     try:
         r = _rq.get("https://web.archive.org/cdx/search/cdx", params={
-            "url": host, "output": "json", "fl": "timestamp", "filter": "statuscode:200",
-            "limit": "1", "from": "19960101", "to": "99991231", "sort": "ascending"
+            "url": host, "output": "json", "fl": "timestamp",
+            "filter": "statuscode:200", "limit": "1",
+            "from": "19960101", "to": "99991231", "sort": "ascending",
         }, timeout=_WE_TIMEOUT)
         if r.ok:
             j = r.json()
@@ -107,18 +146,38 @@ def _wayback_first(host: str) -> Optional[str]:
         pass
     return None
 
-def analyze_website(url: Optional[str]) -> Dict[str, Any]:
-    # Cache by normalized URL
+def _merge_whois_fallback(out: Dict[str, Any], domain_block: Optional[Dict[str, Any]]) -> None:
+    """If RDAP failed, copy created/registrar from a provided domain_block (if any)."""
+    if not domain_block:
+        return
+    wi = out.get("whois") or {}
+    if not wi.get("created") and domain_block.get("created"):
+        wi["created"] = domain_block["created"]
+    if not wi.get("registrar") and domain_block.get("registrar"):
+        wi["registrar"] = domain_block["registrar"]
+    out["whois"] = wi
+
+# --- Public API ---------------------------------------------------------------
+def analyze_website(url: Optional[str], *, domain_block: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Return website intelligence with graceful fallbacks.
+    Shape:
+      {
+        "whois": {"created": str|None, "registrar": str|None},
+        "ssl": {"ok": bool|None, "expires": str|None, "issuer": str|None, "_server": str|None, "_hsts": str|None},
+        "wayback": {"first": str|None},
+      }
+    """
     if not url:
         return {"whois": {"created": None, "registrar": None},
                 "ssl": {"ok": None, "expires": None, "issuer": None},
                 "wayback": {"first": None}}
+
     url_n = normalize_url(url)
     key = f"webintel:{url_n}"
-    c = cache_get(key)
-    if c:
+    cached = cache_get(key)
+    if cached:
         try:
-            return json.loads(c)
+            return json.loads(cached)
         except Exception:
             pass
 
@@ -128,17 +187,30 @@ def analyze_website(url: Optional[str]) -> Dict[str, Any]:
         "ssl": {"ok": None, "expires": None, "issuer": None},
         "wayback": {"first": None},
     }
+
     if host:
-        # RDAP WHOIS (works for most TLDs)
+        # 1) RDAP WHOIS (best-effort)
         who = _rdap_whois(host)
-        out["whois"] = {"created": who.get("created"), "registrar": who.get("registrar")}
-        # HTTPS reachability + headers
-        sslh = _https_head_ok(host)
-        out["ssl"]["ok"] = sslh.get("ok")
-        out["ssl"]["_server"] = sslh.get("_server")
-        out["ssl"]["_hsts"] = sslh.get("_hsts")
-        # Wayback earliest snapshot
+        out["whois"]["created"] = who.get("created")
+        out["whois"]["registrar"] = who.get("registrar")
+
+        # 2) HEAD probe (reachability + headers)
+        head = _https_head_probe(host)
+        out["ssl"]["_server"] = head.get("_server")
+        out["ssl"]["_hsts"] = head.get("_hsts")
+
+        # 3) TLS handshake (cert details)
+        ssl_ok, ssl_exp, issuer_cn = _https_tls_info(host)
+        # prefer TLS result for ok; if unavailable, fallback to HEAD ok
+        out["ssl"]["ok"] = ssl_ok if ssl_ok is not None else head.get("ok")
+        out["ssl"]["expires"] = ssl_exp
+        out["ssl"]["issuer"] = issuer_cn
+
+        # 4) Wayback earliest snapshot
         out["wayback"]["first"] = _wayback_first(host)
+
+    # 5) Deterministic fallback from domain_block (if provided) to avoid 'n/a'
+    _merge_whois_fallback(out, domain_block)
 
     cache_set(key, json.dumps(out), TTL)
     return out
