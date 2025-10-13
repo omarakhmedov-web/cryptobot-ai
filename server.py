@@ -1,5 +1,78 @@
 import os, json, re, traceback, requests
-from webintel import analyze_website, derive_domain
+
+try:
+    from webintel import analyze_website, derive_domain
+except Exception:
+    # Fallback: minimal inline versions if import fails
+    import requests as _rq
+    from urllib.parse import urlparse as _urlparse
+
+    def derive_domain(url):
+        try:
+            if not url:
+                return None
+            p = _urlparse(str(url).strip())
+            host = (p.netloc or p.path).strip().lstrip("*.").split("/")[0]
+            if host.lower().startswith("www."):
+                host = host[4:]
+            return host or None
+        except Exception:
+            return None
+
+    def analyze_website(url):
+        host = derive_domain(url)
+        out = {"whois": {"created": None, "registrar": None},
+               "ssl": {"ok": None, "expires": None, "issuer": None},
+               "wayback": {"first": None}}
+        if not host:
+            return out
+        try:
+            r = _rq.get(f"https://rdap.org/domain/{host}", timeout=2.5)
+            if r.ok:
+                j = r.json()
+                for ev in (j.get("events") or []):
+                    act = str(ev.get("eventAction") or "").lower()
+                    if act in ("registration","registered","creation"):
+                        d = (ev.get("eventDate") or "")[:10]
+                        if d:
+                            out["whois"]["created"] = d
+                            break
+                for ent in (j.get("entities") or []):
+                    roles = [str(x).lower() for x in (ent.get("roles") or [])]
+                    if any("registrar" in rr for rr in roles):
+                        try:
+                            v = ent.get("vcardArray") or []
+                            items = v[1] if isinstance(v, list) and len(v) > 1 else []
+                            for it in items:
+                                if it and it[0] == "fn" and len(it) > 3:
+                                    out["whois"]["registrar"] = it[3]
+                                    raise StopIteration
+                        except StopIteration:
+                            break
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        try:
+            hr = _rq.head(f"https://{host}", timeout=2.0, allow_redirects=True)
+            out["ssl"]["ok"] = bool(hr.ok) if hr is not None else None
+        except Exception:
+            pass
+        try:
+            rwb = _rq.get("https://web.archive.org/cdx/search/cdx",
+                          params={"url": host, "output": "json", "fl": "timestamp",
+                                  "filter": "statuscode:200", "limit": "1",
+                                  "from":"19960101","to":"99991231","sort":"ascending"},
+                          timeout=2.5)
+            if rwb.ok:
+                j = rwb.json()
+                if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and j[1]:
+                    ts = j[1][0]
+                    out["wayback"]["first"] = f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+        except Exception:
+            pass
+        return out
+
 import time
 import renderers_mdx as _mdx
 import sys
