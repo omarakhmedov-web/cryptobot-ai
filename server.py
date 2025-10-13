@@ -277,7 +277,70 @@ except Exception:
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
 WEBHOOK_PATH = f"/webhook/{BOT_WEBHOOK_SECRET}" if BOT_WEBHOOK_SECRET else "/webhook/secret-not-set"
-DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en") or "en"
+DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en")
+
+def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
+    try:
+        import requests as _rq
+    except Exception:
+        return web or {}
+    web = web or {}
+    who = web.setdefault("whois", {"created": None, "registrar": None})
+    ssl = web.setdefault("ssl", {"ok": None, "expires": None, "issuer": None})
+    way = web.setdefault("wayback", {"first": None})
+    if domain:
+        # RDAP
+        try:
+            r = _rq.get(f"https://rdap.org/domain/{domain}", timeout=2.5)
+            if r.ok:
+                j = r.json()
+                if (who.get("created") in (None, "—")):
+                    for ev in (j.get("events") or []):
+                        act = str(ev.get("eventAction") or "").lower()
+                        if act in ("registration","registered","creation"):
+                            d = (ev.get("eventDate") or "")[:10]
+                            if d:
+                                who["created"] = d
+                                break
+                if (who.get("registrar") in (None, "—")):
+                    for ent in (j.get("entities") or []):
+                        roles = [str(x).lower() for x in (ent.get("roles") or [])]
+                        if any("registrar" in rr for rr in roles):
+                            try:
+                                v = ent.get("vcardArray") or []
+                                items = v[1] if isinstance(v, list) and len(v) > 1 else []
+                                for it in items:
+                                    if it and it[0] == "fn" and len(it) > 3:
+                                        who["registrar"] = it[3]
+                                        raise StopIteration
+                            except StopIteration:
+                                break
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+        # SSL
+        try:
+            hr = _rq.head(f"https://{domain}", timeout=2.0, allow_redirects=True)
+            if ssl.get("ok") in (None, "—"):
+                ssl["ok"] = bool(hr.ok) if hr is not None else None
+        except Exception:
+            pass
+        # Wayback
+        try:
+            rwb = _rq.get("https://web.archive.org/cdx/search/cdx",
+                          params={"url": domain, "output":"json", "fl":"timestamp",
+                                  "filter":"statuscode:200", "limit":"1",
+                                  "from":"19960101","to":"99991231","sort":"ascending"},
+                          timeout=2.5)
+            if rwb.ok and (way.get("first") in (None, "—")):
+                j = rwb.json()
+                if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and j[1]:
+                    ts = j[1][0]
+                    way["first"] = f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+        except Exception:
+            pass
+    return web
 
 HELP_URL = os.getenv("HELP_URL", "https://metridex.com/help")
 DEEP_REPORT_URL = os.getenv("DEEP_REPORT_URL", "https://metridex.com/upgrade/deep-report")
@@ -506,8 +569,8 @@ def on_message(msg):
 
         pass
 
+    web = _enrich_webintel_fallback(derive_domain(links.get("site")), web)
     ctx = {"webintel": web, "domain": derive_domain(links.get("site"))}
-
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
