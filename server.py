@@ -244,8 +244,17 @@ def on_message(msg):
 
     verdict = compute_verdict(market)
 
-    quick = render_quick(verdict, market, {}, DEFAULT_LANG)
-    details = render_details(verdict, market, {}, DEFAULT_LANG)
+
+    links = (market.get("links") or {})
+    web = {}
+    try:
+        web = analyze_website(links.get("site")) if links.get("site") else {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
+    except Exception:
+        web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
+    ctx = {"webintel": web}
+
+    quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+    details = render_details(verdict, market, ctx, DEFAULT_LANG)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
@@ -259,13 +268,6 @@ def on_message(msg):
         lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
     except Exception:
         lp = "LP lock: unknown"
-
-    links = (market.get("links") or {})
-    web = {}
-    try:
-        web = analyze_website(links.get("site")) if links.get("site") else {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
-    except Exception:
-        web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
     bundle = {
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
         "reasons": list(getattr(verdict, "reasons", []) or []),
