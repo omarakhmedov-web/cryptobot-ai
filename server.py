@@ -559,7 +559,7 @@ def on_message(msg):
 
     try:
 
-        site_url = links.get("site")
+        site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
 
         if site_url:
 
@@ -569,8 +569,8 @@ def on_message(msg):
 
         pass
 
-    web = _enrich_webintel_fallback(derive_domain(links.get("site")), web)
-    ctx = {"webintel": web, "domain": derive_domain(links.get("site"))}
+    web = _enrich_webintel_fallback(derive_domain(site_url), web)
+    ctx = {"webintel": web, "domain": derive_domain(site_url)}
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
