@@ -1,4 +1,5 @@
 import os, json, re, traceback, requests
+from webintel import analyze_website, derive_domain
 import time
 import renderers_mdx as _mdx
 import sys
@@ -410,12 +411,7 @@ def on_message(msg):
     verdict = compute_verdict(market)
     # --- precompute website intel and pass into ctx so renderers can show it ---
     links = (market.get("links") or {})
-    web = {}
-    try:
-        web = analyze_website(links.get("site")) if links.get("site") else {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
-    except Exception:
-        web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
-    ctx = {"webintel": web}
+    ctx = {"webintel": web, "domain": derive_domain(links.get("site"))}
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
@@ -434,11 +430,6 @@ def on_message(msg):
         lp = "LP lock: unknown"
 
     links = (market.get("links") or {})
-    web = {}
-    try:
-        web = analyze_website(links.get("site")) if links.get("site") else {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
-    except Exception:
-        web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
     bundle = {
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
         "reasons": list(getattr(verdict, "reasons", []) or []),
