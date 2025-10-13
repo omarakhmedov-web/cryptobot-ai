@@ -54,6 +54,93 @@ def _ssl_info(host: str):
     except Exception:
         return {"ok": None, "expires": None, "issuer": None}
 
+
+
+# --- Website intel helpers (RDAP WHOIS fallback, TLS + HTTP HEAD, Wayback) ---
+import socket, ssl as _ssl, datetime as _dt, os as _os
+import requests as _rq
+
+_WE_TIMEOUT = float(_os.getenv("WEBINTEL_TIMEOUT_S", "2.5"))
+_WE_HEAD_TIMEOUT = float(_os.getenv("WEBINTEL_HEAD_TIMEOUT_S", "2.0"))
+
+def _rdap_whois(host: str):
+    try:
+        r = _rq.get(f"https://rdap.org/domain/{host}", timeout=_WE_TIMEOUT)
+        if not r.ok:
+            return {"created": None, "registrar": None}
+        j = r.json()
+        created = None
+        registrar = None
+        for ev in (j.get("events") or []):
+            if isinstance(ev, dict) and str(ev.get("eventAction","")).lower().startswith("registration"):
+                d = ev.get("eventDate")
+                if isinstance(d, str) and len(d) >= 10:
+                    created = d[:10]
+                    break
+        for ent in (j.get("entities") or []):
+            roles = ent.get("roles") or []
+            if any(str(r).lower() == "registrar" for r in roles):
+                v = ent.get("vcardArray")
+                if isinstance(v, list) and len(v) >= 2 and isinstance(v[1], list):
+                    for item in v[1]:
+                        if isinstance(item, list) and len(item) >= 4 and item[0] == "fn":
+                            registrar = item[3]
+                            break
+                if registrar:
+                    break
+        return {"created": created, "registrar": registrar}
+    except Exception:
+        return {"created": None, "registrar": None}
+
+def _ssl_info(host: str):
+    exp = None
+    ok = None
+    try:
+        ctx = _ssl.create_default_context()
+        with socket.create_connection((host, 443), timeout=_WE_TIMEOUT) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+        if cert and "notAfter" in cert:
+            try:
+                exp = _dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").strftime("%Y-%m-%d")
+            except Exception:
+                exp = cert.get("notAfter")
+        ok = True
+    except Exception:
+        ok = None
+    # HTTP HEAD fallback for reachability and headers
+    server = None
+    hsts = None
+    try:
+        resp = _rq.head(f"https://{host}", allow_redirects=True, timeout=_WE_HEAD_TIMEOUT)
+        if resp is not None:
+            ok = True if ok is None else ok
+            server = resp.headers.get("Server")
+            hsts = resp.headers.get("Strict-Transport-Security")
+    except Exception:
+        pass
+    out = {"ok": ok, "expires": exp, "issuer": None}
+    # stash extras for future UI
+    out["_server"] = server
+    out["_hsts"] = hsts
+    return out
+
+def analyze_website(site_url: str | None):
+    host = _host_from_url(site_url) if site_url else None
+    if not host:
+        return {"whois": {"created": None, "registrar": None},
+                "ssl": {"ok": None, "expires": None, "issuer": None},
+                "wayback": {"first": None}}
+    who = _whois_info(host)
+    # RDAP fallback to fill missing fields
+    if not (who.get("created") and who.get("registrar")):
+        wr = _rdap_whois(host)
+        who = {"created": who.get("created") or wr.get("created"),
+               "registrar": who.get("registrar") or wr.get("registrar")}
+    ssl = _ssl_info(host)
+    wb  = _wayback_first(host)
+    return {"whois": who, "ssl": ssl, "wayback": {"first": wb}, "host": host, "wayback_url": f"https://web.archive.org/web/*/{host}"}
+
 def _wayback_first(host: str):
     import requests
     try:
@@ -71,7 +158,7 @@ def _wayback_first(host: str):
         pass
     return None
 
-def analyze_website(site_url: str | None):
+
     host = _host_from_url(site_url) if site_url else None
     if not host:
         return {"whois": {"created": None, "registrar": None},
