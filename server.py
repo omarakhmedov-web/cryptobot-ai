@@ -3,6 +3,85 @@ import time
 import renderers_mdx as _mdx
 import sys
 sys.stderr.write(f"[BOOT] Using renderers module: {_mdx.__file__} | tag={getattr(_mdx, 'RENDERER_BUILD_TAG', None)}\n")
+
+# --- Website intel helper (whois / ssl / wayback) ---
+import socket, ssl as _ssl, datetime as _dt
+
+_WE_TIMEOUT = float(os.getenv("WEBINTEL_TIMEOUT_S", "2.0"))
+
+def _host_from_url(u: str):
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(u.strip())
+        host = p.netloc or p.path
+        host = host.strip().lstrip("*.").split("/")[0]
+        if host.lower().startswith("www."):
+            host = host[4:]
+        return host or None
+    except Exception:
+        return None
+
+def _whois_info(host: str):
+    try:
+        import whois
+        w = whois.whois(host)
+        reg = w.registrar if getattr(w, "registrar", None) else None
+        cd  = w.creation_date if getattr(w, "creation_date", None) else None
+        # some tlds return list
+        if isinstance(cd, (list, tuple)) and cd:
+            cd = cd[0]
+        if isinstance(cd, (_dt.date, _dt.datetime)):
+            cd = cd.strftime("%Y-%m-%d")
+        return {"created": cd, "registrar": reg}
+    except Exception:
+        return {"created": None, "registrar": None}
+
+def _ssl_info(host: str):
+    try:
+        ctx = _ssl.create_default_context()
+        with socket.create_connection((host, 443), timeout=_WE_TIMEOUT) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+        exp = None
+        if cert and "notAfter" in cert:
+            try:
+                import datetime as dt
+                # already imported as _dt above, but keep robust
+                exp = dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").strftime("%Y-%m-%d")
+            except Exception:
+                exp = cert.get("notAfter")
+        return {"ok": True, "expires": exp, "issuer": None}
+    except Exception:
+        return {"ok": None, "expires": None, "issuer": None}
+
+def _wayback_first(host: str):
+    import requests
+    try:
+        base = "https://web.archive.org/cdx/search/cdx"
+        r = requests.get(base, params={
+            "url": host, "output": "json", "fl": "timestamp", "filter": "statuscode:200", "limit": "1",
+            "from": "19960101", "to": "99991231", "sort": "ascending"
+        }, timeout=_WE_TIMEOUT)
+        if r.ok:
+            j = r.json()
+            if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and j[1]:
+                ts = j[1][0]
+                return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+    except Exception:
+        pass
+    return None
+
+def analyze_website(site_url: str | None):
+    host = _host_from_url(site_url) if site_url else None
+    if not host:
+        return {"whois": {"created": None, "registrar": None},
+                "ssl": {"ok": None, "expires": None, "issuer": None},
+                "wayback": {"first": None}}
+    who = _whois_info(host)
+    ssl = _ssl_info(host)
+    wb  = _wayback_first(host)
+    return {"whois": who, "ssl": ssl, "wayback": {"first": wb}}
+
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
@@ -244,17 +323,8 @@ def on_message(msg):
 
     verdict = compute_verdict(market)
 
-
-    links = (market.get("links") or {})
-    web = {}
-    try:
-        web = analyze_website(links.get("site")) if links.get("site") else {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
-    except Exception:
-        web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
-    ctx = {"webintel": web}
-
-    quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
-    details = render_details(verdict, market, ctx, DEFAULT_LANG)
+    quick = render_quick(verdict, market, {}, DEFAULT_LANG)
+    details = render_details(verdict, market, {}, DEFAULT_LANG)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
@@ -268,6 +338,13 @@ def on_message(msg):
         lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
     except Exception:
         lp = "LP lock: unknown"
+
+    links = (market.get("links") or {})
+    web = {}
+    try:
+        web = analyze_website(links.get("site")) if links.get("site") else {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
+    except Exception:
+        web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
     bundle = {
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
         "reasons": list(getattr(verdict, "reasons", []) or []),
