@@ -279,6 +279,37 @@ BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
 WEBHOOK_PATH = f"/webhook/{BOT_WEBHOOK_SECRET}" if BOT_WEBHOOK_SECRET else "/webhook/secret-not-set"
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en")
 
+def build_webintel_ctx(market: dict) -> dict:
+    try:
+        links = (market.get("links") or {})
+    except Exception:
+        links = {}
+    try:
+        site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
+    except Exception:
+        site_url = os.getenv("WEBINTEL_SITE_OVERRIDE")
+    # defaults
+    web = {
+        "whois": {"created": None, "registrar": None},
+        "ssl": {"ok": None, "expires": None, "issuer": None},
+        "wayback": {"first": None}
+    }
+    try:
+        if site_url:
+            web = analyze_website(site_url)
+    except Exception:
+        pass
+    try:
+        dom = derive_domain(site_url)
+    except Exception:
+        dom = None
+    try:
+        web = _enrich_webintel_fallback(dom, web)
+    except Exception:
+        pass
+    return {"webintel": web, "domain": dom}
+
+
 def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
     try:
         import requests as _rq
@@ -570,9 +601,11 @@ def on_message(msg):
         pass
 
     web = _enrich_webintel_fallback(derive_domain(site_url), web)
-    ctx = {"webintel": web, "domain": derive_domain(site_url)}
+    ctx = build_webintel_ctx(market)
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+    ctx = build_webintel_ctx(market)
+
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
