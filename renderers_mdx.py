@@ -6,6 +6,7 @@ import datetime as _dt
 from typing import Any, Dict, Optional, List
 import re as _re
 import socket as _socket, ssl as _ssl
+import copy as _copy
 
 # ---- helpers ----
 def _fmt_num(v: Optional[float], prefix: str = "", none: str = "—") -> str:
@@ -572,6 +573,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         _enable_rdap = _os.getenv("ENABLE_RDAP", "1").lower() in ("1","true","yes")
     except Exception:
         _enable_rdap = True
+    _rd = None
     if _enable_rdap and l_site and l_site != "—":
         try:
             from rdap_client import lookup as _rdap_lookup
@@ -614,13 +616,13 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         if l_site and l_site != "—": ll.append(f"• Site: {l_site}")
         parts.append("\n".join(ll))
 
-    # Website intel (robust; tolerate empty/missing ctx keys) — FIXED INDENT
-    web = (ctx or {}).get("webintel") or {"whois": {}, "ssl": {}, "wayback": {}}
-    who = (web.get("whois") or {}) if isinstance(web, dict) else {}
-    ssl = (web.get("ssl") or {}) if isinstance(web, dict) else {}
-    way = (web.get("wayback") or {}) if isinstance(web, dict) else {}
+    # Website intel — robust + isolated (no ctx mutation)
+    web = _copy.deepcopy((ctx or {}).get("webintel") or {"whois": {}, "ssl": {}, "wayback": {}})
+    who = dict(web.get("whois") or {})
+    ssl = dict(web.get("ssl") or {})
+    way = dict(web.get("wayback") or {})
 
-    # Also accept flattened keys from server (if any)
+    # Accept flattened keys from server (if any)
     try:
         if not who.get("created") and isinstance(web, dict):
             wc = web.get("whois_created") or web.get("created")
@@ -640,7 +642,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     except Exception:
         pass
 
-    # Fallback WHOIS from market['domain'] with multiple common key variants
+    # Fallback WHOIS from market['domain'] with multiple common key variants — guarded by domain match later
     def _pick(*vals):
         for v in vals:
             if v not in (None, "", "n/a", "N/A", "—"):
@@ -648,39 +650,62 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         return None
 
     dom_block = (market or {}).get("domain") or {}
-    who_created = _pick(
-        who.get("created"),
-        dom_block.get("created"), dom_block.get("creationDate"), dom_block.get("createdAt"),
-        dom_block.get("registered"), dom_block.get("registeredAt"),
-        (ctx or {}).get("whois", {}).get("created"),
-    )
-    who_registrar = _pick(
-        who.get("registrar"),
-        dom_block.get("registrar"), dom_block.get("registrarName"),
-        dom_block.get("registrar_url"), dom_block.get("registrarUrl"),
-        (ctx or {}).get("whois", {}).get("registrar"),
-    )
 
-    # If still missing, reuse RDAP result from above (if present in this function scope)
+    # Resolve domain to probe and gate cross-domain leaks
+    _rd_local = _rd if isinstance(_rd, dict) else {}
+    _domain_to_probe = _resolve_domain(_rd_local or {}, market, ctx)
+    prev_dom = web.get('__domain')
+    cur_dom = _domain_to_probe
+    if isinstance(prev_dom, str) and isinstance(cur_dom, str):
+        pd, cd = prev_dom.lower(), cur_dom.lower()
+        if not (pd == cd or pd.endswith('.' + cd) or cd.endswith('.' + pd)):
+            who, ssl, way = {}, {}, {}
+    if isinstance(cur_dom, str):
+        web['__domain'] = cur_dom
+
+    # Guard market['domain'] WHOIS with domain match
     try:
-        _rd_local = locals().get("_rd")
-        if isinstance(_rd_local, dict):
+        _dom_block_name = (dom_block.get("domain") or dom_block.get("name") or dom_block.get("ldhName") or "").lstrip("*.")
+    except Exception:
+        _dom_block_name = ""
+    _dom_match = False
+    try:
+        if _domain_to_probe and _dom_block_name:
+            dl = str(_domain_to_probe).lower()
+            bl = str(_dom_block_name).lower()
+            _dom_match = (dl == bl) or dl.endswith("." + bl) or bl.endswith("." + dl)
+    except Exception:
+        _dom_match = False
+    if _dom_match:
+        who_created = _pick(
+            who.get("created"),
+            dom_block.get("created"), dom_block.get("creationDate"), dom_block.get("createdAt"),
+            dom_block.get("registered"), dom_block.get("registeredAt"),
+            (ctx or {}).get("whois", {}).get("created"),
+        )
+        who_registrar = _pick(
+            who.get("registrar"),
+            dom_block.get("registrar"), dom_block.get("registrarName"),
+            dom_block.get("registrar_url"), dom_block.get("registrarUrl"),
+            (ctx or {}).get("whois", {}).get("registrar"),
+        )
+    else:
+        who_created, who_registrar = who.get("created"), who.get("registrar")
+
+    # If still missing, reuse RDAP result from above (scoped) — also gated by domain
+    if isinstance(_rd_local, dict):
+        _rd_dom = (_rd_local.get("domain") or _rd_local.get("ldhName") or "").lstrip("*.").lower()
+        _dm = (cur_dom or "").lower()
+        _match_rdap = bool(_rd_dom and _dm and (_rd_dom == _dm or _rd_dom.endswith("." + _dm) or _dm.endswith("." + _rd_dom)))
+        if _match_rdap:
             if not who_created:   who_created = _rd_local.get("created")
             if not who_registrar: who_registrar = _rd_local.get("registrar")
-    except Exception:
-        pass
 
     if who_created or who_registrar:
         who["created"] = who_created
         who["registrar"] = who_registrar
-        web["whois"] = who
 
-        # Active probes if data is missing
-    try:
-        _rd_local = locals().get('_rd')
-    except Exception:
-        _rd_local = None
-    _domain_to_probe = _resolve_domain(_rd_local or {}, market, ctx)
+    # Active probes if data is missing
     if _domain_to_probe:
         # SSL probe (TLS handshake) if missing
         if (ssl.get('ok') is None) or (not ssl.get('expires')):
@@ -696,7 +721,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 ssl['ok'] = _tls2['ok']
             if (not ssl.get('expires')) and _tls2.get('expires'):
                 ssl['expires'] = _tls2['expires']
-        # HTTP(S) fallback: if TLS failed but HTTPS is enforced, consider SSL ok=True
+        # HTTP(S) fallback: if TLS failed but HTTPS is enforced, mark ok=True
         if _domain_to_probe and (ssl.get('ok') is None):
             _wp = _web_probe(_domain_to_probe)
             if isinstance(_wp, dict) and _wp.get('https_enforced') is True:
