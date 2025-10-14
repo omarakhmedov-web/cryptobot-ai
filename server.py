@@ -422,6 +422,29 @@ PARSE_MODE = "MarkdownV2"
 app = Flask(__name__)
 
 
+# --- OMEGA-713K: known domains override (website hints) ---
+def _load_known_domains(path: str = "known_domains.json"):
+    """Try to load a JSON map {token_address_lower: {"site": "https://..."}}, fallback to built-ins for well-known tokens."""
+    import json as _json, os as _os
+    _builtin = {
+        "0x6982508145454ce325ddbe47a25d4ec3d2311933": {"site": "https://www.pepe.vip/"},
+        "0x831753dd7087cac61ab5644b308642cc1c33dc13": {"site": "https://quickswap.exchange/"},
+        "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": {"site": "https://pancakeswap.finance/"},
+    }
+    try:
+        if _os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                j = _json.load(f) or {}
+                if isinstance(j, dict):
+                    _builtin.update({k.lower(): v for k, v in j.items()})
+    except Exception:
+        pass
+    return _builtin
+# --- /OMEGA-713K ---
+
+
+
+
 def _discover_site_via_ds(chain: str | None, pair_addr: str | None, token_addr: str | None, timeout=6) -> str | None:
     """Try to fetch project website from DexScreener API if links['site'] is absent."""
     import requests as _rq
@@ -715,6 +738,12 @@ def on_message(msg):
                 _links["site"] = _site_guess
         except Exception:
             pass
+    # Prefer known_domains override if site is missing
+    if not _links.get("site") and _token:
+        _known = _load_known_domains()
+        _site = (_known.get(_token.lower()) or {}).get("site") if isinstance(_known, dict) else None
+        if _site:
+            _links["site"] = _site
     market["links"] = _links
     # --- /OMEGA-713K ---
 
