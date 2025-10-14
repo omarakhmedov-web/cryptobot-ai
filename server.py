@@ -246,6 +246,47 @@ def _wayback_first(host: str):
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
+
+# --- Owner-bypass for limits (OMEGA-713K) ---
+try:
+    _can_scan_orig = can_scan  # keep original reference
+except Exception:
+    _can_scan_orig = None
+
+def _owner_ids():
+    ids = set()
+    # Single admin
+    _aid = os.getenv("ADMIN_CHAT_ID") or os.getenv("OWNER_CHAT_ID") or ""
+    for token in (_aid,):
+        token = (token or "").strip()
+        if token:
+            try:
+                ids.add(int(token))
+            except Exception:
+                pass
+    # Comma-separated allowed list
+    _alist = os.getenv("ALLOWED_CHAT_IDS") or ""
+    for tok in (t.strip() for t in _alist.split(",") if t.strip()):
+        try:
+            ids.add(int(tok))
+        except Exception:
+            pass
+    return ids
+
+def can_scan(chat_id: int):
+    """Owner bypass: if chat_id in ADMIN_CHAT_ID / ALLOWED_CHAT_IDS -> allow (Pro).
+    Otherwise, delegate to original can_scan.
+    """
+    try:
+        if int(chat_id) in _owner_ids():
+            return True, "Pro (owner)"
+    except Exception:
+        pass
+    if _can_scan_orig:
+        return _can_scan_orig(chat_id)
+    return False, "Free"
+# --- /Owner-bypass ---
+
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
 from cache import cache_get, cache_set
@@ -387,20 +428,6 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
-
-# --- Health endpoints (OMEGA-713K v3) ---
-@app.get("/healthz")
-def _healthz_get():
-    try:
-        return jsonify({"ok": True, "status": "ok", "ts": int(time.time())}), 200
-    except Exception:
-        return jsonify({"ok": True}), 200
-
-@app.get("/health")
-def _health_get():
-    return jsonify({"ok": True, "status": "ok", "ts": int(time.time())}), 200
-# --- /Health endpoints ---
-
 
 _MD2_SPECIALS = r'_[]()~>#+-=|{}.!'
 _MD2_PATTERN = re.compile('[' + re.escape(_MD2_SPECIALS) + ']')
