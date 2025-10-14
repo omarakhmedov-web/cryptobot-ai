@@ -556,26 +556,25 @@ def on_message(msg):
         market.setdefault("sources", [])
         market.setdefault("priceChanges", {})
         market.setdefault("links", {})
-    # --- OMEGA-713K: populate default links for buttons ---
+    # --- OMEGA-713K: Buttons links enrichment ---
     try:
         _links = market.get("links") or {}
     except Exception:
         _links = {}
-    try:
-        _chain = (market.get("chain") or "").lower()
-    except Exception:
-        _chain = ""
+    _chain = (market.get("chain") or "").lower()
     _token = (market.get("tokenAddress") or "").lower()
     _pair  = (market.get("pairAddress") or "").lower()
-    # Dex link: prefer Dexscreener pair URL if available
-    if not _links.get("dex"):
+    _dexId = (_links.get("dexId") or "").lower()
+
+    # DexScreener link (kept separate from real DEX)
+    if not _links.get("dexscreener"):
         ds_url = (_links.get("dexscreener") or "").strip()
         if not ds_url and _chain and _pair:
-            # Fallback DS pair URL
             ds_url = f"https://dexscreener.com/{_chain}/{_pair}"
         if ds_url:
-            _links["dex"] = ds_url
-    # Scan link: build per chain
+            _links["dexscreener"] = ds_url
+
+    # Scan link per chain
     if not _links.get("scan") and _token:
         _scan_bases = {
             "ethereum": "https://etherscan.io/token/",
@@ -597,6 +596,16 @@ def on_message(msg):
         base = _scan_bases.get(_chain)
         if base:
             _links["scan"] = base + _token
+
+    # Real DEX link (shows as 'Open in DEX' in Buttons if not DexScreener)
+    if not _links.get("dex") and _token:
+        if _dexId in ("uniswap", "uniswapv2", "uniswapv3") and _chain in ("ethereum","base","arbitrum","polygon","optimism"):
+            _links["dex"] = f"https://app.uniswap.org/explore/tokens/{_chain}/{_token}"
+        elif _dexId.startswith("pancake") and _chain in ("bsc","binance"):
+            _links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={_token}"
+        elif "quickswap" in _dexId and _chain == "polygon":
+            _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
+
     market["links"] = _links
     # --- /OMEGA-713K ---
 
