@@ -246,47 +246,6 @@ def _wayback_first(host: str):
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
-
-# --- Owner-bypass for limits (OMEGA-713K) ---
-try:
-    _can_scan_orig = can_scan  # keep original reference
-except Exception:
-    _can_scan_orig = None
-
-def _owner_ids():
-    ids = set()
-    # Single admin
-    _aid = os.getenv("ADMIN_CHAT_ID") or os.getenv("OWNER_CHAT_ID") or ""
-    for token in (_aid,):
-        token = (token or "").strip()
-        if token:
-            try:
-                ids.add(int(token))
-            except Exception:
-                pass
-    # Comma-separated allowed list
-    _alist = os.getenv("ALLOWED_CHAT_IDS") or ""
-    for tok in (t.strip() for t in _alist.split(",") if t.strip()):
-        try:
-            ids.add(int(tok))
-        except Exception:
-            pass
-    return ids
-
-def can_scan(chat_id: int):
-    """Owner bypass: if chat_id in ADMIN_CHAT_ID / ALLOWED_CHAT_IDS -> allow (Pro).
-    Otherwise, delegate to original can_scan.
-    """
-    try:
-        if int(chat_id) in _owner_ids():
-            return True, "Pro (owner)"
-    except Exception:
-        pass
-    if _can_scan_orig:
-        return _can_scan_orig(chat_id)
-    return False, "Free"
-# --- /Owner-bypass ---
-
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
 from cache import cache_get, cache_set
@@ -597,6 +556,50 @@ def on_message(msg):
         market.setdefault("sources", [])
         market.setdefault("priceChanges", {})
         market.setdefault("links", {})
+    # --- OMEGA-713K: populate default links for buttons ---
+    try:
+        _links = market.get("links") or {}
+    except Exception:
+        _links = {}
+    try:
+        _chain = (market.get("chain") or "").lower()
+    except Exception:
+        _chain = ""
+    _token = (market.get("tokenAddress") or "").lower()
+    _pair  = (market.get("pairAddress") or "").lower()
+    # Dex link: prefer Dexscreener pair URL if available
+    if not _links.get("dex"):
+        ds_url = (_links.get("dexscreener") or "").strip()
+        if not ds_url and _chain and _pair:
+            # Fallback DS pair URL
+            ds_url = f"https://dexscreener.com/{_chain}/{_pair}"
+        if ds_url:
+            _links["dex"] = ds_url
+    # Scan link: build per chain
+    if not _links.get("scan") and _token:
+        _scan_bases = {
+            "ethereum": "https://etherscan.io/token/",
+            "eth": "https://etherscan.io/token/",
+            "bsc": "https://bscscan.com/token/",
+            "binance": "https://bscscan.com/token/",
+            "polygon": "https://polygonscan.com/token/",
+            "matic": "https://polygonscan.com/token/",
+            "arbitrum": "https://arbiscan.io/token/",
+            "arb": "https://arbiscan.io/token/",
+            "base": "https://basescan.org/token/",
+            "optimism": "https://optimistic.etherscan.io/token/",
+            "op": "https://optimistic.etherscan.io/token/",
+            "avalanche": "https://snowtrace.io/token/",
+            "avax": "https://snowtrace.io/token/",
+            "fantom": "https://ftmscan.com/token/",
+            "ftm": "https://ftmscan.com/token/",
+        }
+        base = _scan_bases.get(_chain)
+        if base:
+            _links["scan"] = base + _token
+    market["links"] = _links
+    # --- /OMEGA-713K ---
+
 
     # Ensure asof timestamp and pair age
     if not market.get("asof"):
