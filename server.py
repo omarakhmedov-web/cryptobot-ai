@@ -388,7 +388,7 @@ PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
 
-# --- Health endpoints (OMEGA-713K, v2: GET only; HEAD auto-handled) ---
+# --- Health endpoints (OMEGA-713K v3) ---
 @app.get("/healthz")
 def _healthz_get():
     try:
@@ -398,7 +398,6 @@ def _healthz_get():
 
 @app.get("/health")
 def _health_get():
-    # alias for legacy checks
     return jsonify({"ok": True, "status": "ok", "ts": int(time.time())}), 200
 # --- /Health endpoints ---
 
