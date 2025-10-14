@@ -1,5 +1,25 @@
 from __future__ import annotations
 import os
+
+# --- OMEGA-713K D2 risk palette integration (20 -> yellow) ---
+try:
+    from risk_palette_OMEGA_D2 import risk_color_for_score as _risk_color_for_score, get_risk_emoji as _get_risk_emoji
+except Exception:
+    def _risk_color_for_score(score: int) -> str:
+        try:
+            s = int(score)
+        except Exception:
+            s = 0
+        if s < 0: s = 0
+        if s > 100: s = 100
+        if s <= 19: return "green"
+        if s <= 39: return "yellow"  # D2: 20 -> yellow
+        if s <= 59: return "orange"
+        return "red"
+    def _get_risk_emoji(score: int) -> str:
+        c = _risk_color_for_score(score)
+        return {"green":"🟢","yellow":"🟡","orange":"🟠","red":"🔴"}.get(c, "🟢")
+# --- /OMEGA-713K D2 ---
 import requests as _rq
 import time
 import datetime as _dt
@@ -101,14 +121,36 @@ def _level(verdict) -> str:
     except Exception:
         return f"{_get(verdict, 'level', default='—')}"
 
+
 def _pick_color(verdict, market):
     m = market or {}
     liq = _get(m, "liq") or _get(m, "liquidityUSD") or 0
     vol = _get(m, "vol24h") or _get(m, "volume24hUSD") or 0
     fdv = _get(m, "fdv")
     mc  = _get(m, "mc")
+    # If absolutely no market signals, keep neutral
     if (not liq) and (not vol) and (fdv is None and mc is None):
         return "⚪"
+
+    # Prefer score-based palette (D2)
+    s = None
+    try:
+        s = getattr(verdict, "score", None)
+    except Exception:
+        s = None
+    if s is None:
+        try:
+            s = (verdict or {}).get("score")
+        except Exception:
+            s = None
+    try:
+        if s is not None:
+            s_int = int(float(s))
+            return _get_risk_emoji(s_int)
+    except Exception:
+        pass
+
+    # Fallback to level-based logic
     lvl = None
     try:
         lvl = getattr(verdict, "level", None)
