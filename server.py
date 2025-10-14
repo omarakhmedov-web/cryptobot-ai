@@ -296,11 +296,15 @@ except Exception as _e:
 from risk_engine import compute_verdict
 import onchain_inspector
 from renderers_mdx import render_quick, render_details, render_why, render_whypp, render_lp
+from pair_resolver import resolve_pair
 try:
-    from lp_lite import check_lp_lock_v2
+    from lp_lite_enhanced import check_lp_lock_v2  # prefer enhanced helper
 except Exception:
-    def check_lp_lock_v2(chain, lp_addr):
-        return {"provider": "lite-burn-check", "lpAddress": lp_addr or "—", "until": "—"}
+    try:
+        from lp_lite import check_lp_lock_v2
+    except Exception:
+        def check_lp_lock_v2(chain, lp_addr):
+            return {"provider": "lite-burn-check", "lpAddress": lp_addr or "—", "until": "—"}
 
 try:
     from onchain_inspector import inspect_token
@@ -809,7 +813,8 @@ def on_message(msg):
         ch_ = (market.get("chain") or "").lower()
         _map = {"ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op","base":"base","avalanche":"avax","fantom":"ftm"}
         _short = _map.get(ch_, ch_ or "eth")
-        info = check_lp_lock_v2(_short, market.get("pairAddress"))
+        pair_addr = market.get("pairAddress") or resolve_pair(_short, market.get("tokenAddress"))
+        info = check_lp_lock_v2(_short, pair_addr)
         lp = render_lp(info, DEFAULT_LANG)
     except TypeError:
         lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
