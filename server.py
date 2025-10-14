@@ -246,6 +246,39 @@ def _wayback_first(host: str):
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
+
+# --- Owner-bypass for limits (OMEGA-713K) ---
+try:
+    _can_scan_orig = can_scan  # keep original
+except Exception:
+    _can_scan_orig = None
+
+def _owner_ids():
+    ids = set()
+    # Accept ADMIN_CHAT_ID / OWNER_CHAT_ID (single) and ALLOWED_CHAT_IDS (comma-separated)
+    for name in ("ADMIN_CHAT_ID", "OWNER_CHAT_ID", "ALLOWED_CHAT_IDS"):
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            continue
+        for tok in (t.strip() for t in raw.split(",") if t.strip()):
+            try:
+                ids.add(int(tok))
+            except Exception:
+                pass
+    return ids
+
+def can_scan(chat_id: int):
+    """If chat_id belongs to owner list -> allow as Pro (owner), else delegate."""
+    try:
+        if int(chat_id) in _owner_ids():
+            return True, "Pro (owner)"
+    except Exception:
+        pass
+    if _can_scan_orig:
+        return _can_scan_orig(chat_id)
+    return False, "Free"
+# --- /Owner-bypass ---
+
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
 from cache import cache_get, cache_set
@@ -387,6 +420,20 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
+
+# --- Health endpoints (OMEGA-713K, GET only) ---
+@app.get("/healthz")
+def _healthz_get():
+    try:
+        return jsonify({"ok": True, "status": "ok", "ts": int(time.time())}), 200
+    except Exception:
+        return jsonify({"ok": True}), 200
+
+@app.get("/health")
+def _health_get():
+    return jsonify({"ok": True, "status": "ok", "ts": int(time.time())}), 200
+# --- /Health endpoints ---
+
 
 _MD2_SPECIALS = r'_[]()~>#+-=|{}.!'
 _MD2_PATTERN = re.compile('[' + re.escape(_MD2_SPECIALS) + ']')
@@ -556,19 +603,72 @@ def on_message(msg):
         market.setdefault("sources", [])
         market.setdefault("priceChanges", {})
         market.setdefault("links", {})
-    # --- OMEGA-713K D1: robust Age ---
+    # --- OMEGA-713K D1: robust Age computation ---
     try:
-        _ts = market.get("pairCreatedAt")
+        _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
         _now = market.get("asOf") or int(time.time())
         if isinstance(_ts, (int, float)) and _ts:
-            # normalize ms->s
-            if _ts > 10000000000:
+            # normalize milliseconds to seconds when needed
+            if _ts > 10_000_000_000:  # looks like ms
                 _ts = int(_ts // 1000)
-            _age_days = max(0.0, round((_now - int(_ts)) / 86400.0, 1))
+            _age_days = max(0.0, round((_now - int(_ts)) / 86400.0, 2))
             market["ageDays"] = _age_days
     except Exception:
         pass
     # --- /D1 Age ---
+
+    # --- OMEGA-713K: Buttons links enrichment ---
+    try:
+        _links = market.get("links") or {}
+    except Exception:
+        _links = {}
+    _chain = (market.get("chain") or "").lower()
+    _token = (market.get("tokenAddress") or "").lower()
+    _pair  = (market.get("pairAddress") or "").lower()
+    _dexId = (_links.get("dexId") or "").lower()
+
+    # DexScreener link (kept separate from real DEX)
+    if not _links.get("dexscreener"):
+        ds_url = (_links.get("dexscreener") or "").strip()
+        if not ds_url and _chain and _pair:
+            ds_url = f"https://dexscreener.com/{_chain}/{_pair}"
+        if ds_url:
+            _links["dexscreener"] = ds_url
+
+    # Scan link per chain
+    if not _links.get("scan") and _token:
+        _scan_bases = {
+            "ethereum": "https://etherscan.io/token/",
+            "eth": "https://etherscan.io/token/",
+            "bsc": "https://bscscan.com/token/",
+            "binance": "https://bscscan.com/token/",
+            "polygon": "https://polygonscan.com/token/",
+            "matic": "https://polygonscan.com/token/",
+            "arbitrum": "https://arbiscan.io/token/",
+            "arb": "https://arbiscan.io/token/",
+            "base": "https://basescan.org/token/",
+            "optimism": "https://optimistic.etherscan.io/token/",
+            "op": "https://optimistic.etherscan.io/token/",
+            "avalanche": "https://snowtrace.io/token/",
+            "avax": "https://snowtrace.io/token/",
+            "fantom": "https://ftmscan.com/token/",
+            "ftm": "https://ftmscan.com/token/",
+        }
+        base = _scan_bases.get(_chain)
+        if base:
+            _links["scan"] = base + _token
+
+    # Real DEX link (shows as 'Open in DEX' if not DexScreener)
+    if not _links.get("dex") and _token:
+        if _dexId in ("uniswap", "uniswapv2", "uniswapv3") and _chain in ("ethereum","base","arbitrum","polygon","optimism"):
+            _links["dex"] = f"https://app.uniswap.org/explore/tokens/{_chain}/{_token}"
+        elif _dexId.startswith("pancake") and _chain in ("bsc","binance"):
+            _links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={_token}"
+        elif "quickswap" in _dexId and _chain == "polygon":
+            _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
+
+    market["links"] = _links
+    # --- /OMEGA-713K ---
 
 
     # Ensure asof timestamp and pair age
