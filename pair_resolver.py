@@ -1,4 +1,3 @@
-
 # pair_resolver.py — OMEGA-713K
 from __future__ import annotations
 import os, json
