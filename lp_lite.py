@@ -1,152 +1,170 @@
-# Metridex OMEGA-713K — LP-lite helper (stdlib-only)
+# Metridex OMEGA-713K — LP-lite helper (PATCH)
 # Public API: check_lp_lock_v2(chain, lp_addr) -> dict
-# Computes burned% = (balanceOf(0xdead)+balanceOf(0x0)) / totalSupply
-# Adds provider link to LP holders page.
+# • Computes burned% for ERC‑20 LPs = (balanceOf(0xdead)+balanceOf(0x0)) / totalSupply
+# • Detects v3/NFT LPs (no ERC‑20) and returns "n/a (v3/NFT LP)"
+# • Uses JUDGE_RPC_URLS (JSON) with stdlib urllib JSON‑RPC; fallbacks to public RPCs
+# • Config via ENV: LP_RPC_TIMEOUT_S (default 6), LP_RPC_RETRIES (default 2)
 
 from __future__ import annotations
 import os, json, time
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
 DEAD = "0x000000000000000000000000000000000000dEaD"
 ZERO = "0x0000000000000000000000000000000000000000"
 
-# Public RPC fallbacks (used if JUDGE_RPC_URLS is absent)
+# Public RPC fallbacks (used if JUDGE_RPC_URLS is absent/partial)
 _PUBLIC = {
-    "eth": "https://rpc.ankr.com/eth",
-    "ethereum": "https://rpc.ankr.com/eth",
-    "bsc": "https://rpc.ankr.com/bsc",
-    "binance": "https://rpc.ankr.com/bsc",
-    "polygon": "https://rpc.ankr.com/polygon",
-    "pol": "https://rpc.ankr.com/polygon",
-    "matic": "https://rpc.ankr.com/polygon",
-    "avax": "https://rpc.ankr.com/avalanche",
-    "avalanche": "https://rpc.ankr.com/avalanche",
-    "op": "https://rpc.ankr.com/optimism",
-    "optimism": "https://rpc.ankr.com/optimism",
-    "base": "https://mainnet.base.org",
-    "ftm": "https://rpc.ankr.com/fantom",
-    "fantom": "https://rpc.ankr.com/fantom",
+    "eth": ["https://rpc.ankr.com/eth", "https://cloudflare-eth.com"],
+    "bsc": ["https://rpc.ankr.com/bsc", "https://bsc-dataseed.binance.org"],
+    "polygon": ["https://rpc.ankr.com/polygon", "https://polygon-rpc.com"],
 }
 
-def _rpc_map() -> Dict[str, str]:
-    j = os.getenv("JUDGE_RPC_URLS", "").strip()
-    out: Dict[str, str] = {}
-    if j:
-        try:
-            parsed = json.loads(j)
-            if isinstance(parsed, dict):
-                out.update({str(k).lower(): str(v) for k, v in parsed.items() if v})
-        except Exception:
-            pass
-    for k, v in _PUBLIC.items():
-        out.setdefault(k, v)
-    return out
+def _coalesce_rpcs(chain: str) -> List[str]:
+    """Build ordered RPC list from JUDGE_RPC_URLS + _PUBLIC."""
+    out: List[str] = []
+    try:
+        m = json.loads(os.getenv("JUDGE_RPC_URLS","") or "{}")
+        # Accept both long and short keys
+        aliases = {
+            "ethereum":"eth","eth":"eth",
+            "binance":"bsc","bsc":"bsc",
+            "polygon":"polygon","pol":"polygon","matic":"polygon",
+        }
+        for k,v in list(m.items()):
+            kk = aliases.get(k.lower(), k.lower())
+            if kk == _norm_chain(chain):
+                if isinstance(v, str):
+                    out.append(v)
+                elif isinstance(v, list):
+                    out.extend([x for x in v if isinstance(x, str)])
+    except Exception:
+        pass
+    # append public
+    out.extend(_PUBLIC.get(_norm_chain(chain), []))
+    # dedupe preserving order
+    seen = set(); dedup = []
+    for u in out:
+        if u not in seen and isinstance(u, str) and u.startswith("http"):
+            seen.add(u); dedup.append(u)
+    return dedup
+
+def _norm_chain(chain: str) -> str:
+    c = (chain or "").lower()
+    if c in ("eth","ethereum"): return "eth"
+    if c in ("bsc","binance"): return "bsc"
+    if c in ("polygon","pol","matic"): return "polygon"
+    return c or "eth"
 
 def _pick_explorer(chain: str) -> Tuple[str, str]:
-    c = (chain or "").lower()
-    if c in ("eth", "ethereum"):
+    c = _norm_chain(chain)
+    if c == "eth":
         return "Etherscan", "https://etherscan.io"
-    if c in ("bsc", "binance"):
+    if c == "bsc":
         return "BscScan", "https://bscscan.com"
-    if c in ("polygon", "pol", "matic"):
+    if c == "polygon":
         return "Polygonscan", "https://polygonscan.com"
-    if c in ("avax", "avalanche"):
-        return "Snowtrace", "https://snowtrace.io"
-    if c in ("op", "optimism"):
-        return "Optimistic Etherscan", "https://optimistic.etherscan.io"
-    if c in ("base",):
-        return "BaseScan", "https://basescan.org"
-    if c in ("ftm", "fantom"):
-        return "FTMScan", "https://ftmscan.com"
-    return "Explorer", "https://etherscan.io"
+    return "Explorer", ""
 
-def _post_json(url: str, payload: dict, timeout: int = 4) -> Optional[dict]:
+def _holders_path(base: str, token: str) -> str:
+    if not base:
+        return ""
+    # token holders page (works for major scans)
+    return f"{base}/token/{token}#balances"
+
+def _jsonrpc_call(rpc: str, to: str, data_hex: str, timeout: float) -> Optional[str]:
+    """Low-level eth_call returning hex result or None on failure."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [ {"to": to, "data": data_hex}, "latest" ],
+    }
+    req = Request(rpc, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type":"application/json"})
     try:
-        data = json.dumps(payload).encode("utf-8")
-        req = Request(url, data=data, headers={"Content-Type": "application/json"})
         with urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "ignore")
-            return json.loads(raw)
+            j = json.loads(raw)
+            if "error" in j:  # method missing or revert
+                return None
+            return j.get("result")
     except (URLError, HTTPError, TimeoutError, ValueError):
         return None
 
-def _rpc_call(rpc_url: str, to: str, data: str, timeout: int = 4, retries: int = 1) -> Optional[str]:
-    payload = {
-        "jsonrpc": "2.0",
-        "id": int(time.time()*1000)%1_000_000,
-        "method": "eth_call",
-        "params": [{"to": to, "data": data}, "latest"]
-    }
-    j = None
-    for _ in range(max(1, retries)):
-        j = _post_json(rpc_url, payload, timeout=timeout)
-        if j and isinstance(j, dict) and "result" in j:
-            break
-    if not j: return None
-    return j.get("result")
-
-def _pad(addr: str) -> str:
-    a = (addr or "").lower().replace("0x", "")
-    return a.rjust(64, "0")
-
 def _hex_to_int(x: Optional[str]) -> int:
-    if not x or not isinstance(x, str): return 0
+    if not x or not isinstance(x, str) or not x.startswith("0x"):
+        return -1
     try:
         return int(x, 16)
     except Exception:
-        return 0
+        return -1
 
-def _balance_of(rpc: str, token_addr: str, holder: str) -> int:
-    data = "0x70a08231" + _pad(holder)
-    res = _rpc_call(rpc, token_addr, data, timeout=4, retries=2)
-    return _hex_to_int(res)
+# ERC-20 function selectors
+SIG_TOTAL_SUPPLY = "0x18160ddd"
+SIG_BALANCE_OF  = "0x70a08231"
 
-def _total_supply(rpc: str, token_addr: str) -> int:
-    data = "0x18160ddd"
-    res = _rpc_call(rpc, token_addr, data, timeout=4, retries=2)
-    return _hex_to_int(res)
+def _encode_balance_of(addr: str) -> str:
+    # pad 32 bytes
+    a = addr.lower().replace("0x","").rjust(64,"0")
+    return SIG_BALANCE_OF + a
+
+def _is_erc20_like(rpc: str, token: str, timeout: float) -> bool:
+    # If both totalSupply and balanceOf(dead) fail → very likely non‑ERC20 (v3/NFT LP)
+    ts = _jsonrpc_call(rpc, token, SIG_TOTAL_SUPPLY, timeout)
+    bo = _jsonrpc_call(rpc, token, _encode_balance_of(DEAD), timeout)
+    return ts is not None and bo is not None
+
+def _erc20_total_supply(rpc: str, token: str, timeout: float) -> int:
+    return _hex_to_int(_jsonrpc_call(rpc, token, SIG_TOTAL_SUPPLY, timeout))
+
+def _erc20_balance_of(rpc: str, token: str, owner: str, timeout: float) -> int:
+    return _hex_to_int(_jsonrpc_call(rpc, token, _encode_balance_of(owner), timeout))
+
+def _calc_burned_pct(chain: str, lp_addr: str, timeout_s: float, retries: int) -> Dict[str, Any]:
+    rpcs = _coalesce_rpcs(chain)
+    out: Dict[str,Any] = {
+        "lpToken": lp_addr,
+        "totalSupply": None,
+        "burned": None,
+        "burnedPct": "—",
+        "notes": "",
+    }
+    if not lp_addr or lp_addr == ZERO:
+        out["notes"] = "invalid LP address"
+        return out
+    for rpc in rpcs:
+        # Multi-try per RPC (for transient errors)
+        for _ in range(max(1, retries)):
+            # ERC-20 presence check
+            if not _is_erc20_like(rpc, lp_addr, timeout_s):
+                out["notes"] = "v3/NFT LP — no ERC‑20 balances"
+                out["burnedPct"] = "n/a (v3/NFT LP)"
+                return out
+            ts = _erc20_total_supply(rpc, lp_addr, timeout_s)
+            if ts <= 0:
+                continue
+            d1 = _erc20_balance_of(rpc, lp_addr, DEAD, timeout_s)
+            d0 = _erc20_balance_of(rpc, lp_addr, ZERO, timeout_s)
+            burned = max(0, d1) + max(0, d0)
+            out["totalSupply"] = ts
+            out["burned"] = burned
+            pct_bp = (burned * 10000) // ts
+            out["burnedPct"] = f"{pct_bp/100:.2f}%"
+            return out
+    # exhausted
+    out["notes"] = out.get("notes") or "rpc/timeout"
+    return out
 
 def check_lp_lock_v2(chain: str, lp_addr: str) -> Dict[str, Any]:
-    """Return a lite LP lock view using burn% and a holders page link.
-    chain: short code like 'eth','bsc','polygon' (case-insensitive)
-    lp_addr: LP token (pair) address
     """
-    out: Dict[str, Any] = {
-        "provider": "explorer",
-        "providerUrl": None,
-        "lpAddress": lp_addr or "—",
-        "burnedPct": "—",
-        "burned": None,
-        "totalSupply": None,
-        "until": "—",
-    }
-    chain = (chain or "eth").lower()
-    if not lp_addr or not isinstance(lp_addr, str) or len(lp_addr) < 40:
-        return out
-
-    rpc_map = _rpc_map()
-    rpc = rpc_map.get(chain) or rpc_map.get({"ethereum":"eth","binance":"bsc","polygon":"polygon"}.get(chain, ""))
-    name, base = _pick_explorer(chain)
-    out["provider"] = name
-    out["providerUrl"] = f"{base}/token/{lp_addr}#balances"
-
-    if not rpc:
-        return out
-
-    try:
-        ts = _total_supply(rpc, lp_addr)
-        if ts <= 0:
-            return out
-        d1 = _balance_of(rpc, lp_addr, DEAD)
-        d0 = _balance_of(rpc, lp_addr, ZERO)
-        burned = max(0, d1) + max(0, d0)
-        out["totalSupply"] = ts
-        out["burned"] = burned
-        pct = (burned * 10000) // ts  # basis points
-        out["burnedPct"] = f"{pct/100:.2f}%"
-    except Exception:
-        # keep placeholders
-        pass
-    return out
+    Main entry used by the server / renderers.
+    Returns dict with: burnedPct (str), lpToken, holdersUrl, explorer (name), notes, totalSupply, burned.
+    """
+    timeout_s = float(os.getenv("LP_RPC_TIMEOUT_S", "6"))
+    retries = int(os.getenv("LP_RPC_RETRIES", "2"))
+    explorer_name, explorer_base = _pick_explorer(chain)
+    res = _calc_burned_pct(chain, lp_addr, timeout_s, retries)
+    res["explorer"] = explorer_name
+    res["holdersUrl"] = _holders_path(explorer_base, lp_addr) if explorer_base else ""
+    return res
