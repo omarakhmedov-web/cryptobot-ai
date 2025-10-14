@@ -421,6 +421,46 @@ PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
 
+
+def _discover_site_via_ds(chain: str | None, pair_addr: str | None, token_addr: str | None, timeout=6) -> str | None:
+    """Try to fetch project website from DexScreener API if links['site'] is absent."""
+    import requests as _rq
+    chain = (chain or "").strip().lower()
+    pair  = (pair_addr or "").strip().lower()
+    tok   = (token_addr or "").strip().lower()
+    try:
+        if chain and pair:
+            r = _rq.get(f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair}", timeout=timeout)
+            if r.ok:
+                j = r.json() or {}
+                pairs = j.get("pairs") or []
+                if isinstance(pairs, list) and pairs:
+                    info = (pairs[0].get("info") or {})
+                    w    = info.get("websites") or info.get("website") or []
+                    if isinstance(w, list) and w:
+                        u = (w[0].get("url") if isinstance(w[0], dict) else str(w[0]))
+                        if isinstance(u, str) and u.startswith("http"): return u
+                    u = info.get("url")
+                    if isinstance(u, str) and u.startswith("http"): return u
+        if tok:
+            r2 = _rq.get(f"https://api.dexscreener.com/latest/dex/tokens/{tok}", timeout=timeout)
+            if r2.ok:
+                j2 = r2.json() or {}
+                pairs = j2.get("pairs") or []
+                if isinstance(pairs, list) and pairs:
+                    info = (pairs[0].get("info") or {})
+                    w    = info.get("websites") or info.get("website") or []
+                    if isinstance(w, list) and w:
+                        u = (w[0].get("url") if isinstance(w[0], dict) else str(w[0]))
+                        if isinstance(u, str) and u.startswith("http"): return u
+                    u = info.get("url")
+                    if isinstance(u, str) and u.startswith("http"): return u
+    except Exception:
+        return None
+    return None
+
+
+
 # --- Health endpoints (OMEGA-713K, GET only) ---
 @app.get("/healthz")
 def _healthz_get():
@@ -667,6 +707,14 @@ def on_message(msg):
         elif "quickswap" in _dexId and _chain == "polygon":
             _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
 
+    # Discover project website if missing (DexScreener fallback)
+    if not _links.get("site"):
+        try:
+            _site_guess = _discover_site_via_ds(_chain, _pair, _token, timeout=6)
+            if _site_guess:
+                _links["site"] = _site_guess
+        except Exception:
+            pass
     market["links"] = _links
     # --- /OMEGA-713K ---
 
@@ -970,6 +1018,7 @@ def on_callback(cb):
             val = ch.get("h6") or ch.get("h6h") or ch.get("6h")
         else:
             val = ch.get("h24")
+        send_message(chat_id, f"*{label}*: {_pct(val)}", reply_markup=None)
         answer_callback_query(cb_id, f"{label}: {_pct(val)}", False)
 
     else:
