@@ -1,11 +1,13 @@
-# Metridex OMEGA-713K — LP-lite helper
-# Provides: check_lp_lock_v2(chain_short, lp_addr) -> dict with burned% and provider link.
-# No web3 dependency; uses raw JSON-RPC via requests.
+# Metridex OMEGA-713K — LP-lite helper (stdlib-only)
+# Public API: check_lp_lock_v2(chain, lp_addr) -> dict
+# Computes burned% = (balanceOf(0xdead)+balanceOf(0x0)) / totalSupply
+# Adds provider link to LP holders page.
 
 from __future__ import annotations
 import os, json, time
-from typing import Dict, Any, Optional
-import requests
+from typing import Dict, Any, Optional, Tuple
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 DEAD = "0x000000000000000000000000000000000000dEaD"
 ZERO = "0x0000000000000000000000000000000000000000"
@@ -38,12 +40,11 @@ def _rpc_map() -> Dict[str, str]:
                 out.update({str(k).lower(): str(v) for k, v in parsed.items() if v})
         except Exception:
             pass
-    # merge fallbacks (do not overwrite explicit)
     for k, v in _PUBLIC.items():
         out.setdefault(k, v)
     return out
 
-def _pick_explorer(chain: str) -> (str, str):
+def _pick_explorer(chain: str) -> Tuple[str, str]:
     c = (chain or "").lower()
     if c in ("eth", "ethereum"):
         return "Etherscan", "https://etherscan.io"
@@ -61,24 +62,33 @@ def _pick_explorer(chain: str) -> (str, str):
         return "FTMScan", "https://ftmscan.com"
     return "Explorer", "https://etherscan.io"
 
-def _rpc_call(rpc_url: str, to: str, data: str, timeout: int = 8) -> Optional[str]:
+def _post_json(url: str, payload: dict, timeout: int = 4) -> Optional[dict]:
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "ignore")
+            return json.loads(raw)
+    except (URLError, HTTPError, TimeoutError, ValueError):
+        return None
+
+def _rpc_call(rpc_url: str, to: str, data: str, timeout: int = 4, retries: int = 1) -> Optional[str]:
     payload = {
         "jsonrpc": "2.0",
         "id": int(time.time()*1000)%1_000_000,
         "method": "eth_call",
         "params": [{"to": to, "data": data}, "latest"]
     }
-    try:
-        r = requests.post(rpc_url, json=payload, timeout=timeout)
-        if not r.ok:
-            return None
-        j = r.json()
-        return j.get("result")
-    except Exception:
-        return None
+    j = None
+    for _ in range(max(1, retries)):
+        j = _post_json(rpc_url, payload, timeout=timeout)
+        if j and isinstance(j, dict) and "result" in j:
+            break
+    if not j: return None
+    return j.get("result")
 
 def _pad(addr: str) -> str:
-    a = addr.lower().replace("0x", "")
+    a = (addr or "").lower().replace("0x", "")
     return a.rjust(64, "0")
 
 def _hex_to_int(x: Optional[str]) -> int:
@@ -86,20 +96,16 @@ def _hex_to_int(x: Optional[str]) -> int:
     try:
         return int(x, 16)
     except Exception:
-        try:
-            if x.startswith("0x"): return int(x, 16)
-        except Exception:
-            return 0
-    return 0
+        return 0
 
 def _balance_of(rpc: str, token_addr: str, holder: str) -> int:
     data = "0x70a08231" + _pad(holder)
-    res = _rpc_call(rpc, token_addr, data)
+    res = _rpc_call(rpc, token_addr, data, timeout=4, retries=2)
     return _hex_to_int(res)
 
 def _total_supply(rpc: str, token_addr: str) -> int:
     data = "0x18160ddd"
-    res = _rpc_call(rpc, token_addr, data)
+    res = _rpc_call(rpc, token_addr, data, timeout=4, retries=2)
     return _hex_to_int(res)
 
 def check_lp_lock_v2(chain: str, lp_addr: str) -> Dict[str, Any]:
@@ -107,7 +113,7 @@ def check_lp_lock_v2(chain: str, lp_addr: str) -> Dict[str, Any]:
     chain: short code like 'eth','bsc','polygon' (case-insensitive)
     lp_addr: LP token (pair) address
     """
-    out = {
+    out: Dict[str, Any] = {
         "provider": "explorer",
         "providerUrl": None,
         "lpAddress": lp_addr or "—",
@@ -120,7 +126,8 @@ def check_lp_lock_v2(chain: str, lp_addr: str) -> Dict[str, Any]:
     if not lp_addr or not isinstance(lp_addr, str) or len(lp_addr) < 40:
         return out
 
-    rpc = _rpc_map().get(chain)
+    rpc_map = _rpc_map()
+    rpc = rpc_map.get(chain) or rpc_map.get({"ethereum":"eth","binance":"bsc","polygon":"polygon"}.get(chain, ""))
     name, base = _pick_explorer(chain)
     out["provider"] = name
     out["providerUrl"] = f"{base}/token/{lp_addr}#balances"
@@ -130,14 +137,16 @@ def check_lp_lock_v2(chain: str, lp_addr: str) -> Dict[str, Any]:
 
     try:
         ts = _total_supply(rpc, lp_addr)
+        if ts <= 0:
+            return out
         d1 = _balance_of(rpc, lp_addr, DEAD)
         d0 = _balance_of(rpc, lp_addr, ZERO)
-        burned = d1 + d0
+        burned = max(0, d1) + max(0, d0)
         out["totalSupply"] = ts
         out["burned"] = burned
-        if ts > 0 and burned >= 0:
-            pct = (burned * 10000) // ts  # basis points
-            out["burnedPct"] = f"{pct/100:.2f}%"
+        pct = (burned * 10000) // ts  # basis points
+        out["burnedPct"] = f"{pct/100:.2f}%"
     except Exception:
+        # keep placeholders
         pass
     return out
