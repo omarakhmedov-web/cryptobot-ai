@@ -1,173 +1,143 @@
+# Metridex OMEGA-713K — LP-lite helper
+# Provides: check_lp_lock_v2(chain_short, lp_addr) -> dict with burned% and provider link.
+# No web3 dependency; uses raw JSON-RPC via requests.
+
 from __future__ import annotations
-import os
+import os, json, time
 from typing import Dict, Any, Optional
 import requests
-LP_RPC_TIMEOUT_SEC = int(os.getenv('LP_RPC_TIMEOUT_SEC', '8'))
 
-SIG_TOTALSUPPLY = "0x18160ddd"
-SIG_BALANCEOF   = "0x70a08231"
+DEAD = "0x000000000000000000000000000000000000dEaD"
+ZERO = "0x0000000000000000000000000000000000000000"
 
-CHAIN_RPC_ENV = {
-    "eth":"ETH_RPC_URL_PRIMARY",
-    "bsc":"BSC_RPC_URL_PRIMARY",
-    "polygon":"POLYGON_RPC_URL_PRIMARY",
-    "base":"BASE_RPC_URL_PRIMARY",
-    "arb":"ARB_RPC_URL_PRIMARY",
-    "op":"OP_RPC_URL_PRIMARY",
-    "avax":"AVAX_RPC_URL_PRIMARY",
-    "ftm":"FTM_RPC_URL_PRIMARY"
+# Public RPC fallbacks (used if JUDGE_RPC_URLS is absent)
+_PUBLIC = {
+    "eth": "https://rpc.ankr.com/eth",
+    "ethereum": "https://rpc.ankr.com/eth",
+    "bsc": "https://rpc.ankr.com/bsc",
+    "binance": "https://rpc.ankr.com/bsc",
+    "polygon": "https://rpc.ankr.com/polygon",
+    "pol": "https://rpc.ankr.com/polygon",
+    "matic": "https://rpc.ankr.com/polygon",
+    "avax": "https://rpc.ankr.com/avalanche",
+    "avalanche": "https://rpc.ankr.com/avalanche",
+    "op": "https://rpc.ankr.com/optimism",
+    "optimism": "https://rpc.ankr.com/optimism",
+    "base": "https://mainnet.base.org",
+    "ftm": "https://rpc.ankr.com/fantom",
+    "fantom": "https://rpc.ankr.com/fantom",
 }
 
-# Known locker contracts per chain (conservative baseline)
-DEFAULT_LOCKERS = {
-    "eth": [
-        "0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214",
-        "0x71b5759d73262fbb223956913ecf4ecc51057641",
-        "0xe2fe530c047f2d85298b07d9333c05737f1435fb",
-    ],
-    "bsc": [
-        "0xc765bddb93b0d1c1a88282ba0fa6b2d00e3e0c83",
-        "0x407993575c91ce7643a4d4ccacc9a98c36ee1bbe",
-    ],
-    "polygon": [
-        "0xadb2437e6f65682b85f814fbc12fec0508a7b1d0",
-    ],
-    "arb": [
-        "0x275720567e5955f5f2d53a7a1ab8a0fc643de50e",
-    ],
-    "avax": [
-        "0xa9f6aefa5d56db1205f36c34e6482a6d4979b3bb",
-    ],
-    "base": [
-        "0xc4e637d37113192f4f1f060daebd7758de7f4131",
-    ],
-}
+def _rpc_map() -> Dict[str, str]:
+    j = os.getenv("JUDGE_RPC_URLS", "").strip()
+    out: Dict[str, str] = {}
+    if j:
+        try:
+            parsed = json.loads(j)
+            if isinstance(parsed, dict):
+                out.update({str(k).lower(): str(v) for k, v in parsed.items() if v})
+        except Exception:
+            pass
+    # merge fallbacks (do not overwrite explicit)
+    for k, v in _PUBLIC.items():
+        out.setdefault(k, v)
+    return out
 
-def _parse_addr_list(s: str):
-    return [x.strip().lower() for x in (s or "").split(",") if x and x.strip().startswith("0x")]
+def _pick_explorer(chain: str) -> (str, str):
+    c = (chain or "").lower()
+    if c in ("eth", "ethereum"):
+        return "Etherscan", "https://etherscan.io"
+    if c in ("bsc", "binance"):
+        return "BscScan", "https://bscscan.com"
+    if c in ("polygon", "pol", "matic"):
+        return "Polygonscan", "https://polygonscan.com"
+    if c in ("avax", "avalanche"):
+        return "Snowtrace", "https://snowtrace.io"
+    if c in ("op", "optimism"):
+        return "Optimistic Etherscan", "https://optimistic.etherscan.io"
+    if c in ("base",):
+        return "BaseScan", "https://basescan.org"
+    if c in ("ftm", "fantom"):
+        return "FTMScan", "https://ftmscan.com"
+    return "Explorer", "https://etherscan.io"
 
-def _known_lockers(chain: str):
-    """
-    Resolve locker addresses by priority:
-      1) LP_LOCKER_ADDRS_<CHAINUPPER> (comma-separated)
-      2) LP_LOCKER_ADDRS (global, comma-separated)
-      3) DEFAULT_LOCKERS[chain]
-    """
-    import os
-    ch = (chain or "").lower().strip()
-    env_chain = os.getenv(f"LP_LOCKER_ADDRS_{ch.upper()}", "") or os.getenv(f"LP_LOCKER_ADDRS_{ch}", "")
-    if env_chain:
-        lst = _parse_addr_list(env_chain)
-        if lst:
-            return lst
-    env_global = os.getenv("LP_LOCKER_ADDRS", "")
-    if env_global:
-        lst = _parse_addr_list(env_global)
-        if lst:
-            return lst
-    return list(DEFAULT_LOCKERS.get(ch, []))
-
-DEAD_ADDRS = [
-    "0x000000000000000000000000000000000000dead",
-    "0x0000000000000000000000000000000000000000",
-    "0x0000000000000000000000000000000000000001",
-]
-
-def _rpc(chain: str) -> Optional[str]:
-    ch = (chain or '').lower().strip()
-    env_primary = CHAIN_RPC_ENV.get(ch)
-    candidates = []
-    if env_primary: candidates.append(env_primary)
-    # common fallbacks
-    candidates += [
-        f"{ch.upper()}_RPC_URL_PRIMARY", f"{ch}_RPC_URL_PRIMARY",
-        f"{ch.upper()}_RPC_URL", f"{ch}_RPC_URL"
-    ]
-    alias = {
-        'eth': ['ETHEREUM_RPC_URL','MAINNET_RPC_URL'],
-        'bsc': ['BSC_MAINNET_RPC_URL','BNB_RPC_URL'],
-        'polygon': ['POLYGON_MAINNET_RPC_URL','MATIC_RPC_URL'],
-        'arb': ['ARBITRUM_RPC_URL'],
-        'op': ['OPTIMISM_RPC_URL'],
-        'avax': ['AVALANCHE_RPC_URL'],
-        'ftm': ['FANTOM_RPC_URL'],
-        'base': ['BASE_RPC_URL'],
-    }.get(ch, [])
-    candidates += alias
-    for k in candidates:
-        v = (os.getenv(k, '') or '').strip()
-        if v: return v
-    return None
-
-def _eth_call(rpc: str, to: str, data: str) -> bytes:
-    j = {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]}
-    r = requests.post(rpc, json=j, timeout=LP_RPC_TIMEOUT_SEC)
+def _rpc_call(rpc_url: str, to: str, data: str, timeout: int = 8) -> Optional[str]:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": int(time.time()*1000)%1_000_000,
+        "method": "eth_call",
+        "params": [{"to": to, "data": data}, "latest"]
+    }
     try:
-        res = r.json().get("result") or "0x"
+        r = requests.post(rpc_url, json=payload, timeout=timeout)
+        if not r.ok:
+            return None
+        j = r.json()
+        return j.get("result")
     except Exception:
-        res = "0x"
-    return bytes.fromhex(res[2:]) if res and res.startswith("0x") else b""
+        return None
 
-def _u256(b: bytes) -> int:
-    if not b: return 0
-    return int.from_bytes(b[-32:], "big", signed=False)
+def _pad(addr: str) -> str:
+    a = addr.lower().replace("0x", "")
+    return a.rjust(64, "0")
 
-def _balance_of(rpc: str, token: str, holder: str) -> int:
-    addr = holder.lower().replace("0x","").rjust(64, "0")
-    data = SIG_BALANCEOF + addr
-    return _u256(_eth_call(rpc, token, data))
+def _hex_to_int(x: Optional[str]) -> int:
+    if not x or not isinstance(x, str): return 0
+    try:
+        return int(x, 16)
+    except Exception:
+        try:
+            if x.startswith("0x"): return int(x, 16)
+        except Exception:
+            return 0
+    return 0
 
-def _total_supply(rpc: str, token: str) -> int:
-    return _u256(_eth_call(rpc, token, SIG_TOTALSUPPLY))
+def _balance_of(rpc: str, token_addr: str, holder: str) -> int:
+    data = "0x70a08231" + _pad(holder)
+    res = _rpc_call(rpc, token_addr, data)
+    return _hex_to_int(res)
 
-def check_lp_lock_v2(chain: str, lp_token_address: str) -> Dict[str, Any]:
+def _total_supply(rpc: str, token_addr: str) -> int:
+    data = "0x18160ddd"
+    res = _rpc_call(rpc, token_addr, data)
+    return _hex_to_int(res)
+
+def check_lp_lock_v2(chain: str, lp_addr: str) -> Dict[str, Any]:
+    """Return a lite LP lock view using burn% and a holders page link.
+    chain: short code like 'eth','bsc','polygon' (case-insensitive)
+    lp_addr: LP token (pair) address
     """
-    Lite LP lock check: burned % (dead/zero) + optional lockers via env LP_LOCKER_ADDRS.
-    """
-    rpc = _rpc(chain)
-    if not rpc or not lp_token_address:
-        return {"provider":"lite-burn-check","lpAddress": lp_token_address or "—","status":"unknown"}
+    out = {
+        "provider": "explorer",
+        "providerUrl": None,
+        "lpAddress": lp_addr or "—",
+        "burnedPct": "—",
+        "burned": None,
+        "totalSupply": None,
+        "until": "—",
+    }
+    chain = (chain or "eth").lower()
+    if not lp_addr or not isinstance(lp_addr, str) or len(lp_addr) < 40:
+        return out
+
+    rpc = _rpc_map().get(chain)
+    name, base = _pick_explorer(chain)
+    out["provider"] = name
+    out["providerUrl"] = f"{base}/token/{lp_addr}#balances"
+
+    if not rpc:
+        return out
 
     try:
-        ts = _total_supply(rpc, lp_token_address)
-        if ts <= 0:
-            return {"provider":"lite-burn-check","lpAddress": lp_token_address, "status":"unknown"}
-
-        burned = 0
-        parts = {}
-        for h in DEAD_ADDRS:
-            bal = _balance_of(rpc, lp_token_address, h)
-            parts[h] = bal
-            burned += bal
-        burned_pct = (burned/float(ts))*100.0 if ts else 0.0
-
-        # Known lockers
-        lockers = _known_lockers(chain)
-        locked_total = 0
-        details = []
-        for lk in lockers:
-            bal = _balance_of(rpc, lp_token_address, lk)
-            if bal > 0:
-                pct_lk = (bal/float(ts))*100.0 if ts else 0.0
-                locked_total += bal
-                details.append({"locker": lk, "balance": bal, "pct": round(pct_lk,2)})
-        locked_pct = (locked_total/float(ts))*100.0 if ts else 0.0
-
-        status = "none"
-        if burned_pct >= 95: status = "fully-burned"
-        elif burned_pct >= 50: status = "mostly-burned"
-        elif burned_pct >= 5: status = "partially-burned"
-        else: status = "low-burn"
-
-        return {
-            "provider":"lite-burn-check",
-            "lpAddress": lp_token_address,
-            "burnedPct": round(burned_pct,2),
-            "lockedPct": round(locked_pct,2) if lockers else None,
-            "lockers": details if details else None,
-            "status": status,
-            "until": "—",
-            "breakdown": parts
-        }
-    except Exception as e:
-        return {"provider":"lite-burn-check","lpAddress": lp_token_address, "status":"error", "error": str(e)}
+        ts = _total_supply(rpc, lp_addr)
+        d1 = _balance_of(rpc, lp_addr, DEAD)
+        d0 = _balance_of(rpc, lp_addr, ZERO)
+        burned = d1 + d0
+        out["totalSupply"] = ts
+        out["burned"] = burned
+        if ts > 0 and burned >= 0:
+            pct = (burned * 10000) // ts  # basis points
+            out["burnedPct"] = f"{pct/100:.2f}%"
+    except Exception:
+        pass
+    return out
