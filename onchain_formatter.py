@@ -60,7 +60,7 @@ def _short_addr(addr: str, head: int = 6, tail: int = 6) -> str:
         return str(addr)
     return addr[:2+head] + "…" + addr[-tail:]
 
-def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = False) -> str:
+def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = True) -> str:
     oc = oc or {}
     mkt = mkt or {}
 
@@ -168,7 +168,9 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = False) 
     if supply_line: parts.append(supply_line)
     if hp_line: parts.append(hp_line)
     if lp_line: parts.append(lp_line)
-    parts += [owner_line, state_line, limits_line]
+    parts += [owner_line, state_line]
+    if not (maxTx == "—" and maxWallet == "—"):
+        parts.append(limits_line)
     if tax_line: parts.append(tax_line)
 
     return "\n".join(parts)
