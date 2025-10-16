@@ -149,6 +149,10 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = True) -
 
     paused = _s(oc.get("paused"))
     upgradeable = _s(oc.get("upgradeable"))
+    # Normalize paused display
+    if paused == "—":
+        paused = "n/a"
+
     state_line = f"paused: {paused}  upgradeable: {upgradeable}"
 
     maxTx = _s(oc.get("maxTx"))
