@@ -118,6 +118,11 @@ except Exception:
         return f"Country: {country}" if country else "Country: n/a"
 
 import re as _re
+
+try:
+    from onchain_v2 import check_contract_v2 as _check_contract_v2
+except Exception:
+    _check_contract_v2 = None
 try:
     from renderers_onchain_v2 import render_onchain_v2 as _render_onchain_v2
 except Exception:
@@ -1125,4 +1130,61 @@ def render_contract(info: dict, lang: str = "en") -> str:
     lines.append("Paused: —  Upgradeable: —")
     lines.append("MaxTx: —  MaxWallet: —")
     return "\n".join(lines)
+
+
+def render_security(info: dict, lang: str = "en") -> str:
+    """
+    Unified Security block: LP (burn/lock) + Contract (owner/renounced/paused/upgradeable).
+    Keys in `info`:
+      - chain/network/chainId
+      - lpAddress|lpToken
+      - tokenAddress|token|address
+    """
+    p = info or {}
+    chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
+    lp_addr = (p.get("lpAddress") or p.get("lpToken"))
+    tk_addr = (p.get("tokenAddress") or p.get("token") or p.get("address"))
+
+    def _looks_addr(a: str) -> bool:
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+
+    def _cap(s: str) -> str:
+        s = (s or "").lower()
+        return {"eth":"Ethereum","bsc":"BSC","polygon":"Polygon","arb":"Arbitrum","op":"Optimism","base":"Base"}.get(s, s.capitalize() if s else "—")
+
+    # Header
+    lines = [f"Security — {_cap(chain)}"]
+
+    # LP subsection
+    lp_line = "LP: —"
+    try:
+        if 'check_lp_lock_v2' in globals() and _looks_addr(lp_addr):
+            lp = check_lp_lock_v2(chain, lp_addr)  # safe-fallback already defined above in this file
+            burned = lp.get("burnedPct")
+            locked = lp.get("lockedPct")
+            def _fmt_pct(x):
+                try: return f"{float(x):.2f}%"
+                except Exception: return "—"
+            via = lp.get("lockedBy") or "—"
+            lp_line = f"LP: Burned {_fmt_pct(burned)} • Locked {_fmt_pct(locked)} via {via}"
+    except Exception:
+        pass
+    lines.append(lp_line)
+
+    # Contract subsection
+    ct_line = "Contract: —"
+    try:
+        if '_check_contract_v2' in globals() and _check_contract_v2 and _looks_addr(tk_addr):
+            ct = _check_contract_v2(chain, tk_addr)
+            owner = ct.get("owner") or "—"
+            ren = "True" if ct.get("renounced") is True else ("False" if ct.get("renounced") is False else "—")
+            paused = "True" if ct.get("paused") is True else ("False" if ct.get("paused") is False else "—")
+            up = ct.get("upgradeable")
+            up_str = "True ⚠️" if up is True else ("False" if up is False else "—")
+            ct_line = f"Contract: Owner {owner} • Renounced {ren} • Paused {paused} • Upgradeable {up_str}"
+    except Exception:
+        pass
+    lines.append(ct_line)
+
+    return "\\n".join(lines)
 
