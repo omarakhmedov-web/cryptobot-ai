@@ -167,38 +167,7 @@ def _rdap_whois(host: str):
     except Exception:
         return {"created": None, "registrar": None}
 
-def _ssl_info(host: str):
-    exp = None
-    ok = None
-    try:
-        ctx = _ssl.create_default_context()
-        with socket.create_connection((host, 443), timeout=_WE_TIMEOUT) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                cert = ssock.getpeercert()
-        if cert and "notAfter" in cert:
-            try:
-                exp = _dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").strftime("%Y-%m-%d")
-            except Exception:
-                exp = cert.get("notAfter")
-        ok = True
-    except Exception:
-        ok = None
-    # HTTP HEAD fallback for reachability and headers
-    server = None
-    hsts = None
-    try:
-        resp = _rq.head(f"https://{host}", allow_redirects=True, timeout=_WE_HEAD_TIMEOUT)
-        if resp is not None:
-            ok = True if ok is None else ok
-            server = resp.headers.get("Server")
-            hsts = resp.headers.get("Strict-Transport-Security")
-    except Exception:
-        pass
-    out = {"ok": ok, "expires": exp, "issuer": None}
-    # stash extras for future UI
-    out["_server"] = server
-    out["_hsts"] = hsts
-    return out
+# (duplicate _ssl_info removed)
 
 def analyze_website(site_url: str | None):
     host = _host_from_url(site_url) if site_url else None
@@ -503,7 +472,7 @@ def _health_get():
 # --- /Health endpoints ---
 
 
-_MD2_SPECIALS = r'_[]()~>#+-=|{}.!'
+_MD2_SPECIALS = r'_[]()~>#+-=|{}.!*`'
 _MD2_PATTERN = re.compile('[' + re.escape(_MD2_SPECIALS) + ']')
 def mdv2_escape(text: str) -> str:
     if text is None: return ""
@@ -598,6 +567,13 @@ def safe_render_whypp(verdict, market, lang):
 
 @app.post(WEBHOOK_PATH)
 def webhook():
+    # Webhook header guard
+    try:
+        hdr = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+    except Exception:
+        hdr = None
+    if hdr != (BOT_WEBHOOK_SECRET or ''):
+        return jsonify({'ok': False}), 403
     try:
         upd = request.get_json(force=True, silent=True) or {}
         if "message" in upd: return on_message(upd["message"])
@@ -1065,6 +1041,12 @@ def on_callback(cb):
 
 # === INLINE DIAGNOSTICS (no shell needed) ====================================
 import os as _os
+
+from onchain_v2 import check_contract_v2
+from renderers_onchain_v2 import render_onchain_v2
+from lp_lite_v2 import check_lp_lock_v2
+from onchain_inspector import build_onchain_payload
+from renderers_mdx import sanitize_market_fields, age_label
 def _ua():
     return _os.getenv("HTTP_UA", "MetridexDiag/1.0")
 def _http_get_json(url, timeout=10, headers=None):
