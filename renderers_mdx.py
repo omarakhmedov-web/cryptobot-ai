@@ -776,6 +776,9 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 if isinstance(_wb2, dict) and _wb2.get('first'):
                     way['first'] = _wb2['first']
 
+    if (not l_site or l_site == '—') and _rd_domain:
+        l_site = _rd_domain
+
     parts.append(
         "*Website intel*"
         + f"\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
