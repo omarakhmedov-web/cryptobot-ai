@@ -1,4 +1,4 @@
-import os, json, typing, requests
+import os, json, typing, requests, re
 
 from typing import Optional, Dict, Any
 
@@ -97,13 +97,35 @@ def _get_storage_at(rpc: str, addr: str, slot_hex: str) -> Optional[str]:
     except Exception:
         return None
 
-def _decode_string(hexdata: Optional[str]) -> Optional[str]:
+def _decode_string(hexdata: typing.Optional[str]) -> typing.Optional[str]:
+    """
+    Robustly decode ERC-20 string/bytes32:
+    - dynamic string: 0x | 32-byte offset | 32-byte length | data
+    - bytes32: first 32 bytes, right-padded with zeros
+    - fallback: raw bytes
+    Returns None on failure.
+    """
     if not (isinstance(hexdata, str) and hexdata.startswith("0x")):
         return None
     try:
-        data = bytes.fromhex(hexdata[2:])
-        # naive selector-aware decode: strip selector if mistakenly passed
-        return data.decode(errors="ignore").strip("\x00").strip() or None
+        raw = bytes.fromhex(hexdata[2:])
+        data = b""
+        if len(raw) >= 64:
+            # Try dynamic string layout
+            off = int.from_bytes(raw[0:32], "big")
+            if off in (32, 0x20) and len(raw) >= 64:
+                ln = int.from_bytes(raw[32:64], "big")
+                if ln >= 0 and (64 + ln) <= len(raw):
+                    data = raw[64:64+ln]
+        if not data:
+            # Fallback to bytes32-like static
+            if len(raw) >= 32:
+                data = raw[:32].split(b"\x00", 1)[0]
+            else:
+                data = raw
+        text = data.replace(b"\x00", b"").decode("utf-8", "ignore")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or None
     except Exception:
         return None
 
@@ -202,7 +224,7 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
     # pretty token label
     nm, sm = res.get("name"), res.get("symbol")
     if nm and sm:
-        res["token"] = f"{nm} ({sm})"
+        res["token"] = f"{nm.strip()} ({sm.strip()})" if isinstance(nm, str) and isinstance(sm, str) else f"{nm} ({sm})"
     elif nm:
         res["token"] = str(nm)
     elif sm:
