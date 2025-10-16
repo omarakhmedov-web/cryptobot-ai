@@ -970,4 +970,8 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         except Exception:
             pair, asof = "—", "n/a"
         print(f"[MDX v2.6] render_details FAILSAFE: {type(_e).__name__}: {_e}", flush=True)
-        return "*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof}"
+        try:
+            print(f"[MDX v2.6] ctx: pair={pair}, asof={asof}", flush=True)
+        except Exception:
+            pass
+        return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof}"
