@@ -122,6 +122,8 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = True) -
         suffix_lvl = f" | level={lvl}" if lvl not in (None, "—") else ""
         suffix_reason = f" ({reason})" if reason and sim == "—" and risk == "—" else ""
         hp_line = f"Honeypot.is: simulation={sim} | risk={risk}{suffix_lvl}{suffix_reason}"
+    if hide_empty_honeypot and ("simulation=—" in hp_line and "risk=—" in hp_line):
+        hp_line = None
     if hide_empty_honeypot and (not hp or ((hp.get("simulation") in (None, '—')) and (hp.get("risk") in (None, '—')) and not hp.get("level"))):
         hp_line = None
 
