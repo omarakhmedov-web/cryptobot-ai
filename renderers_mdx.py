@@ -636,7 +636,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
             if _rd:
                 _rd_lines = ["*WHOIS/RDAP*"]
                 if _rd.get("domain"):    _rd_lines.append(f"• Domain: {_rd['domain']}")
-                if _rd.get("registrar"): _rd_lines.append(f"• Registrar: {_rd['registrar']}")
+                if _rd.get("registrar"): _rd_lines.append(f"• Registrar: {_fmt_registrar(_rd['registrar'])}")
                 if _rd.get("registrar_id"): _rd_lines.append(f"• Registrar IANA ID: {_rd['registrar_id']}")
                 if _rd.get("created"):   _rd_lines.append(f"• Created: {_rd['created']}")
                 if _rd.get("expires"):   _rd_lines.append(f"• Expires: {_rd['expires']}")
