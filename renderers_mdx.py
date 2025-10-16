@@ -27,6 +27,9 @@ from typing import Any, Dict, Optional, List
 
 # === Module-scope helper: pretty registrar name (used in RDAP & Website) ===
 def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
+    # Note: this function existed historically under a different name.
+    # We expose a stable alias `_fmt_registrar` for callers.
+
     s = (val or "").strip()
     if not s or s in ("—","n/a","N/A","NA"):
         return "n/a"
@@ -46,6 +49,9 @@ def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
     base = _re.sub(r"\s+,", ",", base)
     base = _re.sub(r",\s*", ", ", base)
     return base.strip()
+
+# Back-compat alias for registrar formatter
+_fmt_registrar = _fmt_registrar__INNER_SHOULD_NOT_EXIST
 
 # Country inference helper (no new ENV; graceful fallback)
 try:
@@ -237,7 +243,7 @@ def _human_status(s: str) -> str:
 
 # RDAP country placeholder flag (default ON):
 # Set env RDAP_COUNTRY_PLACEHOLDER=0 to disable showing "Country: —" when country is missing.
-_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "0") not in ("0", "false", "False", ""))
+_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "1") not in ("0", "false", "False", ""))
 
 # ---- domain coolness flags ----
 _WAYBACK_SUMMARY = (os.getenv("WAYBACK_SUMMARY", "1") not in ("0","false","False",""))
@@ -268,7 +274,7 @@ HSTS_SHOW_MAXAGE_ONLY = (os.getenv("HSTS_SHOW_MAXAGE_ONLY", "1") not in ("0","fa
 RDAP_DNSSEC_SHOW_UNSIGNED = (os.getenv("RDAP_DNSSEC_SHOW_UNSIGNED", "0") not in ("0","false","False",""))
 BADGE_WAYBACK = (os.getenv("BADGE_WAYBACK", "1") not in ("0","false","False",""))
 DOMAIN_EMOJI_BAR = (os.getenv("DOMAIN_EMOJI_BAR", "1") not in ("0","false","False",""))
-RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG", "v9-stable")
+RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG", "v9-stable+mdx2.6.2-hotfix1")
 
 # Simple in-process TTL caches for network checks
 _CACHE_TTL = int(os.getenv("WEB_CACHE_TTL", "1800"))
