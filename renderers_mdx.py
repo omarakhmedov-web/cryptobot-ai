@@ -24,17 +24,16 @@ import requests as _rq
 import time
 import datetime as _dt
 from typing import Any, Dict, Optional, List
-
 try:
     from lp_lite_v2 import check_lp_lock_v2
 except Exception:
     def check_lp_lock_v2(chain, lp_addr, rpc_urls=None, timeout_s=6.0, retries=2):
-        # Fallback stub: avoids crashing if module is absent; returns 'unknown'.
         return {
             'status': 'unknown', 'burnedPct': None, 'lockedPct': None, 'lpToken': lp_addr,
             'holdersUrl': '', 'uncxUrl': 'https://app.unicrypt.network/',
             'teamfinanceUrl': 'https://app.team.finance/', 'dataSource': '—', 'lockedBy': None,
         }
+
 # === Metridex: Age bucket & Δ24h helpers (SAFE) ===
 def _age_bucket_label(age_days: float) -> str:
     try:
@@ -993,28 +992,28 @@ def render_lp(info: dict, lang: str = "en") -> str:
     chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
     lp_token = (p.get("lpAddress") or p.get("lpToken") or p.get("address") or p.get("token") or "—")
     def _looks_addr(a: str) -> bool:
-        try:
-            return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
-        except Exception:
-            return False
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+
     data = None
     if _looks_addr(lp_token):
         try:
             data = check_lp_lock_v2(chain, lp_token)
         except Exception:
             data = None
+
     lines = []
     def _cap(s: str) -> str:
         s = (s or "").lower()
         return {"eth":"Ethereum","bsc":"BSC","polygon":"Polygon"}.get(s, s.capitalize() if s else "—")
-    lines.append(f"*LP lock (lite) — {_cap(chain)}*")
+    lines.append(f"LP lock (lite) — {_cap(chain)}")
     status_map = {"burned":"burned","locked-partial":"locked-partial","v3-nft":"v3-NFT","unknown":"unknown"}
+
     if data and isinstance(data, dict):
         status = status_map.get(str(data.get("status")),"unknown")
-        lines.append(f"• Status: {status}")
+        lines.append(f"Status: {status}")
         if status == "v3-NFT":
-            lines.append("• Burned: n/a (v3/NFT)")
-            lines.append("• Locked: n/a (v3/NFT)")
+            lines.append("Burned: n/a (v3/NFT)")
+            lines.append("Locked: n/a (v3/NFT)")
         else:
             burned = data.get("burnedPct")
             locked = data.get("lockedPct")
@@ -1023,20 +1022,21 @@ def render_lp(info: dict, lang: str = "en") -> str:
                     return f"{float(x):.2f}%"
                 except Exception:
                     return "—"
-            lines.append(f"• Burned: {_fmt_pct(burned)}  (0xdead + 0x0)")
+            lines.append(f"Burned: {_fmt_pct(burned)}  (0xdead + 0x0)")
             lk_by = data.get("lockedBy") or "—"
-            lines.append(f"• Locked: {_fmt_pct(locked)} via {lk_by}")
+            lines.append(f"Locked: {_fmt_pct(locked)} via {lk_by}")
         lp_disp = data.get("lpToken") or lp_token
-        lines.append(f"• LP token: `{lp_disp}`")
+        lines.append(f"LP token: {lp_disp}")
         links = []
         if data.get("holdersUrl"): links.append("Holders (Etherscan)")
         if data.get("uncxUrl"): links.append("UNCX")
         if data.get("teamfinanceUrl"): links.append("TeamFinance")
         if links:
-            lines.append("• Links: " + " | ".join(links))
+            lines.append("Links: " + " | ".join(links))
         ds = data.get("dataSource") or "—"
-        lines.append(f"• Data source: {ds}")
-        return "\\n".join(lines)
+        lines.append(f"Data source: {ds}")
+        return "\n".join(lines)
+
     # Fallback legacy formatting without compute
     burned_pct = p.get("burnedPct")
     locked_pct = p.get("lockedPct")
@@ -1051,19 +1051,13 @@ def render_lp(info: dict, lang: str = "en") -> str:
             status = "locked-partial"
     except Exception:
         pass
-    lines.append(f"• Status: {status}")
-    if isinstance(burned_pct,(int,float)) or (isinstance(burned_pct,str) and burned_pct.replace('.','',1).isdigit()):
-        lines.append(f"• Burned: {_fmt_pct2(burned_pct)}  (0xdead + 0x0)")
-    else:
-        lines.append("• Burned: —")
-    if isinstance(locked_pct,(int,float)) or (isinstance(locked_pct,str) and locked_pct.replace('.','',1).isdigit()):
-        lines.append(f"• Locked: {_fmt_pct2(locked_pct)} via —")
-    else:
-        lines.append("• Locked: —")
-    lines.append(f"• LP token: `{lp_token}`")
-    lines.append("• Links: UNCX | TeamFinance")
-    lines.append("• Data source: —")
-    return "\\n".join(lines)
+    lines.append(f"Status: {status}")
+    lines.append(f"Burned: {_fmt_pct2(burned_pct) if burned_pct is not None else '—'}")
+    lines.append(f"Locked: {_fmt_pct2(locked_pct) if locked_pct is not None else '—'}")
+    lines.append(f"LP token: {lp_token}")
+    lines.append("Links: UNCX | TeamFinance")
+    lines.append("Data source: —")
+    return "\n".join(lines)
 def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     try:
         print("[MDX v2.6] render_details() called", flush=True)
@@ -1097,17 +1091,3 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         except Exception:
             asof_fmt = str(asof)
         return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
-
-
-def render_lp_lite_v2(chain: str, lp_token: str) -> str:
-    """Direct LPv2 render when you already know chain and LP token."""
-    try:
-        data = check_lp_lock_v2(chain, lp_token)
-    except Exception:
-        data = {"status":"unknown","burnedPct":None,"lockedPct":None,"lpToken":lp_token,
-                "holdersUrl":"","uncxUrl":"https://app.unicrypt.network/","teamfinanceUrl":"https://app.team.finance/",
-                "dataSource":"—"}
-    # Reuse the main formatter via the info→compute path
-    info = {"chain": chain, "lpAddress": lp_token}
-    return render_lp(info)
-
