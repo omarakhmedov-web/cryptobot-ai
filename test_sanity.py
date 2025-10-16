@@ -107,3 +107,24 @@ def test_optional_regression_runner():
     code = os.system(f"{sys.executable} \"{tester}\"")
     assert code in (0, 256), "Regression tests failed (see Regression_Report_*.txt)"
 
+
+
+def test_rdap_country_extraction():
+    import importlib
+    rc = importlib.import_module('rdap_client (3)'.replace(' ', '_'))
+    rdap_json = {
+        "entities": [
+            {"roles":["registrant"], "vcardArray":["vcard", [
+                ["fn", {}, "text", "Example"],
+                ["adr", {}, "text", ["", "", "", "City", "Region", "00000", "US"]]
+            ]]}
+        ],
+        "events":[
+            {"eventAction":"registration", "eventDate":"2022-01-01T00:00:00Z"},
+            {"eventAction":"expiration", "eventDate":"2030-01-01T00:00:00Z"}
+        ],
+        "status":["clientTransferProhibited"]
+    }
+    res = rc._normalize_rdap("example.com", rdap_json)
+    assert res.get("country") in ("United States", "US")
+    assert "has_expiry" in res.get("flags", [])
