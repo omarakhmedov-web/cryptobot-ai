@@ -66,15 +66,54 @@ _EXPLORERS = {
 LOCKER_ADDRESSES: Dict[str, Dict[str, List[str]]] = {
     "eth": {
         "UNCX": [
-            "0x663A5C229c09b049E36dCc11a9B0d4a8Eb9db214",  # UNCX V2 (ETH, Uniswap v2)
-            "0xFD235968e65B0990584585763f837A5b5330e6DE",  # UNCX V3 (ETH)
+            "0x663A5C229c09b049E36dCc11a9B0d4a8Eb9db214",
+            "0xFD235968e65B0990584585763f837A5b5330e6DE",
         ],
         "TeamFinance": [
-            "0xe2fe530c047f2d85298b07d9333c05737f1435fb",  # TeamFinance Lock (ETH)
+            "0xe2fe530c047f2d85298b07d9333c05737f1435fb",
         ],
     },
-    "bsc": {"UNCX": [], "TeamFinance": []},
-    "polygon": {"UNCX": [], "TeamFinance": []},
+    "bsc": {
+        "UNCX": [
+            "0xC765bddB93b0D1c1A88282BA0fa6B2d00E3e0c83",
+        ],
+        "TeamFinance": [
+            "0x0c89c0407775dd89b12918b9c0aa42bf96518820",
+        ],
+    },
+    "polygon": {
+        "UNCX": [
+            "0xaDB2437e6F65682B85F814fBc12FeC0508A7B1D0",
+        ],
+        "TeamFinance": [
+            "0x3eF7442dF454bA6b7C1deEc8DdF29Cfb2d6e56c7",
+        ],
+    },
+    "arb": {"UNCX": [], "TeamFinance": []},
+    "arbitrum": {"UNCX": [], "TeamFinance": []},
+    "nova": {"UNCX": [], "TeamFinance": []},
+    "arbitrum-nova": {"UNCX": [], "TeamFinance": []},
+    "op": {"UNCX": [], "TeamFinance": []},
+    "optimism": {"UNCX": [], "TeamFinance": []},
+    "base": {"UNCX": [], "TeamFinance": []},
+    "avax": {"UNCX": [], "TeamFinance": []},
+    "avalanche": {"UNCX": [], "TeamFinance": []},
+    "ftm": {"UNCX": [], "TeamFinance": []},
+    "fantom": {"UNCX": [], "TeamFinance": []},
+    "zksync": {"UNCX": [], "TeamFinance": []},
+    "linea": {"UNCX": [], "TeamFinance": []},
+    "mantle": {"UNCX": [], "TeamFinance": []},
+    "scroll": {"UNCX": [], "TeamFinance": []},
+    "blast": {"UNCX": [], "TeamFinance": []},
+    "kava": {"UNCX": [], "TeamFinance": []},
+    "sei": {"UNCX": [], "TeamFinance": []},
+    "sei-evm": {"UNCX": [], "TeamFinance": []},
+    "bera": {"UNCX": [], "TeamFinance": []},
+    "berachain": {"UNCX": [], "TeamFinance": []},
+    "gnosis": {"UNCX": [], "TeamFinance": []},
+    "xdai": {"UNCX": [], "TeamFinance": []},
+    "cronos": {"UNCX": [], "TeamFinance": []},
+    "cro": {"UNCX": [], "TeamFinance": []},
 }
 
 # ERC-20 selectors
