@@ -18,8 +18,65 @@ CHAIN_RPC_ENV = {
 ZERO = "0x0000000000000000000000000000000000000000"
 
 def _rpc_for_chain(short: str) -> Optional[str]:
-    env = CHAIN_RPC_ENV.get((short or "").lower().strip())
-    return (os.getenv(env, "") or "").strip() or None
+    """Resolve RPC for a chain with multiple fallbacks:
+    1) *_RPC_URL_PRIMARY env (current behavior)
+    2) Alternate envs (e.g., ETH_RPC_URL, POLYGON_RPC_URL, etc.)
+    3) RPC_URLS JSON env: {"eth": "...", "bsc": "...", ...}
+    4) Known public endpoints (last resort)
+    """
+    short = (short or "").strip().lower()
+    env_key = CHAIN_RPC_ENV.get(short)
+    # 1) Primary per-chain env
+    cand = []
+    if env_key:
+        v = (os.getenv(env_key, "") or "").strip()
+        if v:
+            cand.append(v)
+
+    # 2) Alternate env names (common conventions)
+    ALT_ENV = {
+        "eth": ["ETH_RPC_URL", "ETHEREUM_RPC_URL"],
+        "bsc": ["BSC_RPC_URL", "BNB_RPC_URL", "BSC_RPC"],
+        "polygon": ["POLYGON_RPC_URL", "MATIC_RPC_URL"],
+        "base": ["BASE_RPC_URL"],
+        "arb": ["ARB_RPC_URL", "ARBITRUM_RPC_URL"],
+        "op": ["OP_RPC_URL", "OPTIMISM_RPC_URL"],
+        "avax": ["AVAX_RPC_URL", "AVALANCHE_RPC_URL"],
+        "ftm": ["FTM_RPC_URL", "FANTOM_RPC_URL"],
+    }
+    for name in ALT_ENV.get(short, []):
+        vv = (os.getenv(name, "") or "").strip()
+        if vv:
+            cand.append(vv)
+
+    # 3) RPC_URLS (JSON map in env)
+    try:
+        import json as _json
+        raw = (os.getenv("RPC_URLS", "") or "").strip()
+        if raw:
+            j = _json.loads(raw)
+            if isinstance(j, dict):
+                vv = (j.get(short) or j.get({"eth":"ethereum","arb":"arbitrum","op":"optimism"}.get(short, short)))
+                if isinstance(vv, str) and vv.strip():
+                    cand.append(vv.strip())
+    except Exception:
+        pass
+
+    # 4) Known public endpoints (last resort; rate-limited, but enough for lightweight reads)
+    PUBLIC = {
+        "eth": ["https://ethereum.publicnode.com", "https://rpc.ankr.com/eth"],
+        "bsc": ["https://bsc-dataseed.binance.org", "https://rpc.ankr.com/bsc"],
+        "polygon": ["https://polygon-rpc.com", "https://rpc.ankr.com/polygon"],
+        "arb": ["https://arb1.arbitrum.io/rpc", "https://rpc.ankr.com/arbitrum"],
+        "op": ["https://mainnet.optimism.io", "https://rpc.ankr.com/optimism"],
+        "base": ["https://mainnet.base.org"],
+        "avax": ["https://api.avax.network/ext/bc/C/rpc", "https://rpc.ankr.com/avalanche"],
+        "ftm": ["https://rpc.ftm.tools", "https://rpc.ankr.com/fantom"],
+    }
+    for url in cand + PUBLIC.get(short, []):
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+    return None
 
 def _post_json(rpc: str, payload: dict, timeout: int = 8) -> dict:
     r = requests.post(rpc, json=payload, timeout=timeout)
@@ -48,6 +105,15 @@ def _get_storage_at(rpc: str, addr: str, slot_hex: str) -> str:
         return res if isinstance(res, str) else "0x"
     except Exception:
         return "0x"
+
+
+def _has_code(rpc: str, addr: str) -> bool:
+    try:
+        out = _post_json(rpc, {"jsonrpc":"2.0","id":1,"method":"eth_getCode","params":[addr,"latest"]})
+        code = out.get("result") or "0x"
+        return isinstance(code, str) and code not in ("0x", "0x0")
+    except Exception:
+        return False
 
 def _as_addr(hexword: str) -> Optional[str]:
     if not hexword or not hexword.startswith("0x"):
