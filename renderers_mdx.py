@@ -214,7 +214,7 @@ def _human_status(s: str) -> str:
 
 # RDAP country placeholder flag (default ON):
 # Set env RDAP_COUNTRY_PLACEHOLDER=0 to disable showing "Country: —" when country is missing.
-_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "1") not in ("0", "false", "False", ""))
+_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "0") not in ("0", "false", "False", ""))
 
 # ---- domain coolness flags ----
 _WAYBACK_SUMMARY = (os.getenv("WAYBACK_SUMMARY", "1") not in ("0","false","False",""))
@@ -665,6 +665,28 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         if l_site and l_site != "—": ll.append(f"• Site: {l_site}")
         parts.append("\n".join(ll))
 
+
+    # Helper: pretty registrar name (Website block only)
+    def _fmt_registrar(val):
+        s = (val or "").strip()
+        if not s or s in ("—","n/a","N/A","NA"):
+            return "n/a"
+        import re as _re
+        s = _re.sub(r"\s+", " ", s.replace(",", ", "))
+        base = s.title()
+        base = _re.sub(r"\bInc\b\.?", "Inc.", base)
+        base = _re.sub(r"\bLlc\b\.?", "LLC", base)
+        base = _re.sub(r"\bLtd\b\.?", "Ltd.", base)
+        base = _re.sub(r"\bGmbh\b", "GmbH", base)
+        base = _re.sub(r"\bAg\b", "AG", base)
+        base = _re.sub(r"\bNv\b", "NV", base)
+        base = _re.sub(r"\bBv\b", "BV", base)
+        base = _re.sub(r"\bSa\b", "S.A.", base)
+        base = _re.sub(r"\bSpa\b", "S.p.A.", base)
+        base = _re.sub(r"(?i)Namecheap", "Namecheap", base)
+        base = _re.sub(r"\s+,", ",", base)
+        base = _re.sub(r",\s*", ", ", base)
+        return base.strip()
     # Website intel (robust; tolerate empty/missing ctx keys) — FIXED INDENT
     web = (ctx or {}).get("webintel") or {"whois": {}, "ssl": {}, "wayback": {}}
     who = (web.get("whois") or {}) if isinstance(web, dict) else {}
