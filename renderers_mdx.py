@@ -24,6 +24,15 @@ import requests as _rq
 import time
 import datetime as _dt
 from typing import Any, Dict, Optional, List
+# Country inference helper (no new ENV; graceful fallback)
+try:
+    from webintel_country_fix_v1 import infer_country, country_label
+except Exception:
+    def infer_country(meta): 
+        return None
+    def country_label(country):
+        return f"Country: {country}" if country else "Country: n/a"
+
 import re as _re
 import socket as _socket, ssl as _ssl
 
@@ -754,12 +763,25 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 if isinstance(_wb2, dict) and _wb2.get('first'):
                     way['first'] = _wb2['first']
 
-    parts.append(
-        "*Website intel*"
-        + f"\n• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}"
-        + f"\n• SSL: ok={(ssl.get('ok') if ssl.get('ok') is not None else 'n/a')}, expires {ssl.get('expires') or 'n/a'}"
-        + f"\n• Wayback first: {way.get('first') or 'n/a'}"
-    )
+        _rd_country = None
+        try:
+            _rd_local = locals().get("_rd")
+            if isinstance(_rd_local, dict):
+                _rd_country = _rd_local.get("country") or None
+        except Exception:
+            _rd_country = None
+        country_line = None if _rd_country else country_label(infer_country(web))
+    w_lines = ["*Website intel*"]
+    if country_line:
+        w_lines.append(f"• {country_line}")
+    w_lines.append(f"• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}")
+    w_lines.append(f"• SSL: ok={(ssl.get('ok') if ssl.get('ok') is not None else 'n/a')}, expires {ssl.get('expires') or 'n/a'}")
+    w_lines.append(f"• Wayback first: {way.get('first') or 'n/a'}")
+    parts.append("\n".join(w_lines))
+
+
+
+
 
     return "\n".join(parts)
 
