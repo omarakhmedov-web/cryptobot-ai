@@ -33,9 +33,9 @@ ZERO = "0x0000000000000000000000000000000000000000"
 
 # Minimal public RPC fallbacks (rate-limited; OK for lite checks)
 _PUBLIC_RPC = {
-    "eth": ["https://cloudflare-eth.com", "https://rpc.ankr.com/eth"],
-    "bsc": ["https://bsc-dataseed.binance.org", "https://rpc.ankr.com/bsc"],
-    "polygon": ["https://polygon-rpc.com", "https://rpc.ankr.com/polygon"],
+    "eth": ["https://cloudflare-eth.com", "https://rpc.ankr.com/eth", "https://rpc.flashbots.net", "https://eth.llamarpc.com", "https://ethereum.publicnode.com"],
+    "bsc": ["https://bsc-dataseed.binance.org", "https://rpc.ankr.com/bsc", "https://binance.llamarpc.com", "https://bsc.publicnode.com"],
+    "polygon": ["https://polygon-rpc.com", "https://rpc.ankr.com/polygon", "https://polygon.llamarpc.com", "https://polygon-rpc.publicnode.com"],
 }
 
 # Explorers (holders pages)
@@ -79,7 +79,7 @@ def _holders_url(explorer_base: str, token: str) -> str:
 def _jsonrpc_call(rpc: str, to_addr: str, data: str, timeout: float) -> Optional[str]:
     payload = {"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to_addr,"data":data},"latest"]}
     req = Request(rpc, data=json.dumps(payload).encode("utf-8"),
-                  headers={"Content-Type":"application/json"})
+                  headers={"Content-Type":"application/json","User-Agent":"Metridex/LPv2 (+https://metridex.com)","Accept":"application/json"})
     try:
         with urlopen(req, timeout=timeout) as resp:
             obj = json.loads(resp.read().decode("utf-8"))
@@ -95,6 +95,21 @@ def _hex_to_int(x: Optional[str]) -> Optional[int]:
         return int(x, 16)
     except Exception:
         return None
+
+
+def _eth_get_code(rpc: str, addr: str, timeout: float) -> Optional[str]:
+    payload = {"jsonrpc":"2.0","id":1,"method":"eth_getCode","params":[addr,"latest"]}
+    req = Request(rpc, data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type":"application/json","User-Agent":"Metridex/LPv2 (+https://metridex.com)","Accept":"application/json"})
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            obj = json.loads(resp.read().decode("utf-8"))
+            if "result" in obj and isinstance(obj["result"], str):
+                return obj["result"]
+    except (URLError, HTTPError, TimeoutError, ValueError):
+        return None
+    return None
+
 
 def _encode_balance_of(addr: str) -> str:
     a = (addr or "").lower().replace("0x","").rjust(64,"0")
@@ -180,9 +195,14 @@ def check_lp_lock_v2(chain: str, lp_addr: str, rpc_urls: Optional[List[str]] = N
     burned_pct, burned_amt, total_supply = _calc_burned_pct(chain_n, lp_addr, rpcs, timeout_s, retries)
 
     if burned_pct is None:
-        # Either v3/NFT or RPC unavailable
+        # Try to distinguish RPC/ABI issues from true v3/NFT by checking contract code
+        code_hex = _try_each_rpc(lambda rpc: _eth_get_code(rpc, lp_addr, timeout_s), rpcs, retries)
+        has_code = isinstance(code_hex, str) and code_hex.startswith("0x") and len(code_hex) > 2 and code_hex != "0x"
+        status = "unknown" if has_code else ("v3-nft" if rpcs else "unknown")
+        ds = "on-chain (contract present)" if has_code else "—"
+        note = "Total supply not readable (RPC limit or non-ERC20 LP)"
         return {
-            "status": "v3-nft" if rpcs else "unknown",
+            "status": status,
             "burnedPct": None,
             "lockedPct": None,
             "lpToken": lp_addr,
@@ -190,8 +210,8 @@ def check_lp_lock_v2(chain: str, lp_addr: str, rpc_urls: Optional[List[str]] = N
             "holdersUrl": _holders_url(explorer_base, lp_addr) if explorer_base else "",
             "uncxUrl": "https://app.unicrypt.network/",
             "teamfinanceUrl": "https://app.team.finance/",
-            "dataSource": "—",
-            "notes": ["ERC‑20 methods unavailable (v3/NFT LP or RPC blocked)"],
+            "dataSource": ds,
+            "notes": [note],
         }
 
     locked_pct, provider = _calc_locked_pct(chain_n, lp_addr, rpcs, timeout_s, retries)
