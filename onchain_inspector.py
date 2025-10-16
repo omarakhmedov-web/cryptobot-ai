@@ -8,6 +8,8 @@ ZERO = "0x0000000000000000000000000000000000000000"
 SIG_NAME      = "0x06fdde03"
 SIG_SYMBOL    = "0x95d89b41"
 SIG_DECIMALS  = "0x313ce567"
+SIG_TOTAL_SUPPLY = "0x18160ddd"
+SIG_BALANCE_OF = "0x70a08231"
 SIG_OWNER     = "0x8da5cb5b"
 SIG_PAUSED_1  = "0x5c975abb"  # paused()
 SIG_IMPL_FN   = "0x5c60da1b"  # implementation()
@@ -211,12 +213,37 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
     # upgradeable
     res["upgradeable"] = _is_upgradeable_proxy(rpc, token_address)
 
+    # totalSupply (best-effort)
+    try:
+        ts_hex = _eth_call(rpc, token_address, SIG_TOTAL_SUPPLY)
+        ts = _decode_u256(ts_hex)
+    except Exception:
+        ts = None
+    res["totalSupply"] = ts
+
     # soft limits (best-effort; many tokens don't expose these)
     res["maxTx"] = None
     res["maxWallet"] = None
 
     # taxes (best-effort; leave None)
     res["taxes"] = {}
+    # Honeypot.is (best-effort)
+    hp = _honeypot_check(short, token_address)
+    if hp:
+        res["honeypot"] = {"simulation": hp.get("simulation"), "risk": hp.get("risk"), "level": hp.get("level")}
+        # Merge taxes
+        t = res.get("taxes") or {}
+        for k in ("buy","sell","transfer"):
+            if hp.get(k) is not None:
+                try:
+                    t[k] = round(float(hp.get(k)), 2)
+                except Exception:
+                    pass
+        res["taxes"] = t
+    # LP lock (lite) if pair provided
+    if pair_address:
+        res["lp_lock_lite"] = _lp_lock_lite(rpc, pair_address, short)
+
 
     # additional helpful flags
     res["contractCodePresent"] = _has_code(rpc, token_address)
@@ -234,3 +261,113 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
         res["token"] = (str(res.get("token")) if res.get("token") is not None else "") + " · Decimals: " + str(res.get("decimals"))
 
     return res
+
+
+
+def _honeypot_check(chain: str, token: str, timeout: int = 6):
+    """
+    Best-effort call to Honeypot.is public API. Graceful fallback on errors.
+    Returns dict with keys: simulation, risk, level, buy, sell, transfer
+    """
+    try:
+        import requests
+        ch = {
+            "eth": "ethereum", "bsc": "bsc", "polygon": "polygon",
+            "arb": "arbitrum", "op": "optimism", "base": "base",
+            "avax": "avalanche", "ftm": "fantom",
+        }.get((chain or "").lower(), "ethereum")
+        url = f"https://api.honeypot.is/v2/IsHoneypot?address={token}&chain={ch}"
+        r = requests.get(url, timeout=timeout, headers={"User-Agent":"Metridex/1.0"})
+        if r.status_code != 200:
+            return {}
+        j = r.json()
+        out = {}
+        sim = ((j.get("simulation") or {}).get("success"))
+        out["simulation"] = "OK" if sim is True else ("FAIL" if sim is False else "—")
+        # taxes
+        taxes = (j.get("taxes") or {})
+        out["buy"] = taxes.get("buy") if isinstance(taxes.get("buy"), (int,float)) else None
+        out["sell"] = taxes.get("sell") if isinstance(taxes.get("sell"), (int,float)) else None
+        out["transfer"] = taxes.get("transfer") if isinstance(taxes.get("transfer"), (int,float)) else None
+        # risk level (rough)
+        out["risk"] = (j.get("honeypotResult") or {}).get("isHoneypot")
+        out["level"] = (j.get("honeypotResult") or {}).get("riskLevel")
+        return out
+    except Exception:
+        return {}
+
+
+
+def _erc20_balance_of(rpc: str, token_addr: str, holder: str):
+    try:
+        data = SIG_BALANCE_OF + "0"*24 + holder.lower().replace("0x","")
+        res = _eth_call(rpc, token_addr, data)
+        return _decode_u256(res)
+    except Exception:
+        return None
+
+def _lp_lock_lite(rpc: str, pair_addr: str, chain: str):
+    """
+    Returns dict:
+      burned_pct, lockers: {"UNCX": pct, "TeamFinance": pct}, top_holder_label, top_holder_pct
+    Uses only balances of known addresses: dead/zero + known lockers per chain.
+    """
+    out = {"burned_pct": None, "lockers": {}, "top_holder_label": None, "top_holder_pct": None}
+    if not (rpc and pair_addr and pair_addr.startswith("0x")):
+        return out
+    ts_hex = _eth_call(rpc, pair_addr, SIG_TOTAL_SUPPLY)
+    ts = _decode_u256(ts_hex)
+    if not ts or ts <= 0:
+        return out
+    DEAD = "0x000000000000000000000000000000000000dead"
+    ZERO = "0x0000000000000000000000000000000000000000"
+    burned = 0
+    for addr in (DEAD, ZERO):
+        bal = _erc20_balance_of(rpc, pair_addr, addr)
+        if isinstance(bal, int):
+            burned += bal
+    out["burned_pct"] = round((burned / ts) * 100, 2) if burned else 0.0
+
+    # Lockers list: ENV override, else defaults
+    defaults = {
+        "eth": {
+            "UNCX": ["0x0fF9d5D7C7f3f271547dF6fC9E1Ff7A3aC3f7b6a"],
+            "TeamFinance": ["0x3b77f1b32b66f3ee0D47b7d4dF47E7B06C5744F3"],
+        },
+        "bsc": {
+            "UNCX": ["0x3a4f06431457de873b588846c64041b95df72ea5"],
+            "TeamFinance": ["0x0c1cf4f1f1458e8f26b55685b9a78e78d7e4c37c"],
+        },
+        "polygon": {
+            "UNCX": ["0x9ad32b9004c2d5c5bf31eceb0165aaf1cdbf62d0"],
+            "TeamFinance": ["0x8c87b7517a4e2b45286da5dadda8e90d518d042d"],
+        }
+    }
+    try:
+        cfg = os.getenv("LP_LOCKER_ADDRESSES") or ""
+        if cfg.strip():
+            j = json.loads(cfg)
+            defaults = j if isinstance(j, dict) else defaults
+    except Exception:
+        pass
+
+    lockers = defaults.get(chain, {})
+    top_label, top_val = None, 0
+    for name, addrs in lockers.items():
+        total = 0
+        for a in (addrs or []):
+            bal = _erc20_balance_of(rpc, pair_addr, a)
+            if isinstance(bal, int):
+                total += bal
+        pct = round((total / ts) * 100, 2) if total else 0.0
+        out["lockers"][name] = pct
+        if pct > top_val:
+            top_val, top_label = pct, name
+
+    # Consider burned as candidate top holder too
+    if out["burned_pct"] is not None and out["burned_pct"] > top_val:
+        top_val, top_label = out["burned_pct"], "burned"
+
+    out["top_holder_label"] = top_label
+    out["top_holder_pct"] = top_val if top_val > 0 else None
+    return out
