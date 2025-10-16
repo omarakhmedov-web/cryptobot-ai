@@ -102,8 +102,8 @@ def _encode_balance_of(addr: str) -> str:
 
 def _is_erc20_like(rpc: str, token: str, timeout: float) -> bool:
     ts = _jsonrpc_call(rpc, token, SIG_TOTAL_SUPPLY, timeout)
-    bo = _jsonrpc_call(rpc, token, _encode_balance_of(DEAD), timeout)
-    return ts is not None and bo is not None
+    # Some tokens may revert on balanceOf(dead); totalSupply() is sufficient heuristic.
+    return ts is not None
 
 def _erc20_total_supply(rpc: str, token: str, timeout: float) -> Optional[int]:
     return _hex_to_int(_jsonrpc_call(rpc, token, SIG_TOTAL_SUPPLY, timeout))
