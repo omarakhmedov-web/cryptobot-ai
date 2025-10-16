@@ -24,6 +24,29 @@ import requests as _rq
 import time
 import datetime as _dt
 from typing import Any, Dict, Optional, List
+
+# === Module-scope helper: pretty registrar name (used in RDAP & Website) ===
+def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
+    s = (val or "").strip()
+    if not s or s in ("—","n/a","N/A","NA"):
+        return "n/a"
+    import re as _re
+    s = _re.sub(r"\s+", " ", s.replace(",", ", "))
+    base = s.title()
+    base = _re.sub(r"\bInc\b\.?", "Inc.", base)
+    base = _re.sub(r"\bLlc\b\.?", "LLC", base)
+    base = _re.sub(r"\bLtd\b\.?", "Ltd.", base)
+    base = _re.sub(r"\bGmbh\b", "GmbH", base)
+    base = _re.sub(r"\bAg\b", "AG", base)
+    base = _re.sub(r"\bNv\b", "NV", base)
+    base = _re.sub(r"\bBv\b", "BV", base)
+    base = _re.sub(r"\bSa\b", "S.A.", base)
+    base = _re.sub(r"\bSpa\b", "S.p.A.", base)
+    base = _re.sub(r"(?i)Namecheap", "Namecheap", base)
+    base = _re.sub(r"\s+,", ",", base)
+    base = _re.sub(r",\s*", ", ", base)
+    return base.strip()
+
 # Country inference helper (no new ENV; graceful fallback)
 try:
     from webintel_country_fix_v1 import infer_country, country_label
@@ -667,7 +690,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
 
 
     # Helper: pretty registrar name (Website block only)
-    def _fmt_registrar(val):
+    def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
         s = (val or "").strip()
         if not s or s in ("—","n/a","N/A","NA"):
             return "n/a"
