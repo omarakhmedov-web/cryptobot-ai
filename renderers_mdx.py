@@ -24,8 +24,17 @@ import requests as _rq
 import time
 import datetime as _dt
 from typing import Any, Dict, Optional, List
-from lp_lite_v2 import check_lp_lock_v2
 
+try:
+    from lp_lite_v2 import check_lp_lock_v2
+except Exception:
+    def check_lp_lock_v2(chain, lp_addr, rpc_urls=None, timeout_s=6.0, retries=2):
+        # Fallback stub: avoids crashing if module is absent; returns 'unknown'.
+        return {
+            'status': 'unknown', 'burnedPct': None, 'lockedPct': None, 'lpToken': lp_addr,
+            'holdersUrl': '', 'uncxUrl': 'https://app.unicrypt.network/',
+            'teamfinanceUrl': 'https://app.team.finance/', 'dataSource': '—', 'lockedBy': None,
+        }
 # === Metridex: Age bucket & Δ24h helpers (SAFE) ===
 def _age_bucket_label(age_days: float) -> str:
     try:
