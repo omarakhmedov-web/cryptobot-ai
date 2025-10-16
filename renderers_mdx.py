@@ -118,6 +118,10 @@ except Exception:
         return f"Country: {country}" if country else "Country: n/a"
 
 import re as _re
+try:
+    from renderers_onchain_v2 import render_onchain_v2 as _render_onchain_v2
+except Exception:
+    _render_onchain_v2 = None
 import socket as _socket, ssl as _ssl
 
 # ---- helpers ----
@@ -1091,3 +1095,34 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         except Exception:
             asof_fmt = str(asof)
         return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
+
+
+def render_contract(info: dict, lang: str = "en") -> str:
+    """
+    CONTRACT block (On-chain) — compact, production-ready.
+    Uses renderers_onchain_v2 if available; otherwise graceful fallback.
+    Expected keys in `info`: chain/network/chainId, token/tokenAddress/address.
+    """
+    p = info or {}
+    chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
+    token = (p.get("token") or p.get("tokenAddress") or p.get("address") or "—")
+    def _looks_addr(a: str) -> bool:
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+    if _render_onchain_v2 and _looks_addr(token):
+        try:
+            return _render_onchain_v2(chain, token)
+        except Exception:
+            pass
+    # Fallback minimal block (no on-chain calls)
+    lines = []
+    lines.append("On-chain")
+    lines.append("Contract code: —")
+    lines.append("Token: — (—)")
+    lines.append("Decimals: —")
+    lines.append("Total supply: —")
+    lines.append("Owner: —")
+    lines.append("Renounced: —")
+    lines.append("Paused: —  Upgradeable: —")
+    lines.append("MaxTx: —  MaxWallet: —")
+    return "\n".join(lines)
+
