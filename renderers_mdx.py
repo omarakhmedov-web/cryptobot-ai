@@ -76,6 +76,8 @@ def _normalize_reason_text(line: str) -> str:
 
 # === Module-scope helper: pretty registrar name (used in RDAP & Website) ===
 def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
+
+# Back-compat alias for registrar formatter
     s = (val or "").strip()
     if not s or s in ("—","n/a","N/A","NA"):
         return "n/a"
@@ -95,6 +97,7 @@ def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
     base = _re.sub(r"\s+,", ",", base)
     base = _re.sub(r",\s*", ", ", base)
     return base.strip()
+_fmt_registrar = _fmt_registrar__INNER_SHOULD_NOT_EXIST  # back-compat alias
 
 # Country inference helper (no new ENV; graceful fallback)
 try:
@@ -286,7 +289,7 @@ def _human_status(s: str) -> str:
 
 # RDAP country placeholder flag (default ON):
 # Set env RDAP_COUNTRY_PLACEHOLDER=0 to disable showing "Country: —" when country is missing.
-_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "0") not in ("0", "false", "False", ""))
+_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "1") not in ("0", "false", "False", ""))
 
 # ---- domain coolness flags ----
 _WAYBACK_SUMMARY = (os.getenv("WAYBACK_SUMMARY", "1") not in ("0","false","False",""))
