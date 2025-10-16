@@ -25,6 +25,7 @@ def _strip_invisibles(s: str) -> str:
     return out
 
 def _smart_title(name: str) -> str:
+
     if not isinstance(name, str):
         return name
     name = _strip_invisibles(name)
@@ -112,7 +113,7 @@ def format_onchain_text(oc: dict, mkt: dict) -> str:
 
     # Owner / renounced
     owner_raw = _strip_invisibles(str(oc.get("owner") or "")) if oc.get("owner") else oc.get("owner")
-    owner_line = "owner: " + _s(owner_raw)
+    owner_line = "owner: " + _s(_short_addr(owner_raw) if isinstance(owner_raw, str) else owner_raw)
     renounced = oc.get("renounced")
     if renounced not in (None, "—"):
         owner_line += "  renounced: " + _s(renounced)
@@ -136,8 +137,54 @@ def format_onchain_text(oc: dict, mkt: dict) -> str:
         tsx = "—" if ts is None else f"{ts}%"
         tax_line = f"Taxes: buy={tbx} | sell={tsx}"
 
-    parts = ["On-chain", cc_line, token_line, owner_line, state_line, limits_line]
+    # Total supply
+    supply_line = None
+    ts = oc.get("totalSupply")
+    dec = oc.get("decimals")
+    if isinstance(ts, int) and isinstance(dec, int) and dec >= 0:
+        try:
+            from decimal import Decimal, getcontext
+            getcontext().prec = 40
+            human = (Decimal(ts) / (Decimal(10) ** dec)).quantize(Decimal("0.001"))
+            supply_line = f"Total supply: ~{human:,}"
+        except Exception:
+            pass
+    # Honeypot (best-effort)
+    hp = oc.get("honeypot") or {}
+    hp_line = None
+    if hp:
+        sim = hp.get("simulation") or "—"
+        risk = hp.get("risk") or "—"
+        lvl = hp.get("level")
+        suffix = f" | level={lvl}" if lvl not in (None, "—") else ""
+        hp_line = f"Honeypot.is: simulation={sim} | risk={risk}{suffix}"
+    parts = ["On-chain", cc_line, token_line]
+    if hp_line:
+        parts.append(hp_line)
+    if supply_line:
+        parts.append(supply_line)
+    # LP lock (lite)
+    lp = oc.get("lp_lock_lite") or {}
+    lp_line = None
+    if lp:
+        burned = lp.get("burned_pct"); u = (lp.get("lockers") or {}).get("UNCX"); tf = (lp.get("lockers") or {}).get("TeamFinance")
+        top_lab = lp.get("top_holder_label"); top_pct = lp.get("top_holder_pct")
+        def _fmt(v):
+            return "—" if v in (None, "") else (f"{v:.2f}%" if isinstance(v, (int,float)) else str(v))
+        core = f"burned={_fmt(burned)} | UNCX={_fmt(u)} | TeamFinance={_fmt(tf)}"
+        if top_lab and top_pct:
+            core += f" | topHolder={top_lab}:{_fmt(top_pct)}"
+        lp_line = "LP: " + core
+    if lp_line:
+        parts.append(lp_line)
+    parts += [owner_line, state_line, limits_line]
     if tax_line:
         parts.append(tax_line)
 
     return "\n".join(parts)
+
+
+def _short_addr(addr: str, head: int = 6, tail: int = 6) -> str:
+    if not isinstance(addr, str) or not addr.startswith("0x") or len(addr) != 42:
+        return str(addr)
+    return addr[:2+head] + "…" + addr[-tail:]
