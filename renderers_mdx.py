@@ -815,12 +815,18 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
                 _rd_country = _rd_local.get("country") or None
         except Exception:
             _rd_country = None
-        country_line = None if _rd_country else country_label(infer_country(web))
+        try:
+            _ci = infer_country(web)
+        except Exception:
+            _ci = None
+        country_line = (None if _rd_country else (country_label(_ci) if _ci else None))
     w_lines = ["*Website intel*"]
     if country_line:
         w_lines.append(f"• {country_line}")
     w_lines.append(f"• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}")
-    w_lines.append(f"• SSL: ok={(ssl.get('ok') if ssl.get('ok') is not None else 'n/a')}, expires {ssl.get('expires') or 'n/a'}")
+    ok_val = ssl.get('ok')
+    ok_disp = (ok_val if ok_val is not None else 'n/a')
+    w_lines.append(f"• SSL: ok={ok_disp}, expires {ssl.get('expires') or 'n/a'}")
     w_lines.append(f"• Wayback first: {way.get('first') or 'n/a'}")
     parts.append("\n".join(w_lines))
 
@@ -974,4 +980,16 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
             print(f"[MDX v2.6] ctx: pair={pair}, asof={asof}", flush=True)
         except Exception:
             pass
-        return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof}"
+        try:
+            _as = asof
+            if isinstance(_as, (int,float)):
+                ts = int(_as)
+                # detect ms
+                if ts > 10**12:
+                    ts = ts // 1000
+                asof_fmt = __import__("datetime").datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC")
+            else:
+                asof_fmt = str(_as)
+        except Exception:
+            asof_fmt = str(asof)
+        return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
