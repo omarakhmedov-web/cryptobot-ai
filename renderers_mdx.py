@@ -598,7 +598,7 @@ def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str
     ]
     return "\n".join(lines)
 
-def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
+def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
     chain = _fmt_chain(_get(market, "chain"))
     token = _get(market, "tokenAddress", default="—")
@@ -952,3 +952,22 @@ def render_lp(info: Dict[str, Any], lang: str = "en") -> str:
         lines.append(f"• Unlocks: {until}")
     lines.append(f"• LP token: `{addr}`")
     return "\n".join(lines)
+
+# === Failsafe wrapper to avoid silent failures ===
+def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
+    try:
+        print("[MDX v2.6] render_details() called", flush=True)
+        return _render_details_impl(verdict, market, ctx, lang)
+    except Exception as _e:
+        import traceback as _tb
+        try:
+            _tb.print_exc()
+        except Exception:
+            pass
+        try:
+            pair = (market or {}).get("pair") or "—"
+            asof = (market or {}).get("asof") or "n/a"
+        except Exception:
+            pair, asof = "—", "n/a"
+        print(f"[MDX v2.6] render_details FAILSAFE: {type(_e).__name__}: {_e}", flush=True)
+        return "*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof}"
