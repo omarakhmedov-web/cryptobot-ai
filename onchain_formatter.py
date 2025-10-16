@@ -64,6 +64,7 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = False) 
     oc = oc or {}
     mkt = mkt or {}
 
+    # Contract code
     cc = oc.get("contractCodePresent")
     if cc is True:
         cc_line = "Contract code: present"
@@ -72,6 +73,7 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = False) 
     else:
         cc_line = "Contract code: —"
 
+    # Token line normalization
     name = oc.get("name"); symbol = oc.get("symbol")
     if not (name and symbol):
         n2, s2, _ = _parse_token_label(oc.get("token") or "")
@@ -97,6 +99,7 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = False) 
     if isinstance(dec, int):
         token_line += f" · Decimals: {dec}"
 
+    # Total supply
     supply_line = None
     ts = oc.get("totalSupply")
     if isinstance(ts, int) and isinstance(dec, int) and dec >= 0:
@@ -107,6 +110,7 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = False) 
         except Exception:
             pass
 
+    # Honeypot line (with reason/meta)
     hp = oc.get("honeypot") or {}
     hp_meta = oc.get("honeypot_meta") or {}
     hp_line = None
@@ -121,6 +125,7 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = False) 
     if hide_empty_honeypot and (not hp or ((hp.get("simulation") in (None, '—')) and (hp.get("risk") in (None, '—')) and not hp.get("level"))):
         hp_line = None
 
+    # LP lite
     lp = oc.get("lp_lock_lite") or {}
     lp_line = None
     if lp:
@@ -133,6 +138,7 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = False) 
             core += f" | topHolder={top_lab}:{_fmt(top_pct)}"
         lp_line = "LP: " + core
 
+    # Owner and state
     owner_raw = oc.get("owner")
     owner_line = "owner: " + _s(_short_addr(owner_raw) if isinstance(owner_raw, str) else owner_raw)
     renounced = oc.get("renounced")
@@ -147,10 +153,22 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = False) 
     maxWallet = _s(oc.get("maxWallet"))
     limits_line = f"maxTx: {maxTx}  maxWallet: {maxWallet}"
 
+    # Taxes (show buy/sell/transfer if available)
+    taxes = oc.get("taxes") or {}
+    tb = taxes.get("buy"); tsell = taxes.get("sell"); ttr = taxes.get("transfer")
+    tax_line = None
+    if (tb is not None) or (tsell is not None) or (ttr is not None):
+        tbx = "—" if tb is None else f"{tb}%"
+        tsx = "—" if tsell is None else f"{tsell}%"
+        ttx = "—" if ttr is None else f"{ttr}%"
+        tax_line = f"Taxes: buy={tbx} | sell={tsx} | transfer={ttx}"
+
+    # Assemble (keep Total supply before Honeypot as обсуждали)
     parts = ["On-chain", cc_line, token_line]
     if supply_line: parts.append(supply_line)
     if hp_line: parts.append(hp_line)
     if lp_line: parts.append(lp_line)
     parts += [owner_line, state_line, limits_line]
-    return "\n".join(parts)
+    if tax_line: parts.append(tax_line)
 
+    return "\n".join(parts)
