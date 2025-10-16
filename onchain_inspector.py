@@ -1,24 +1,19 @@
 import os, json, typing, time, re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import requests
 
-# Constants
 ZERO = "0x0000000000000000000000000000000000000000"
 
-# Function selectors
 SIG_NAME         = "0x06fdde03"
 SIG_SYMBOL       = "0x95d89b41"
 SIG_DECIMALS     = "0x313ce567"
 SIG_TOTAL_SUPPLY = "0x18160ddd"
 SIG_BALANCE_OF   = "0x70a08231"
 SIG_OWNER        = "0x8da5cb5b"
-SIG_PAUSED_1     = "0x5c975abb"  # paused()
-SIG_IMPL_FN      = "0x5c60da1b"  # implementation()
-
-# EIP-1967 slot for implementation
+SIG_PAUSED_1     = "0x5c975abb"
+SIG_IMPL_FN      = "0x5c60da1b"
 EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 
-# RPC resolution
 CHAIN_RPC_ENV = {
     "eth": "ETH_RPC_URL_PRIMARY",
     "bsc": "BSC_RPC_URL_PRIMARY",
@@ -56,18 +51,13 @@ def _rpc_for_chain(short: str) -> Optional[str]:
     short = (short or "").strip().lower()
     if not short:
         return None
-    # 1) Primary env
     ek = CHAIN_RPC_ENV.get(short)
     if ek:
         v = (os.getenv(ek, "") or "").strip()
-        if v:
-            return v
-    # 2) Alternate envs
+        if v: return v
     for name in ALT_ENV.get(short, []):
         v = (os.getenv(name, "") or "").strip()
-        if v:
-            return v
-    # 3) RPC_URLS JSON map
+        if v: return v
     try:
         raw = (os.getenv("RPC_URLS", "") or "").strip()
         if raw:
@@ -78,11 +68,9 @@ def _rpc_for_chain(short: str) -> Optional[str]:
                     return v.strip()
     except Exception:
         pass
-    # 4) Public
     lst = PUBLIC_RPC.get(short) or []
     return lst[0] if lst else None
 
-# Basic JSON-RPC helpers
 def _post_json(rpc: str, payload: dict, timeout: int = 12) -> dict:
     r = requests.post(rpc, json=payload, timeout=timeout, headers={"User-Agent":"Metridex/1.0"})
     r.raise_for_status()
@@ -102,14 +90,7 @@ def _get_storage_at(rpc: str, addr: str, slot_hex: str) -> Optional[str]:
     except Exception:
         return None
 
-# Decoders
 def _decode_string(hexdata: Optional[str]) -> Optional[str]:
-    """
-    Robustly decode ERC-20 string/bytes32:
-    - dynamic string: 0x | 32-byte offset | 32-byte length | data
-    - bytes32: first 32 bytes, right-padded with zeros
-    - fallback: raw bytes
-    """
     if not (isinstance(hexdata, str) and hexdata.startswith("0x")):
         return None
     try:
@@ -127,7 +108,8 @@ def _decode_string(hexdata: Optional[str]) -> Optional[str]:
             else:
                 data = raw
         text = data.replace(b"\x00", b"").decode("utf-8", "ignore")
-        text = re.sub(r"\s+", " ", text).strip()
+        import re as _re
+        text = _re.sub(r"\s+", " ", text).strip()
         return text or None
     except Exception:
         return None
@@ -163,17 +145,26 @@ def _has_code(rpc: str, addr: str) -> Optional[bool]:
     except Exception:
         return None
 
+def _get_impl(rpc: str, addr: str) -> Optional[str]:
+    try:
+        out = _get_storage_at(rpc, addr, EIP1967_IMPL_SLOT)
+        if out and out != "0x" and int(out, 16) != 0:
+            return out
+    except Exception:
+        pass
+    try:
+        impl = _eth_call(rpc, addr, SIG_IMPL_FN)
+        return _as_addr(impl)
+    except Exception:
+        return None
+
 def _is_upgradeable_proxy(rpc: str, addr: str) -> Optional[bool]:
     try:
-        st = _get_storage_at(rpc, addr, EIP1967_IMPL_SLOT)
-        if isinstance(st, str) and st != "0x" and int(st, 16) != 0:
+        impl = _get_impl(rpc, addr)
+        if impl and impl.lower() != ZERO:
             return True
     except Exception:
         pass
-    impl = _eth_call(rpc, addr, SIG_IMPL_FN)
-    impl_addr = _as_addr(impl)
-    if impl_addr and impl_addr.lower() != ZERO.lower():
-        return True
     return False
 
 def _normalize_owner(owner: Optional[str]) -> Optional[str]:
@@ -183,83 +174,77 @@ def _normalize_owner(owner: Optional[str]) -> Optional[str]:
         return ZERO
     return o
 
-# TTL cache for Honeypot.is
-_INSPECT_CACHE = {}
-_INSPECT_TTL = 30.0  # seconds
+_HP_CACHE = {}
+_HP_TTL = 120.0
 
-_HP_CACHE: Dict[typing.Tuple[str,str], typing.Tuple[float, dict]] = {}
-_HP_TTL = 120.0  # seconds
+def _honeypot_defaults(chain: str, token: str):
+    raw = (os.getenv("HONEYPOT_DEFAULTS", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        mp = json.loads(raw)
+        if not isinstance(mp, dict): return None
+        key = f"{(chain or '').lower()}:{(token or '').lower()}"
+        val = mp.get(key)
+        return val if isinstance(val, dict) else None
+    except Exception:
+        return None
 
-def _honeypot_check(chain: str, token: str, timeout: int = 6):
-    """
-    Robust Honeypot.is fetch with caching.
-    Returns dict: simulation ("OK"/"FAIL"/"—"), risk, level, buy, sell, transfer
-    """
-    key = ((chain or "").lower(), (token or "").lower())
-    now = time.time()
-    hit = _HP_CACHE.get(key)
-    if hit and (now - hit[0] <= _HP_TTL):
-        return hit[1].copy()
+def _honeypot_check(chain: str, token: str, timeout: int = 12):
+    d = _honeypot_defaults(chain, token)
+    if d:
+        out = {"simulation": d.get("simulation"), "risk": d.get("risk"), "level": d.get("level"),
+               "buy": d.get("buy"), "sell": d.get("sell"), "transfer": d.get("transfer")}
+        return out, {"reason": "override"}
 
-    aliases = {
-        "eth": ["ethereum","eth"],
-        "bsc": ["bsc"],
-        "polygon": ["polygon","matic"],
-        "arb": ["arbitrum","arb"],
-        "op": ["optimism","op"],
-        "base": ["base"],
-        "avax": ["avalanche","avax"],
-        "ftm": ["fantom","ftm"],
-    }
+    aliases = {"eth": ["ethereum","eth"], "bsc": ["bsc"], "polygon": ["polygon","matic"],
+               "arb": ["arbitrum","arb"], "op": ["optimism","op"], "base": ["base"],
+               "avax": ["avalanche","avax"], "ftm": ["fantom","ftm"]}
     chains = aliases.get((chain or "").lower(), ["ethereum"])
-    endpoints = [
-        "https://api.honeypot.is/v2/IsHoneypot",
-        "https://api.honeypot.is/v1/IsHoneypot",
-        "https://api.honeypot.is/IsHoneypot",
-    ]
+    endpoints = ["https://api.honeypot.is/v2/IsHoneypot", "https://api.honeypot.is/v1/IsHoneypot", "https://api.honeypot.is/IsHoneypot"]
 
-    for ch in chains:
-        for ep in endpoints:
-            try:
-                url = f"{ep}?address={token}&chain={ch}"
-                r = requests.get(url, timeout=timeout, headers={"User-Agent":"Metridex/1.0"})
-                if r.status_code != 200:
-                    continue
-                j = r.json()
+    last_reason = None
+    for attempt in range(2):
+        for ch in chains:
+            for ep in endpoints:
+                try:
+                    url = f"{ep}?address={token}&chain={ch}"
+                    r = requests.get(url, timeout=timeout, headers={"User-Agent":"Metridex/1.0"})
+                    if r.status_code == 429:
+                        last_reason = "429"; continue
+                    if r.status_code != 200:
+                        last_reason = f"http-{r.status_code}"; continue
+                    try:
+                        j = r.json()
+                    except Exception:
+                        last_reason = "bad-json"; continue
 
-                # simulation
-                sim = None
-                if isinstance(j.get("simulation"), dict):
-                    sim = j["simulation"].get("success")
-                if sim is None and "isHoneypot" in j and isinstance(j["isHoneypot"], bool):
-                    sim = (not j["isHoneypot"])
-                simulation = "OK" if sim is True else ("FAIL" if sim is False else "—")
+                    sim = None
+                    if isinstance(j.get("simulation"), dict):
+                        sim = j["simulation"].get("success")
+                    if sim is None and isinstance(j.get("isHoneypot"), bool):
+                        sim = (not j["isHoneypot"])
+                    simulation = "OK" if sim is True else ("FAIL" if sim is False else "—")
 
-                # risk / level
-                risk = None; level = None
-                if isinstance(j.get("honeypotResult"), dict):
-                    risk = j["honeypotResult"].get("isHoneypot")
-                    level = j["honeypotResult"].get("riskLevel")
-                if risk is None and "isHoneypot" in j and isinstance(j["isHoneypot"], bool):
-                    risk = "low" if (j["isHoneypot"] is False) else "high"
+                    risk = None; level = None
+                    if isinstance(j.get("honeypotResult"), dict):
+                        risk = j["honeypotResult"].get("isHoneypot")
+                        level = j["honeypotResult"].get("riskLevel")
+                    if risk is None and isinstance(j.get("isHoneypot"), bool):
+                        risk = "low" if (j["isHoneypot"] is False) else "high"
 
-                # taxes
-                taxes = j.get("taxes") or {}
-                buy = taxes.get("buy"); sell = taxes.get("sell"); transfer = taxes.get("transfer")
-                out = {
-                    "simulation": simulation,
-                    "risk": risk,
-                    "level": level,
-                    "buy": round(float(buy),2) if isinstance(buy,(int,float)) else None,
-                    "sell": round(float(sell),2) if isinstance(sell,(int,float)) else None,
-                    "transfer": round(float(transfer),2) if isinstance(transfer,(int,float)) else None,
-                }
-                _HP_CACHE[key] = (time.time(), out)
-                return out
-            except Exception:
-                continue
+                    taxes = j.get("taxes") or {}
+                    out = {"simulation": simulation, "risk": risk, "level": level,
+                           "buy": round(float(taxes.get("buy")),2) if isinstance(taxes.get("buy"), (int,float)) else None,
+                           "sell": round(float(taxes.get("sell")),2) if isinstance(taxes.get("sell"), (int,float)) else None,
+                           "transfer": round(float(taxes.get("transfer")),2) if isinstance(taxes.get("transfer"), (int,float)) else None}
+                    return out, {"reason": None}
+                except requests.Timeout:
+                    last_reason = "timeout"
+                except Exception:
+                    last_reason = "error"
+        time.sleep(0.35)
 
-    # Fallback without chain
     try:
         url = f"https://api.honeypot.is/v2/IsHoneypot?address={token}"
         r = requests.get(url, timeout=timeout, headers={"User-Agent":"Metridex/1.0"})
@@ -270,22 +255,26 @@ def _honeypot_check(chain: str, token: str, timeout: int = 6):
                 sim = j["simulation"].get("success")
             simulation = "OK" if sim is True else ("FAIL" if sim is False else "—")
             taxes = j.get("taxes") or {}
-            out = {
-                "simulation": simulation,
-                "risk": (j.get("honeypotResult") or {}).get("isHoneypot"),
-                "level": (j.get("honeypotResult") or {}).get("riskLevel"),
-                "buy": taxes.get("buy"),
-                "sell": taxes.get("sell"),
-                "transfer": taxes.get("transfer"),
-            }
-            _HP_CACHE[key] = (time.time(), out)
-            return out
+            out = {"simulation": simulation, "risk": (j.get("honeypotResult") or {}).get("isHoneypot"),
+                   "level": (j.get("honeypotResult") or {}).get("riskLevel"),
+                   "buy": taxes.get("buy"), "sell": taxes.get("sell"), "transfer": taxes.get("transfer")}
+            return out, {"reason": None}
+    except requests.Timeout:
+        last_reason = "timeout"
     except Exception:
-        pass
+        last_reason = "error"
 
-    out = {}
-    _HP_CACHE[key] = (time.time(), out)
-    return out
+    return {}, {"reason": last_reason}
+
+def _honeypot_fetch_cached(chain: str, token: str):
+    k = ((chain or "").lower(), (token or "").lower())
+    now = time.time()
+    hit = _HP_CACHE.get(k)
+    if hit and (now - hit[0] <= _HP_TTL):
+        return hit[1].copy(), hit[2].copy()
+    out, meta = _honeypot_check(chain, token)
+    _HP_CACHE[k] = (time.time(), out.copy(), meta.copy())
+    return out, meta
 
 def _erc20_balance_of(rpc: str, token_addr: str, holder: str):
     try:
@@ -296,10 +285,6 @@ def _erc20_balance_of(rpc: str, token_addr: str, holder: str):
         return None
 
 def _lp_lock_lite(rpc: str, pair_addr: str, chain: str):
-    """
-    Returns dict:
-      burned_pct, lockers: {"UNCX": pct, "TeamFinance": pct}, top_holder_label, top_holder_pct
-    """
     out = {"burned_pct": None, "lockers": {}, "top_holder_label": None, "top_holder_pct": None}
     if not (rpc and isinstance(pair_addr, str) and pair_addr.startswith("0x")):
         return out
@@ -318,18 +303,9 @@ def _lp_lock_lite(rpc: str, pair_addr: str, chain: str):
     out["burned_pct"] = round((burned / ts) * 100, 2) if burned else 0.0
 
     defaults = {
-        "eth": {
-            "UNCX": ["0x0fF9d5D7C7f3f271547dF6fC9E1Ff7A3aC3f7b6a"],
-            "TeamFinance": ["0x3b77f1b32b66f3ee0D47b7d4dF47E7B06C5744F3"],
-        },
-        "bsc": {
-            "UNCX": ["0x3a4f06431457de873b588846c64041b95df72ea5"],
-            "TeamFinance": ["0x0c1cf4f1f1458e8f26b55685b9a78e78d7e4c37c"],
-        },
-        "polygon": {
-            "UNCX": ["0x9ad32b9004c2d5c5bf31eceb0165aaf1cdbf62d0"],
-            "TeamFinance": ["0x8c87b7517a4e2b45286da5dadda8e90d518d042d"],
-        }
+        "eth": {"UNCX": ["0x0fF9d5D7C7f3f271547dF6fC9E1Ff7A3aC3f7b6a"], "TeamFinance": ["0x3b77f1b32b66f3ee0D47b7d4dF47E7B06C5744F3"]},
+        "bsc": {"UNCX": ["0x3a4f06431457de873b588846c64041b95df72ea5"], "TeamFinance": ["0x0c1cf4f1f1458e8f26b55685b9a78e78d7e4c37c"]},
+        "polygon": {"UNCX": ["0x9ad32b9004c2d5c5bf31eceb0165aaf1cdbf62d0"], "TeamFinance": ["0x8c87b7517a4e2b45286da5dadda8e90d518d042d"]},
     }
     try:
         cfg = os.getenv("LP_LOCKER_ADDRESSES") or ""
@@ -360,21 +336,24 @@ def _lp_lock_lite(rpc: str, pair_addr: str, chain: str):
     out["top_holder_pct"] = top_val if top_val > 0 else None
     return out
 
+_INSPECT_CACHE = {}
+_INSPECT_TTL = 30.0
+
 def inspect_token(chain_short: str, token_address: str, pair_address: Optional[str] = None) -> Dict[str, Any]:
     short = (chain_short or "").lower().strip()
     rpc = _rpc_for_chain(short)
     if not (rpc and isinstance(token_address, str) and token_address.startswith("0x") and len(token_address)==42):
-
         return {"ok": False, "error": "rpc or token invalid"}
-    key_inspect = ((chain_short or "").lower().strip(), (token_address or "").lower().strip(), (pair_address or "").lower().strip() if pair_address else "")
+
+    key_inspect = (short, (token_address or "").lower().strip(), (pair_address or "").lower().strip() if pair_address else "")
     now = time.time()
     hit = _INSPECT_CACHE.get(key_inspect)
     if hit and (now - hit[0] <= _INSPECT_TTL):
         from copy import deepcopy
         return deepcopy(hit[1])
+
     res: Dict[str, Any] = {"ok": True, "chain": short, "token": token_address}
 
-    # ERC-20 meta
     name_hex = _eth_call(rpc, token_address, SIG_NAME)
     sym_hex  = _eth_call(rpc, token_address, SIG_SYMBOL)
     dec_hex  = _eth_call(rpc, token_address, SIG_DECIMALS)
@@ -382,45 +361,38 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
     res["symbol"]   = _decode_string(sym_hex) or None
     res["decimals"] = _decode_u256(dec_hex)
 
-    # Owner / renounced
     owner_hex = _eth_call(rpc, token_address, SIG_OWNER)
     owner = _as_addr(owner_hex)
     owner = _normalize_owner(owner)
     res["owner"] = owner or ZERO
     res["renounced"] = bool(owner == ZERO)
 
-    # State
     res["paused"] = _as_bool(_eth_call(rpc, token_address, SIG_PAUSED_1))
     res["upgradeable"] = _is_upgradeable_proxy(rpc, token_address)
 
-    # totalSupply
     ts_hex = _eth_call(rpc, token_address, SIG_TOTAL_SUPPLY)
     res["totalSupply"] = _decode_u256(ts_hex)
 
-    # limits (best-effort)
-    res["maxTx"] = None
-    res["maxWallet"] = None
-
-    # taxes & honeypot
     res["taxes"] = {}
-    hp = _honeypot_check(short, token_address)
-    if hp:
-        res["honeypot"] = {"simulation": hp.get("simulation"), "risk": hp.get("risk"), "level": hp.get("level")}
-        t = res["taxes"]
+
+    hp_out, hp_meta = _honeypot_fetch_cached(short, token_address)
+    if hp_out:
+        res["honeypot"] = {"simulation": hp_out.get("simulation"), "risk": hp_out.get("risk"), "level": hp_out.get("level")}
+        res["honeypot_meta"] = hp_meta
         for k in ("buy","sell","transfer"):
-            if hp.get(k) is not None:
+            if hp_out.get(k) is not None:
                 try:
-                    t[k] = round(float(hp.get(k)), 2)
+                    res["taxes"][k] = round(float(hp_out.get(k)), 2)
                 except Exception:
                     pass
-        res["taxes"] = t
+    else:
+        res["honeypot_meta"] = hp_meta
 
-    # LP lock lite (if pair provided)
     if pair_address:
         res["lp_lock_lite"] = _lp_lock_lite(rpc, pair_address, short)
 
-    # Code presence
     res["contractCodePresent"] = _has_code(rpc, token_address)
 
-    _INSPECT_CACHE[key_inspect] = (time.time(), res)
+    _INSPECT_CACHE[key_inspect] = (time.time(), res.copy())
     return res
+
