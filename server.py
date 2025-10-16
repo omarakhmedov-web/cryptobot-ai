@@ -1,4 +1,5 @@
 import os, json, re, traceback, requests
+from onchain_formatter import format_onchain_text
 
 try:
     from webintel import analyze_website, derive_domain
@@ -1024,6 +1025,7 @@ def on_callback(cb):
                         f'paused: {paused}  upgradeable: {upgradeable}\n'
                         f'maxTx: {maxTx}  maxWallet: {maxWallet}'
                     )
+                text = format_onchain_text(oc, mkt)
                 send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
                 answer_callback_query(cb_id, 'On-chain ready.', False)
 
