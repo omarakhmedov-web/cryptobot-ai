@@ -16,24 +16,6 @@ except Exception:
 
 _cache: Dict[tuple, Dict[str, Any]] = {}
 
-# ISO 3166-1 alpha-2 minimal map (extend as needed)
-_ISO2_TO_NAME = {
-    "US":"United States", "GB":"United Kingdom", "CA":"Canada", "DE":"Germany", "FR":"France",
-    "NL":"Netherlands", "SE":"Sweden", "NO":"Norway", "CH":"Switzerland", "AE":"United Arab Emirates",
-    "AU":"Australia", "SG":"Singapore", "HK":"Hong Kong", "JP":"Japan", "KR":"South Korea",
-    "CN":"China", "IN":"India", "IE":"Ireland", "LT":"Lithuania", "LV":"Latvia", "EE":"Estonia",
-    "PL":"Poland", "CZ":"Czech Republic", "SK":"Slovakia", "ES":"Spain", "IT":"Italy",
-    "PT":"Portugal", "RU":"Russia", "UA":"Ukraine", "TR":"Turkey", "BR":"Brazil",
-    "AR":"Argentina"
-}
-def _iso2_to_name(code: str | None) -> str | None:
-    if not code: return None
-    c = str(code).strip()
-    if len(c) == 2 and c.isalpha():
-        return _ISO2_TO_NAME.get(c.upper(), c.upper())
-    # sometimes RDAP returns full country already
-    return c if c else None
-
 def _now() -> int:
     return int(time.time())
 
@@ -95,64 +77,27 @@ def _normalize_rdap(domain: str, raw: Dict[str, Any]) -> Dict[str, Any]:
             return obj.get(key, default)
         return default
 
-    # Events -> created/expires
-    events = {}
-    for e in _get(raw, "events", []) or []:
-        if not isinstance(e, dict): 
-            continue
-        act = e.get("eventAction")
-        if act:
-            events[act] = e.get("eventDate")
-
+    events = { (e.get("eventAction")): e.get("eventDate") for e in _get(raw, "events", []) if isinstance(e, dict) }
     created_raw = events.get("registration") or events.get("created")
     expires_raw = events.get("expiration")
 
     registrar, registrar_id = _extract_registrar_info(_get(raw, "entities", []) or [])
 
-    # Nameservers, status
-    ns = [n.get("ldhName") for n in (_get(raw, "nameservers", []) or []) if isinstance(n, dict) and n.get("ldhName")]
+    ns = [n.get("ldhName") for n in _get(raw, "nameservers", []) or [] if isinstance(n, dict) and n.get("ldhName")]
     status = _get(raw, "status", []) or []
 
-    # Country from vcardArray/adr with role priority
     country = None
-    try:
-        role_priority = ("registrant","administrative","admin","tech","registrar")
-        best_rank = 999
-        for ent in (_get(raw, "entities", []) or []):
-            roles = tuple(ent.get("roles") or [])
-            # assess rank
-            rank = None
-            for idx, rr in enumerate(role_priority):
-                if rr in roles:
-                    rank = idx
+    for ent in _get(raw, "entities", []) or []:
+        if any(r in (ent.get("roles") or []) for r in ("registrant","administrative")):
+            vcard = ent.get("vcardArray", [None, []])[1]
+            for it in vcard:
+                if it and it[0] == "adr" and isinstance(it[3], list) and len(it[3]) >= 7:
+                    country = it[3][6]
                     break
-            if rank is None or rank > best_rank:
-                continue
-            vcard = ent.get("vcardArray", [None, []])
-            items = vcard[1] if isinstance(vcard, list) and len(vcard) > 1 else []
-            found = None
-            for it in items:
-                try:
-                    if it and it[0] == "adr" and isinstance(it[3], list) and len(it[3]) >= 7:
-                        found = it[3][6]
-                        break
-                    if it and it[0] == "country" and len(it) > 3:
-                        found = it[3]
-                        break
-                except Exception:
-                    continue
-            if found:
-                country = _iso2_to_name(found)
-                best_rank = rank
-        if isinstance(country, str) and not country.strip():
-            country = None
-    except Exception:
-        pass
 
     created_iso = _iso_date(created_raw)
     expires_iso = _iso_date(expires_raw)
 
-    # Age in days
     age_days = None
     try:
         if created_raw:
@@ -164,11 +109,7 @@ def _normalize_rdap(domain: str, raw: Dict[str, Any]) -> Dict[str, Any]:
     flags: List[str] = []
     if age_days is not None and age_days < 90: flags.append("new_domain_lt_90d")
     if expires_iso: flags.append("has_expiry")
-    try:
-        if any(("clientHold" in s) or ("serverHold" in s) for s in (status or [])):
-            flags.append("domain_on_hold")
-    except Exception:
-        pass
+    if any(("clientHold" in s) or ("serverHold" in s) for s in status): flags.append("domain_on_hold")
     if not registrar: flags.append("registrar_unknown")
 
     return {
