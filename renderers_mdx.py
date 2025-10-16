@@ -474,24 +474,7 @@ def _resolve_domain(_rd: dict, market: dict, ctx: dict) -> str | None:
                 dom = _host_from_url(site) or dom
         except Exception:
             pass
-        # 2b) token-level fallbacks (DexScreener often exposes token website separately)
-    if not dom and isinstance(market, dict):
-        try:
-            tok = market.get("token") or {}
-            cand = (
-                tok.get("website") or tok.get("homepage") or tok.get("officialSite")
-                or market.get("tokenWebsite")
-                or ((market.get("links") or {}).get("tokenSite"))
-                or ((market.get("links") or {}).get("website"))
-            )
-            if isinstance(cand, dict):
-                cand = cand.get("url") or cand.get("label")
-            if isinstance(cand, str):
-                dom = _host_from_url(cand) or dom
-        except Exception:
-            pass
-
-# 3) common RDAP keys
+    # 3) common RDAP keys
     if not dom and isinstance(_rd, dict):
         for k in ("ldhName","unicodeName","domain","name","handle"):
             v = _rd.get(k)
@@ -631,19 +614,14 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         _enable_rdap = _os.getenv("ENABLE_RDAP", "1").lower() in ("1","true","yes")
     except Exception:
         _enable_rdap = True
-    # Resolve domain once for RDAP/Website intel
-    try:
-        _rd_domain = _resolve_domain({}, market, ctx)
-    except Exception:
-        _rd_domain = None
-    if _enable_rdap and (_rd_domain or (l_site and l_site != "—")):
+    if _enable_rdap and l_site and l_site != "—":
         try:
             from rdap_client import lookup as _rdap_lookup
         except Exception:
             _rdap_lookup = None
         if _rdap_lookup:
             try:
-                _rd = _rdap_lookup(_rd_domain or l_site)
+                _rd = _rdap_lookup(l_site)
             except Exception:
                 _rd = None
             if _rd:
@@ -775,9 +753,6 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 _wb2 = _wayback_summary('www.' + _domain_to_probe)
                 if isinstance(_wb2, dict) and _wb2.get('first'):
                     way['first'] = _wb2['first']
-
-    if (not l_site or l_site == '—') and _rd_domain:
-        l_site = _rd_domain
 
     parts.append(
         "*Website intel*"
