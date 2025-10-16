@@ -25,11 +25,57 @@ import time
 import datetime as _dt
 from typing import Any, Dict, Optional, List
 
+# === Metridex: Age bucket & Δ24h helpers (SAFE) ===
+def _age_bucket_label(age_days: float) -> str:
+    try:
+        d = float(age_days)
+    except Exception:
+        return "Established"
+    if d >= 1095: label = "Long-standing (>3 years)"
+    elif d >= 730: label = "Long-standing (>2 years)"
+    elif d >= 365: label = "Established >1 year"
+    elif d >= 180: label = "Established >6 months"
+    elif d >= 90:  label = "Established >3 months"
+    elif d >= 30:  label = "Established >1 month"
+    elif d >= 7:   label = "Established >1 week"
+    else:          label = "Newly created"
+    approx = (f"~{d/365.0:.1f}y" if d >= 365 else f"~{d:.0f}d")
+    return f"{label} ({approx})"
+
+def _delta24h_positive_label(ch24: float):
+    try:
+        v = float(ch24)
+    except Exception:
+        return None
+    if abs(v) <= 6.0:
+        return "Stable day (|Δ24h| ≤ 6%)"
+    return None
+
+def _normalize_reason_text(line: str) -> str:
+    import re as _re
+    try:
+        s = str(line)
+    except Exception:
+        return line
+    m = _re.search(r"Moderate 24h move \(([+\-]?\d+)%\)", s)
+    if m:
+        try:
+            val_abs = str(abs(int(m.group(1))))
+        except Exception:
+            val_abs = m.group(1).lstrip("+-")
+        s = _re.sub(r"Moderate 24h move \(([+\-]?\d+)%\)", f"Contained daily move (|Δ24h| ≈ {val_abs}%)", s)
+    m2 = _re.search(r"Established\s*>\s*1\s*week\s*\(~\s*([\d\.]+)\s*d\)", s, _re.I)
+    if m2:
+        try:
+            days = float(m2.group(1))
+            s = _re.sub(r"Established\s*>\s*1\s*week\s*\(~\s*([\d\.]+)\s*d\)", _age_bucket_label(days), s, flags=_re.I)
+        except Exception:
+            pass
+    return s
+
+
 # === Module-scope helper: pretty registrar name (used in RDAP & Website) ===
 def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
-    # Note: this function existed historically under a different name.
-    # We expose a stable alias `_fmt_registrar` for callers.
-
     s = (val or "").strip()
     if not s or s in ("—","n/a","N/A","NA"):
         return "n/a"
@@ -49,9 +95,6 @@ def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
     base = _re.sub(r"\s+,", ",", base)
     base = _re.sub(r",\s*", ", ", base)
     return base.strip()
-
-# Back-compat alias for registrar formatter
-_fmt_registrar = _fmt_registrar__INNER_SHOULD_NOT_EXIST
 
 # Country inference helper (no new ENV; graceful fallback)
 try:
@@ -243,7 +286,7 @@ def _human_status(s: str) -> str:
 
 # RDAP country placeholder flag (default ON):
 # Set env RDAP_COUNTRY_PLACEHOLDER=0 to disable showing "Country: —" when country is missing.
-_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "1") not in ("0", "false", "False", ""))
+_RDAP_COUNTRY_PLACEHOLDER = (os.getenv("RDAP_COUNTRY_PLACEHOLDER", "0") not in ("0", "false", "False", ""))
 
 # ---- domain coolness flags ----
 _WAYBACK_SUMMARY = (os.getenv("WAYBACK_SUMMARY", "1") not in ("0","false","False",""))
@@ -274,7 +317,7 @@ HSTS_SHOW_MAXAGE_ONLY = (os.getenv("HSTS_SHOW_MAXAGE_ONLY", "1") not in ("0","fa
 RDAP_DNSSEC_SHOW_UNSIGNED = (os.getenv("RDAP_DNSSEC_SHOW_UNSIGNED", "0") not in ("0","false","False",""))
 BADGE_WAYBACK = (os.getenv("BADGE_WAYBACK", "1") not in ("0","false","False",""))
 DOMAIN_EMOJI_BAR = (os.getenv("DOMAIN_EMOJI_BAR", "1") not in ("0","false","False",""))
-RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG", "v9-stable+mdx2.6.2-hotfix1")
+RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG", "v9-stable")
 
 # Simple in-process TTL caches for network checks
 _CACHE_TTL = int(os.getenv("WEB_CACHE_TTL", "1800"))
@@ -843,28 +886,30 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
     return "\n".join(parts)
 
 
+
 def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
-    # Take up to 3 key reasons, deduplicated
+    # Take up to 3 key reasons, deduplicated, with normalization (age/delta wording).
     reasons: List[str] = []
     try:
         reasons = list(getattr(verdict, "reasons", []) or [])
     except Exception:
         reasons = list((verdict or {}).get("reasons") or [])
     seen = set()
-    uniq = []
+    uniq: List[str] = []
     for r in reasons:
-        if not r: continue
-        if r in seen: continue
+        if not r: 
+            continue
+        if r in seen: 
+            continue
         seen.add(r)
-        uniq.append(r)
+        uniq.append(_normalize_reason_text(r))
         if len(uniq) >= 3:
             break
     if not uniq:
         return "*Why?*\n• No specific risk factors detected"
     header = "*Why?*"
     lines = [f"• {r}" for r in uniq]
-    return "\n".join([header] + lines).replace("\n", "\n")
-
+    return "\n".join([header] + lines)
 def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     # Weighted Top-3 positives and Top-3 risks (chain-aware)
     m = market or {}
@@ -885,8 +930,10 @@ def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     try:
         if isinstance(liq,(int,float)) and liq >= t["LIQ_POSITIVE"]: add_pos(f"Healthy liquidity (${liq:,.0f})", 3)
         if isinstance(vol,(int,float)) and vol >= t["VOL_ACTIVE"]:   add_pos(f"Active 24h volume (${vol:,.0f})", 2)
-        if isinstance(age,(int,float)) and age >= 7:                 add_pos(f"Established >1 week (~{age:.1f}d)", 2)
-        if isinstance(ch24,(int,float)) and -30 < ch24 < 80:         add_pos(f"Moderate 24h move ({ch24:+.0f}%)", 1)
+        if isinstance(age,(int,float)) and age >= 7:                 add_pos(_age_bucket_label(age), 2)
+        if isinstance(ch24,(int,float)):
+            _lbl = _delta24h_positive_label(ch24)
+            if _lbl: add_pos(_lbl, 1)
     except Exception:
         pass
 
@@ -895,7 +942,12 @@ def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
         elif isinstance(liq,(int,float)) and liq < t["LIQ_LOW"]: add_risk(f"Low liquidity (${liq:,.0f})", 3)
         if vol is None: add_risk("24h volume unknown", 1)
         elif isinstance(vol,(int,float)) and vol < t["VOL_THIN"]: add_risk(f"Thin 24h volume (${vol:,.0f})", 2)
-        if isinstance(ch24,(int,float)) and (ch24 > 100 or ch24 < -70): add_risk(f"Extreme 24h move ({ch24:+.0f}%)", 2)
+        if isinstance(ch24,(int,float)):
+            _abs = abs(ch24)
+            if _abs >= 25:
+                add_risk(f"High daily volatility (|Δ24h| ≈ {_abs:.0f}%)", 3)
+            elif _abs >= 12:
+                add_risk(f"Elevated daily volatility (|Δ24h| ≈ {_abs:.0f}%)", 2)
         if age is None: add_risk("Pair age unknown", 2)
         elif isinstance(age,(int,float)) and age < 1: add_risk("Newly created pair (<1d)", 3)
         if isinstance(fdv,(int,float)) and isinstance(mc,(int,float)) and mc>0 and fdv/mc>5:
