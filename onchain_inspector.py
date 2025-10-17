@@ -530,3 +530,15 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
 
     _INSPECT_CACHE[key] = (now, deepcopy(out))
     return out
+
+
+# === Back-compat wrapper =======================================================
+def build_onchain_payload(chain_short: str, token_address: str, pair_address: Optional[str] = None) -> Dict[str, Any]:
+    """Compatibility shim expected by server diagnostics.
+    Delegates to inspect_token(...) and returns the same payload.
+    Safe: never raises; mirrors inspect_token's guarantees.
+    """
+    try:
+        return inspect_token(chain_short, token_address, pair_address)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "chain": (chain_short or "").lower(), "token": token_address}
