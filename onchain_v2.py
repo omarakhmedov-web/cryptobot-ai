@@ -1,4 +1,4 @@
-# MDX_PATCH_2025_10_17 v3 — polygon RPCs + timeout 2.5s
+# MDX_PATCH_2025_10_17 v4 — polygon RPCs + timeout 2.5s
 # onchain_v2.py — Metridex On-chain (no proxies, no new ENV)
 from __future__ import annotations
 from typing import Optional, Dict, Any, List
