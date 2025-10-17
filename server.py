@@ -656,6 +656,31 @@ def on_message(msg):
     try:
         _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
         _now = market.get("asOf") or int(time.time())
+
+        # If _ts missing, pull from DexScreener pairs endpoint (one-shot, 5s)
+        if not _ts:
+            try:
+                import os as _os, requests as _rq
+                _chain0 = (market.get("chain") or "").lower()
+                _map = {"ethereum":"ethereum","eth":"ethereum","bsc":"bsc","binance":"bsc","polygon":"polygon","matic":"polygon",
+                        "arbitrum":"arbitrum","base":"base","optimism":"optimism","op":"optimism","avalanche":"avalanche","fantom":"fantom","ftm":"fantom"}
+                _short = _map.get(_chain0, _chain0)
+                _pair_addr0 = (market.get("pairAddress") or "").lower()
+                if _short and _pair_addr0:
+                    _base0 = (_os.getenv("DS_PROXY_URL") or _os.getenv("DEXSCREENER_PROXY_BASE") or "https://api.dexscreener.com").rstrip("/")
+                    _url0 = f"{_base0}/latest/dex/pairs/{_short}/{_pair_addr0}"
+                    _r0 = _rq.get(_url0, timeout=5)
+                    if _r0.ok:
+                        _j0 = _r0.json() or {}
+                        _pd0 = _j0.get("pair")
+                        if not isinstance(_pd0, dict):
+                            _ps0 = _j0.get("pairs") or _j0.get("data") or []
+                            if isinstance(_ps0, list) and _ps0:
+                                _pd0 = _ps0[0] if isinstance(_ps0[0], dict) else {}
+                        if isinstance(_pd0, dict):
+                            _ts = _pd0.get("pairCreatedAt") or _pd0.get("createdAt") or _pd0.get("launchedAt")
+            except Exception:
+                pass
     
         if isinstance(_ts, (int, float)) and _ts:
             # normalize milliseconds to seconds when needed
@@ -984,7 +1009,16 @@ def on_callback(cb):
                     oc = {'ok': False, 'error': str(_e)}
                 if isinstance(bundle, dict):
                     bundle['onchain'] = oc
-                ok = bool(oc.get('ok'))
+                valid = bool(oc.get('ok')) and (oc.get('codePresent') is not None or oc.get('contractCodePresent') is not None or oc.get('name') or (oc.get('decimals') is not None))
+                # FALLBACK_ONCHAIN_V2_STRICT: ensure reply even if inspector returned stub
+                if not valid:
+                    try:
+                        text_fb = render_onchain_v2(chain_short, token_addr)
+                        send_message(chat_id, text_fb, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
+                        answer_callback_query(cb_id, 'On-chain (fallback)', False)
+                        return jsonify({'ok': True})
+                    except Exception:
+                        pass
                 # FALLBACK_ONCHAIN_V2: if inspector failed, attempt simplified on-chain v2 renderer
                 if not ok:
                     try:
