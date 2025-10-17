@@ -60,7 +60,30 @@ def _short_addr(addr: str, head: int = 6, tail: int = 6) -> str:
         return str(addr)
     return addr[:2+head] + "…" + addr[-tail:]
 
+
+def _as_map(x):
+    """
+    Normalize arbitrary value to a dict:
+    - if dict -> return as is
+    - if tuple/list and first element is dict -> return that
+    - else -> {}
+    """
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, (list, tuple)) and x:
+        if isinstance(x[0], dict):
+            return x[0]
+    return {}
+
 def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = True) -> str:
+    # Normalize honeypot structure to dict to avoid AttributeError on tuple/list
+    hp_raw = oc.get('honeypot')
+    if isinstance(hp_raw, dict):
+        hp = hp_raw
+    elif isinstance(hp_raw, (list, tuple)) and len(hp_raw) and isinstance(hp_raw[0], dict):
+        hp = hp_raw[0]
+    else:
+        hp = {}
     oc = oc or {}
     mkt = mkt or {}
 
@@ -111,7 +134,7 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = True) -
             pass
 
     # Honeypot line (with reason/meta)
-    hp = oc.get("honeypot") or {}
+    hp = _as_map(oc.get("honeypot"))
     hp_meta = oc.get("honeypot_meta") or {}
     hp_line = None
     if hp:
