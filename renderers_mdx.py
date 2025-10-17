@@ -743,7 +743,7 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
                 _rd_country_val = _rd.get("country")
                 if not _rd_country_val:
                     try:
-                        _ctx_local = {"rdap": _rd, "whois": _who if ' _who ' or True else None, "ssl": _ssl if ' _ssl ' or True else None}
+                        _ctx_local = {"rdap": _rd, "whois": who, "ssl": ssl}
                         _ci = infer_country(_ctx_local)
                         if _ci:
                             _rd_country_val = _ci
@@ -1223,7 +1223,7 @@ def render_security(info: dict, lang: str = "en") -> str:
         pass
     lines.append(ct_line)
 
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 # === Added for compatibility: sanitize_market_fields ========================
