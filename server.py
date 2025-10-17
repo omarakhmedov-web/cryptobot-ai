@@ -1,4 +1,4 @@
-# MDX_PATCH_2025_10_17 v3
+# MDX_PATCH_2025_10_17 v4 — on-chain fallback via v2 if inspector fails
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
 
@@ -1010,93 +1010,41 @@ def on_callback(cb):
             answer_callback_query(cb_id, f"PDF export failed: {e}", True)
     
 
-    elif action == "ONCHAIN":
-        # On-chain details via live inspect (hardened) with guard on unknown chain
-        mkt = (bundle.get('market') if isinstance(bundle, dict) else None) or {}
-        chain_name = (mkt.get('chain') or '').strip().lower()
-        if not chain_name:
-            send_message(chat_id, "On-chain\nUnsupported/unknown chain", reply_markup=None)
-            answer_callback_query(cb_id, "On-chain not available", False)
-        else:
-            _map = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance smart chain":"bsc","polygon":"polygon","matic":"polygon",
-                    "arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax","fantom":"ftm","ftm":"ftm"}
-            chain_short = _map.get(chain_name, chain_name)
-            token_addr = mkt.get('tokenAddress')
-            pair_addr = mkt.get('pairAddress')
-            if chain_short not in _map.values():
-                send_message(chat_id, "On-chain\nUnsupported/unknown chain", reply_markup=None)
-                answer_callback_query(cb_id, "On-chain not available", False)
-            else:
+    
+elif action == "ONCHAIN":
+        
+        # MDX v4: robust inspector->v2 fallback (fast)
+        try:
+            mkt = bundle.get('market') if isinstance(bundle, dict) else {}
+            chain = (mkt or {}).get('chain') or (mkt or {}).get('chainId') or ''
+            chain = str(chain).lower()
+            if chain.isdigit():
+                chain = {'1':'eth','56':'bsc','137':'polygon'}.get(chain, chain)
+            if chain in ('matic','pol','poly'):
+                chain = 'polygon'
+            ca = (mkt or {}).get('tokenAddress') or (mkt or {}).get('token') or text.strip()
+            oc = None
+            try:
+                oc = onchain_inspector.inspect_token(chain, ca, mkt)
+            except Exception:
+                oc = None
+            if not oc or not oc.get('ok'):
                 try:
-                    token_addr = token_addr or _derive_token_address_quickfix(mkt, links)
-                    oc = onchain_inspector.inspect_token(chain_short, token_addr, pair_addr)
-                    # SAFEGUARD: ensure 'ok' exists for downstream checks
-                    ok = bool((oc or {}).get('ok'))
-
-                except Exception as _e:
-                    oc = {'ok': False, 'error': str(_e)}
-                if isinstance(bundle, dict):
-                    bundle['onchain'] = oc
-                valid = bool(oc.get('ok')) and (oc.get('codePresent') is not None or oc.get('contractCodePresent') is not None or oc.get('name') or (oc.get('decimals') is not None))
-                # FALLBACK_ONCHAIN_V2_STRICT: ensure reply even if inspector returned stub
-                if not valid:
-                    try:
-                        text_fb = render_onchain_v2(chain_short, token_addr)
-                        send_message(chat_id, text_fb, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
-                        answer_callback_query(cb_id, 'On-chain (fallback)', False)
-                        return jsonify({'ok': True})
-                    except Exception:
-                        pass
-                # FALLBACK_ONCHAIN_V2: if inspector failed, attempt simplified on-chain v2 renderer
-                if not ok:
-                    try:
-                        text_fb = render_onchain_v2(chain_short, token_addr)
-                        send_message(chat_id, text_fb, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
-                        answer_callback_query(cb_id, 'On-chain (fallback)', False)
-                        return jsonify({'ok': True})
-                    except Exception:
-                        pass
-                # FALLBACK_ONCHAIN_V2: if inspector fails, try minimal v2 path
-                if not ok:
-                    try:
-                        text = render_onchain_v2(chain_short, token_addr)
-                        send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
-                        answer_callback_query(cb_id, 'On-chain (fallback) ready.', False)
-                        return jsonify({'ok': True})
-                    except Exception:
-                        pass
-                def _s(x):
-                    try:
-                        return str(x) if x is not None else '—'
-                    except Exception:
-                        return '—'
-                owner_raw = oc.get('owner')
-                owner = owner_raw.lower() if isinstance(owner_raw, str) else ''
-                renounced = oc.get('renounced')
-                if renounced in (None, '—'):
-                    if owner in ('0x0000000000000000000000000000000000000000','0x000000000000000000000000000000000000dead'):
-                        renounced = True
-                token_name = _s(oc.get('token_name') or oc.get('token') or mkt.get('pairSymbol'))
-                paused = _s(oc.get('paused'))
-                upgradeable = _s(oc.get('upgradeable'))
-                maxTx = _s(oc.get('maxTx'))
-                maxWallet = _s(oc.get('maxWallet'))
-                if not ok:
-                    text = 'On-chain\n' + _s(oc.get('error') or 'inspection failed')
-                else:
-                    text = (
-                        'On-chain\n'
-                        f'token: {token_name}\n'
-                        f'owner: {_s(owner_raw)}\n'
-                        f'renounced: {renounced}\n'
-                        f'paused: {paused}  upgradeable: {upgradeable}\n'
-                        f'maxTx: {maxTx}  maxWallet: {maxWallet}'
-                    )
+                    info = check_contract_v2(chain, ca, timeout_s=2.5)
+                    text = render_onchain_v2(chain, ca, info)
+                except Exception:
+                    text = "On-chain
+inspection failed"
+            else:
                 text = format_onchain_text(oc, mkt)
-                send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
-                answer_callback_query(cb_id, 'On-chain ready.', False)
-
-    elif action == "COPY_CA":
+            send_message(chat_id, text, reply_markup=build_reply_markup(bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain')
+            answer_callback_query(cb_id, 'On-chain ready.', False)
+        except Exception:
+            send_message(chat_id, "On-chain
+inspection failed", ctx='onchain')
+            answer_callback_query(cb_id, 'On-chain failed.', False)
+elif action == "COPY_CA"
+:
         mkt = (bundle.get("market") or {})
         token = (mkt.get("tokenAddress") or "—")
         send_message(chat_id, f"*Contract address*\n`{token}`", reply_markup=_mk_copy_keyboard(token, links))
