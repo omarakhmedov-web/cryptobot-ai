@@ -241,8 +241,133 @@ except Exception as _e:
         fetch_market = getattr(_dex, 'fetch_market')
     except Exception as _e2:
         _err = str(_e2)
-        def fetch_market(*args, **kwargs):
-            return {'ok': False, 'error': 'market_fetch_unavailable: ' + _err, 'sources': [], 'links': {}}
+        
+def fetch_market(text: str, timeout: int = 10) -> dict:
+    """
+    Build a normalized market dict from a user-supplied token/pair/link using DexScreener.
+    Returns keys consumed by renderers and link-enrichment blocks downstream.
+    """
+    import time, re as _re
+    import requests as _rq
+    out = {"ok": False, "links": {}}
+    s = (text or "").strip()
+
+    # Heuristics: token addr (0x...40 hex), pair addr (same shape), or DS link
+    token_addr = None
+    pair_addr = None
+    chain = None
+
+    m = _re.search(r"(0x[a-fA-F0-9]{40})", s)
+    if m:
+        token_addr = m.group(1).lower()
+
+    if "dexscreener.com" in s:
+        try:
+            # Parse /{chain}/{pair} from URL
+            parts = s.split("dexscreener.com/", 1)[1].split("?")[0].split("#")[0].split("/")
+            if len(parts) >= 2:
+                chain = parts[0].strip().lower()
+                pair_addr = parts[1].strip().lower()
+        except Exception:
+            pass
+
+    # Try tokens endpoint first if we have token
+    data = None
+    if token_addr and not pair_addr:
+        try:
+            r = _rq.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=timeout)
+            if r.ok:
+                j = r.json() or {}
+                ps = j.get("pairs") or []
+                if isinstance(ps, list) and ps:
+                    # Pick the most liquid pair
+                    best = max(ps, key=lambda p: float(((p.get("liquidity") or {}).get("usd") or 0) or 0))
+                    data = best
+        except Exception:
+            data = None
+
+    # If no data yet and we have chain+pair, use pairs endpoint
+    if data is None and pair_addr and chain:
+        try:
+            r = _rq.get(f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair_addr}", timeout=timeout)
+            if r.ok:
+                j = r.json() or {}
+                ps = j.get("pairs") or []
+                if isinstance(ps, list) and ps:
+                    data = ps[0]
+        except Exception:
+            data = None
+
+    if not data:
+        # As a last resort, if we only have token_addr, keep it in the output so downstream can still enrich links.
+        if token_addr:
+            out.update({"ok": False, "chain": chain, "tokenAddress": token_addr, "pairAddress": pair_addr})
+        return out
+
+    # Extract & normalize
+    def _num(x):
+        try:
+            if x is None: return None
+            return float(x)
+        except Exception:
+            try:
+                return float(str(x).replace(",", ""))
+            except Exception:
+                return None
+
+    chain = (data.get("chainId") or chain or "").lower()
+    base = data.get("baseToken") or {}
+    quote = data.get("quoteToken") or {}
+    base_sym = base.get("symbol") or base.get("name") or "—"
+    quote_sym = quote.get("symbol") or quote.get("name") or "—"
+    token_addr = (base.get("address") or token_addr or "").lower()
+    pair_addr = (data.get("pairAddress") or pair_addr or "").lower()
+
+    price = _num(data.get("priceUsd"))
+    fdv = _num(data.get("fdv"))
+    mc  = _num(data.get("marketCap"))
+    if fdv is not None and mc is not None and fdv < mc:
+        fdv, mc = mc, fdv  # reconcile
+
+    liq = _num((data.get("liquidity") or {}).get("usd"))
+    vol24 = _num((data.get("volume") or {}).get("h24"))
+
+    d5  = _num((data.get("priceChange") or {}).get("h5"))
+    d1  = _num((data.get("priceChange") or {}).get("h1"))
+    d24 = _num((data.get("priceChange") or {}).get("h24"))
+
+    pair_created = data.get("pairCreatedAt") or data.get("createdAt") or data.get("launchedAt")
+    asof = data.get("asAt") or data.get("asof")
+    if not asof:
+        asof = int(time.time() * 1000)
+
+    links = {
+        "dexscreener": f"https://dexscreener.com/{chain}/{pair_addr}" if chain and pair_addr else None,
+        "dexId": (data.get("dexId") or "").lower()
+    }
+
+    out.update({
+        "ok": True,
+        "chain": chain,
+        "symbol": f"{base_sym}/{quote_sym}",
+        "baseToken": base,
+        "quoteToken": quote,
+        "tokenAddress": token_addr,
+        "pairAddress": pair_addr,
+        "price": price,
+        "fdv": fdv,
+        "marketCap": mc,
+        "liquidityUsd": liq,
+        "volume24hUsd": vol24,
+        "delta5m": d5,
+        "delta1h": d1,
+        "delta24h": d24,
+        "pairCreatedAt": pair_created,
+        "asof": asof,
+        "links": links,
+        "source": "DexScreener",
+    })
+    return out
 
 from risk_engine import compute_verdict
 import onchain_inspector
