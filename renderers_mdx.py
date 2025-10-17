@@ -197,34 +197,7 @@ def _fmt_age_days(v: Optional[float]) -> str:
         return f"{round(n*24)} h"
     return f"{n:.1f} d"
 
-def _explorer_label(chain: Optional[str]) -> str:
-    c = (chain or "").strip().lower()
-    if c in ("eth","ethereum"): return "Etherscan"
-    if c in ("bsc","binance smart chain","bnb"): return "BscScan"
-    if c in ("polygon","matic"): return "Polygonscan"
-    if c in ("arbitrum","arb"): return "Arbiscan"
-    if c in ("optimism","op"): return "Optimistic Etherscan"
-    if c in ("base",): return "BaseScan"
-    if c in ("avalanche","avax"): return "SnowTrace"
-    if c in ("fantom","ftm"): return "FTMScan"
-    return "Explorer"
-
-def _days_from_ts(ts_any) -> Optional[float]:
-    try:
-        if ts_any is None:
-            return None
-        ts = int(ts_any)
-        ts_s = ts if ts < 10**12 else ts//1000
-        import time as _t
-        now = int(_t.time())
-        if ts_s <= 0 or ts_s > now:
-            return None
-        return (now - ts_s)/86400.0
-    except Exception:
-        return None
-
 def _fmt_time(ts_ms: Optional[int]) -> str:
-
     if ts_ms is None:
         return "—"
     try:
@@ -684,7 +657,7 @@ def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str
     chg5 = _fmt_pct(_get(market, "priceChanges", "m5"))
     chg1 = _fmt_pct(_get(market, "priceChanges", "h1"))
     chg24= _fmt_pct(_get(market, "priceChanges", "h24"))
-    age = _fmt_age_days(_get(market, "ageDays") or _days_from_ts(_get(market, "pairCreatedAt")))
+    age  = _fmt_age_days(_get(market, "ageDays"))
     asof = _fmt_time(_get(market, "asof"))
     src  = _get(market, "source", default="DexScreener")
     sources = _get(market, "sources") or ([src] if src else [])
@@ -715,7 +688,7 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
     chg5  = _fmt_pct(_get(market, "priceChanges", "m5"))
     chg1  = _fmt_pct(_get(market, "priceChanges", "h1"))
     chg24 = _fmt_pct(_get(market, "priceChanges", "h24"))
-    age = _fmt_age_days(_get(market, "ageDays") or _days_from_ts(_get(market, "pairCreatedAt")))
+    age   = _fmt_age_days(_get(market, "ageDays"))
     src_  = _get(market, "source", default="DexScreener")
     asof  = _fmt_time(_get(market, "asof"))
 
@@ -770,7 +743,7 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
                 _rd_country_val = _rd.get("country")
                 if not _rd_country_val:
                     try:
-                        _ctx_local = {"rdap": _rd, "whois": (ctx or {}).get("webintel", {}).get("whois", {}), "ssl": (ctx or {}).get("webintel", {}).get("ssl", {})}
+                        _ctx_local = {"rdap": _rd, "whois": who, "ssl": ssl}
                         _ci = infer_country(_ctx_local)
                         if _ci:
                             _rd_country_val = _ci
@@ -1101,7 +1074,7 @@ def render_lp(info: dict, lang: str = "en") -> str:
         lp_disp = data.get("lpToken") or lp_token
         lines.append(f"LP token: {lp_disp}")
         links = []
-        if data.get("holdersUrl"): links.append(f"Holders ({_explorer_label(_get(market, 'chain'))})")
+        if data.get("holdersUrl"): links.append("Holders (Etherscan)")
         if data.get("uncxUrl"): links.append("UNCX")
         if data.get("teamfinanceUrl"): links.append("TeamFinance")
         if links:
