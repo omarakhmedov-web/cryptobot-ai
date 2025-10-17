@@ -1033,15 +1033,13 @@ elif action == "ONCHAIN":
                     info = check_contract_v2(chain, ca, timeout_s=2.5)
                     text = render_onchain_v2(chain, ca, info)
                 except Exception:
-                    text = "On-chain
-inspection failed"
+                    text = "On-chain\ninspection failed"
             else:
                 text = format_onchain_text(oc, mkt)
             send_message(chat_id, text, reply_markup=build_reply_markup(bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain')
             answer_callback_query(cb_id, 'On-chain ready.', False)
         except Exception:
-            send_message(chat_id, "On-chain
-inspection failed", ctx='onchain')
+            send_message(chat_id, "On-chain\ninspection failed", ctx='onchain')
             answer_callback_query(cb_id, 'On-chain failed.', False)
 elif action == "COPY_CA"
 :
