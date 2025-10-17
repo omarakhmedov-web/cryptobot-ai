@@ -18,6 +18,7 @@ Integration example (pseudo):
     line = country_label(country)
 """
 
+import re
 from typing import Any, Dict, Iterable, Optional
 
 # Minimal mapping for common ISO alpha-2 -> full names
@@ -95,7 +96,17 @@ def _normalize_country(val: Optional[str]) -> Optional[str]:
     # Title-case common names, keep acronyms
     if s.isupper() and len(s) <= 3:
         return s
-    # Basic cleanup: collapse spaces
+# Map common acronyms/synonyms
+upper = s.upper()
+if upper == "UK":
+    return "United Kingdom"
+if upper == "UAE":
+    return "United Arab Emirates"
+if upper == "USA":
+    return "United States"
+if s == "Czech Republic":
+    return "Czechia"
+# Basic cleanup: collapse spaces
     s = " ".join(s.split())
     # Fix common vendor strings
     s = s.replace("United States of America", "United States")
