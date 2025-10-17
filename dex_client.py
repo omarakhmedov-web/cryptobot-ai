@@ -137,6 +137,9 @@ def fetch_market(text: str) -> dict:
     price_usd = _num(p.get("priceUsd"), 0.0)
     fdv = _num(p.get("fdv"), 0.0)
     mc = _num(p.get("marketCap"), 0.0)
+    # FDV/MC reconciliation: enforce FDV >= MC when both are positive
+    if fdv > 0 and mc > 0 and fdv < mc:
+        fdv, mc = mc, fdv
     liq_usd = _num((p.get("liquidity") or {}).get("usd"), 0.0)
     vol24h = _num((p.get("volume") or {}).get("h24") or (p.get("txns") or {}).get("h24"), 0.0)
     changes = (p.get("priceChange") or {})
