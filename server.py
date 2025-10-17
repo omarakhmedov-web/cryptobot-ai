@@ -1029,6 +1029,9 @@ def on_callback(cb):
                 try:
                     token_addr = token_addr or _derive_token_address_quickfix(mkt, links)
                     oc = onchain_inspector.inspect_token(chain_short, token_addr, pair_addr)
+                    # SAFEGUARD: ensure 'ok' exists for downstream checks
+                    ok = bool((oc or {}).get('ok'))
+
                 except Exception as _e:
                     oc = {'ok': False, 'error': str(_e)}
                 if isinstance(bundle, dict):
