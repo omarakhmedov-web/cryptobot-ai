@@ -1,4 +1,5 @@
 import os, json, socket, ssl
+WEBINTEL_ENABLE_WHOIS = os.getenv('WEBINTEL_ENABLE_WHOIS', '0') == '1'
 from typing import Optional, Dict, Any, Tuple
 import requests as _rq
 from urllib.parse import urlparse
@@ -22,7 +23,7 @@ except Exception:
         return "https://" + u.lstrip("/")
 
 TTL = int(os.getenv("CACHE_TTL_WEB_SEC", "172800"))
-_WE_TIMEOUT = float(os.getenv("WEBINTEL_TIMEOUT_S", "2.5"))
+_WE_TIMEOUT = float(os.getenv("WEBINTEL_TIMEOUT_S", "1.0"))
 _WE_HEAD_TIMEOUT = float(os.getenv("WEBINTEL_HEAD_TIMEOUT_S", "2.0"))
 _WE_TLS_TIMEOUT = float(os.getenv("WEBINTEL_TLS_TIMEOUT_S", "4.0"))
 
