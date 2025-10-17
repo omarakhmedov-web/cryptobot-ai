@@ -1,3 +1,4 @@
+# MDX_PATCH_2025_10_17 v3 — output style tuned
 # renderers_onchain_v2.py — text formatter for On-chain block
 from __future__ import annotations
 from typing import Dict, Any, Optional
