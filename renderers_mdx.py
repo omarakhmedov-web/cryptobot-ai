@@ -734,8 +734,17 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
                 if _rd.get("created"):   _rd_lines.append(f"• Created: {_rd['created']}")
                 if _rd.get("expires"):   _rd_lines.append(f"• Expires: {_rd['expires']}")
                 if _rd.get("age_days") is not None: _rd_lines.append(f"• Domain age: {_rd['age_days']} d")
-                if _rd.get("country"):
-                    _rd_lines.append(f"• Country: {_rd['country']}")
+                # Country with fallback: RDAP -> infer_country (rdap-only) -> placeholder
+                _rd_country_val = _rd.get("country")
+                if not _rd_country_val:
+                    try:
+                        _ci = infer_country({"rdap": _rd})
+                        if _ci:
+                            _rd_country_val = _ci
+                    except Exception:
+                        _rd_country_val = None
+                if _rd_country_val:
+                    _rd_lines.append(f"• Country: {_rd_country_val}")
                 elif _RDAP_COUNTRY_PLACEHOLDER:
                     _rd_lines.append("• Country: —")
                 if _rd.get("status"):
