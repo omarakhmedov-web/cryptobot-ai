@@ -1,3 +1,4 @@
+# MDX_PATCH_2025_10_17 v3 — DS timeout=6s
 import os, re, time
 import requests
 
