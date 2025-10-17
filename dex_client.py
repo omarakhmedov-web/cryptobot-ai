@@ -44,6 +44,25 @@ def _ds_get_json(path: str):
             continue
     raise RuntimeError(f"DexScreener fetch failed: {last_err}")
 
+
+def _fetch_pair_details(chain: str, pair_addr: str) -> dict:
+    """Fetch a single pair's details to enrich missing fields like pairCreatedAt."""
+    chain = _normalize_chain(chain)
+    pair_addr = (pair_addr or '').lower().strip()
+    if not (chain and pair_addr):
+        return {}
+    try:
+        j = _ds_get_json(f"latest/dex/pairs/{chain}/{pair_addr}")
+        if isinstance(j, dict):
+            dd = j.get("pair") or j.get("pairs") or j.get("data")
+            if isinstance(dd, list) and dd:
+                dd = dd[0]
+            return dd if isinstance(dd, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+
 def _pick_best_pair(pairs):
     if not isinstance(pairs, list) or not pairs:
         return None
@@ -148,4 +167,17 @@ def fetch_market(text: str) -> dict:
         "pairSymbol": f"{base.get('symbol') or ''}/{quote.get('symbol') or ''}".strip("/"),
         "asOf": int(time.time()),
     }
+    
+    # ENRICH_PAIR_CREATED_AT: ensure pairCreatedAt is populated
+    try:
+        if not out.get("pairCreatedAt"):
+            _pc = _fetch_pair_details(chain, out.get("pairAddress"))
+            _pcts = _pc.get("pairCreatedAt") or _pc.get("createdAt") or _pc.get("launchedAt")
+            if _pcts:
+                if isinstance(_pcts, (int, float)) and _pcts > 10_000_000_000:
+                    _pcts = int(_pcts // 1000)
+                out["pairCreatedAt"] = _pcts
+    except Exception:
+        pass
+
     return out
