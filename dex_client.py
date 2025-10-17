@@ -1,7 +1,7 @@
 import os, re, time
 import requests
 
-HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SECONDS", "6"))
 
 def _build_bases():
     bases = []
