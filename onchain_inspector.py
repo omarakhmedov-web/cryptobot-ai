@@ -494,7 +494,14 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
 
     # Owner / paused / upgradeable
     owner_raw = _eth_call(rpc_to_use, token, SIG_OWNER)
-    owner     = _normalize_owner(owner_raw)
+    owner = _as_addr(owner_raw)
+    if not owner or owner.lower() == ZERO:
+        slot0 = _get_storage_at(rpc_to_use, token, "0x0")
+        slot_owner = _as_addr(slot0)
+        if slot_owner and slot_owner.lower() != ZERO:
+            owner = slot_owner
+    owner = _normalize_owner(owner)
+
     paused    = _as_bool(_eth_call(rpc_to_use, token, SIG_PAUSED_1))
     impl_hex  = _eth_call(rpc_to_use, token, SIG_IMPL_FN)
     upgradeable = bool(impl_hex and isinstance(impl_hex, str) and impl_hex not in ("0x", "0x0") and int(impl_hex,16) != 0)
