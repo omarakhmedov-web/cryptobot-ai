@@ -1,4 +1,3 @@
-# MDX_PATCH_2025_10_17 v4 — on-chain fallback via v2 if inspector fails
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
 
@@ -1010,39 +1009,39 @@ def on_callback(cb):
             answer_callback_query(cb_id, f"PDF export failed: {e}", True)
     
 
-    
-elif action == "ONCHAIN":
-        
-        # MDX v4: robust inspector->v2 fallback (fast)
+    elif action == "ONCHAIN":
+        # MDX v4.2: robust inspector->v2 fallback (fast, Polygon-safe)
+        mkt = (bundle.get('market') if isinstance(bundle, dict) else None) or {}
+        # Normalize chain
+        chain = (mkt.get('chain') or mkt.get('chainId') or '').strip().lower()
+        if chain.isdigit():
+            chain = {'1':'eth','56':'bsc','137':'polygon'}.get(chain, chain)
+        if chain in ('matic','pol','poly'):
+            chain = 'polygon'
+        token_addr = mkt.get('tokenAddress') or (text.strip() if isinstance(text, str) else '')
+        # Try inspector first
         try:
-            mkt = bundle.get('market') if isinstance(bundle, dict) else {}
-            chain = (mkt or {}).get('chain') or (mkt or {}).get('chainId') or ''
-            chain = str(chain).lower()
-            if chain.isdigit():
-                chain = {'1':'eth','56':'bsc','137':'polygon'}.get(chain, chain)
-            if chain in ('matic','pol','poly'):
-                chain = 'polygon'
-            ca = (mkt or {}).get('tokenAddress') or (mkt or {}).get('token') or text.strip()
-            oc = None
+            oc = onchain_inspector.inspect_token(chain, token_addr, mkt.get('pairAddress'))
+        except Exception as _e:
+            oc = {'ok': False, 'error': str(_e)}
+        ok = bool((oc or {}).get('ok'))
+        # If inspector failed or returned stub — fallback to v2
+        if not ok or not (oc.get('codePresent') is True or oc.get('name') or (oc.get('decimals') is not None)):
             try:
-                oc = onchain_inspector.inspect_token(chain, ca, mkt)
-            except Exception:
-                oc = None
-            if not oc or not oc.get('ok'):
-                try:
-                    info = check_contract_v2(chain, ca, timeout_s=2.5)
-                    text = render_onchain_v2(chain, ca, info)
-                except Exception:
-                    text = "On-chain\ninspection failed"
-            else:
-                text = format_onchain_text(oc, mkt)
+                from onchain_v2 import check_contract_v2
+                from renderers_onchain_v2 import render_onchain_v2
+                info = check_contract_v2(chain, token_addr, timeout_s=2.5)
+                text = render_onchain_v2(chain, token_addr, info)
+                send_message(chat_id, text, reply_markup=build_reply_markup(bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain')
+                answer_callback_query(cb_id, 'On-chain ready.', False)
+            except Exception as _e2:
+                send_message(chat_id, "On-chain\ninspection failed", ctx='onchain')
+                answer_callback_query(cb_id, 'On-chain failed.', False)
+        else:
+            text = format_onchain_text(oc, mkt)
             send_message(chat_id, text, reply_markup=build_reply_markup(bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain')
             answer_callback_query(cb_id, 'On-chain ready.', False)
-        except Exception:
-            send_message(chat_id, "On-chain\ninspection failed", ctx='onchain')
-            answer_callback_query(cb_id, 'On-chain failed.', False)
-elif action == "COPY_CA"
-:
+    elif action == "COPY_CA":
         mkt = (bundle.get("market") or {})
         token = (mkt.get("tokenAddress") or "—")
         send_message(chat_id, f"*Contract address*\n`{token}`", reply_markup=_mk_copy_keyboard(token, links))
