@@ -68,6 +68,7 @@ def derive_domain(url: Optional[str]) -> Optional[str]:
         return None
 
 
+
 def _rdap_whois(host: str) -> Dict[str, Any]:
     """Fetch basic WHOIS via RDAP aggregator; tolerant on failure."""
     try:
@@ -79,6 +80,36 @@ def _rdap_whois(host: str) -> Dict[str, Any]:
         registrar = None
         country = (j.get("country") or None)
         # creation date from events
+        for ev in (j.get("events") or []):
+            try:
+                act = str(ev.get("eventAction") or "").lower()
+                if act in ("registration","registered","creation"):
+                    d = ev.get("eventDate") or ""
+                    if isinstance(d, str) and len(d) >= 10:
+                        created = d[:10]
+                        break
+            except Exception:
+                pass
+        # registrar from entities->vcardArray
+        for ent in (j.get("entities") or []):
+            try:
+                roles = [str(x).lower() for x in (ent.get("roles") or [])]
+                if any("registrar" in r for r in roles):
+                    v = ent.get("vcardArray") or []
+                    items = v[1] if isinstance(v, list) and len(v) > 1 else []
+                    for it in items:
+                        if it and it[0] == "fn" and len(it) > 3:
+                            registrar = it[3]
+                            raise StopIteration
+            except StopIteration:
+                break
+            except Exception:
+                pass
+        return {"created": created, "registrar": registrar, "country": country}
+    except Exception:
+        return {"created": None, "registrar": None, "country": None}
+
+# creation date from events
         for ev in (j.get("events") or []):
             try:
                 act = str(ev.get("eventAction") or "").lower()
@@ -220,13 +251,13 @@ def analyze_website(url: Optional[str], *, domain_block: Optional[Dict[str, Any]
     """Return website intelligence with graceful fallbacks.
     Shape:
       {
-        "whois": {"created": str|None, "registrar": str|None},
+        "whois": {"created": str|None, "registrar": str|None}, "country": str|None,
         "ssl": {"ok": bool|None, "expires": str|None, "issuer": str|None, "_server": str|None, "_hsts": str|None},
         "wayback": {"first": str|None},
       }
     """
     if not url:
-        return {"whois": {"created": None, "registrar": None},
+        return {"whois": {"created": None, "registrar": None, "country": None},
                 "ssl": {"ok": None, "expires": None, "issuer": None},
                 "wayback": {"first": None}}
 
@@ -241,7 +272,7 @@ def analyze_website(url: Optional[str], *, domain_block: Optional[Dict[str, Any]
 
     host = derive_domain(url_n)
     out = {
-        "whois": {"created": None, "registrar": None},
+        "whois": {"created": None, "registrar": None, "country": None},
         "ssl": {"ok": None, "expires": None, "issuer": None},
         "wayback": {"first": None},
         "country": None,
