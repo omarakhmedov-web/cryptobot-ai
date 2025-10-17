@@ -1188,3 +1188,30 @@ def render_security(info: dict, lang: str = "en") -> str:
 
     return "\\n".join(lines)
 
+
+# === Added for compatibility: sanitize_market_fields ========================
+def sanitize_market_fields(mkt: dict | None):
+    """Return market dict with guaranteed keys used by diagnostics, without mutation."""
+    m = dict(mkt or {})
+    # Normalize typical fields to avoid KeyError in diagnostics
+    m.setdefault("pairAddress", m.get("pair") or m.get("pair_address"))
+    m.setdefault("tokenAddress", m.get("token") or m.get("token_address"))
+    m.setdefault("chainId", m.get("chain") or m.get("network") or "eth")
+    m.setdefault("ageMs", m.get("ageMs") or m.get("age") or None)
+    return m
+
+
+# === Added for compatibility: age_label ====================================
+def age_label(ms: int | None) -> str:
+    """Convert milliseconds to a compact label like "~2.1 d". Returns "—" if unknown."""
+    try:
+        v = int(ms) if ms is not None else 0
+    except Exception:
+        v = 0
+    if v <= 0:
+        return "—"
+    # milliseconds -> days with one decimal if < 3 days; otherwise integer
+    days = v / (1000 * 60 * 60 * 24)
+    if days < 3:
+        return f"~{days:.1f} d"
+    return f"~{round(days)} d"
