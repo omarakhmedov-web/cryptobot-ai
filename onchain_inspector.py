@@ -88,7 +88,7 @@ def _rpc_candidates_for_chain(short: str) -> list[str]:
         if v and v not in cands:
             cands.append(v)
 
-        return cands[:2] if len(cands) > 2 else cands
+        return cands[:4] if short == "bsc" and len(cands) > 4 else (cands[:2] if len(cands) > 2 else cands)
 def _rpc_for_chain(short: str) -> Optional[str]:
     short = (short or "").strip().lower()
     if not short:
