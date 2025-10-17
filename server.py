@@ -459,7 +459,7 @@ def _discover_site_via_ds(chain: str | None, pair_addr: str | None, token_addr: 
 
 
 # --- Health endpoints (OMEGA-713K, GET only) ---
-@app.get("/healthz")
+@app.route('/healthz', methods=['GET','HEAD'])
 def _healthz_get():
     try:
         return jsonify({"ok": True, "status": "ok", "ts": int(time.time())}), 200
