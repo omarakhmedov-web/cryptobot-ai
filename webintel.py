@@ -27,29 +27,6 @@ _WE_TIMEOUT = float(os.getenv("WEBINTEL_TIMEOUT_S", "1.0"))
 _WE_HEAD_TIMEOUT = float(os.getenv("WEBINTEL_HEAD_TIMEOUT_S", "2.0"))
 _WE_TLS_TIMEOUT = float(os.getenv("WEBINTEL_TLS_TIMEOUT_S", "4.0"))
 
-
-# --- Country helpers ---------------------------------------------------------
-def _rdap_ip_country(host: str) -> Optional[str]:
-    """Resolve host to IP and query RDAP for ASN/country. Returns ISO code or None."""
-    try:
-        # Resolve host → first IPv4
-        ips = socket.gethostbyname_ex(host)[2]
-        if not ips:
-            return None
-        ip = ips[0]
-        try:
-            r = _rq.get(f"https://rdap.org/ip/{ip}", timeout=_WE_TIMEOUT)
-            if r.ok:
-                j = r.json()
-                c = j.get("country") or None
-                if isinstance(c, str) and c.strip():
-                    return c.strip()
-        except Exception:
-            return None
-    except Exception:
-        return None
-    return None
-
 # --- Helpers -----------------------------------------------------------------
 def derive_domain(url: Optional[str]) -> Optional[str]:
     if not url:
@@ -67,77 +44,12 @@ def derive_domain(url: Optional[str]) -> Optional[str]:
     except Exception:
         return None
 
-
-
 def _rdap_whois(host: str) -> Dict[str, Any]:
     """Fetch basic WHOIS via RDAP aggregator; tolerant on failure."""
     try:
         r = _rq.get(f"https://rdap.org/domain/{host}", timeout=_WE_TIMEOUT)
         if not r.ok:
-            return {"created": None, "registrar": None, "country": None}
-        j = r.json()
-        created = None
-        registrar = None
-        country = (j.get("country") or None)
-        # creation date from events
-        for ev in (j.get("events") or []):
-            try:
-                act = str(ev.get("eventAction") or "").lower()
-                if act in ("registration","registered","creation"):
-                    d = ev.get("eventDate") or ""
-                    if isinstance(d, str) and len(d) >= 10:
-                        created = d[:10]
-                        break
-            except Exception:
-                pass
-        # registrar from entities->vcardArray
-        for ent in (j.get("entities") or []):
-            try:
-                roles = [str(x).lower() for x in (ent.get("roles") or [])]
-                if any("registrar" in r for r in roles):
-                    v = ent.get("vcardArray") or []
-                    items = v[1] if isinstance(v, list) and len(v) > 1 else []
-                    for it in items:
-                        if it and it[0] == "fn" and len(it) > 3:
-                            registrar = it[3]
-                            raise StopIteration
-            except StopIteration:
-                break
-            except Exception:
-                pass
-        return {"created": created, "registrar": registrar, "country": country}
-    except Exception:
-        return {"created": None, "registrar": None, "country": None}
-
-# creation date from events
-        for ev in (j.get("events") or []):
-            try:
-                act = str(ev.get("eventAction") or "").lower()
-                if act in ("registration","registered","creation"):
-                    d = ev.get("eventDate") or ""
-                    if isinstance(d, str) and len(d) >= 10:
-                        created = d[:10]
-                        break
-            except Exception:
-                pass
-        # registrar from entities->vcardArray
-        for ent in (j.get("entities") or []):
-            try:
-                roles = [str(x).lower() for x in (ent.get("roles") or [])]
-                if any("registrar" in r for r in roles):
-                    v = ent.get("vcardArray") or []
-                    items = v[1] if isinstance(v, list) and len(v) > 1 else []
-                    for it in items:
-                        if it and it[0] == "fn" and len(it) > 3:
-                            registrar = it[3]
-                            raise StopIteration
-            except StopIteration:
-                break
-            except Exception:
-                pass
-        return {"created": created, "registrar": registrar, "country": country}
-    except Exception:
-        return {"created": None, "registrar": None, "country": None}
+            return {"created": None, "registrar": None}
         j = r.json()
         created = None
         registrar = None
@@ -251,13 +163,13 @@ def analyze_website(url: Optional[str], *, domain_block: Optional[Dict[str, Any]
     """Return website intelligence with graceful fallbacks.
     Shape:
       {
-        "whois": {"created": str|None, "registrar": str|None}, "country": str|None,
+        "whois": {"created": str|None, "registrar": str|None},
         "ssl": {"ok": bool|None, "expires": str|None, "issuer": str|None, "_server": str|None, "_hsts": str|None},
         "wayback": {"first": str|None},
       }
     """
     if not url:
-        return {"whois": {"created": None, "registrar": None, "country": None},
+        return {"whois": {"created": None, "registrar": None},
                 "ssl": {"ok": None, "expires": None, "issuer": None},
                 "wayback": {"first": None}}
 
@@ -272,10 +184,9 @@ def analyze_website(url: Optional[str], *, domain_block: Optional[Dict[str, Any]
 
     host = derive_domain(url_n)
     out = {
-        "whois": {"created": None, "registrar": None, "country": None},
+        "whois": {"created": None, "registrar": None},
         "ssl": {"ok": None, "expires": None, "issuer": None},
         "wayback": {"first": None},
-        "country": None,
     }
 
     if host:
@@ -283,15 +194,6 @@ def analyze_website(url: Optional[str], *, domain_block: Optional[Dict[str, Any]
         who = _rdap_whois(host)
         out["whois"]["created"] = who.get("created")
         out["whois"]["registrar"] = who.get("registrar")
-        # Country heuristic: RDAP(domain) → RDAP(IP) → registrar country (if available elsewhere)
-        out["country"] = who.get("country")
-        if not out["country"]:
-            try:
-                out["country"] = _rdap_ip_country(host)
-            except Exception:
-                out["country"] = None
-        # Also reflect in whois block for downstream renderers
-        out["whois"]["country"] = out["country"]
 
         # 2) HEAD probe (reachability + headers)
         head = _https_head_probe(host)
