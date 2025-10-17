@@ -459,3 +459,15 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
 
     _INSPECT_CACHE[key_inspect] = (time.time(), deepcopy(res))
     return res
+
+
+# === Compatibility shim (legacy API) ===========================================
+def build_onchain_payload(chain_short: str, token_address: str, pair_address: str | None = None):
+    """Compatibility wrapper.
+    Historically, server imported `build_onchain_payload` from this module.
+    We now delegate to `inspect_token` to produce the same payload shape.
+    """
+    try:
+        return inspect_token(chain_short, token_address, pair_address)
+    except Exception as e:
+        return {"ok": False, "error": f"onchain shim failure: {e}"}
