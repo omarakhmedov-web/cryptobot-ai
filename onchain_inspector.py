@@ -88,9 +88,7 @@ def _rpc_candidates_for_chain(short: str) -> list[str]:
         if v and v not in cands:
             cands.append(v)
 
-    return cands
-
-
+        return cands[:2] if len(cands) > 2 else cands
 def _rpc_for_chain(short: str) -> Optional[str]:
     short = (short or "").strip().lower()
     if not short:
@@ -122,7 +120,7 @@ def _rpc_for_chain(short: str) -> Optional[str]:
     return lst[0] if lst else None
 
 # ===== JSON-RPC Helpers =====
-def _post_json(rpc: str, payload: dict, timeout: int = 12) -> dict:
+def _post_json(rpc: str, payload: dict, timeout: int = 4) -> dict:
     r = requests.post(rpc, json=payload, timeout=timeout, headers={"User-Agent":"Metridex/1.0"})
     r.raise_for_status()
     return r.json()
