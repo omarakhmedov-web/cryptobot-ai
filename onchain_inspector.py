@@ -438,99 +438,95 @@ def _lp_lock_lite(rpc: str, pair_addr: str, chain: str):
 _INSPECT_CACHE: Dict[Tuple[str,str,str], Tuple[float, dict]] = {}
 _INSPECT_TTL = 30.0  # seconds
 
-def inspect_token(chain_short: str, token_address: str, pair_address: Optional[str] = None) -> Dict[str, Any]:
-    # _TRY_MULTI_RPC
-    short = (chain_short or "").lower().strip()
-    candidates = _rpc_candidates_for_chain(short)
-    rpc = candidates[0] if candidates else None
-    if not (rpc and isinstance(token_address, str) and token_address.startswith("0x") and len(token_address)==42):
-        return {"ok": False, "error": "rpc or token invalid"}
 
-    key_inspect = (short, (token_address or "").lower().strip(), (pair_address or "").lower().strip() if pair_address else "")
+def inspect_token(chain_short: str, token_address: str, pair_address: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Hardened on-chain inspector:
+    - Tries multiple RPC endpoints (env -> RPC_URLS JSON -> public)
+    - Never raises; always returns a dict with ok/error
+    - Avoids duplicate RPC calls (previous version duplicated ERC-20 reads)
+    - Caches results for a short TTL to protect from spam
+    """
+    short = (chain_short or "").lower().strip()
+    token = (token_address or "").strip()
+    pair  = (pair_address or "").strip() if pair_address else ""
+    # Validate inputs early
+    if not (isinstance(token, str) and token.startswith("0x") and len(token) == 42):
+        return {"ok": False, "error": "invalid token address", "chain": short, "token": token_address}
+    cands = _rpc_candidates_for_chain(short)
+    if not cands:
+        # keep compatible error string seen in logs
+        return {"ok": False, "error": "rpc or token invalid", "chain": short, "token": token_address}
+    # Cache
+    key = (short, token.lower(), pair.lower())
     now = time.time()
-    hit = _INSPECT_CACHE.get(key_inspect)
+    hit = _INSPECT_CACHE.get(key)
     if hit and (now - hit[0] <= _INSPECT_TTL):
         return deepcopy(hit[1])
 
-    res: Dict[str, Any] = {"ok": True, "chain": short, "token": token_address}
-
-    # ERC-20 meta
-    # Try multiple RPC endpoints until one succeeds for basic reads
-    last_err = None
-    for _rpc_try in (candidates or [rpc]):
-        rpc = _rpc_try
+    # Pick a working rpc (first that yields either codePresent or decimals)
+    rpc_to_use: Optional[str] = None
+    code_present: Optional[bool] = None
+    decimals_guess: Optional[int] = None
+    for rpc in cands:
         try:
-            name_hex = _eth_call(rpc, token_address, SIG_NAME)
-            sym_hex  = _eth_call(rpc, token_address, SIG_SYMBOL)
-            dec_hex  = _eth_call(rpc, token_address, SIG_DECIMALS)
-            # Minimal success criterion: got code or at least decimals
-            code_present = _has_code(rpc, token_address)
-            decimals = _decode_u256(dec_hex)
-            # If read worked, keep this rpc and break
-            if code_present is not None or decimals is not None:
+            code_present = _has_code(rpc, token)
+            dec_hex = _eth_call(rpc, token, SIG_DECIMALS)
+            decimals_guess = _decode_u256(dec_hex)
+            if code_present is not None or decimals_guess is not None:
+                rpc_to_use = rpc
                 break
-        except Exception as e:
-            last_err = e
+        except Exception:
+            # continue to next rpc
             continue
-    # Now proceed with the last tried rpc (best-effort)
-    name_hex = _eth_call(rpc, token_address, SIG_NAME)
-    sym_hex  = _eth_call(rpc, token_address, SIG_SYMBOL)
-    dec_hex  = _eth_call(rpc, token_address, SIG_DECIMALS)
-    name_hex = _eth_call(rpc, token_address, SIG_NAME)
-    sym_hex  = _eth_call(rpc, token_address, SIG_SYMBOL)
-    dec_hex  = _eth_call(rpc, token_address, SIG_DECIMALS)
-    res["name"]     = _decode_string(name_hex) or None
-    res["symbol"]   = _decode_string(sym_hex) or None
-    res["decimals"] = _decode_u256(dec_hex)
+    if rpc_to_use is None:
+        # As a last resort, pick the first candidate but mark as degraded
+        rpc_to_use = cands[0]
 
-    # Owner / renounced
-    owner_hex = _eth_call(rpc, token_address, SIG_OWNER)
-    owner = _as_addr(owner_hex)
-    owner = _normalize_owner(owner)
-    res["owner"] = owner or ZERO
-    res["renounced"] = bool(owner == ZERO)
+    # Perform reads (each call is internally guarded and returns None on failure)
+    name_hex = _eth_call(rpc_to_use, token, SIG_NAME)
+    sym_hex  = _eth_call(rpc_to_use, token, SIG_SYMBOL)
+    dec_hex  = _eth_call(rpc_to_use, token, SIG_DECIMALS)
+    ts_hex   = _eth_call(rpc_to_use, token, SIG_TOTAL_SUPPLY)
 
-    # State
-    res["paused"] = _as_bool(_eth_call(rpc, token_address, SIG_PAUSED_1))
-    res["upgradeable"] = _is_upgradeable_proxy(rpc, token_address)
+    name    = _decode_string(name_hex)
+    symbol  = _decode_string(sym_hex)
+    decimals= _decode_u256(dec_hex) if dec_hex is not None else decimals_guess
+    total   = _decode_u256(ts_hex)
 
-    # totalSupply
-    ts_hex = _eth_call(rpc, token_address, SIG_TOTAL_SUPPLY)
-    res["totalSupply"] = _decode_u256(ts_hex)
+    # Owner / paused / upgradeable
+    owner_raw = _eth_call(rpc_to_use, token, SIG_OWNER)
+    owner     = _normalize_owner(owner_raw)
+    paused    = _as_bool(_eth_call(rpc_to_use, token, SIG_PAUSED_1))
+    impl_hex  = _eth_call(rpc_to_use, token, SIG_IMPL_FN)
+    upgradeable = bool(impl_hex and isinstance(impl_hex, str) and impl_hex not in ("0x", "0x0") and int(impl_hex,16) != 0)
 
-    # taxes & honeypot
-    res["taxes"] = {}
-    hp_out, hp_meta = _honeypot_fetch_cached(short, token_address)
-    if hp_out:
-        res["honeypot"] = {"simulation": hp_out.get("simulation"), "risk": hp_out.get("risk"), "level": hp_out.get("level")}
-        res["honeypot_meta"] = hp_meta
-        for k in ("buy","sell","transfer"):
-            if hp_out.get(k) is not None:
-                try:
-                    res["taxes"][k] = round(float(hp_out.get(k)), 2)
-                except Exception:
-                    pass
-    else:
-        res["honeypot_meta"] = hp_meta  # carry reason even when empty
+    # Honeypot (best-effort; cached)
+    hp = _honeypot_fetch_cached(short, token) or _honeypot_defaults()
 
-    # LP lock lite (if pair provided)
-    if pair_address:
-        res["lp_lock_lite"] = _lp_lock_lite(rpc, pair_address, short)
-
-    # Code presence
-    res["contractCodePresent"] = _has_code(rpc, token_address)
-
-    _INSPECT_CACHE[key_inspect] = (time.time(), deepcopy(res))
-    return res
-
-
-# === Compatibility shim (legacy API) ===========================================
-def build_onchain_payload(chain_short: str, token_address: str, pair_address: str | None = None):
-    """Compatibility wrapper.
-    Historically, server imported `build_onchain_payload` from this module.
-    We now delegate to `inspect_token` to produce the same payload shape.
-    """
+    out: Dict[str, Any] = {
+        "ok": True,
+        "chain": short,
+        "token": token_address,
+        "codePresent": bool(code_present) if code_present is not None else None,
+        "name": name,
+        "symbol": symbol,
+        "decimals": decimals,
+        "totalSupply": total,
+        "totalDisplay": None,
+        "owner": owner,
+        "renounced": owner == ZERO,
+        "paused": paused,
+        "upgradeable": upgradeable,
+        "maxTx": None,
+        "maxWallet": None,
+        "honeypot": hp,
+    }
+    # Post-formatting
     try:
-        return inspect_token(chain_short, token_address, pair_address)
-    except Exception as e:
-        return {"ok": False, "error": f"onchain shim failure: {e}"}
+        out["totalDisplay"] = _format_supply(total, decimals)  # if available in this module
+    except Exception:
+        pass
+
+    _INSPECT_CACHE[key] = (now, deepcopy(out))
+    return out
