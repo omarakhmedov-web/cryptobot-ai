@@ -1,4 +1,13 @@
 import os, json, re, traceback, requests
+# --- Silence python-whois noisy logs & hard-disable legacy WHOIS path ---
+import logging, os
+for _n in ("whois", "whois.whois"):
+    try:
+        logging.getLogger(_n).setLevel(logging.CRITICAL)
+    except Exception:
+        pass
+os.environ.setdefault("WEBINTEL_ENABLE_WHOIS", "0")
+
 from onchain_formatter import format_onchain_text
 
 try:
