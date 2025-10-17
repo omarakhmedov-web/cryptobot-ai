@@ -565,15 +565,20 @@ def safe_render_whypp(verdict, market, lang):
         except TypeError:
             return render_whypp(verdict)
 
+@app.get(WEBHOOK_PATH)
+def _webhook_probe_get():
+    return jsonify({'ok': True, 'method': 'GET', 'ts': int(time.time())}), 200
+
 @app.post(WEBHOOK_PATH)
 def webhook():
-    # Webhook header guard
+    # Webhook header guard (optional, accepts WEBHOOK_HEADER_SECRET or BOT_WEBHOOK_SECRET)
     try:
         hdr = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
     except Exception:
         hdr = None
-    if hdr != (BOT_WEBHOOK_SECRET or ''):
-        return jsonify({'ok': False}), 403
+    expected = os.getenv('WEBHOOK_HEADER_SECRET','').strip() or (BOT_WEBHOOK_SECRET or '')
+    if expected and hdr != expected:
+        return jsonify({'ok': False, 'err': 'bad secret header'}), 403
     try:
         upd = request.get_json(force=True, silent=True) or {}
         if "message" in upd: return on_message(upd["message"])
@@ -1045,25 +1050,8 @@ import os as _os
 from onchain_v2 import check_contract_v2
 from renderers_onchain_v2 import render_onchain_v2
 from lp_lite_v2 import check_lp_lock_v2
-try:
-    from onchain_inspector import build_onchain_payload
-except Exception:
-    from onchain_inspector import inspect_token as build_onchain_payload
-try:
-    from renderers_mdx import sanitize_market_fields, age_label
-except Exception:
-    def sanitize_market_fields(mkt: dict | None):
-        return mkt or {}
-    def age_label(ms: int | None):
-        try:
-            v = int(ms) if ms is not None else 0
-        except Exception:
-            v = 0
-        if v <= 0:
-            return "—"
-        days = max(1, round(v / (1000*60*60*24)))
-        return f"~{days} d"
-
+from onchain_inspector import build_onchain_payload
+from renderers_mdx import sanitize_market_fields, age_label
 def _ua():
     return _os.getenv("HTTP_UA", "MetridexDiag/1.0")
 def _http_get_json(url, timeout=10, headers=None):
