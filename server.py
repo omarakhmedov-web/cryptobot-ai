@@ -489,6 +489,29 @@ def tg(method, payload=None, files=None, timeout=12):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
+# === QUICKFIX: token address derivation for ONCHAIN ===
+def _derive_token_address_quickfix(mkt: dict, links: dict) -> str | None:
+    if not isinstance(mkt, dict):
+        return None
+    t = (mkt.get("tokenAddress") or "").strip()
+    if t.startswith("0x") and len(t) == 42:
+        return t
+    for k in ("address","token","token0Address","baseTokenAddress","token1Address","baseToken"):
+        v = mkt.get(k)
+        if isinstance(v, str) and v.startswith("0x") and len(v) == 42:
+            return v
+        if isinstance(v, dict):
+            a = (v.get("address") or "").strip()
+            if a.startswith("0x") and len(a) == 42:
+                return a
+    if isinstance(links, dict):
+        val = f"{links.get('scan') or ''} {links.get('dex') or ''} {links.get('holders') or ''}"
+        m = re.search(r"(?:token|address|inputCurrency|outputCurrency)=?0x([0-9a-fA-F]{40})", val)
+        if m:
+            return "0x" + m.group(1)
+    return None
+# === /QUICKFIX ===
 def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown', disable_web_page_preview=None):
     data = {"chat_id": chat_id, "text": mdv2_escape(str(text)), "parse_mode": PARSE_MODE}
     if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
@@ -867,7 +890,6 @@ def on_message(msg):
 
 
 def on_callback(cb):
-    ok = True  # guard to avoid NameError
     cb_id = cb["id"]
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
@@ -1005,6 +1027,7 @@ def on_callback(cb):
                 answer_callback_query(cb_id, "On-chain not available", False)
             else:
                 try:
+                    token_addr = token_addr or _derive_token_address_quickfix(mkt, links)
                     oc = onchain_inspector.inspect_token(chain_short, token_addr, pair_addr)
                 except Exception as _e:
                     oc = {'ok': False, 'error': str(_e)}
