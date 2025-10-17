@@ -185,34 +185,6 @@ def analyze_website(site_url: str | None):
     wb  = _wayback_first(host)
     return {"whois": who, "ssl": ssl, "wayback": {"first": wb}, "host": host, "wayback_url": f"https://web.archive.org/web/*/{host}"}
 
-def _wayback_first(host: str):
-    import requests
-    try:
-        base = "https://web.archive.org/cdx/search/cdx"
-        r = requests.get(base, params={
-            "url": host, "output": "json", "fl": "timestamp", "filter": "statuscode:200", "limit": "1",
-            "from": "19960101", "to": "99991231", "sort": "ascending"
-        }, timeout=_WE_TIMEOUT)
-        if r.ok:
-            j = r.json()
-            if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and j[1]:
-                ts = j[1][0]
-                return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
-    except Exception:
-        pass
-    return None
-
-
-    host = _host_from_url(site_url) if site_url else None
-    if not host:
-        return {"whois": {"created": None, "registrar": None},
-                "ssl": {"ok": None, "expires": None, "issuer": None},
-                "wayback": {"first": None}}
-    who = _whois_info(host)
-    ssl = _ssl_info(host)
-    wb  = _wayback_first(host)
-    return {"whois": who, "ssl": ssl, "wayback": {"first": wb}}
-
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
@@ -814,6 +786,7 @@ def on_message(msg):
 
     }
 
+    site_url = None
     try:
 
         site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
@@ -873,7 +846,7 @@ def on_message(msg):
         "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
     }
 
-    sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links, ctx="quick"))
+    sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
     msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
@@ -1018,7 +991,7 @@ def on_callback(cb):
             chain = {'1':'eth','56':'bsc','137':'polygon'}.get(chain, chain)
         if chain in ('matic','pol','poly'):
             chain = 'polygon'
-        token_addr = mkt.get('tokenAddress') or (text.strip() if isinstance(text, str) else '')
+        token_addr = mkt.get('tokenAddress')
         # Try inspector first
         try:
             oc = onchain_inspector.inspect_token(chain, token_addr, mkt.get('pairAddress'))
@@ -1032,14 +1005,14 @@ def on_callback(cb):
                 from renderers_onchain_v2 import render_onchain_v2
                 info = check_contract_v2(chain, token_addr, timeout_s=2.5)
                 text = render_onchain_v2(chain, token_addr, info)
-                send_message(chat_id, text, reply_markup=build_reply_markup(bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain')
+                send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, bundle.get('links') if isinstance(bundle, dict) else {}, ctx='onchain'))
                 answer_callback_query(cb_id, 'On-chain ready.', False)
             except Exception as _e2:
-                send_message(chat_id, "On-chain\ninspection failed", ctx='onchain')
+                send_message(chat_id, "On-chain\ninspection failed")
                 answer_callback_query(cb_id, 'On-chain failed.', False)
         else:
             text = format_onchain_text(oc, mkt)
-            send_message(chat_id, text, reply_markup=build_reply_markup(bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain')
+            send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, bundle.get('links') if isinstance(bundle, dict) else {}, ctx='onchain'))
             answer_callback_query(cb_id, 'On-chain ready.', False)
     elif action == "COPY_CA":
         mkt = (bundle.get("market") or {})
@@ -1080,7 +1053,12 @@ import os as _os
 
 from onchain_v2 import check_contract_v2
 from renderers_onchain_v2 import render_onchain_v2
-from lp_lite_v2 import check_lp_lock_v2
+# Prefer enhanced/lite import above; optionally override with v2 if available
+try:
+    from lp_lite_v2 import check_lp_lock_v2 as _check_lp_lock_v2_new
+    check_lp_lock_v2 = _check_lp_lock_v2_new
+except Exception:
+    pass
 from onchain_inspector import build_onchain_payload
 from renderers_mdx import sanitize_market_fields, age_label
 def _ua():
