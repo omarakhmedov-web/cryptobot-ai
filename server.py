@@ -1045,7 +1045,11 @@ import os as _os
 from onchain_v2 import check_contract_v2
 from renderers_onchain_v2 import render_onchain_v2
 from lp_lite_v2 import check_lp_lock_v2
-from onchain_inspector import build_onchain_payload
+try:
+    from onchain_inspector import build_onchain_payload
+except Exception:
+    # Fallback: alias inspect_token to expected name
+    from onchain_inspector import inspect_token as build_onchain_payload
 from renderers_mdx import sanitize_market_fields, age_label
 def _ua():
     return _os.getenv("HTTP_UA", "MetridexDiag/1.0")
