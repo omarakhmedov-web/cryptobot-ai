@@ -656,6 +656,7 @@ def on_message(msg):
     try:
         _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
         _now = market.get("asOf") or int(time.time())
+    
         if isinstance(_ts, (int, float)) and _ts:
             # normalize milliseconds to seconds when needed
             if _ts > 10_000_000_000:  # looks like ms
@@ -797,6 +798,11 @@ def on_message(msg):
         _short = _map.get(ch_, ch_ or "eth")
         pair_addr = market.get("pairAddress") or resolve_pair(_short, market.get("tokenAddress"))
         info = check_lp_lock_v2(_short, pair_addr)
+        try:
+            if isinstance(info, dict) and not info.get('chain'):
+                info['chain'] = _short
+        except Exception:
+            pass
         lp = render_lp(info, DEFAULT_LANG)
     except TypeError:
         lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
@@ -979,6 +985,24 @@ def on_callback(cb):
                 if isinstance(bundle, dict):
                     bundle['onchain'] = oc
                 ok = bool(oc.get('ok'))
+                # FALLBACK_ONCHAIN_V2: if inspector failed, attempt simplified on-chain v2 renderer
+                if not ok:
+                    try:
+                        text_fb = render_onchain_v2(chain_short, token_addr)
+                        send_message(chat_id, text_fb, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
+                        answer_callback_query(cb_id, 'On-chain (fallback)', False)
+                        return jsonify({'ok': True})
+                    except Exception:
+                        pass
+                # FALLBACK_ONCHAIN_V2: if inspector fails, try minimal v2 path
+                if not ok:
+                    try:
+                        text = render_onchain_v2(chain_short, token_addr)
+                        send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
+                        answer_callback_query(cb_id, 'On-chain (fallback) ready.', False)
+                        return jsonify({'ok': True})
+                    except Exception:
+                        pass
                 def _s(x):
                     try:
                         return str(x) if x is not None else '—'
