@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-# === _MDX_SAFEGUARDS_MODULE ===
-try:
-    _show_links  # type: ignore[name-defined]
-except Exception:
-    _show_links = True  # module-safe default
-try:
-    _show_webintel  # type: ignore[name-defined]
-except Exception:
-    _show_webintel = False  # module-safe default
-# === /_MDX_SAFEGUARDS_MODULE ===
+# === _MDX_LINKS_POLICY ===
+_show_links = False
+_show_webintel = False
+# === /_MDX_LINKS_POLICY ===
 import os
 
 # --- OMEGA-713K D2 risk palette integration (20 -> yellow) ---
