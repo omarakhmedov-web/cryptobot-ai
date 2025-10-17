@@ -846,7 +846,17 @@ def on_message(msg):
         "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
     }
 
-    sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
+        # Prefer editing placeholder message if available (clean UX)
+    if _scan_msg_id:
+        sent = tg("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": _scan_msg_id,
+            "text": mdv2_escape(quick),
+            "parse_mode": PARSE_MODE,
+            "reply_markup": json.dumps(build_keyboard(chat_id, 0, links))
+        })
+    else:
+        sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
     msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
