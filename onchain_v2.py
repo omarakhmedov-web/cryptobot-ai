@@ -53,7 +53,7 @@ def _norm_chain(c: str) -> str:
 def _pick_rpcs(chain: str, rpc_urls: Optional[List[str]]) -> List[str]:
     if rpc_urls and isinstance(rpc_urls, list) and rpc_urls:
         return rpc_urls
-    return _PUBLIC_RPC.get(_norm_chain(chain), [])
+    return (_PUBLIC_RPC.get(_norm_chain(chain), []) or [])[:2]
 
 def _jsonrpc_call(rpc: str, method: str, params: list, timeout: float) -> Optional[dict]:
     payload = {"jsonrpc":"2.0","id":1,"method":method,"params":params}
@@ -145,7 +145,7 @@ def _format_supply(total: Optional[int], decimals: Optional[int]) -> Optional[st
         return None
 
 def check_contract_v2(chain: str, token: str, rpc_urls: Optional[List[str]] = None,
-                      timeout_s: float = 6.0) -> Dict[str, Any]:
+                      timeout_s: float = 3.0) -> Dict[str, Any]:
     rpcs = _pick_rpcs(chain, rpc_urls)
     # Presence
     code = _try_each(rpcs, _eth_get_code, token, timeout_s)
