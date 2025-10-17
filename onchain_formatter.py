@@ -55,6 +55,19 @@ def _parse_token_label(raw: str):
         return name, sym, dec
     return None, None, None
 
+
+def _normalize_owner_display(owner: str) -> str:
+    if not isinstance(owner, str):
+        return owner
+    try:
+        low = owner.lower()
+        # pattern: 0x + 24 zeros + 40-hex tail
+        if low.startswith("0x000000000000000000000000") and len(low) == 66:
+            tail = low[-40:]
+            return "0x" + tail
+    except Exception:
+        pass
+    return owner
 def _short_addr(addr: str, head: int = 6, tail: int = 6) -> str:
     if not isinstance(addr, str) or not addr.startswith("0x") or len(addr) != 42:
         return str(addr)
@@ -88,7 +101,7 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = True) -
     mkt = mkt or {}
 
     # Contract code
-    cc = oc.get("contractCodePresent")
+    cc = oc.get("contractCodePresent") if oc.get("contractCodePresent") is not None else oc.get("codePresent")
     if cc is True:
         cc_line = "Contract code: present"
     elif cc is False:
@@ -165,7 +178,7 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = True) -
 
     # Owner and state
     owner_raw = oc.get("owner")
-    owner_line = "owner: " + _s(_short_addr(owner_raw) if isinstance(owner_raw, str) else owner_raw)
+    owner_line = "owner: " + _s(_short_addr(_normalize_owner_display(owner_raw)) if isinstance(owner_raw, str) else owner_raw)
     renounced = oc.get("renounced")
     if renounced not in (None, "—"):
         owner_line += "  renounced: " + _s(renounced)
