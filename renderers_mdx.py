@@ -197,23 +197,6 @@ def _fmt_age_days(v: Optional[float]) -> str:
         return f"{round(n*24)} h"
     return f"{n:.1f} d"
 
-def _days_from_ts(ts_any) -> Optional[float]:
-    try:
-        if ts_any is None:
-            return None
-        ts = int(ts_any)
-        if ts < 10**12:  # very likely seconds
-            ts_s = ts
-        else:
-            ts_s = ts // 1000
-        # now vs UTC
-        now = int(__import__("time").time())
-        if ts_s <= 0 or ts_s > now:
-            return None
-        return (now - ts_s) / 86400.0
-    except Exception:
-        return None
-
 def _explorer_label(chain: Optional[str]) -> str:
     c = (chain or "").strip().lower()
     if c in ("eth","ethereum"): return "Etherscan"
@@ -225,6 +208,20 @@ def _explorer_label(chain: Optional[str]) -> str:
     if c in ("avalanche","avax"): return "SnowTrace"
     if c in ("fantom","ftm"): return "FTMScan"
     return "Explorer"
+
+def _days_from_ts(ts_any) -> Optional[float]:
+    try:
+        if ts_any is None:
+            return None
+        ts = int(ts_any)
+        ts_s = ts if ts < 10**12 else ts//1000
+        import time as _t
+        now = int(_t.time())
+        if ts_s <= 0 or ts_s > now:
+            return None
+        return (now - ts_s)/86400.0
+    except Exception:
+        return None
 
 def _fmt_time(ts_ms: Optional[int]) -> str:
 
