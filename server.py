@@ -1,3 +1,4 @@
+# MDX_PATCH_2025_10_17 v3
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
 
