@@ -734,11 +734,12 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
                 if _rd.get("created"):   _rd_lines.append(f"• Created: {_rd['created']}")
                 if _rd.get("expires"):   _rd_lines.append(f"• Expires: {_rd['expires']}")
                 if _rd.get("age_days") is not None: _rd_lines.append(f"• Domain age: {_rd['age_days']} d")
-                # Country with fallback: RDAP -> infer_country (rdap-only) -> placeholder
+                # Country with fallback: RDAP -> infer_country(ctx: rdap+whois+ssl) -> placeholder
                 _rd_country_val = _rd.get("country")
                 if not _rd_country_val:
                     try:
-                        _ci = infer_country({"rdap": _rd})
+                        _ctx_local = {"rdap": _rd, "whois": _who if ' _who ' or True else None, "ssl": _ssl if ' _ssl ' or True else None}
+                        _ci = infer_country(_ctx_local)
                         if _ci:
                             _rd_country_val = _ci
                     except Exception:
@@ -757,8 +758,6 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
                 if _rd.get("flags"):     _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
                 parts.append("\n".join(_rd_lines))
 
-    # Links (text) — hidden by default, we have buttons
-    _show_links = _os.getenv("SHOW_LINKS_IN_DETAILS", "0").lower() in ("1","true","yes")
     if _show_links:
         ll = ["*Links*"]
         if l_dex and l_dex != "—": ll.append(f"• DEX: {l_dex}")
