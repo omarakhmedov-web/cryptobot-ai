@@ -146,30 +146,22 @@ def format_onchain_text(oc: dict, mkt: dict, hide_empty_honeypot: bool = True) -
         except Exception:
             pass
 
-    # Honeypot line (with reason/meta) — defensive
-hp_raw = oc.get('honeypot')
-if isinstance(hp_raw, dict):
-    hp = hp_raw
-elif isinstance(hp_raw, (list, tuple)) and len(hp_raw) and isinstance(hp_raw[0], dict):
-    hp = hp_raw[0]
-else:
-    hp = {}
-
-hp_meta = oc.get("honeypot_meta") or {}
-hp_line = None
-if isinstance(hp, dict) and hp:
-    sim = hp.get("simulation") or "—"
-    risk = hp.get("risk") or "—"
-    lvl = hp.get("level")
-    reason = hp_meta.get("reason")
-    suffix_lvl = f" | level={lvl}" if lvl not in (None, "—") else ""
-    suffix_reason = f" ({reason})" if reason and sim == "—" and risk == "—" else ""
-    hp_line = f"Honeypot.is: simulation={sim} | risk={risk}{suffix_lvl}{suffix_reason}"
-if hide_empty_honeypot and hp_line and ("simulation=—" in hp_line and "risk=—" in hp_line):
+    # Honeypot line (with reason/meta)
+    hp = _as_map(oc.get("honeypot"))
+    hp_meta = oc.get("honeypot_meta") or {}
     hp_line = None
-if hide_empty_honeypot and (not hp or ((hp.get("simulation") in (None, '—')) and (hp.get("risk") in (None, '—')) and not hp.get("level"))):
-    hp_line = None
-
+    if hp:
+        sim = hp.get("simulation") or "—"
+        risk = hp.get("risk") or "—"
+        lvl = hp.get("level")
+        reason = hp_meta.get("reason")
+        suffix_lvl = f" | level={lvl}" if lvl not in (None, "—") else ""
+        suffix_reason = f" ({reason})" if reason and sim == "—" and risk == "—" else ""
+        hp_line = f"Honeypot.is: simulation={sim} | risk={risk}{suffix_lvl}{suffix_reason}"
+    if hide_empty_honeypot and hp_line and ("simulation=—" in hp_line and "risk=—" in hp_line):
+        hp_line = None
+    if hide_empty_honeypot and (not hp or ((hp.get("simulation") in (None, '—')) and (hp.get("risk") in (None, '—')) and not hp.get("level"))):
+        hp_line = None
 
     # LP lite
     lp = oc.get("lp_lock_lite") or {}
