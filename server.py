@@ -499,6 +499,19 @@ def send_message_raw(chat_id, text, reply_markup=None):
     if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
     return tg("sendMessage", data)
 
+
+def _safe_send_onchain(chat_id, links, chain_short, token_addr, fallback_reason="fallback"):
+    try:
+        from renderers_onchain_v2 import render_onchain_v2
+        text_fb = render_onchain_v2(chain_short, token_addr)
+        send_message(chat_id, text_fb, reply_markup=build_keyboard(chat_id, 0, links or {}, ctx='onchain'))
+        return True
+    except Exception as _e:
+        try:
+            send_message(chat_id, f"On-chain\nTemporarily unavailable ({fallback_reason})", reply_markup=None)
+        except Exception:
+            pass
+        return False
 def answer_callback_query(cb_id, text, show_alert=False):
     return tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": str(text), "show_alert": bool(show_alert)})
 
@@ -867,7 +880,6 @@ def on_message(msg):
 
 
 def on_callback(cb):
-    ok = True  # guard to avoid NameError
     cb_id = cb["id"]
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
