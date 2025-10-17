@@ -1,3 +1,4 @@
+# MDX_PATCH_2025_10_17 v3 — polygon RPCs + timeout 2.5s
 # onchain_v2.py — Metridex On-chain (no proxies, no new ENV)
 from __future__ import annotations
 from typing import Optional, Dict, Any, List
@@ -23,8 +24,8 @@ _PUBLIC_RPC = {
         "https://bsc.publicnode.com",
     ],
     "polygon": [
-        "https://polygon-rpc.com",
         "https://polygon-bor.publicnode.com",
+        "https://polygon-rpc.com",
         "https://rpc.ankr.com/polygon",
         "https://polygon.llamarpc.com",
         "https://polygon-rpc.publicnode.com",
