@@ -1028,7 +1028,7 @@ def render_lp(info: dict, lang: str = "en") -> str:
         s = (s or "").lower()
         return {"eth":"Ethereum","bsc":"BSC","polygon":"Polygon"}.get(s, s.capitalize() if s else "—")
     lines.append(f"LP lock (lite) — {_cap(chain)}")
-    status_map = {"burned":"burned","locked-partial":"locked-partial","v3-nft":"v3-NFT","unknown":"unknown"}
+    status_map = {"burned":"burned","locked-partial":"locked-partial","unlocked":"unlocked","v3-nft":"v3-NFT","unknown":"unknown"}
 
     if data and isinstance(data, dict):
         status = status_map.get(str(data.get("status")),"unknown")
@@ -1039,6 +1039,30 @@ def render_lp(info: dict, lang: str = "en") -> str:
         else:
             burned = data.get("burnedPct")
             locked = data.get("lockedPct")
+            # Correct LP status normalization
+            try:
+                _locked_val = float(locked) if locked is not None else None
+            except Exception:
+                _locked_val = None
+            _locked_by = (data.get("lockedBy") or "").strip()
+            if status != "v3-NFT" and _locked_val is not None:
+                if _locked_val <= 0.0:
+                    status = "unlocked"
+                elif 0.0 < _locked_val < 100.0 and _locked_by not in ("", "—"):
+                    status = "locked-partial"
+            # Normalize status based on lockedPct and provider
+            try:
+                _locked_val = float(locked) if locked is not None else None
+            except Exception:
+                _locked_val = None
+            lk_by = data.get("lockedBy") or "—"
+            if status != "v3-NFT":
+                if _locked_val is not None:
+                    if _locked_val <= 0.0:
+                        status = "unlocked"
+                    elif _locked_val < 100.0 and lk_by != "—":
+                        status = "locked-partial"
+                    # else keep prior status
             def _fmt_pct(x):
                 try:
                     return f"{float(x):.2f}%"
