@@ -43,7 +43,7 @@ ALT_ENV = {
 PUBLIC_RPC = {
     "eth": ["https://ethereum.publicnode.com", "https://rpc.ankr.com/eth"],
     "bsc": ["https://bsc-dataseed.binance.org", "https://rpc.ankr.com/bsc"],
-    "polygon": ["https://polygon-rpc.com", "https://rpc.ankr.com/polygon"],
+    "polygon": ["https://polygon-rpc.com", "https://polygon-bor.publicnode.com", "https://rpc.ankr.com/polygon", "https://polygon.llamarpc.com", "https://polygon-rpc.publicnode.com"],
     "arb": ["https://arb1.arbitrum.io/rpc", "https://rpc.ankr.com/arbitrum"],
     "op": ["https://mainnet.optimism.io", "https://rpc.ankr.com/optimism"],
     "base": ["https://mainnet.base.org"],
