@@ -51,6 +51,46 @@ PUBLIC_RPC = {
     "ftm": ["https://rpc.ftm.tools", "https://rpc.ankr.com/fantom"],
 }
 
+
+def _rpc_candidates_for_chain(short: str) -> list[str]:
+    """Return a list of RPC endpoints to try for the given chain, ordered by priority.
+    Includes primary/alt envs, JSON map, and all known public RPCs for the chain.
+    """
+    short = (short or "").lower().strip()
+    cands: list[str] = []
+
+    # Primary env (highest priority)
+    ek = CHAIN_RPC_ENV.get(short)
+    if ek:
+        v = (os.getenv(ek, "") or "").strip()
+        if v: cands.append(v)
+
+    # Alternate envs
+    for name in ALT_ENV.get(short, []):
+        v = (os.getenv(name, "") or "").strip()
+        if v and v not in cands:
+            cands.append(v)
+
+    # JSON map
+    try:
+        raw = (os.getenv("RPC_URLS", "") or "").strip()
+        if raw:
+            j = json.loads(raw)
+            if isinstance(j, dict):
+                v = (j.get(short) or "").strip() if isinstance(j.get(short), str) else ""
+                if v and v not in cands:
+                    cands.append(v)
+    except Exception:
+        pass
+
+    # All public RPCs for the chain
+    for v in PUBLIC_RPC.get(short, []):
+        if v and v not in cands:
+            cands.append(v)
+
+    return cands
+
+
 def _rpc_for_chain(short: str) -> Optional[str]:
     short = (short or "").strip().lower()
     if not short:
@@ -399,8 +439,10 @@ _INSPECT_CACHE: Dict[Tuple[str,str,str], Tuple[float, dict]] = {}
 _INSPECT_TTL = 30.0  # seconds
 
 def inspect_token(chain_short: str, token_address: str, pair_address: Optional[str] = None) -> Dict[str, Any]:
+    # _TRY_MULTI_RPC
     short = (chain_short or "").lower().strip()
-    rpc = _rpc_for_chain(short)
+    candidates = _rpc_candidates_for_chain(short)
+    rpc = candidates[0] if candidates else None
     if not (rpc and isinstance(token_address, str) and token_address.startswith("0x") and len(token_address)==42):
         return {"ok": False, "error": "rpc or token invalid"}
 
@@ -413,6 +455,27 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
     res: Dict[str, Any] = {"ok": True, "chain": short, "token": token_address}
 
     # ERC-20 meta
+    # Try multiple RPC endpoints until one succeeds for basic reads
+    last_err = None
+    for _rpc_try in (candidates or [rpc]):
+        rpc = _rpc_try
+        try:
+            name_hex = _eth_call(rpc, token_address, SIG_NAME)
+            sym_hex  = _eth_call(rpc, token_address, SIG_SYMBOL)
+            dec_hex  = _eth_call(rpc, token_address, SIG_DECIMALS)
+            # Minimal success criterion: got code or at least decimals
+            code_present = _has_code(rpc, token_address)
+            decimals = _decode_u256(dec_hex)
+            # If read worked, keep this rpc and break
+            if code_present is not None or decimals is not None:
+                break
+        except Exception as e:
+            last_err = e
+            continue
+    # Now proceed with the last tried rpc (best-effort)
+    name_hex = _eth_call(rpc, token_address, SIG_NAME)
+    sym_hex  = _eth_call(rpc, token_address, SIG_SYMBOL)
+    dec_hex  = _eth_call(rpc, token_address, SIG_DECIMALS)
     name_hex = _eth_call(rpc, token_address, SIG_NAME)
     sym_hex  = _eth_call(rpc, token_address, SIG_SYMBOL)
     dec_hex  = _eth_call(rpc, token_address, SIG_DECIMALS)
