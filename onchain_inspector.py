@@ -1,9 +1,8 @@
-# MDX_PATCH_2025_10_17 v3 — inspector polygon RPCs + timeout 2.5s
+# MDX_PATCH_2025_10_17 v4 — inspector polygon RPCs + timeout 2.5s
 import os, json, typing, time, re
 from typing import Optional, Dict, Any, Tuple
 from copy import deepcopy
 import requests
-TIMEOUT_SECONDS = 2.5  # MDX_PATCH_2025_10_17 v3
 
 # ===== Constants & Selectors =====
 ZERO = "0x0000000000000000000000000000000000000000"
@@ -45,9 +44,7 @@ ALT_ENV = {
 PUBLIC_RPC = {
     "eth": ["https://ethereum.publicnode.com", "https://rpc.ankr.com/eth"],
     "bsc": ["https://bsc-dataseed.binance.org", "https://rpc.ankr.com/bsc"],
-    "polygon": [
-    "https://polygon-bor.publicnode.com", "https://polygon-rpc.com", "https://rpc.ankr.com/polygon", "https://polygon.llamarpc.com", "https://polygon-rpc.publicnode.com"
-  ],
+    "polygon": [ "https://polygon-bor.publicnode.com", "https://polygon-rpc.com", "https://rpc.ankr.com/polygon", "https://polygon.llamarpc.com", "https://polygon-rpc.publicnode.com" ],
     "arb": ["https://arb1.arbitrum.io/rpc", "https://rpc.ankr.com/arbitrum"],
     "op": ["https://mainnet.optimism.io", "https://rpc.ankr.com/optimism"],
     "base": ["https://mainnet.base.org"],
@@ -551,3 +548,5 @@ def build_onchain_payload(chain_short: str, token_address: str, pair_address: Op
         return inspect_token(chain_short, token_address, pair_address)
     except Exception as e:
         return {"ok": False, "error": str(e), "chain": (chain_short or "").lower(), "token": token_address}
+
+TIMEOUT_SECONDS = 2.5  # MDX_PATCH_2025_10_17 v4
