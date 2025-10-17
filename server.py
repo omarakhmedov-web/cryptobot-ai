@@ -1048,9 +1048,22 @@ from lp_lite_v2 import check_lp_lock_v2
 try:
     from onchain_inspector import build_onchain_payload
 except Exception:
-    # Fallback: alias inspect_token to expected name
     from onchain_inspector import inspect_token as build_onchain_payload
-from renderers_mdx import sanitize_market_fields, age_label
+try:
+    from renderers_mdx import sanitize_market_fields, age_label
+except Exception:
+    def sanitize_market_fields(mkt: dict | None):
+        return mkt or {}
+    def age_label(ms: int | None):
+        try:
+            v = int(ms) if ms is not None else 0
+        except Exception:
+            v = 0
+        if v <= 0:
+            return "—"
+        days = max(1, round(v / (1000*60*60*24)))
+        return f"~{days} d"
+
 def _ua():
     return _os.getenv("HTTP_UA", "MetridexDiag/1.0")
 def _http_get_json(url, timeout=10, headers=None):
