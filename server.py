@@ -367,6 +367,210 @@ PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
 
+# === NOWPayments integration (invoices + IPN) ================================
+import requests as _rq_np
+from flask import redirect as _redirect, Response as _Response
+
+# Entitlements (simple JSON file) — minimal, non-invasive
+_PRO_DB_PATH = os.getenv("PRO_USERS_DB_PATH", "./pro_users.json")
+
+def _load_pro_db():
+    try:
+        with open(_PRO_DB_PATH, "r", encoding="utf-8") as f:
+            j = json.load(f)
+            return j if isinstance(j, dict) else {}
+    except Exception:
+        return {}
+
+def _save_pro_db(db: dict):
+    try:
+        with open(_PRO_DB_PATH, "w", encoding="utf-8") as f:
+            json.dump(db or {}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _grant_plan(chat_id: int, plan: str, days: int):
+    db = _load_pro_db()
+    now = int(time.time())
+    # Store expiry as unix seconds
+    cur = db.get(str(chat_id), {})
+    exp_old = int(cur.get("expires", 0))
+    exp_base = max(exp_old, now)
+    expires = exp_base + days*24*3600
+    db[str(chat_id)] = {"plan": plan, "granted_at": now, "expires": expires}
+    _save_pro_db(db)
+    return expires
+
+def _plan_defaults(plan: str):
+    plan = (plan or "").strip().lower()
+    if plan in ("day","daypass","day-pass","pass"):
+        return {"amount": 9, "label": os.getenv("CRYPTO_LABEL_DAYPASS") or "Day Pass — $9", "days": 1}
+    if plan in ("deep","report","deep-report","deep_report"):
+        return {"amount": 3, "label": os.getenv("CRYPTO_LABEL_DEEP") or "Deep report — $3", "days": 0}
+    if plan in ("teams","team"):
+        return {"amount": 99, "label": os.getenv("CRYPTO_LABEL_TEAMS") or "Teams — from $99", "days": 30}
+    # default: pro
+    return {"amount": 29, "label": os.getenv("CRYPTO_LABEL_PRO") or "Pro — $29", "days": 30}
+
+def _resolve_chat_id_from_query(args):
+    for k in ("u","uid","chat","chat_id","tg","user","user_id"):
+        v = args.get(k)
+        if v is None: continue
+        try:
+            return int(str(v).strip())
+        except Exception:
+            pass
+    return None
+
+def _build_order_id(chat_id, plan):
+    ts = int(time.time())
+    rand = uuid.uuid4().hex[:8]
+    return f"tg:{chat_id}:{plan}:{ts}:{rand}"
+
+def _now_invoice_url_from_base(base_link: str, invoice_id: str) -> str:
+    base_link = (base_link or "").strip()
+    if not base_link:
+        return None
+    # If base already includes ?iid= or endswith '=' — append; else assume it's a template needing invoice_id concatenation
+    if "iid=" in base_link or base_link.endswith("="):
+        return f"{base_link}{invoice_id}"
+    # Otherwise, if it's a canonical invoice_url already, just return it
+    return base_link
+
+def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str):
+    api_key = (os.getenv("NOWPAYMENTS_API_KEY") or "").strip()
+    if not api_key:
+        return {"ok": False, "error": "NOWPAYMENTS_API_KEY is not set"}
+    payload = {
+        "price_amount": float(amount_usd),
+        "price_currency": "usd",
+        "order_id": order_id,
+        "order_description": order_desc,
+        "is_fixed_rate": True,
+        "is_fee_paid_by_user": True,
+        "ipn_callback_url": ipn_url,
+    }
+    if success_url: payload["success_url"] = success_url
+    if cancel_url:  payload["cancel_url"]  = cancel_url
+    try:
+        r = _rq_np.post("https://api.nowpayments.io/v1/invoice", json=payload, timeout=12, headers={"x-api-key": api_key})
+        j = r.json() if r.headers.get("content-type","").startswith("application/json") else {"error": r.text}
+        if r.ok and isinstance(j, dict) and (j.get("invoice_id") or j.get("id")):
+            return {"ok": True, "json": j}
+        return {"ok": False, "status": r.status_code, "json": j}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.get("/api/now/invoice")
+def now_create_invoice():
+    # plan & optional overrides
+    plan_raw = request.args.get("plan","pro")
+    p = _plan_defaults(plan_raw)
+    amount = float(request.args.get("amount", p["amount"]))
+    base = (os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    chat_id = _resolve_chat_id_from_query(request.args)  # try to capture user id if buttons passed it
+    if not chat_id:
+        # Soft fallback: allow pass-through; we'll still create invoice, but we can't auto-activate
+        pass
+    ipn_secret = (os.getenv("CRYPTO_WEBHOOK_SECRET") or "").strip() or "generic"
+    ipn_url = f"{base}/crypto_webhook/{ipn_secret}" if base else None
+    success_url = os.getenv("NOWPAYMENTS_SUCCESS_URL", "") or (f"{base}/health" if base else None)
+    cancel_url  = os.getenv("NOWPAYMENTS_CANCEL_URL",  "") or (f"{base}/health" if base else None)
+    # Order metadata
+    order_id = _build_order_id(chat_id or "anon", (plan_raw or "pro"))
+    desc = p["label"]
+    res = _np_create_invoice(amount, order_id, desc, success_url, cancel_url, ipn_url)
+    if not res.get("ok"):
+        # If API key absent but CRYPTO_LINK_* present, attempt naive redirect
+        msg = res.get("error") or res.get("json") or "invoice_create_failed"
+        return jsonify({"ok": False, "error": msg}), 500
+    j = res["json"]
+    invoice_id = j.get("invoice_id") or j.get("id") or ""
+    invoice_url = j.get("invoice_url") or ""
+    # Prefer env CRYPTO_LINK_* base if provided
+    cl_map = {
+        "deep":  os.getenv("CRYPTO_LINK_DEEP",""),
+        "day":   os.getenv("CRYPTO_LINK_DAYPASS",""),
+        "pro":   os.getenv("CRYPTO_LINK_PRO",""),
+        "teams": os.getenv("CRYPTO_LINK_TEAMS",""),
+    }
+    key = "deep" if plan_raw.lower().startswith("deep") else ("day" if plan_raw.lower().startswith("day") else ("teams" if plan_raw.lower().startswith("team") else "pro"))
+    prefer = cl_map.get(key) or ""
+    final_url = _now_invoice_url_from_base(prefer, invoice_id) or invoice_url
+    if not final_url:
+        return jsonify({"ok": False, "error": "no_invoice_url"}), 500
+    # HTTP 302 to hosted payment page
+    return _redirect(final_url, code=302)
+
+# Extend can_scan override to honor paid users from JSON DB
+def _paid_ids():
+    try:
+        db = _load_pro_db()
+        now = int(time.time())
+        return {int(k) for k,v in db.items() if isinstance(v, dict) and int(v.get("expires",0)) > now}
+    except Exception:
+        return set()
+
+_can_scan_orig_ref = can_scan
+
+def can_scan(chat_id: int):
+    try:
+        # Owners/admins still bypass
+        if int(chat_id) in _owner_ids():
+            return True, "Pro (owner)"
+        # Paid users from our lightweight DB
+        if int(chat_id) in _paid_ids():
+            return True, "Pro (paid)"
+    except Exception:
+        pass
+    # Delegate to original logic
+    if _can_scan_orig_ref and _can_scan_orig_ref is not can_scan:
+        return _can_scan_orig_ref(chat_id)
+    return False, "Free"
+
+# IPN webhook: verify HMAC and activate plan
+@app.post("/crypto_webhook/<secret>")
+def np_ipn(secret):
+    expected_secret = (os.getenv("CRYPTO_WEBHOOK_SECRET") or "").strip()
+    if expected_secret and secret != expected_secret:
+        return jsonify({"ok": False, "error": "bad secret"}), 403
+    try:
+        raw = request.get_data()  # bytes
+    except Exception:
+        raw = b""
+    sig = request.headers.get("x-nowpayments-sig","").strip().lower()
+    calc = hmac.new((os.getenv("CRYPTO_WEBHOOK_HMAC") or "").encode("utf-8"), raw, hashlib.sha512).hexdigest()
+    if not sig or sig != calc.lower():
+        return jsonify({"ok": False, "error": "bad signature"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    status = (data.get("payment_status") or data.get("paymentStatus") or "").lower()
+    order_id = str(data.get("order_id") or data.get("orderId") or "")
+    invoice_id = str(data.get("invoice_id") or data.get("invoiceId") or "")
+    if status not in ("finished","confirmed","confirming","partially_paid"):
+        return jsonify({"ok": True, "ignored": status})
+    # Parse chat_id and plan from order_id: tg:<chat_id>:<plan>:...
+    chat_id = None; plan = "pro"
+    try:
+        parts = order_id.split(":")
+        if len(parts) >= 3 and parts[0] == "tg":
+            chat_id = int(parts[1]); plan = parts[2]
+    except Exception:
+        pass
+    if not chat_id:
+        # We can't identify the user; acknowledge but do nothing
+        return jsonify({"ok": True, "no_user": True})
+    # Activate entitlement on finished/confirmed
+    if status in ("finished","confirmed"):
+        days = _plan_defaults(plan).get("days", 30)
+        exp = _grant_plan(chat_id, plan, days)
+        try:
+            exp_dt = dt.datetime.utcfromtimestamp(exp).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            exp_dt = str(exp)
+        send_message(chat_id, f"✅ *{plan.capitalize()}* activated. Expires: {exp_dt}")
+    return jsonify({"ok": True, "chat_id": chat_id, "status": status, "invoice_id": invoice_id})
+# === /NOWPayments integration ================================================
+
 
 # --- OMEGA-713K: known domains override (website hints) ---
 def _load_known_domains(path: str = "known_domains.json"):
@@ -509,12 +713,40 @@ def parse_cb(data: str):
     return m.group(1), int(m.group(2)), int(m.group(3))
 
 def _pricing_links():
+    """
+    Returns pricing/upgrade links. Prefers CRYPTO_* env (NOWPayments) if present.
+    Fallbacks:
+      - If CRYPTO_LINK_* provided: use them
+      - Else: point to internal invoice endpoint /api/now/invoice?plan=...
+      - Else: use static *URL envs (DEEP_REPORT_URL, PRO_URL, ...)
+    """
+    import os as _os, urllib.parse as _up
+    base = (_os.getenv("PUBLIC_URL") or _os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    # NOWPayments-style link bases (may be like https://nowpayments.io/payment/?iid=)
+    cl_deep  = (_os.getenv("CRYPTO_LINK_DEEP") or "").strip()
+    cl_day   = (_os.getenv("CRYPTO_LINK_DAYPASS") or "").strip()
+    cl_pro   = (_os.getenv("CRYPTO_LINK_PRO") or "").strip()
+    cl_teams = (_os.getenv("CRYPTO_LINK_TEAMS") or "").strip()
+
+    def _pref(link_base, plan):
+        # If set -> use as-is; else if server has public URL -> internal invoice; else -> fallback static URL
+        if link_base:
+            return link_base
+        if base:
+            return f"{base}/api/now/invoice?plan={_up.quote(plan)}"
+        # Final fallback: previous static URLs
+        if plan == "deep":   return DEEP_REPORT_URL
+        if plan == "day":    return DAY_PASS_URL
+        if plan == "pro":    return PRO_URL
+        if plan == "teams":  return TEAMS_URL
+        return HELP_URL
+
     return {
-        "deep_report": DEEP_REPORT_URL,
-        "day_pass": DAY_PASS_URL,
-        "pro": PRO_URL,
-        "teams": TEAMS_URL,
-        "help": HELP_URL,
+        "deep_report": _pref(cl_deep, "deep"),
+        "day_pass":    _pref(cl_day, "day"),
+        "pro":         _pref(cl_pro, "pro"),
+        "teams":       _pref(cl_teams, "teams"),
+        "help":        HELP_URL,
     }
 
 def build_hint_quickscan(clickable: bool) -> str:
