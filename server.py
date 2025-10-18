@@ -367,24 +367,25 @@ PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
 
-# === NOWPayments integration (lock low-price to USDT-BSC) ====================
+# === NOWPayments: locked low-price to USDT-BSC (no duplicates) ===============
 import requests as _rq_np
 from flask import redirect as _redirect
 
 def _plan_defaults(plan: str):
-    plan = (plan or "").strip().lower()
-    if plan.startswith("deep"):
+    p = (plan or "").strip().lower()
+    if p.startswith("deep"):
         return {"amount": 3, "label": os.getenv("CRYPTO_LABEL_DEEP") or "Deep report — $3", "days": 0}
-    if plan.startswith("day"):
+    if p.startswith("day"):
         return {"amount": 9, "label": os.getenv("CRYPTO_LABEL_DAYPASS") or "Day Pass — $9", "days": 1}
-    if plan.startswith("team"):
+    if p.startswith("team"):
         return {"amount": 99, "label": os.getenv("CRYPTO_LABEL_TEAMS") or "Teams — from $99", "days": 30}
     return {"amount": 29, "label": os.getenv("CRYPTO_LABEL_PRO") or "Pro — $29", "days": 30}
 
 def _resolve_chat_id_from_query(args):
     for k in ("u","uid","chat","chat_id","tg","user","user_id"):
         v = args.get(k)
-        if v is None: continue
+        if v is None: 
+            continue
         try:
             return int(str(v).strip())
         except Exception:
@@ -403,13 +404,12 @@ def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, succes
     plan_key = (plan_key or "").lower().strip()
     low_ticket = (plan_key.startswith("deep") or plan_key.startswith("day") or float(amount_usd) < 15.0)
 
-    # Lock logic:
-    #  - Low-ticket: no fixed-rate, pay_currency = usdtbsc (MetaMask-friendly, low min)
-    #  - High-ticket: fixed-rate ON by default, pay_currency from env or default bnbbsc
+    # Lock for low-ticket
     if low_ticket:
         is_fixed_rate = False
-        pay_currency = "usdtbsc"
+        pay_currency = "usdtbsc"   # USDT on BSC (MetaMask-friendly, low min)
     else:
+        # For higher tickets: fixed rate ON by default, currency can be overridden via env
         is_fixed_rate = True if os.getenv("NOWPAYMENTS_FIXED_RATE") is None else bool(int(os.getenv("NOWPAYMENTS_FIXED_RATE","1")))
         pay_currency = (os.getenv("NOWPAYMENTS_PAY_CURRENCY_HIGH") or os.getenv("NOWPAYMENTS_PAY_CURRENCY") or "bnbbsc").strip().lower()
 
@@ -452,7 +452,7 @@ def now_create_invoice():
     j = res["json"]
     invoice_url = j.get("invoice_url") or ""
     return _redirect(invoice_url, code=302)
-# === /NOWPayments lock =======================================================
+# === /NOWPayments single-route ==============================================
 
 # === NOWPayments integration (invoices + IPN) ================================
 import requests as _rq_np
@@ -548,46 +548,6 @@ def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, succes
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-@app.get("/api/now/invoice")
-def now_create_invoice():
-    # plan & optional overrides
-    plan_raw = request.args.get("plan","pro")
-    p = _plan_defaults(plan_raw)
-    amount = float(request.args.get("amount", p["amount"]))
-    base = (os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
-    chat_id = _resolve_chat_id_from_query(request.args)  # try to capture user id if buttons passed it
-    if not chat_id:
-        # Soft fallback: allow pass-through; we'll still create invoice, but we can't auto-activate
-        pass
-    ipn_secret = (os.getenv("CRYPTO_WEBHOOK_SECRET") or "").strip() or "generic"
-    ipn_url = f"{base}/crypto_webhook/{ipn_secret}" if base else None
-    success_url = os.getenv("NOWPAYMENTS_SUCCESS_URL", "") or (f"{base}/health" if base else None)
-    cancel_url  = os.getenv("NOWPAYMENTS_CANCEL_URL",  "") or (f"{base}/health" if base else None)
-    # Order metadata
-    order_id = _build_order_id(chat_id or "anon", (plan_raw or "pro"))
-    desc = p["label"]
-    res = _np_create_invoice(amount, order_id, desc, success_url, cancel_url, ipn_url)
-    if not res.get("ok"):
-        # If API key absent but CRYPTO_LINK_* present, attempt naive redirect
-        msg = res.get("error") or res.get("json") or "invoice_create_failed"
-        return jsonify({"ok": False, "error": msg}), 500
-    j = res["json"]
-    invoice_id = j.get("invoice_id") or j.get("id") or ""
-    invoice_url = j.get("invoice_url") or ""
-    # Prefer env CRYPTO_LINK_* base if provided
-    cl_map = {
-        "deep":  os.getenv("CRYPTO_LINK_DEEP",""),
-        "day":   os.getenv("CRYPTO_LINK_DAYPASS",""),
-        "pro":   os.getenv("CRYPTO_LINK_PRO",""),
-        "teams": os.getenv("CRYPTO_LINK_TEAMS",""),
-    }
-    key = "deep" if plan_raw.lower().startswith("deep") else ("day" if plan_raw.lower().startswith("day") else ("teams" if plan_raw.lower().startswith("team") else "pro"))
-    prefer = cl_map.get(key) or ""
-    final_url = _now_invoice_url_from_base(prefer, invoice_id) or invoice_url
-    if not final_url:
-        return jsonify({"ok": False, "error": "no_invoice_url"}), 500
-    # HTTP 302 to hosted payment page
-    return _redirect(final_url, code=302)
 
 # Extend can_scan override to honor paid users from JSON DB
 def _paid_ids():
