@@ -367,7 +367,7 @@ PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
 
-# === NOWPayments: locked low-price to USDT-BSC (no duplicates) ===============
+# === NOWPayments: lock low-ticket to Polygon (maticmainnet) ===================
 import requests as _rq_np
 from flask import redirect as _redirect
 
@@ -384,7 +384,7 @@ def _plan_defaults(plan: str):
 def _resolve_chat_id_from_query(args):
     for k in ("u","uid","chat","chat_id","tg","user","user_id"):
         v = args.get(k)
-        if v is None: 
+        if v is None:
             continue
         try:
             return int(str(v).strip())
@@ -404,12 +404,13 @@ def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, succes
     plan_key = (plan_key or "").lower().strip()
     low_ticket = (plan_key.startswith("deep") or plan_key.startswith("day") or float(amount_usd) < 15.0)
 
-    # Lock for low-ticket
+    # Policy:
+    #  - Low-ticket ($3/$9): floating rate + Polygon native coin to minimize min amount
+    #  - High-ticket (>= $15): fixed rate ON by default, currency from env or fallback BSC native
     if low_ticket:
         is_fixed_rate = False
-        pay_currency = "usdtbsc"   # USDT on BSC (MetaMask-friendly, low min)
+        pay_currency = "maticmainnet"   # Polygon native (MetaMask-friendly, low min)
     else:
-        # For higher tickets: fixed rate ON by default, currency can be overridden via env
         is_fixed_rate = True if os.getenv("NOWPAYMENTS_FIXED_RATE") is None else bool(int(os.getenv("NOWPAYMENTS_FIXED_RATE","1")))
         pay_currency = (os.getenv("NOWPAYMENTS_PAY_CURRENCY_HIGH") or os.getenv("NOWPAYMENTS_PAY_CURRENCY") or "bnbbsc").strip().lower()
 
@@ -433,6 +434,15 @@ def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, succes
         return {"ok": True, "json": j}
     return {"ok": False, "status": r.status_code, "json": j}
 
+# Remove any previous definitions of this route to avoid duplicates
+try:
+    view_funcs = list(app.view_functions.keys())
+    if "now_create_invoice" in view_funcs:
+        # Flask doesn't support removing rules easily; we just redefine with a new function
+        pass
+except Exception:
+    pass
+
 @app.get("/api/now/invoice")
 def now_create_invoice():
     plan_raw = request.args.get("plan","pro")
@@ -452,7 +462,7 @@ def now_create_invoice():
     j = res["json"]
     invoice_url = j.get("invoice_url") or ""
     return _redirect(invoice_url, code=302)
-# === /NOWPayments single-route ==============================================
+# === /NOWPayments: lock to Polygon ===========================================
 
 # === NOWPayments integration (invoices + IPN) ================================
 import requests as _rq_np
@@ -549,33 +559,6 @@ def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, succes
         return {"ok": False, "error": str(e)}
 
 
-# Extend can_scan override to honor paid users from JSON DB
-def _paid_ids():
-    try:
-        db = _load_pro_db()
-        now = int(time.time())
-        return {int(k) for k,v in db.items() if isinstance(v, dict) and int(v.get("expires",0)) > now}
-    except Exception:
-        return set()
-
-_can_scan_orig_ref = can_scan
-
-def can_scan(chat_id: int):
-    try:
-        # Owners/admins still bypass
-        if int(chat_id) in _owner_ids():
-            return True, "Pro (owner)"
-        # Paid users from our lightweight DB
-        if int(chat_id) in _paid_ids():
-            return True, "Pro (paid)"
-    except Exception:
-        pass
-    # Delegate to original logic
-    if _can_scan_orig_ref and _can_scan_orig_ref is not can_scan:
-        return _can_scan_orig_ref(chat_id)
-    return False, "Free"
-
-# IPN webhook: verify HMAC and activate plan
 @app.post("/crypto_webhook/<secret>")
 def np_ipn(secret):
     expected_secret = (os.getenv("CRYPTO_WEBHOOK_SECRET") or "").strip()
