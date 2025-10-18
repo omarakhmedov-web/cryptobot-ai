@@ -437,21 +437,43 @@ def _now_invoice_url_from_base(base_link: str, invoice_id: str) -> str:
     # Otherwise, if it's a canonical invoice_url already, just return it
     return base_link
 
-def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str):
+
+def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str, plan_key: str):
     api_key = (os.getenv("NOWPAYMENTS_API_KEY") or "").strip()
     if not api_key:
         return {"ok": False, "error": "NOWPAYMENTS_API_KEY is not set"}
+
+    # --- Fixed-rate logic ---
+    fixed_rate_env = os.getenv("NOWPAYMENTS_FIXED_RATE")
+    # Auto: disable fixed-rate for small amounts to avoid "amountTo is too small"
+    is_fixed_rate = (bool(int(fixed_rate_env)) if fixed_rate_env is not None else (float(amount_usd) >= 15.0))
+
+    # --- Pay-currency selection (MetaMask-friendly) ---
+    plan_key = (plan_key or "").strip().lower()
+    low_plan = plan_key.startswith("deep") or plan_key.startswith("day")
+    # Explicit override wins
+    pay_curr = (os.getenv("NOWPAYMENTS_PAY_CURRENCY") or "").strip().lower()
+    if not pay_curr:
+        if low_plan or float(amount_usd) < 15.0:
+            # Low-ticket default: Polygon native (low fees, MetaMask-ready)
+            pay_curr = (os.getenv("NOWPAYMENTS_PAY_CURRENCY_LOW") or "maticmainnet").strip().lower()
+        else:
+            # Higher-ticket default: BSC native
+            pay_curr = (os.getenv("NOWPAYMENTS_PAY_CURRENCY_HIGH") or "bnbbsc").strip().lower()
+
     payload = {
         "price_amount": float(amount_usd),
         "price_currency": "usd",
         "order_id": order_id,
         "order_description": order_desc,
-        "is_fixed_rate": True,
-        "is_fee_paid_by_user": True,
+        "is_fixed_rate": is_fixed_rate,
+        "is_fee_paid_by_user": bool(int(os.getenv("NOWPAYMENTS_FEE_PAID_BY_USER", "1"))),
         "ipn_callback_url": ipn_url,
+        "pay_currency": pay_curr,
     }
     if success_url: payload["success_url"] = success_url
     if cancel_url:  payload["cancel_url"]  = cancel_url
+
     try:
         r = _rq_np.post("https://api.nowpayments.io/v1/invoice", json=payload, timeout=12, headers={"x-api-key": api_key})
         j = r.json() if r.headers.get("content-type","").startswith("application/json") else {"error": r.text}
@@ -462,6 +484,7 @@ def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, succes
         return {"ok": False, "error": str(e)}
 
 @app.get("/api/now/invoice")
+
 def now_create_invoice():
     # plan & optional overrides
     plan_raw = request.args.get("plan","pro")
@@ -479,7 +502,7 @@ def now_create_invoice():
     # Order metadata
     order_id = _build_order_id(chat_id or "anon", (plan_raw or "pro"))
     desc = p["label"]
-    res = _np_create_invoice(amount, order_id, desc, success_url, cancel_url, ipn_url)
+    res = _np_create_invoice(amount, order_id, desc, success_url, cancel_url, ipn_url, plan_raw.lower())
     if not res.get("ok"):
         # If API key absent but CRYPTO_LINK_* present, attempt naive redirect
         msg = res.get("error") or res.get("json") or "invoice_create_failed"
