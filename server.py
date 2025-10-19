@@ -894,6 +894,15 @@ def on_message(msg):
     if not ok:
         send_message(chat_id, "Free scans exhausted. Use /upgrade.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
+    # --- Processing indicator (safe, minimal) ---
+    ph = send_message(chat_id, "Processing…")
+    ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
+    try:
+        tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    except Exception:
+        pass
+    # --- /Processing indicator ---
+
 
     # QuickScan flow
     try:
@@ -1122,6 +1131,14 @@ def on_message(msg):
             })
         except Exception as e:
             print("editMessageReplyMarkup failed:", e)
+
+    # --- Remove processing indicator if present ---
+    if 'ph_id' in locals() and ph_id:
+        try:
+            tg("deleteMessage", {"chat_id": chat_id, "message_id": ph_id})
+        except Exception:
+            pass
+    # --- /Remove processing indicator ---
     register_scan(chat_id)
     return jsonify({"ok": True})
 
