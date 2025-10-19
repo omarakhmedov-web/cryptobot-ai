@@ -1792,7 +1792,7 @@ def _np_create_invoice_smart(amount_usd: float, order_id: str, order_desc: str, 
     if low_ticket:
         # Default list excludes TRC20 since it's not available in your account;
         # adjust via env NOWPAY_LOW_TICKET_CURRENCIES if needed.
-        raw_list = os.getenv("NOWPAY_LOW_TICKET_CURRENCIES", "usdtbsc,usdtmatic,ton,trx,ltc,xrp,xlm,bnbbsc")
+        raw_list = os.getenv("NOWPAY_LOW_TICKET_CURRENCIES", "ton,usdtbsc,usdtmatic,bnbbsc,maticmainnet")
         candidates = [c.strip() for c in raw_list.split(",") if c.strip()]
         last_err = None
         for cur in candidates:
@@ -1805,9 +1805,20 @@ def _np_create_invoice_smart(amount_usd: float, order_id: str, order_desc: str, 
                 last_err = res
                 continue
             return res
-        return last_err or {"ok": False, "error": "All low-ticket currencies failed"}
+        res = _try_create(None, is_fixed_rate=False)
+        if res.get('ok'):
+            return res
+        return last_err or {'ok': False, 'error': 'All low-ticket currencies failed (and generic invoice failed)'}
     else:
         is_fixed = True if os.getenv("NOWPAYMENTS_FIXED_RATE") is None else bool(int(os.getenv("NOWPAYMENTS_FIXED_RATE","1")))
         pay_cur = (os.getenv("NOWPAYMENTS_PAY_CURRENCY_HIGH") or os.getenv("NOWPAYMENTS_PAY_CURRENCY") or "bnbbsc").strip().lower()
         return _try_create(pay_cur, is_fixed_rate=is_fixed)
 # === /NOWPAYMENTS SMART INVOICE HELPER =======================================
+
+
+# Back-compat: force any calls to _np_create_invoice to use smart variant
+try:
+    _np_create_invoice  # may exist
+    _np_create_invoice = _np_create_invoice_smart
+except NameError:
+    _np_create_invoice = _np_create_invoice_smart
