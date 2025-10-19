@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
 
@@ -396,7 +398,7 @@ def _build_order_id(chat_id, plan):
     import uuid, time as _t
     return f"tg:{chat_id}:{plan}:{int(_t.time())}:{uuid.uuid4().hex[:8]}"
 
-def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str, plan_key: str):
+def _np_create_invoice_legacy(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str, plan_key: str):
     api_key = (os.getenv("NOWPAYMENTS_API_KEY") or "").strip()
     if not api_key:
         return {"ok": False, "error": "NOWPAYMENTS_API_KEY is not set"}
@@ -456,7 +458,7 @@ def now_create_invoice():
     chat_id = _resolve_chat_id_from_query(request.args)
     order_id = _build_order_id(chat_id or "anon", (plan_raw or "pro"))
     desc = p["label"]
-    res = _np_create_invoice(amount, order_id, desc, success_url, cancel_url, ipn_url, plan_raw)
+    res = _np_create_invoice_smart(amount, order_id, desc, success_url, cancel_url, ipn_url, plan_raw)
     if not res.get("ok"):
         return jsonify({"ok": False, "error": res}), 502
     j = res["json"]
@@ -534,7 +536,7 @@ def _now_invoice_url_from_base(base_link: str, invoice_id: str) -> str:
     # Otherwise, if it's a canonical invoice_url already, just return it
     return base_link
 
-def _np_create_invoice(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str):
+def _np_create_invoice_legacy(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str):
     api_key = (os.getenv("NOWPAYMENTS_API_KEY") or "").strip()
     if not api_key:
         return {"ok": False, "error": "NOWPAYMENTS_API_KEY is not set"}
@@ -1745,3 +1747,67 @@ def _build_html_report_safe(bundle: dict) -> bytes:
             "<body><h1>Metridex Report (fallback)</h1><pre>" + pretty + "</pre></body></html>"
         )
         return html.encode("utf-8")
+
+
+# === NOWPAYMENTS SMART INVOICE HELPER (appended) =============================
+def _np_create_invoice_smart(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str, plan_key: str | None = None):
+    """
+    Robust NOWPayments invoice creator with low-ticket fallbacks.
+    Env:
+      NOWPAY_LOW_TICKET_CURRENCIES = "usdtbsc,usdtmatic,ton,trx,ltc,xrp,xlm,bnbbsc"
+      NOWPAYMENTS_PAY_CURRENCY_HIGH (fallback to NOWPAYMENTS_PAY_CURRENCY) (default: "bnbbsc")
+      NOWPAYMENTS_FIXED_RATE (0/1, default: 1 for high-ticket)
+      NOWPAYMENTS_FEE_PAID_BY_USER (0/1, default: 1)
+    """
+    api_key = (os.getenv("NOWPAYMENTS_API_KEY") or "").strip()
+    if not api_key:
+        return {"ok": False, "error": "NOWPAYMENTS_API_KEY is not set"}
+
+    fee_by_user = bool(int(os.getenv("NOWPAYMENTS_FEE_PAID_BY_USER", "1")))
+    low_ticket = bool((plan_key or "").lower().startswith(("deep","day"))) or float(amount_usd) < 15.0
+
+    def _try_create(pay_currency: str, is_fixed_rate: bool):
+        payload = {
+            "price_amount": float(amount_usd),
+            "price_currency": "usd",
+            "order_id": order_id,
+            "order_description": order_desc,
+            "is_fixed_rate": bool(is_fixed_rate),
+            "is_fee_paid_by_user": fee_by_user,
+            "ipn_callback_url": ipn_url,
+            "pay_currency": pay_currency.lower().strip() if pay_currency else None,
+        }
+        if success_url: payload["success_url"] = success_url
+        if cancel_url:  payload["cancel_url"]  = cancel_url
+        r = _rq_np.post("https://api.nowpayments.io/v1/invoice", json=payload, timeout=12, headers={"x-api-key": api_key})
+        ctype = r.headers.get("content-type","")
+        try:
+            j = r.json() if ctype.startswith("application/json") else {"error": r.text}
+        except Exception:
+            j = {"error": r.text}
+        if r.ok and isinstance(j, dict) and (j.get("invoice_id") or j.get("id")):
+            return {"ok": True, "json": j}
+        return {"ok": False, "status": r.status_code, "json": j}
+
+    if low_ticket:
+        # Default list excludes TRC20 since it's not available in your account;
+        # adjust via env NOWPAY_LOW_TICKET_CURRENCIES if needed.
+        raw_list = os.getenv("NOWPAY_LOW_TICKET_CURRENCIES", "usdtbsc,usdtmatic,ton,trx,ltc,xrp,xlm,bnbbsc")
+        candidates = [c.strip() for c in raw_list.split(",") if c.strip()]
+        last_err = None
+        for cur in candidates:
+            res = _try_create(cur, is_fixed_rate=False)
+            if res.get("ok"):
+                return res
+            j = res.get("json") or {}
+            err_txt = (json.dumps(j, ensure_ascii=False) if isinstance(j, dict) else str(j)).lower()
+            if ("amountto is too small" in err_txt) or ("too small" in err_txt) or ("invalid currency" in err_txt):
+                last_err = res
+                continue
+            return res
+        return last_err or {"ok": False, "error": "All low-ticket currencies failed"}
+    else:
+        is_fixed = True if os.getenv("NOWPAYMENTS_FIXED_RATE") is None else bool(int(os.getenv("NOWPAYMENTS_FIXED_RATE","1")))
+        pay_cur = (os.getenv("NOWPAYMENTS_PAY_CURRENCY_HIGH") or os.getenv("NOWPAYMENTS_PAY_CURRENCY") or "bnbbsc").strip().lower()
+        return _try_create(pay_cur, is_fixed_rate=is_fixed)
+# === /NOWPAYMENTS SMART INVOICE HELPER =======================================
