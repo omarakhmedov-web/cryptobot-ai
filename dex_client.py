@@ -7,7 +7,7 @@ HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SECONDS", "6"))
 def _build_bases():
     bases = []
     # Prefer explicit proxy (Render env: DS_PROXY_URL or DEXSCREENER_PROXY_BASE)
-    proxy = os.getenv("DS_PROXY_URL") or os.getenv("DEXSCREENER_PROXY_BASE") or ""
+    proxy = os.getenv("DS_PROXY_URL") or os.getenv("DEXSCREENER_PROXY_BASE") or os.getenv("DEX_BASE") or ""
     if proxy:
         proxy = proxy.strip().rstrip("/")
         if proxy and proxy not in bases:
@@ -21,28 +21,43 @@ def _build_bases():
     for canon in ("https://api.dexscreener.com", "https://io.dexscreener.com", "https://cdn.dexscreener.com"):
         if canon not in bases:
             bases.append(canon)
+
+    # Enforce proxy-only if requested
+    if str(os.getenv("DEXSCREENER_FORCE_PROXY", "0")).strip() in ("1", "true", "yes"):
+        bases = [b for b in bases if not b.startswith("https://api.dexscreener.com") and not b.startswith("https://io.dexscreener.com") and not b.startswith("https://cdn.dexscreener.com")]
     return bases
 
 DS_BASES = _build_bases()
 
 _ADDR40 = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
+
 def _ds_get_json(path: str):
     last_err = None
+    retries = int(float(os.getenv("DEXSCREENER_RETRIES", "2")))
+    delay_ms = int(float(os.getenv("DEXSCREENER_RETRY_DELAY_MS", "300")))
+    ua = os.getenv("HTTP_UA","MetridexBot/1.3")
+    headers = {"User-Agent": ua, "Accept":"application/json", "Origin":"https://metridex.com"}
     for base in DS_BASES:
         url = base.rstrip("/") + "/" + path.lstrip("/")
-        try:
-            r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": os.getenv("HTTP_UA","MetridexBot/1.2")})
-            if r.ok:
-                try:
-                    return r.json()
-                except Exception as e:
-                    last_err = f"Bad JSON from {url}: {e}"
-                    continue
-            last_err = f"HTTP {r.status_code} from {url}"
-        except Exception as e:
-            last_err = f"{type(e).__name__}: {e} @ {url}"
-            continue
+        attempt = 0
+        while attempt <= retries:
+            try:
+                import requests
+                r = requests.get(url, timeout=HTTP_TIMEOUT, headers=headers)
+                if r.ok:
+                    try:
+                        return r.json()
+                    except Exception as e:
+                        last_err = f"Bad JSON from {url}: {e}"
+                        break
+                else:
+                    last_err = f"HTTP {r.status_code} from {url}"
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e} @ {url}"
+            attempt += 1
+            if attempt <= retries and delay_ms > 0:
+                import time as _t; _t.sleep(delay_ms/1000.0)
     raise RuntimeError(f"DexScreener fetch failed: {last_err}")
 
 
@@ -102,7 +117,7 @@ def fetch_market(text: str) -> dict:
     text = (text or "").strip()
     token = None
     if _ADDR40.match(text):
-        token = text
+        token = text.lower()
     if not token:
         m = re.search(r"0x[a-fA-F0-9]{40}", text)
         if m:
@@ -138,7 +153,7 @@ def fetch_market(text: str) -> dict:
     fdv = _num(p.get("fdv"), 0.0)
     mc = _num(p.get("marketCap"), 0.0)
     liq_usd = _num((p.get("liquidity") or {}).get("usd"), 0.0)
-    vol24h = _num((p.get("volume") or {}).get("h24") or (p.get("txns") or {}).get("h24"), 0.0)
+    vol24h = _num((p.get("volume") or {}).get("h24"), 0.0)
     changes = (p.get("priceChange") or {})
 
     # Build COMPAT structure expected by server.py report builders
