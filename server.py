@@ -226,8 +226,15 @@ def can_scan(chat_id: int):
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
 from cache import cache_get, cache_set
+import os as _os
 try:
-    from dex_client import fetch_market
+    if (_os.getenv('USE_FREE_MARKET','0') or '0').strip() == '1':
+        try:
+            from dex_client_free_proxy_v1 import fetch_market  # free aggregator proxy
+        except Exception as _e_free:
+            from dex_client import fetch_market  # fallback to legacy client
+    else:
+        from dex_client import fetch_market
 except Exception as _e:
     try:
         import dex_client as _dex
@@ -236,6 +243,7 @@ except Exception as _e:
         _err = str(_e2)
         def fetch_market(*args, **kwargs):
             return {'ok': False, 'error': 'market_fetch_unavailable: ' + _err, 'sources': [], 'links': {}}
+
 
 from risk_engine import compute_verdict
 import onchain_inspector
