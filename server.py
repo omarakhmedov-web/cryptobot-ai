@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
 
@@ -367,6 +369,240 @@ PARSE_MODE = "MarkdownV2"
 
 app = Flask(__name__)
 
+# === NOWPayments: lock low-ticket to Polygon (maticmainnet) ===================
+import requests as _rq_np
+from flask import redirect as _redirect
+
+def _plan_defaults(plan: str):
+    p = (plan or "").strip().lower()
+    if p.startswith("deep"):
+        return {"amount": 3, "label": os.getenv("CRYPTO_LABEL_DEEP") or "Deep report — $3", "days": 0}
+    if p.startswith("day"):
+        return {"amount": 9, "label": os.getenv("CRYPTO_LABEL_DAYPASS") or "Day Pass — $9", "days": 1}
+    if p.startswith("team"):
+        return {"amount": 99, "label": os.getenv("CRYPTO_LABEL_TEAMS") or "Teams — from $99", "days": 30}
+    return {"amount": 29, "label": os.getenv("CRYPTO_LABEL_PRO") or "Pro — $29", "days": 30}
+
+def _resolve_chat_id_from_query(args):
+    for k in ("u","uid","chat","chat_id","tg","user","user_id"):
+        v = args.get(k)
+        if v is None:
+            continue
+        try:
+            return int(str(v).strip())
+        except Exception:
+            pass
+    return None
+
+def _build_order_id(chat_id, plan):
+    import uuid, time as _t
+    return f"tg:{chat_id}:{plan}:{int(_t.time())}:{uuid.uuid4().hex[:8]}"
+
+def _np_create_invoice_legacy(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str, plan_key: str):
+    api_key = (os.getenv("NOWPAYMENTS_API_KEY") or "").strip()
+    if not api_key:
+        return {"ok": False, "error": "NOWPAYMENTS_API_KEY is not set"}
+
+    plan_key = (plan_key or "").lower().strip()
+    low_ticket = (plan_key.startswith("deep") or plan_key.startswith("day") or float(amount_usd) < 15.0)
+
+    # Policy:
+    #  - Low-ticket ($3/$9): floating rate + Polygon native coin to minimize min amount
+    #  - High-ticket (>= $15): fixed rate ON by default, currency from env or fallback BSC native
+    if low_ticket:
+        is_fixed_rate = False
+        pay_currency = "maticmainnet"   # Polygon native (MetaMask-friendly, low min)
+    else:
+        is_fixed_rate = True if os.getenv("NOWPAYMENTS_FIXED_RATE") is None else bool(int(os.getenv("NOWPAYMENTS_FIXED_RATE","1")))
+        pay_currency = (os.getenv("NOWPAYMENTS_PAY_CURRENCY_HIGH") or os.getenv("NOWPAYMENTS_PAY_CURRENCY") or "bnbbsc").strip().lower()
+
+    payload = {
+        "price_amount": float(amount_usd),
+        "price_currency": "usd",
+        "order_id": order_id,
+        "order_description": order_desc,
+        "is_fixed_rate": is_fixed_rate,
+        "is_fee_paid_by_user": bool(int(os.getenv("NOWPAYMENTS_FEE_PAID_BY_USER", "1"))),
+        "ipn_callback_url": ipn_url,
+        "pay_currency": pay_currency,
+    }
+    if success_url: payload["success_url"] = success_url
+    if cancel_url:  payload["cancel_url"]  = cancel_url
+
+    r = _rq_np.post("https://api.nowpayments.io/v1/invoice", json=payload, timeout=12, headers={"x-api-key": api_key})
+    ct = r.headers.get("content-type","")
+    j = r.json() if ct.startswith("application/json") else {"error": r.text}
+    if r.ok and isinstance(j, dict) and (j.get("invoice_id") or j.get("id")):
+        return {"ok": True, "json": j}
+    return {"ok": False, "status": r.status_code, "json": j}
+
+# Remove any previous definitions of this route to avoid duplicates
+try:
+    view_funcs = list(app.view_functions.keys())
+    if "now_create_invoice" in view_funcs:
+        # Flask doesn't support removing rules easily; we just redefine with a new function
+        pass
+except Exception:
+    pass
+
+@app.get("/api/now/invoice")
+def now_create_invoice():
+    plan_raw = request.args.get("plan","pro")
+    p = _plan_defaults(plan_raw)
+    amount = float(request.args.get("amount", p["amount"]))
+    base = (os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    ipn_secret = (os.getenv("CRYPTO_WEBHOOK_SECRET") or "generic").strip()
+    ipn_url = f"{base}/crypto_webhook/{ipn_secret}" if base else None
+    success_url = os.getenv("NOWPAYMENTS_SUCCESS_URL", "") or (f"{base}/health" if base else None)
+    cancel_url  = os.getenv("NOWPAYMENTS_CANCEL_URL",  "") or (f"{base}/health" if base else None)
+    chat_id = _resolve_chat_id_from_query(request.args)
+    order_id = _build_order_id(chat_id or "anon", (plan_raw or "pro"))
+    desc = p["label"]
+    res = _np_create_invoice_smart(amount, order_id, desc, success_url, cancel_url, ipn_url, plan_raw)
+    if not res.get("ok"):
+        return jsonify({"ok": False, "error": res}), 502
+    j = res["json"]
+    invoice_url = j.get("invoice_url") or ""
+    return _redirect(invoice_url, code=302)
+# === /NOWPayments: lock to Polygon ===========================================
+
+# === NOWPayments integration (invoices + IPN) ================================
+import requests as _rq_np
+from flask import redirect as _redirect, Response as _Response
+
+# Entitlements (simple JSON file) — minimal, non-invasive
+_PRO_DB_PATH = os.getenv("PRO_USERS_DB_PATH", "./pro_users.json")
+
+def _load_pro_db():
+    try:
+        with open(_PRO_DB_PATH, "r", encoding="utf-8") as f:
+            j = json.load(f)
+            return j if isinstance(j, dict) else {}
+    except Exception:
+        return {}
+
+def _save_pro_db(db: dict):
+    try:
+        with open(_PRO_DB_PATH, "w", encoding="utf-8") as f:
+            json.dump(db or {}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _grant_plan(chat_id: int, plan: str, days: int):
+    db = _load_pro_db()
+    now = int(time.time())
+    # Store expiry as unix seconds
+    cur = db.get(str(chat_id), {})
+    exp_old = int(cur.get("expires", 0))
+    exp_base = max(exp_old, now)
+    expires = exp_base + days*24*3600
+    db[str(chat_id)] = {"plan": plan, "granted_at": now, "expires": expires}
+    _save_pro_db(db)
+    return expires
+
+def _plan_defaults(plan: str):
+    plan = (plan or "").strip().lower()
+    if plan in ("day","daypass","day-pass","pass"):
+        return {"amount": 9, "label": os.getenv("CRYPTO_LABEL_DAYPASS") or "Day Pass — $9", "days": 1}
+    if plan in ("deep","report","deep-report","deep_report"):
+        return {"amount": 3, "label": os.getenv("CRYPTO_LABEL_DEEP") or "Deep report — $3", "days": 0}
+    if plan in ("teams","team"):
+        return {"amount": 99, "label": os.getenv("CRYPTO_LABEL_TEAMS") or "Teams — from $99", "days": 30}
+    # default: pro
+    return {"amount": 29, "label": os.getenv("CRYPTO_LABEL_PRO") or "Pro — $29", "days": 30}
+
+def _resolve_chat_id_from_query(args):
+    for k in ("u","uid","chat","chat_id","tg","user","user_id"):
+        v = args.get(k)
+        if v is None: continue
+        try:
+            return int(str(v).strip())
+        except Exception:
+            pass
+    return None
+
+def _build_order_id(chat_id, plan):
+    ts = int(time.time())
+    rand = uuid.uuid4().hex[:8]
+    return f"tg:{chat_id}:{plan}:{ts}:{rand}"
+
+def _now_invoice_url_from_base(base_link: str, invoice_id: str) -> str:
+    base_link = (base_link or "").strip()
+    if not base_link:
+        return None
+    # If base already includes ?iid= or endswith '=' — append; else assume it's a template needing invoice_id concatenation
+    if "iid=" in base_link or base_link.endswith("="):
+        return f"{base_link}{invoice_id}"
+    # Otherwise, if it's a canonical invoice_url already, just return it
+    return base_link
+
+def _np_create_invoice_legacy(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str):
+    api_key = (os.getenv("NOWPAYMENTS_API_KEY") or "").strip()
+    if not api_key:
+        return {"ok": False, "error": "NOWPAYMENTS_API_KEY is not set"}
+    payload = {
+        "price_amount": float(amount_usd),
+        "price_currency": "usd",
+        "order_id": order_id,
+        "order_description": order_desc,
+        "is_fixed_rate": True,
+        "is_fee_paid_by_user": True,
+        "ipn_callback_url": ipn_url,
+    }
+    if success_url: payload["success_url"] = success_url
+    if cancel_url:  payload["cancel_url"]  = cancel_url
+    try:
+        r = _rq_np.post("https://api.nowpayments.io/v1/invoice", json=payload, timeout=12, headers={"x-api-key": api_key})
+        j = r.json() if r.headers.get("content-type","").startswith("application/json") else {"error": r.text}
+        if r.ok and isinstance(j, dict) and (j.get("invoice_id") or j.get("id")):
+            return {"ok": True, "json": j}
+        return {"ok": False, "status": r.status_code, "json": j}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/crypto_webhook/<secret>")
+def np_ipn(secret):
+    expected_secret = (os.getenv("CRYPTO_WEBHOOK_SECRET") or "").strip()
+    if expected_secret and secret != expected_secret:
+        return jsonify({"ok": False, "error": "bad secret"}), 403
+    try:
+        raw = request.get_data()  # bytes
+    except Exception:
+        raw = b""
+    sig = request.headers.get("x-nowpayments-sig","").strip().lower()
+    calc = hmac.new((os.getenv("CRYPTO_WEBHOOK_HMAC") or "").encode("utf-8"), raw, hashlib.sha512).hexdigest()
+    if not sig or sig != calc.lower():
+        return jsonify({"ok": False, "error": "bad signature"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    status = (data.get("payment_status") or data.get("paymentStatus") or "").lower()
+    order_id = str(data.get("order_id") or data.get("orderId") or "")
+    invoice_id = str(data.get("invoice_id") or data.get("invoiceId") or "")
+    if status not in ("finished","confirmed","confirming","partially_paid"):
+        return jsonify({"ok": True, "ignored": status})
+    # Parse chat_id and plan from order_id: tg:<chat_id>:<plan>:...
+    chat_id = None; plan = "pro"
+    try:
+        parts = order_id.split(":")
+        if len(parts) >= 3 and parts[0] == "tg":
+            chat_id = int(parts[1]); plan = parts[2]
+    except Exception:
+        pass
+    if not chat_id:
+        # We can't identify the user; acknowledge but do nothing
+        return jsonify({"ok": True, "no_user": True})
+    # Activate entitlement on finished/confirmed
+    if status in ("finished","confirmed"):
+        days = _plan_defaults(plan).get("days", 30)
+        exp = _grant_plan(chat_id, plan, days)
+        try:
+            exp_dt = dt.datetime.utcfromtimestamp(exp).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            exp_dt = str(exp)
+        send_message(chat_id, f"✅ *{plan.capitalize()}* activated. Expires: {exp_dt}")
+    return jsonify({"ok": True, "chat_id": chat_id, "status": status, "invoice_id": invoice_id})
+# === /NOWPayments integration ================================================
+
 
 # --- OMEGA-713K: known domains override (website hints) ---
 def _load_known_domains(path: str = "known_domains.json"):
@@ -509,12 +745,40 @@ def parse_cb(data: str):
     return m.group(1), int(m.group(2)), int(m.group(3))
 
 def _pricing_links():
+    """
+    Returns pricing/upgrade links. Prefers CRYPTO_* env (NOWPayments) if present.
+    Fallbacks:
+      - If CRYPTO_LINK_* provided: use them
+      - Else: point to internal invoice endpoint /api/now/invoice?plan=...
+      - Else: use static *URL envs (DEEP_REPORT_URL, PRO_URL, ...)
+    """
+    import os as _os, urllib.parse as _up
+    base = (_os.getenv("PUBLIC_URL") or _os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    # NOWPayments-style link bases (may be like https://nowpayments.io/payment/?iid=)
+    cl_deep  = (_os.getenv("CRYPTO_LINK_DEEP") or "").strip()
+    cl_day   = (_os.getenv("CRYPTO_LINK_DAYPASS") or "").strip()
+    cl_pro   = (_os.getenv("CRYPTO_LINK_PRO") or "").strip()
+    cl_teams = (_os.getenv("CRYPTO_LINK_TEAMS") or "").strip()
+
+    def _pref(link_base, plan):
+        # If set -> use as-is; else if server has public URL -> internal invoice; else -> fallback static URL
+        if link_base:
+            return link_base
+        if base:
+            return f"{base}/api/now/invoice?plan={_up.quote(plan)}"
+        # Final fallback: previous static URLs
+        if plan == "deep":   return DEEP_REPORT_URL
+        if plan == "day":    return DAY_PASS_URL
+        if plan == "pro":    return PRO_URL
+        if plan == "teams":  return TEAMS_URL
+        return HELP_URL
+
     return {
-        "deep_report": DEEP_REPORT_URL,
-        "day_pass": DAY_PASS_URL,
-        "pro": PRO_URL,
-        "teams": TEAMS_URL,
-        "help": HELP_URL,
+        "deep_report": _pref(cl_deep, "deep"),
+        "day_pass":    _pref(cl_day, "day"),
+        "pro":         _pref(cl_pro, "pro"),
+        "teams":       _pref(cl_teams, "teams"),
+        "help":        HELP_URL,
     }
 
 def build_hint_quickscan(clickable: bool) -> str:
@@ -630,6 +894,15 @@ def on_message(msg):
     if not ok:
         send_message(chat_id, "Free scans exhausted. Use /upgrade.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
+    # --- Processing indicator (safe, minimal) ---
+    ph = send_message(chat_id, "Processing…")
+    ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
+    try:
+        tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    except Exception:
+        pass
+    # --- /Processing indicator ---
+
 
     # QuickScan flow
     try:
@@ -858,6 +1131,14 @@ def on_message(msg):
             })
         except Exception as e:
             print("editMessageReplyMarkup failed:", e)
+
+    # --- Remove processing indicator if present ---
+    if 'ph_id' in locals() and ph_id:
+        try:
+            tg("deleteMessage", {"chat_id": chat_id, "message_id": ph_id})
+        except Exception:
+            pass
+    # --- /Remove processing indicator ---
     register_scan(chat_id)
     return jsonify({"ok": True})
 
@@ -1483,3 +1764,78 @@ def _build_html_report_safe(bundle: dict) -> bytes:
             "<body><h1>Metridex Report (fallback)</h1><pre>" + pretty + "</pre></body></html>"
         )
         return html.encode("utf-8")
+
+
+# === NOWPAYMENTS SMART INVOICE HELPER (appended) =============================
+def _np_create_invoice_smart(amount_usd: float, order_id: str, order_desc: str, success_url: str, cancel_url: str, ipn_url: str, plan_key: str | None = None):
+    """
+    Robust NOWPayments invoice creator with low-ticket fallbacks.
+    Env:
+      NOWPAY_LOW_TICKET_CURRENCIES = "usdtbsc,usdtmatic,ton,trx,ltc,xrp,xlm,bnbbsc"
+      NOWPAYMENTS_PAY_CURRENCY_HIGH (fallback to NOWPAYMENTS_PAY_CURRENCY) (default: "bnbbsc")
+      NOWPAYMENTS_FIXED_RATE (0/1, default: 1 for high-ticket)
+      NOWPAYMENTS_FEE_PAID_BY_USER (0/1, default: 1)
+    """
+    api_key = (os.getenv("NOWPAYMENTS_API_KEY") or "").strip()
+    if not api_key:
+        return {"ok": False, "error": "NOWPAYMENTS_API_KEY is not set"}
+
+    fee_by_user = bool(int(os.getenv("NOWPAYMENTS_FEE_PAID_BY_USER", "1")))
+    low_ticket = bool((plan_key or "").lower().startswith(("deep","day"))) or float(amount_usd) < 15.0
+
+    def _try_create(pay_currency: str, is_fixed_rate: bool):
+        payload = {
+            "price_amount": float(amount_usd),
+            "price_currency": "usd",
+            "order_id": order_id,
+            "order_description": order_desc,
+            "is_fixed_rate": bool(is_fixed_rate),
+            "is_fee_paid_by_user": fee_by_user,
+            "ipn_callback_url": ipn_url,
+            "pay_currency": pay_currency.lower().strip() if pay_currency else None,
+        }
+        if success_url: payload["success_url"] = success_url
+        if cancel_url:  payload["cancel_url"]  = cancel_url
+        r = _rq_np.post("https://api.nowpayments.io/v1/invoice", json=payload, timeout=12, headers={"x-api-key": api_key})
+        ctype = r.headers.get("content-type","")
+        try:
+            j = r.json() if ctype.startswith("application/json") else {"error": r.text}
+        except Exception:
+            j = {"error": r.text}
+        if r.ok and isinstance(j, dict) and (j.get("invoice_id") or j.get("id")):
+            return {"ok": True, "json": j}
+        return {"ok": False, "status": r.status_code, "json": j}
+
+    if low_ticket:
+        # Default list excludes TRC20 since it's not available in your account;
+        # adjust via env NOWPAY_LOW_TICKET_CURRENCIES if needed.
+        raw_list = os.getenv("NOWPAY_LOW_TICKET_CURRENCIES", "ton,usdtbsc,usdtmatic,bnbbsc,maticmainnet")
+        candidates = [c.strip() for c in raw_list.split(",") if c.strip()]
+        last_err = None
+        for cur in candidates:
+            res = _try_create(cur, is_fixed_rate=False)
+            if res.get("ok"):
+                return res
+            j = res.get("json") or {}
+            err_txt = (json.dumps(j, ensure_ascii=False) if isinstance(j, dict) else str(j)).lower()
+            if ("amountto is too small" in err_txt) or ("too small" in err_txt) or ("invalid currency" in err_txt):
+                last_err = res
+                continue
+            return res
+        res = _try_create(None, is_fixed_rate=False)
+        if res.get('ok'):
+            return res
+        return last_err or {'ok': False, 'error': 'All low-ticket currencies failed (and generic invoice failed)'}
+    else:
+        is_fixed = True if os.getenv("NOWPAYMENTS_FIXED_RATE") is None else bool(int(os.getenv("NOWPAYMENTS_FIXED_RATE","1")))
+        pay_cur = (os.getenv("NOWPAYMENTS_PAY_CURRENCY_HIGH") or os.getenv("NOWPAYMENTS_PAY_CURRENCY") or "bnbbsc").strip().lower()
+        return _try_create(pay_cur, is_fixed_rate=is_fixed)
+# === /NOWPAYMENTS SMART INVOICE HELPER =======================================
+
+
+# Back-compat: force any calls to _np_create_invoice to use smart variant
+try:
+    _np_create_invoice  # may exist
+    _np_create_invoice = _np_create_invoice_smart
+except NameError:
+    _np_create_invoice = _np_create_invoice_smart
