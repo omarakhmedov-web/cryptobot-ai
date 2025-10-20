@@ -1542,11 +1542,7 @@ def on_message(msg):
             print("editMessageReplyMarkup failed:", e)
 
     # --- Remove processing indicator if present ---
-    if 'ph_id' in locals() and ph_id:
-        try:
-            tg("deleteMessage", {"chat_id": chat_id, "message_id": ph_id})
-        except Exception:
-            pass
+    
     # --- /Remove processing indicator ---
     register_scan(chat_id)
     return jsonify({"ok": True})
