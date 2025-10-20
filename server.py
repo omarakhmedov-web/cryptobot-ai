@@ -857,6 +857,38 @@ def webhook():
         return jsonify({"ok": True})
 
 def on_message(msg):
+    # --- Early /start handler (safe & minimal) ---
+    try:
+        chat_id = ((msg.get('chat') or {}).get('id'))
+        text = (msg.get('text') or '').strip()
+        low = text.lower()
+    except Exception:
+        chat_id, text, low = None, '', ''
+    if low in ('start', 'старт'):
+        low = '/start'
+    if isinstance(low, str) and low.startswith('/start'):
+        _welcome = (
+            'Metridex QuickScan is ready.\n'
+            'Paste a token address (0x…) or a DexScreener link to scan.'
+        )
+        try:
+            reply_kb = None
+            try:
+                reply_kb = build_keyboard(chat_id, 0, _pricing_links(), ctx='start')
+            except Exception:
+                reply_kb = None
+            if reply_kb is not None:
+                send_message(chat_id, _welcome, reply_markup=reply_kb)
+            else:
+                send_message(chat_id, _welcome)
+        except Exception as _e_start:
+            try:
+                send_message(chat_id, _welcome)
+            except Exception:
+                pass
+        return jsonify({'ok': True})
+    # --- /Early /start handler ---
+
     # Ignore messages sent by the bot itself and the temporary placeholder
     try:
         if (msg.get('from') or {}).get('is_bot'):
@@ -874,6 +906,9 @@ def on_message(msg):
     text = (msg.get("text") or "").strip()
     low = text.lower()
 
+    # Accept 'start'/'старт' without slash as /start
+    if low in ('start', 'старт'):
+        low = '/start'
     if low.startswith("/start"):
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
@@ -915,17 +950,21 @@ def on_message(msg):
     if not ok:
         send_message(chat_id, "Free scans exhausted. Use /upgrade.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
-    # --- Processing indicator (safe, minimal) ---
-    ph = send_message(chat_id, "Processing…")
-    ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
-    try:
-        tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
-    except Exception:
-        pass
-    # --- /Processing indicator ---
-
-
-    # QuickScan flow
+    # Only show Processing… for token address or DexScreener URLs
+    _looks_like_scan = (text.startswith('0x') and len(text) >= 42) or ('dexscreener.com' in low)
+    if _looks_like_scan:
+    
+        # --- Processing indicator (safe, minimal) ---
+        ph = send_message(chat_id, "Processing…")
+        ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
+        try:
+            tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+        except Exception:
+            pass
+        # --- /Processing indicator ---
+    
+    
+        # QuickScan flow
     try:
         market = fetch_market(text) or {}
     except Exception as e:
