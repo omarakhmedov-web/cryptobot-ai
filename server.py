@@ -2694,3 +2694,90 @@ def _tokens_actions_keyboard(tokens):
         if token and token.startswith("0x") and len(token)==42:
             rows.append([{"text": f"👁️ Unwatch {token[:6]}…", "callback_data": f"UNWATCH_T:{token}"}])
     return {"inline_keyboard": rows} if rows else None
+
+# === PATCH: DEX/Scan fallbacks & explorer expansion ===========================
+def _generic_scan_url(token: str):
+    try:
+        if token and token.startswith("0x") and len(token)==42:
+            return f"https://blockscan.com/address/{token}"
+        return None
+    except Exception:
+        return None
+
+def _generic_dex_search(token: str):
+    try:
+        if token and token.startswith("0x"):
+            return f"https://dexscreener.com/search?q={token}"
+        return None
+    except Exception:
+        return None
+
+# Redefine _alert_keyboard to ensure buttons even when URLs absent
+try:
+    _prev_alert_keyboard = _alert_keyboard
+except Exception:
+    _prev_alert_keyboard = None
+
+def _alert_keyboard(dex_url: str, scan_url: str, token: str):
+    try:
+        # Fallbacks
+        if not dex_url:
+            dex_url = _generic_dex_search(token) or ""
+        if not scan_url:
+            scan_url = _generic_scan_url(token) or ""
+
+        rows = []
+        row = []
+        if dex_url:
+            row.append({"text": "🟢 Open in DEX", "url": dex_url})
+        if scan_url:
+            row.append({"text": "🔍 Open in Scan", "url": scan_url})
+        if row:
+            rows.append(row)
+        if token and isinstance(token, str) and token.startswith("0x") and len(token)==42:
+            rows.append([{"text": "👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
+        return {"inline_keyboard": rows} if rows else None
+    except Exception:
+        # Fall back to previous implementation if anything goes wrong
+        if _prev_alert_keyboard:
+            try:
+                return _prev_alert_keyboard(dex_url, scan_url, token)
+            except Exception:
+                return None
+        return None
+
+# Overwrite explorer with broader chain support
+def _explorer_url(chain: str, token: str):
+    try:
+        ch = (chain or "").lower()
+        if not token or not token.startswith("0x") or len(token)!=42:
+            return None
+        if ch in ("eth","ethereum","mainnet"):
+            return f"https://etherscan.io/token/{token}"
+        if ch in ("bsc","bnb","binance"):
+            return f"https://bscscan.com/token/{token}"
+        if ch in ("polygon","matic"):
+            return f"https://polygonscan.com/token/{token}"
+        if ch in ("arbitrum","arb","arb1"):
+            return f"https://arbiscan.io/token/{token}"
+        if ch in ("base","basesepolia","base-mainnet"):
+            return f"https://basescan.org/token/{token}"
+        if ch in ("optimism","op"):
+            return f"https://optimistic.etherscan.io/token/{token}"
+        if ch in ("avalanche","avax"):
+            return f"https://snowtrace.io/token/{token}"
+        if ch in ("fantom","ftm"):
+            return f"https://ftmscan.com/token/{token}"
+        if ch in ("gnosis","gno","xdai"):
+            return f"https://gnosisscan.io/token/{token}"
+        if ch in ("linea",):
+            return f"https://lineascan.build/token/{token}"
+        if ch in ("scroll",):
+            return f"https://scrollscan.com/token/{token}"
+        if ch in ("pulse","pulsechain","plsx","pls"):
+            return f"https://scan.pulsechain.com/token/{token}"
+        # Default to generic multi-chain viewer
+        return _generic_scan_url(token)
+    except Exception:
+        return _generic_scan_url(token)
+# === /PATCH ===================================================================
