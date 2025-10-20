@@ -226,8 +226,15 @@ def can_scan(chat_id: int):
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
 from cache import cache_get, cache_set
+import os as _os
 try:
-    from dex_client import fetch_market
+    if (_os.getenv('USE_FREE_MARKET','0') or '0').strip() == '1':
+        try:
+            from dex_client_free_proxy_v1 import fetch_market  # free aggregator proxy
+        except Exception as _e_free:
+            from dex_client import fetch_market  # fallback to legacy client
+    else:
+        from dex_client import fetch_market
 except Exception as _e:
     try:
         import dex_client as _dex
@@ -236,6 +243,7 @@ except Exception as _e:
         _err = str(_e2)
         def fetch_market(*args, **kwargs):
             return {'ok': False, 'error': 'market_fetch_unavailable: ' + _err, 'sources': [], 'links': {}}
+
 
 from risk_engine import compute_verdict
 import onchain_inspector
@@ -841,7 +849,7 @@ def webhook():
     try:
         upd = request.get_json(force=True, silent=True) or {}
         if "message" in upd: return on_message(upd["message"])
-        if "edited_message" in upd: return on_message(upd["edited_message"])
+        if "edited_message" in upd: return jsonify({"ok": True})
         if "callback_query" in upd: return on_callback(upd["callback_query"])
         return jsonify({"ok": True})
     except Exception as e:
@@ -849,6 +857,19 @@ def webhook():
         return jsonify({"ok": True})
 
 def on_message(msg):
+    # Ignore messages sent by the bot itself and the temporary placeholder
+    try:
+        if (msg.get('from') or {}).get('is_bot'):
+            return jsonify({'ok': True})
+    except Exception:
+        pass
+    try:
+        _t = (msg.get('text') or '').strip()
+        if _t == 'Processing…' or _t == 'Processing...':
+            return jsonify({'ok': True})
+    except Exception:
+        pass
+
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
     low = text.lower()
