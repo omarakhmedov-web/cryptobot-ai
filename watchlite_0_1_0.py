@@ -222,6 +222,7 @@ def _status_text(cid):
         lines.append(f"*Mute:* {mins} min left")
     return "\n".join(lines)
 
+
 def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_msg=None):
     """Return True if handled fully (intercepted); otherwise False to delegate to original on_message."""
     if not isinstance(text, str):
@@ -232,58 +233,13 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
 
     _ensure_loaded()
     cfg = _cfg(chat_id)
-    # WATCH_T / UNWATCH_T with explicit token
-    if data.startswith("UNWATCH_T:") or data.startswith("WATCH_T:"):
-        tok = data.split(":",1)[1].strip().lower()
-        wl = _wl(chat_id)
-        if data.startswith("UNWATCH_T:"):
-            if tok in wl:
-                wl.remove(tok); _save_db()
-                _safe_acb(cb_id, "Removed from watchlist.", False)
-                if _send_message: _send_message(chat_id, f"Removed `{tok}` from watchlist.")
-            else:
-                _safe_acb(cb_id, "Not in watchlist.", False)
-            return True
-        else:
-            if tok not in wl and len(wl) < LIMIT:
-                wl.append(tok); _save_db()
-                _safe_acb(cb_id, "Added to watchlist.", False)
-                if _send_message: _send_message(chat_id, f"Watching `{tok}`. Total: {len(wl)}")
-            else:
-                _safe_acb(cb_id, "Already watching or list full.", False)
-            return True
-
-    # Legacy WATCH/UNWATCH without token — use message token or last_token
-    if data in ("WATCH","UNWATCH"):
-        msg_text = (msg.get("text") or "") + "\n" + (msg.get("caption") or "")
-        tok = _find_token_in_text(msg_text) or cfg.get("last_token")
-        if not (isinstance(tok, str) and tok.startswith("0x") and len(tok)==42):
-            _safe_acb(cb_id, "Scan a token first.", True)
-            return True
-        wl = _wl(chat_id)
-        if data == "WATCH":
-            if tok not in wl and len(wl) < LIMIT:
-                wl.append(tok); _save_db()
-                _safe_acb(cb_id, "Added to watchlist.", False)
-                if _send_message: _send_message(chat_id, f"Watching `{tok}`. Total: {len(wl)}")
-            else:
-                _safe_acb(cb_id, "Already watching or list full.", False)
-            return True
-        else:
-            if tok in wl:
-                wl.remove(tok); _save_db()
-                _safe_acb(cb_id, "Removed from watchlist.", False)
-                if _send_message: _send_message(chat_id, f"Removed `{tok}` from watchlist.")
-            else:
-                _safe_acb(cb_id, "Not in watchlist.", False)
-            return True
 
     def reply(msg):
         if _send_message:
             _send_message(chat_id, msg)
 
-    # WATCH
-    if low.startswith("/watch"):
+    # /watch
+    if _is_cmd(low, 'watch'):
         parts = text.split(None, 1)
         token = None
         if len(parts) > 1:
@@ -296,13 +252,14 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
         wl = _wl(chat_id)
         tok = token.lower()
         if tok in wl:
-            reply(f"Already watching `{tok}`.")
-            return True
-        if len(wl) >= LIMIT:
-            reply(f"Watchlist is full (limit {LIMIT}). Remove some with `/unwatch 0x...`")
-            return True
-        wl.append(tok); _save_db()
-        # Info + buttons
+            # Already watching — всё равно пришлём карточку
+            pass
+        else:
+            if len(wl) >= LIMIT:
+                reply(f"Watchlist is full (limit {LIMIT}). Remove some with `/unwatch 0x...`")
+                return True
+            wl.append(tok); _save_db()
+        # Info + buttons after watch
         try:
             mkt = _fetch_market(tok) if _fetch_market else None
         except Exception:
@@ -315,11 +272,11 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
             header = f"*Watching — {psym}*  `[{chain}]`\n`{tok}`"
             _send_message(chat_id, header, reply_markup=kb)
         else:
-            reply(f"Watching `{tok}`. Total: {len(wl)}")
+            reply(f"Watching `{tok}`. Total: {len(_wl(chat_id))}")
         return True
 
-    # UNWATCH
-    if low.startswith("/unwatch"):
+    # /unwatch
+    if _is_cmd(low, 'unwatch'):
         parts = text.split(None, 1)
         token = None
         if len(parts) > 1:
@@ -333,7 +290,6 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
         tok = token.lower()
         if tok in wl:
             wl.remove(tok); _save_db()
-            # Info + buttons (offer to watch back)
             try:
                 mkt = _fetch_market(tok) if _fetch_market else None
             except Exception:
@@ -346,13 +302,13 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
                 header = f"*Unwatched — {psym}*  `[{chain}]`\n`{tok}`"
                 _send_message(chat_id, header, reply_markup=kb)
             else:
-                reply(f"Removed `{tok}` from watchlist. Total: {len(wl)}")
+                reply(f"Removed `{tok}` from watchlist. Total: {len(_wl(chat_id))}")
         else:
             reply(f"Not in watchlist: `{tok}`")
         return True
 
-    # WATCHLIST
-    if low.startswith("/watchlist"):
+    # /watchlist
+    if _is_cmd(low, 'watchlist'):
         wl = _wl(chat_id)
         if not wl:
             reply("Watchlist is empty. Add with `/watch 0x...`")
@@ -363,13 +319,13 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
         reply("\n".join(lines))
         return True
 
-    # ALERTS TOGGLES
-    if low.startswith("/alerts_on"):
+    # Toggles
+    if _is_cmd(low, 'alerts_on'):
         cfg["enabled"] = True; _save_state(); reply("Alerts: ON"); return True
-    if low.startswith("/alerts_off"):
+    if _is_cmd(low, 'alerts_off'):
         cfg["enabled"] = False; _save_state(); reply("Alerts: OFF"); return True
 
-    if low.startswith("/alerts_set"):
+    if _is_cmd(low, 'alerts_set'):
         p = _parse_set_args(text)
         if p.get("reset"):
             cfg["thresholds"] = dict(_DEFAULT_THRESHOLDS)
@@ -380,7 +336,7 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
             reply("Alerts config reset to defaults.")
             return True
         if p.get("preset"):
-            name = p["preset"].strip().lower()
+            name = (p["preset"] or "").strip().lower()
             if name in _PRESETS:
                 pr = _PRESETS[name]
                 cfg["thresholds"] = {k: pr[k] for k in ("d5","d1h","d24","vol")}
@@ -410,23 +366,18 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
         reply("Usage: `/alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60` or `preset fast|normal|calm` or `reset`.")
         return True
 
-    if low.startswith("/alerts_mute"):
-        minutes = 1440  # default
+    if _is_cmd(low, 'alerts_mute'):
+        minutes = 1440
         parts = text.split(None,1)
         if len(parts)>1:
-            try:
-                minutes = max(1, int(float(parts[1].strip())))
-            except Exception:
-                minutes = 1440
-        cfg["mute_until_ts"] = _now() + minutes*60
-        _save_state()
-        reply(f"Muted alerts for {minutes} minutes.")
-        return True
+            try: minutes = max(1, int(float(parts[1].strip())))
+            except Exception: minutes = 1440
+        cfg["mute_until_ts"] = _now() + minutes*60; _save_state(); reply(f"Muted alerts for {minutes} minutes."); return True
 
-    if low.startswith("/alerts_unmute"):
+    if _is_cmd(low, 'alerts_unmute'):
         cfg["mute_until_ts"] = 0; _save_state(); reply("Unmuted alerts."); return True
 
-    if low.startswith("/alerts"):
+    if _is_cmd(low, 'alerts'):
         reply(_status_text(chat_id)); return True
 
     return False
