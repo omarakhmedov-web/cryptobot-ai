@@ -1840,478 +1840,481 @@ try:
 except NameError:
     _np_create_invoice = _np_create_invoice_smart
 
+# === WATCHLIST & ALERTS (lite) — non-invasive add‑on (OMEGA‑713K) ============
+# Minimal, wrapper‑based: only intercepts new commands and callbacks; everything
+# else is delegated to original handlers. Storage: ./watch_db.json + ./watch_state.json
+# Defaults: thresholds ON, ticker interval 15min, cooldown 60min per token/metric.
+import os as _os_wl, json as _json_wl, time as _time_wl, threading as _th_wl, re as _re_wl
 
-# === WATCHLIST & ALERTS (lite) v1 — non-invasive wrappers ====================
-# No new ENV required; uses JSON files in working dir by default.
-import threading as _th, time as _t, json as _json, os as _os, re as _re
+WATCH_DB_PATH     = _os_wl.getenv("WATCH_DB_PATH", "./watch_db.json")
+WATCH_STATE_PATH  = _os_wl.getenv("WATCH_STATE_PATH","./watch_state.json")
+WATCHLIST_LIMIT   = int(_os_wl.getenv("WATCHLIST_LIMIT","200"))
+ALERTS_DEFAULT_ON = True
 
-WATCH_DB_PATH = _os.getenv("WATCH_DB_PATH", "./watch_db.json")
-WATCH_STATE_PATH = _os.getenv("WATCH_STATE_PATH", "./watch_state.json")
-WATCHLIST_LIMIT = int(_os.getenv("WATCHLIST_LIMIT", "200"))
-
-_DEFAULT_ALERTS = {
-    "d5": 2.0, "d1h": 5.0, "d24": 10.0, "vol": 250_000.0,
-    "int": 15, "cd": 60, "enabled": True, "preset": "normal", "mute_until": 0,
-    "last_tick": 0, "cooldowns": {}
-}
 _PRESETS = {
-    "fast":   {"d5": 1.0, "d1h": 3.0, "d24": 7.0,  "vol": 150_000.0, "int": 10, "cd": 45},
-    "normal": {"d5": 2.0, "d1h": 5.0, "d24": 10.0, "vol": 250_000.0, "int": 15, "cd": 60},
-    "calm":   {"d5": 3.0, "d1h": 7.0, "d24": 15.0, "vol": 500_000.0, "int": 20, "cd": 60},
+    "fast":   {"d5":1.0, "d1h":3.0, "d24":7.0,  "vol":150_000.0, "int":5,  "cd":30},
+    "normal": {"d5":2.0, "d1h":5.0, "d24":10.0, "vol":250_000.0, "int":15, "cd":60},
+    "calm":   {"d5":3.0, "d1h":8.0, "d24":15.0, "vol":500_000.0, "int":30, "cd":90},
 }
+_DEFAULTS = _PRESETS["normal"]
 
-def _load_json(path, default):
+def _wl_now(): return int(_time_wl.time())
+
+def _wl_load(path, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
-            j = _json.load(f)
-            return j if isinstance(j, (dict, list)) else default
+            j = _json_wl.load(f)
+        return j if isinstance(j, type(default)) else default
     except Exception:
         return default
 
-def _save_json(path, obj):
+def _wl_save(path, obj):
     try:
         with open(path, "w", encoding="utf-8") as f:
-            _json.dump(obj, f, ensure_ascii=False, indent=2)
+            _json_wl.dump(obj, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
-def _get_watchlist(chat_id: int):
-    db = _load_json(WATCH_DB_PATH, {})
-    lst = db.get(str(chat_id))
-    if not isinstance(lst, list):
-        lst = []
-    # normalize
-    out = []
-    for t in lst:
-        if isinstance(t, str) and t.startswith("0x") and len(t)==42:
-            out.append(t.lower())
-    return out
+def _wl_db():
+    return _wl_load(WATCH_DB_PATH, {})
 
-def _set_watchlist(chat_id: int, lst):
-    db = _load_json(WATCH_DB_PATH, {})
-    db[str(chat_id)] = list(dict.fromkeys([t.lower() for t in lst if isinstance(t, str)]))[:WATCHLIST_LIMIT]
-    _save_json(WATCH_DB_PATH, db)
+def _wl_state():
+    return _wl_load(WATCH_STATE_PATH, {})
 
-def _add_watch(chat_id: int, token: str):
-    token = (token or "").strip().lower()
-    if not (token.startswith("0x") and len(token)==42):
-        return False, "Invalid token address"
-    lst = _get_watchlist(chat_id)
-    if token in lst:
-        return True, "Already in watchlist"
-    if len(lst) >= WATCHLIST_LIMIT:
-        return False, f"Watchlist is full (limit {WATCHLIST_LIMIT})"
-    lst.append(token)
-    _set_watchlist(chat_id, lst)
-    return True, "Added to watchlist"
+def _wl_state_for(chat_id: int):
+    st = _wl_state()
+    key = str(chat_id)
+    cur = st.get(key) or {}
+    # defaults
+    cur.setdefault("enabled", ALERTS_DEFAULT_ON)
+    cur.setdefault("thresholds", dict(_DEFAULTS))
+    cur.setdefault("preset", "normal")
+    cur.setdefault("mute_until", 0)
+    cur.setdefault("cooldowns", {})  # {token: {metric: ts}}
+    cur.setdefault("last_token", None)
+    cur.setdefault("last_tick", 0)
+    st[key] = cur
+    return st, key, cur
 
-def _remove_watch(chat_id: int, token: str):
-    token = (token or "").strip().lower()
-    lst = _get_watchlist(chat_id)
-    if token in lst:
-        lst = [t for t in lst if t != token]
-        _set_watchlist(chat_id, lst)
-        return True, "Removed from watchlist"
-    return False, "Token not in watchlist"
+def _wl_state_put(chat_id: int, cur: dict):
+    st, key, _ = _wl_state_for(chat_id)
+    st[key] = cur
+    _wl_save(WATCH_STATE_PATH, st)
 
-def _get_state(chat_id: int):
-    st = _load_json(WATCH_STATE_PATH, {})
-    s = st.get(str(chat_id)) or {}
-    # merge defaults
-    out = dict(_DEFAULT_ALERTS)
-    out.update({k:v for k,v in s.items() if k in out or k in ("preset","last_token","last_links")})
-    return out
+def _wl_is_addr(s: str):
+    return isinstance(s, str) and s.lower().startswith("0x") and len(s) == 42 and all(c in "0123456789abcdefx" for c in s.lower())
 
-def _set_state(chat_id: int, patch: dict):
-    st = _load_json(WATCH_STATE_PATH, {})
-    cur = st.get(str(chat_id)) or {}
-    cur.update(patch or {})
-    st[str(chat_id)] = cur
-    _save_json(WATCH_STATE_PATH, st)
+def _wl_hnum(s: str):
+    """Parse '250k' / '1.2m' / plain numbers to float."""
+    try:
+        s = str(s).strip().lower().replace(",", "")
+        if s.endswith("k"): return float(s[:-1]) * 1_000.0
+        if s.endswith("m"): return float(s[:-1]) * 1_000_000.0
+        return float(s)
+    except Exception:
+        return None
 
-def _fmt_k(v):
+def _wl_pct(v):
     try:
         n = float(v)
-        if abs(n) >= 1_000_000: return f"{n/1_000_000:.1f}m"
-        if abs(n) >= 1_000:     return f"{n/1_000:.0f}k"
-        return f"{n:.0f}"
+        arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
+        return f"{arrow} {n:+.2f}%"
     except Exception:
-        return str(v)
+        return "—"
 
-def _parse_k(s):
-    s = str(s).strip().lower()
-    m = _re.match(r'^([0-9]+(?:\.[0-9]+)?)\s*([km])?$', s)
-    if not m:
-        return None
-    val = float(m.group(1))
-    suf = m.group(2)
-    if suf == 'm':
-        val *= 1_000_000.0
-    elif suf == 'k':
-        val *= 1_000.0
-    return val
+def _wl_add(chat_id: int, token: str):
+    token = (token or "").lower()
+    if not _wl_is_addr(token): return False, "Bad token"
+    db = _wl_db()
+    arr = list(db.get(str(chat_id)) or [])
+    if token in arr: return True, "Already in watchlist"
+    if len(arr) >= WATCHLIST_LIMIT: return False, f"Watchlist limit {WATCHLIST_LIMIT}"
+    arr.append(token)
+    db[str(chat_id)] = arr
+    _wl_save(WATCH_DB_PATH, db)
+    return True, f"Added: `{token}`"
 
-# Hook into store_bundle to capture last scanned token/links for convenience (/watch without arg)
+def _wl_del(chat_id: int, token: str):
+    token = (token or "").lower()
+    db = _wl_db()
+    arr = list(db.get(str(chat_id)) or [])
+    if token in arr:
+        arr = [t for t in arr if t != token]
+        db[str(chat_id)] = arr
+        _wl_save(WATCH_DB_PATH, db)
+        return True, f"Removed: `{token}`"
+    return False, "Not in watchlist"
+
+def _wl_list(chat_id: int):
+    db = _wl_db()
+    return list(db.get(str(chat_id)) or [])
+
+def _wl_set_last_scanned(chat_id: int, token: str, chain: str|None=None, links: dict|None=None):
+    st, key, cur = _wl_state_for(chat_id)
+    cur["last_token"] = token
+    # keep some context
+    if links:
+        cur["last_links"] = {"scan": (links.get("scan") if isinstance(links, dict) else None),
+                             "dex": (links.get("dex") if isinstance(links, dict) else None)}
+    if chain: cur["last_chain"] = chain
+    st[key] = cur
+    _wl_save(WATCH_STATE_PATH, st)
+
+# Wrap store_bundle to capture last scanned token per chat
 try:
-    _store_bundle__orig = store_bundle  # imported earlier
-    def store_bundle(chat_id, msg_id, bundle):
+    _store_bundle_orig = store_bundle  # will exist in main file
+    def store_bundle(chat_id, message_id, bundle):
         try:
-            _store_bundle__orig(chat_id, msg_id, bundle)
-        finally:
-            try:
-                mkt = (bundle or {}).get("market") or {}
-                tok = (mkt.get("tokenAddress") or "").lower()
-                lnks = (bundle or {}).get("links") or {}
-                if tok:
-                    _set_state(chat_id, {"last_token": tok, "last_links": lnks})
-            except Exception:
-                pass
+            res = _store_bundle_orig(chat_id, message_id, bundle)
+        except Exception as e:
+            res = None
+        try:
+            mkt = (bundle or {}).get("market") or {}
+            tok = (mkt.get("tokenAddress") or "").lower()
+            ch  = (mkt.get("chain") or "")
+            lnk = (bundle or {}).get("links") or {}
+            if _wl_is_addr(tok): _wl_set_last_scanned(chat_id, tok, ch, lnk)
+        except Exception:
+            pass
+        return res
 except Exception:
     pass
 
-# Helpers to build alert keyboard quickly
-def _alert_keyboard(links: dict, token: str, muted: bool):
+# Helpers for alerts
+def _wl_thresholds(cur: dict):
+    th = dict(_DEFAULTS)
+    th.update(cur.get("thresholds") or {})
+    # normalize
+    th["d5"]  = float(th.get("d5",  _DEFAULTS["d5"]))
+    th["d1h"] = float(th.get("d1h", _DEFAULTS["d1h"]))
+    th["d24"] = float(th.get("d24", _DEFAULTS["d24"]))
+    th["vol"] = float(th.get("vol", _DEFAULTS["vol"]))
+    th["int"] = int(th.get("int", _DEFAULTS["int"]))
+    th["cd"]  = int(th.get("cd",  _DEFAULTS["cd"]))
+    return th
+
+def _wl_cooldown_ok(cur: dict, token: str, metric: str, now=None):
+    now = now or _wl_now()
+    cds = cur.setdefault("cooldowns", {})
+    tmap = cds.setdefault(token, {})
+    ts  = int(tmap.get(metric, 0) or 0)
+    cd  = int(_wl_thresholds(cur)["cd"]) * 60
+    return (now - ts) >= cd
+
+def _wl_set_cooldown(cur: dict, token: str, metric: str, now=None):
+    now = now or _wl_now()
+    cds = cur.setdefault("cooldowns", {}).setdefault(token, {})
+    cds[metric] = now
+
+def _wl_fallback_scan(chain: str|None, token: str|None):
+    if not token: return None
+    base = {
+        "ethereum":"https://etherscan.io/token/",
+        "eth":"https://etherscan.io/token/",
+        "bsc":"https://bscscan.com/token/",
+        "binance":"https://bscscan.com/token/",
+        "polygon":"https://polygonscan.com/token/",
+        "matic":"https://polygonscan.com/token/",
+        "base":"https://basescan.org/token/",
+        "arbitrum":"https://arbiscan.io/token/",
+        "arb":"https://arbiscan.io/token/",
+        "optimism":"https://optimistic.etherscan.io/token/",
+        "op":"https://optimistic.etherscan.io/token/",
+    }
+    b = base.get((chain or "").lower())
+    return (b + token) if b else None
+
+def _wl_alert_keyboard(links: dict, chain: str|None, token: str, muted: bool):
+    scan = (links or {}).get("scan") or _wl_fallback_scan(chain, token)
+    dex  = (links or {}).get("dex")
     kb = {"inline_keyboard": []}
-    row = []
-    dex = (links or {}).get("dex")
-    if dex:
-        row.append({"text": "🟢 Open in DEX", "url": dex})
-    scan = (links or {}).get("scan")
-    if scan:
-        row.append({"text": "🔍 Open in Scan", "url": scan})
-    if row:
-        kb["inline_keyboard"].append(row)
-    row2 = [{"text": "👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}]
-    if muted:
-        row2.append({"text": "🔔 Unmute", "callback_data": "ALERT_UNMUTE"})
-    else:
-        row2.append({"text": "🔕 Mute 24h", "callback_data": "ALERT_MUTE24:1440"})
+    row1 = []
+    if dex:  row1.append({"text":"🟢 Open in DEX", "url": dex})
+    if scan: row1.append({"text":"🔍 Open in Scan", "url": scan})
+    if row1: kb["inline_keyboard"].append(row1)
+    row2 = [{"text":"👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}]
+    row2.append({"text": ("🔔 Unmute" if muted else "🔕 Mute 24h"),
+                 "callback_data": ("ALERTS_UNMUTE" if muted else "ALERTS_MUTE24H")})
     kb["inline_keyboard"].append(row2)
     return kb
 
-def _links_enrich_for_alert(market: dict):
-    # Derive links minimal (scan/dex) similarly to QuickScan enrichment
-    links = dict((market.get("links") or {}))
-    chain = (market.get("chain") or "").lower()
-    token = (market.get("tokenAddress") or "").lower()
-    dexId = (links.get("dexId") or "").lower()
-    if not links.get("scan") and token:
-        _scan_bases = {
-            "ethereum": "https://etherscan.io/token/",
-            "eth": "https://etherscan.io/token/",
-            "bsc": "https://bscscan.com/token/",
-            "binance": "https://bscscan.com/token/",
-            "polygon": "https://polygonscan.com/token/",
-            "matic": "https://polygonscan.com/token/",
-            "arbitrum": "https://arbiscan.io/token/",
-            "arb": "https://arbiscan.io/token/",
-            "base": "https://basescan.org/token/",
-            "optimism": "https://optimistic.etherscan.io/token/",
-            "op": "https://optimistic.etherscan.io/token/",
-            "avalanche": "https://snowtrace.io/token/",
-            "avax": "https://snowtrace.io/token/",
-            "fantom": "https://ftmscan.com/token/",
-            "ftm": "https://ftmscan.com/token/",
-        }
-        base = _scan_bases.get(chain)
-        if base:
-            links["scan"] = base + token
-    if not links.get("dex") and token:
-        if dexId in ("uniswap", "uniswapv2", "uniswapv3") and chain in ("ethereum","base","arbitrum","polygon","optimism"):
-            links["dex"] = f"https://app.uniswap.org/explore/tokens/{chain}/{token}"
-        elif dexId.startswith("pancake") and chain in ("bsc","binance"):
-            links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={token}"
-        elif "quickswap" in dexId and chain == "polygon":
-            links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={token}"
-    return links
+def _wl_check_one(chat_id: int, token: str):
+    # Uses fetch_market from main file
+    try:
+        mkt = fetch_market(token) or {}
+    except Exception:
+        mkt = {}
+    links = (mkt.get("links") or {})
+    ch    = (mkt.get("chain") or "")
+    pc    = mkt.get("priceChanges") or {}
+    vol   = mkt.get("vol24h")
+    # Normalize numbers
+    def _tofloat(x):
+        try: return float(x)
+        except Exception: return None
+    m5  = _tofloat(pc.get("m5"))
+    h1  = _tofloat(pc.get("h1"))
+    h24 = _tofloat(pc.get("h24"))
+    volf = _tofloat(vol)
+    st, key, cur = _wl_state_for(chat_id)
+    th = _wl_thresholds(cur)
+    now = _wl_now()
+    # Skip if muted or disabled
+    if not cur.get("enabled", True): return False
+    if int(cur.get("mute_until", 0) or 0) > now: return False
+    triggered = []
+    if m5 is not None and abs(m5) >= th["d5"] and _wl_cooldown_ok(cur, token, "d5", now): triggered.append(("Δ5m", m5, "d5"))
+    if h1 is not None and abs(h1) >= th["d1h"] and _wl_cooldown_ok(cur, token, "d1h", now): triggered.append(("Δ1h", h1, "d1h"))
+    if h24 is not None and abs(h24) >= th["d24"] and _wl_cooldown_ok(cur, token, "d24", now): triggered.append(("Δ24h", h24, "d24"))
+    if volf is not None and volf >= th["vol"] and _wl_cooldown_ok(cur, token, "vol", now): triggered.append(("Vol24h", volf, "vol"))
+    if not triggered: return False
+    # Build message
+    parts = [f"*Alert — {mdv2_escape(token)}*"]
+    if m5 is not None:  parts.append(f"• Δ5m: {mdv2_escape(_wl_pct(m5))}")
+    if h1 is not None:  parts.append(f"• Δ1h: {mdv2_escape(_wl_pct(h1))}")
+    if h24 is not None: parts.append(f"• Δ24h: {mdv2_escape(_wl_pct(h24))}")
+    if volf is not None: parts.append(f"• Vol24h: ${volf:,.0f}")
+    txt = "\n".join(parts)
+    muted = int(cur.get("mute_until", 0) or 0) > now
+    kb = _wl_alert_keyboard(links, ch, token, muted)
+    send_message(chat_id, txt, reply_markup=kb)
+    # Set cooldowns
+    for _, _, keym in triggered:
+        _wl_set_cooldown(cur, token, keym, now)
+    _wl_state_put(chat_id, cur)
+    return True
 
-# Command handlers (thin). Only intercept our commands, delegate otherwise.
-def _watch_try_handle_message(msg) -> bool:
-    chat_id = msg["chat"]["id"]
-    text = (msg.get("text") or "").strip()
-    low = text.split()[0].lower() if text else ""
-    # Normalize bot mention suffix
-    low = low.split("@")[0] if "@" in low else low
+def _wl_ticker_once():
+    db = _wl_db()
+    now = _wl_now()
+    for key, arr in (db.items() if isinstance(db, dict) else []):
+        try: chat_id = int(key)
+        except Exception: continue
+        st, _, cur = _wl_state_for(chat_id)
+        th = _wl_thresholds(cur)
+        if not cur.get("enabled", True): continue
+        if int(cur.get("mute_until", 0) or 0) > now: continue
+        last = int(cur.get("last_tick", 0) or 0)
+        if (now - last) < max(60, int(th.get("int", _DEFAULTS["int"])) * 60):  # at least 1 min
+            continue
+        for tok in (arr or []):
+            try: _wl_check_one(chat_id, tok)
+            except Exception: pass
+        cur["last_tick"] = now
+        _wl_state_put(chat_id, cur)
 
-    def _reply(txt):
-        send_message(chat_id, txt, reply_markup=None)
-        return True
+# background thread
+_ticker_started = False
+def _wl_start_ticker():
+    global _ticker_started
+    if _ticker_started: return
+    def _loop():
+        while True:
+            try: _wl_ticker_once()
+            except Exception: pass
+            _time_wl.sleep(60)
+    t = _th_wl.Thread(target=_loop, daemon=True, name="mdx-watchlist-ticker")
+    t.start()
+    _ticker_started = True
 
-    parts = text.split()
-    # /watch
-    if low == "/watch":
-        token = parts[1] if len(parts) > 1 else (_get_state(chat_id).get("last_token") or "")
-        ok_, msg_ = _add_watch(chat_id, token)
-        if ok_:
-            _reply(f"*Watchlist*: added `{token}`")
-        else:
-            _reply(f"*Watchlist*: {msg_}")
+try:
+    @app.before_first_request
+    def _wl__bf_start():
+        _wl_start_ticker()
+except Exception:
+    # If decorator not available (unlikely), start immediately
+    try: _wl_start_ticker()
+    except Exception: pass
+
+# Command handlers (wrapping on_message)
+try:
+    _on_message_orig = on_message
+except Exception:
+    _on_message_orig = None
+
+def _wl_cmd_watch(chat_id: int, args: str):
+    addr = None
+    m = _re_wl.search(r"(0x[0-9a-fA-F]{40})", args or "")
+    if m: addr = m.group(1)
+    if not addr:
+        st, _, cur = _wl_state_for(chat_id)
+        addr = cur.get("last_token")
+    if not addr:
+        send_message(chat_id, "Provide a token address or scan one first.")
         return True
-    # /unwatch
-    if low == "/unwatch":
-        token = parts[1] if len(parts) > 1 else (_get_state(chat_id).get("last_token") or "")
-        ok_, msg_ = _remove_watch(chat_id, token)
-        if ok_:
-            _reply(f"*Watchlist*: removed `{token}`")
-        else:
-            _reply(f"*Watchlist*: {msg_}")
+    ok, msg = _wl_add(chat_id, addr)
+    send_message(chat_id, msg)
+    return True
+
+def _wl_cmd_unwatch(chat_id: int, args: str):
+    addr = None
+    m = _re_wl.search(r"(0x[0-9a-fA-F]{40})", args or "")
+    if m: addr = m.group(1)
+    if not addr:
+        st, _, cur = _wl_state_for(chat_id)
+        addr = cur.get("last_token")
+    if not addr:
+        send_message(chat_id, "Provide a token address or scan one first.")
         return True
-    # /watchlist
-    if low == "/watchlist":
-        lst = _get_watchlist(chat_id)
-        if not lst:
-            return _reply("*Watchlist* is empty")
-        lines = [f"*Watchlist* ({len(lst)}/{WATCHLIST_LIMIT}):"] + [f"• `{t}`" for t in lst[:WATCHLIST_LIMIT]]
-        return _reply("\n".join(lines))
-    # Alerts toggles
-    if low == "/alerts_on":
-        st = _get_state(chat_id); st["enabled"] = True; _set_state(chat_id, st)
-        return _reply("Alerts: *ON*")
-    if low == "/alerts_off":
-        st = _get_state(chat_id); st["enabled"] = False; _set_state(chat_id, st)
-        return _reply("Alerts: *OFF*")
-    if low == "/alerts_mute":
-        minutes = 1440
-        if len(parts) > 1:
-            try:
-                minutes = int(float(parts[1]))
-            except Exception:
-                pass
-        until = int(_t.time()) + minutes*60
-        _set_state(chat_id, {"mute_until": until})
-        return _reply(f"Alerts muted for *{minutes}* min")
-    if low == "/alerts_unmute":
-        _set_state(chat_id, {"mute_until": 0})
-        return _reply("Alerts *unmuted*")
-    if low == "/alerts":
-        st = _get_state(chat_id)
-        mute = st.get("mute_until", 0)
-        mute_str = "ON" if mute and int(_t.time()) < int(mute) else "OFF"
-        if mute_str == "ON":
-            left = max(0, int(mute - int(_t.time())) // 60)
-            mute_str += f" (~{left} min)"
-        txt = (
-            "*Alerts status*\n"
-            f"• enabled: {'ON' if st.get('enabled') else 'OFF'}\n"
-            f"• preset: {st.get('preset','normal')}\n"
-            f"• thresholds: Δ5m {st.get('d5')}%  |  Δ1h {st.get('d1h')}%  |  Δ24h {st.get('d24')}%  |  vol ${_fmt_k(st.get('vol'))}\n"
-            f"• interval: {st.get('int')} min  |  cooldown: {st.get('cd')} min\n"
-            f"• mute: {mute_str}"
-        )
-        return _reply(txt)
-    if low == "/alerts_set":
-        # formats: /alerts_set reset | /alerts_set preset fast|normal|calm | /alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60
-        if len(parts) == 1:
-            return _reply("Usage:\n/alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60\n/alerts_set preset fast|normal|calm\n/alerts_set reset")
-        st = _get_state(chat_id)
-        if parts[1].lower() == "reset":
-            _set_state(chat_id, dict(_DEFAULT_ALERTS))
-            return _reply("Alerts: *defaults restored*")
-        if parts[1].lower() == "preset" and len(parts) >= 3:
-            p = parts[2].lower()
-            if p in _PRESETS:
-                ns = dict(st); ns.update(_PRESETS[p]); ns["preset"] = p
-                _set_state(chat_id, ns)
-                return _reply(f"Alerts preset: *{p}*")
-            return _reply("Unknown preset. Use: fast | normal | calm")
-        # parse kv
-        ns = dict(st)
-        for kv in parts[1:]:
-            if "=" not in kv: continue
-            k, v = kv.split("=",1)
-            k = k.lower().strip(); v=v.strip().lower()
-            if k in ("d5","d1h","d24"):
-                try: ns[k] = float(v)
-                except Exception: pass
-            elif k == "vol":
-                val = _parse_k(v); 
-                if val is not None: ns["vol"] = float(val)
-            elif k in ("int","cd"):
-                try: ns[k] = int(float(v))
-                except Exception: pass
-        ns["preset"] = ns.get("preset","custom")
-        _set_state(chat_id, ns)
-        return _reply("Alerts: *updated*")
+    ok, msg = _wl_del(chat_id, addr)
+    send_message(chat_id, msg)
+    return True
+
+def _wl_cmd_watchlist(chat_id: int):
+    arr = _wl_list(chat_id)
+    if not arr:
+        send_message(chat_id, "*Watchlist is empty.*")
+        return True
+    lines = [f"*Watchlist* ({len(arr)}/{WATCHLIST_LIMIT})"]
+    for i, t in enumerate(arr, 1):
+        lines.append(f"{i}. `{t}`")
+    send_message(chat_id, "\n".join(lines))
+    return True
+
+def _wl_cmd_alerts_on(chat_id: int):
+    st, key, cur = _wl_state_for(chat_id)
+    cur["enabled"] = True
+    _wl_state_put(chat_id, cur)
+    send_message(chat_id, "Alerts: *ON*")
+    return True
+
+def _wl_cmd_alerts_off(chat_id: int):
+    st, key, cur = _wl_state_for(chat_id)
+    cur["enabled"] = False
+    _wl_state_put(chat_id, cur)
+    send_message(chat_id, "Alerts: *OFF*")
+    return True
+
+def _wl_cmd_alerts_status(chat_id: int):
+    st, key, cur = _wl_state_for(chat_id)
+    th = _wl_thresholds(cur)
+    muted = int(cur.get("mute_until", 0) or 0) > _wl_now()
+    lines = [
+        "*Alerts status*",
+        f"• State: {'ON' if cur.get('enabled', True) else 'OFF'}",
+        f"• Preset: {cur.get('preset', 'normal')}",
+        f"• Δ5m ≥ {th['d5']:.2f}%  • Δ1h ≥ {th['d1h']:.2f}%  • Δ24h ≥ {th['d24']:.2f}%",
+        f"• Vol24h ≥ ${th['vol']:,.0f}",
+        f"• Interval: {th['int']} min  • Cooldown: {th['cd']} min",
+        f"• Mute: {'ON (24h)' if muted else 'OFF'}",
+    ]
+    send_message(chat_id, "\n".join(lines))
+    return True
+
+def _wl_cmd_alerts_set(chat_id: int, args: str):
+    st, key, cur = _wl_state_for(chat_id)
+    a = (args or "").strip().lower()
+    if "reset" in a:
+        cur["thresholds"] = dict(_DEFAULTS)
+        cur["preset"] = "normal"
+        _wl_state_put(chat_id, cur)
+        return _wl_cmd_alerts_status(chat_id)
+    m = _re_wl.search(r"preset\s+(fast|normal|calm)", a)
+    if m:
+        cur["preset"] = m.group(1)
+        cur["thresholds"].update(_PRESETS[cur["preset"]])
+    # Parse key=val tokens
+    for k, keyname in (("d5","d5"), ("d1h","d1h"), ("d24","d24")):
+        mm = _re_wl.search(rf"{k}\s*=\s*([0-9]+(?:\.[0-9]+)?)", a)
+        if mm: cur.setdefault("thresholds", {})[keyname] = float(mm.group(1))
+    mm = _re_wl.search(r"vol\s*=\s*([0-9]+(?:\.[0-9]+)?[km]?)", a)
+    if mm:
+        v = _wl_hnum(mm.group(1))
+        if v is not None: cur.setdefault("thresholds", {})["vol"] = float(v)
+    mm = _re_wl.search(r"int\s*=\s*([0-9]+)", a)
+    if mm: cur.setdefault("thresholds", {})["int"] = int(mm.group(1))
+    mm = _re_wl.search(r"cd\s*=\s*([0-9]+)", a)
+    if mm: cur.setdefault("thresholds", {})["cd"] = int(mm.group(1))
+    _wl_state_put(chat_id, cur)
+    return _wl_cmd_alerts_status(chat_id)
+
+def _wl_cmd_alerts_mute(chat_id: int, args: str):
+    st, key, cur = _wl_state_for(chat_id)
+    mm = _re_wl.search(r"([0-9]+)", args or "")
+    mins = int(mm.group(1)) if mm else 24*60
+    cur["mute_until"] = _wl_now() + mins*60
+    _wl_state_put(chat_id, cur)
+    send_message(chat_id, f"Muted for *{mins}* min.")
+    return True
+
+def _wl_cmd_alerts_unmute(chat_id: int):
+    st, key, cur = _wl_state_for(chat_id)
+    cur["mute_until"] = 0
+    _wl_state_put(chat_id, cur)
+    send_message(chat_id, "Unmuted.")
+    return True
+
+def _wl_handle_message(chat_id: int, text: str, msg: dict):
+    low = (text or "").lower()
+    if low.startswith("/watchlist"):  return _wl_cmd_watchlist(chat_id)
+    if low.startswith("/watch@") or low.startswith("/watch " ) or low.strip()=="/watch": 
+        return _wl_cmd_watch(chat_id, text)
+    if low.startswith("/unwatch@") or low.startswith("/unwatch ") or low.strip()=="/unwatch": 
+        return _wl_cmd_unwatch(chat_id, text)
+    if low.startswith("/alerts_on"):  return _wl_cmd_alerts_on(chat_id)
+    if low.startswith("/alerts_off"): return _wl_cmd_alerts_off(chat_id)
+    if low.startswith("/alerts_set"): return _wl_cmd_alerts_set(chat_id, text)
+    if low.startswith("/alerts_mute"): return _wl_cmd_alerts_mute(chat_id, text)
+    if low.startswith("/alerts_unmute"): return _wl_cmd_alerts_unmute(chat_id)
+    if low.startswith("/alerts"):     return _wl_cmd_alerts_status(chat_id)
     return False
 
-# Callback wrapper (thin)
-def _watch_try_handle_callback(cb) -> bool:
-    data = cb.get("data") or ""
-    msg = cb.get("message") or {}
-    chat_id = msg.get("chat",{}).get("id")
-    cb_id = cb.get("id")
-    if data.startswith("UNWATCH_T:"):
-        token = data.split(":",1)[1].strip().lower()
-        ok_, _m = _remove_watch(chat_id, token)
-        answer_callback_query(cb_id, "Unwatched", False)
-        send_message(chat_id, f"*Watchlist*: removed `{token}`")
-        return True
-    if data.startswith("ALERT_MUTE24:"):
-        try:
-            minutes = int(float(data.split(":",1)[1]))
-        except Exception:
-            minutes = 1440
-        until = int(_t.time()) + minutes*60
-        _set_state(chat_id, {"mute_until": until})
-        answer_callback_query(cb_id, "Muted", False)
-        return True
-    if data == "ALERT_UNMUTE":
-        _set_state(chat_id, {"mute_until": 0})
-        answer_callback_query(cb_id, "Unmuted", False)
-        return True
-    return False
-
-# Wrap original on_message/on_callback
+# Wrap on_message to be thin and delegating
 try:
-    _on_message__orig = on_message
-    def on_message(msg):
-        try:
-            handled = _watch_try_handle_message(msg)
-            if handled: 
-                return jsonify({"ok": True})
-        except Exception as _e:
-            # fall-through to original if our parsing failed
-            pass
-        return _on_message__orig(msg)
+    from flask import jsonify as _wl_jsonify
 except Exception:
-    pass
+    _wl_jsonify = lambda x: x
 
+def on_message(msg):
+    try:
+        chat_id = msg["chat"]["id"]
+        text = (msg.get("text") or "").strip()
+        if _wl_handle_message(chat_id, text, msg):
+            return _wl_jsonify({"ok": True})
+    except Exception:
+        pass
+    if _on_message_orig:
+        return _on_message_orig(msg)
+
+# Callback handlers
 try:
-    _on_callback__orig = on_callback
-    def on_callback(cb):
-        try:
-            handled = _watch_try_handle_callback(cb)
-            if handled:
-                return jsonify({"ok": True})
-        except Exception:
-            pass
-        return _on_callback__orig(cb)
+    _on_callback_orig = on_callback  # original reference
 except Exception:
-    pass
+    _on_callback_orig = None
 
-# Alerts ticker — per-chat interval, cooldown per token/metric, mute 24h
-class _AlertsTicker(_th.Thread):
-    def __init__(self):
-        super().__init__(daemon=True, name="alerts-ticker")
-        self._stop = _th.Event()
+def on_callback(cb):
+    try:
+        data = cb.get("data") or ""
+        msg  = cb.get("message") or {}
+        chat_id = msg.get("chat",{}).get("id")
+        if data.startswith("UNWATCH_T:"):
+            tok = data.split(":",1)[1].strip()
+            _wl_cmd_unwatch(int(chat_id), tok)
+            answer_callback_query(cb.get("id"), "Unwatched.", False)
+            return _wl_jsonify({"ok": True})
+        if data == "ALERTS_MUTE24H":
+            _wl_cmd_alerts_mute(int(chat_id), "1440")
+            answer_callback_query(cb.get("id"), "Muted 24h.", False)
+            return _wl_jsonify({"ok": True})
+        if data == "ALERTS_UNMUTE":
+            _wl_cmd_alerts_unmute(int(chat_id))
+            answer_callback_query(cb.get("id"), "Unmuted.", False)
+            return _wl_jsonify({"ok": True})
+        # Also catch v1:WATCH / v1:UNWATCH if present in keyboard
+        m = re.match(r"^v1:(WATCH|UNWATCH):(\-?\d+):(\-?\d+)$", data or "")
+        if m and chat_id is not None:
+            act = m.group(1)
+            # Try last token from state
+            st, _, cur = _wl_state_for(int(chat_id))
+            tok = cur.get("last_token")
+            if tok:
+                if act == "WATCH": _wl_cmd_watch(int(chat_id), tok)
+                else: _wl_cmd_unwatch(int(chat_id), tok)
+            answer_callback_query(cb.get("id"), f"{act.title()} ok.", False)
+            return _wl_jsonify({"ok": True})
+    except Exception:
+        pass
+    if _on_callback_orig:
+        return _on_callback_orig(cb)
 
-    def stop(self):
-        self._stop.set()
-
-    def _should_run_for_chat(self, chat_id: int, st: dict):
-        if not st.get("enabled", True):
-            return False
-        if int(_t.time()) < int(st.get("mute_until", 0) or 0):
-            return False
-        last = int(st.get("last_tick", 0) or 0)
-        interval = max(3, int(st.get("int", 15) or 15)) * 60
-        return (int(_t.time()) - last) >= interval
-
-    def _mark_tick(self, chat_id: int):
-        _set_state(chat_id, {"last_tick": int(_t.time())})
-
-    def _pct_abs(self, v):
-        try:
-            return abs(float(v or 0.0))
-        except Exception:
-            return 0.0
-
-    def _send_alert(self, chat_id: int, token: str, mkt: dict, metrics_tripped: list, st: dict):
-        pc = (mkt.get("priceChanges") or {})
-        def _fmt(label, key):
-            try:
-                v = float(pc.get(key))
-                arrow = "▲" if v>0 else ("▼" if v<0 else "•")
-                return f"{label} {arrow} {v:+.2f}%"
-            except Exception:
-                return f"{label} —"
-        vol = mkt.get("vol24h")
-        try:
-            vol_s = _fmt_k(vol)
-        except Exception:
-            vol_s = "—"
-        lines = [
-            "*Alert* — QuickScan watch",
-            f"`{(mkt.get('pairSymbol') or 'Token')}`  •  `{(mkt.get('chain') or '').capitalize()}`",
-            f"{_fmt('Δ5m','m5')}  |  {_fmt('Δ1h','h1')}  |  {_fmt('Δ24h','h24')}  |  Vol24h ${vol_s}",
-        ]
-        txt = "\n".join(lines)  # we escape again in send_message
-        links = _links_enrich_for_alert(mkt)
-        kb = _alert_keyboard(links, token, muted = int(_t.time()) < int(st.get("mute_until", 0) or 0))
-        send_message(chat_id, txt, reply_markup=kb)
-
-    def _check_and_alert(self, chat_id: int, token: str, st: dict):
-        try:
-            mkt = fetch_market(token) or {}
-        except Exception:
-            mkt = {}
-        if not mkt or not mkt.get("ok"):
-            return
-        pc = (mkt.get("priceChanges") or {})
-        tripped = []
-        if self._pct_abs(pc.get("m5"))  >= float(st.get("d5", 2.0)):  tripped.append("d5")
-        if self._pct_abs(pc.get("h1"))  >= float(st.get("d1h", 5.0)): tripped.append("d1h")
-        if self._pct_abs(pc.get("h24")) >= float(st.get("d24",10.0)): tripped.append("d24")
-        try:
-            vol_ok = float(mkt.get("vol24h") or 0.0) >= float(st.get("vol", 250_000.0))
-        except Exception:
-            vol_ok = False
-        if vol_ok: tripped.append("vol")
-        if not tripped:
-            return
-        # cooldowns
-        cd_min = max(1, int(st.get("cd", 60) or 60))
-        now = int(_t.time())
-        st_local = _get_state(chat_id)  # reload to avoid races
-        cds = st_local.get("cooldowns") or {}
-        tok_map = cds.get(token) or {}
-        allowed = False
-        for m in tripped:
-            last = int(tok_map.get(m, 0) or 0)
-            if now - last >= cd_min * 60:
-                allowed = True
-                tok_map[m] = now
-        if not allowed:
-            return
-        cds[token] = tok_map
-        _set_state(chat_id, {"cooldowns": cds})
-        self._send_alert(chat_id, token, mkt, tripped, st_local)
-
-    def run(self):
-        # Stagger startup a bit
-        _t.sleep(2.5)
-        while not self._stop.is_set():
-            try:
-                db = _load_json(WATCH_DB_PATH, {})
-                if isinstance(db, dict):
-                    for chat_id_str, tokens in list(db.items()):
-                        try:
-                            chat_id = int(chat_id_str)
-                        except Exception:
-                            continue
-                        st = _get_state(chat_id)
-                        if self._should_run_for_chat(chat_id, st):
-                            tokens = tokens if isinstance(tokens, list) else []
-                            # mark tick first to avoid overlap on slow runs
-                            self._mark_tick(chat_id)
-                            for tok in tokens[:WATCHLIST_LIMIT]:
-                                if self._stop.is_set(): break
-                                self._check_and_alert(chat_id, str(tok), st)
-                                _t.sleep(0.2)  # polite gap
-            except Exception as _e:
-                # Don't crash the thread
-                pass
-            # short sleep loop
-            for _ in range(30):
-                if self._stop.is_set(): break
-                _t.sleep(1.0)
-
-# Launch ticker once
-try:
-    if not hasattr(app, "_watch_ticker_started"):
-        app._watch_ticker_started = True
-        _ticker = _AlertsTicker()
-        _ticker.start()
-except Exception:
-    pass
 # === /WATCHLIST & ALERTS (lite) ==============================================
