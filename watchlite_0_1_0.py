@@ -1,4 +1,4 @@
-# watchlite_0_1_0.py — minimal, non-invasive Watchlist + Alerts (lite) for Metridex
+# watchlite_0_1_0.py — minimal (v0.1.1 cmd‑match fix), non-invasive Watchlist + Alerts (lite) for Metridex
 # Requirements: no new ENV. Uses JSON files next to server: watch_db.json, watch_state.json
 # Features:
 # - Commands: /watch, /unwatch [0x..], /watchlist
@@ -9,6 +9,11 @@
 # - Uses server's send_message(), mdv2_escape(), tg(), build_keyboard(), fetch_market()
 
 import os, json, time, threading, re
+
+def _is_cmd(low: str, base: str) -> bool:
+    if not isinstance(low, str):
+        return False
+    return re.match(rf'^/{base}(?:@[\w_]+)?(?:\s|$)', low) is not None
 
 _DEFAULT_DB = "./watch_db.json"
 _DEFAULT_STATE = "./watch_state.json"
