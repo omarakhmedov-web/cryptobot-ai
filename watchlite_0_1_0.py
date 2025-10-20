@@ -106,6 +106,40 @@ def _md(text):
         return _escape(text)
     return text
 
+
+def _find_token_in_text(text):
+    if not isinstance(text, str):
+        return None
+    m = re.search(r'(0x[a-fA-F0-9]{40})', text)
+    return m.group(1) if m else None
+
+def _safe_acb(cb_id, text="OK", alert=False):
+    try:
+        if _answer_cb:
+            _answer_cb(cb_id, text, alert)
+            return
+    except Exception:
+        pass
+    try:
+        if _tg:
+            _tg("answerCallbackQuery", callback_query_id=cb_id, text=text, show_alert=alert)
+    except Exception:
+        pass
+
+def _build_watch_keyboard(links, token, watched):
+    rows = []
+    if isinstance(links, dict):
+        if links.get("dex"):
+            rows.append([{"text":"🟢 Open in DEX", "url": links["dex"]}])
+        if links.get("scan"):
+            rows.append([{"text":"🔍 Open in Scan", "url": links["scan"]}])
+    if watched:
+        rows.append([{"text":"👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
+    else:
+        rows.append([{"text":"👁️ Watch", "callback_data": f"WATCH_T:{token}"}])
+    rows.append([{"text":"🔕 Mute 24h", "callback_data":"MUTE_24H"}, {"text":"🔔 Unmute", "callback_data":"UNMUTE"}])
+    return {"inline_keyboard": rows}
+
 def init(paths=None, limit=None, send_message_fn=None, send_message_raw=None, tg_fn=None, escape_fn=None, fetch_market_fn=None, build_keyboard_fn=None, answer_callback_fn=None):
     global DB_PATH, STATE_PATH, LIMIT, _send_message, _send_raw, _escape, _tg, _fetch_market, _build_kbd, _answer_cb
     if isinstance(paths, dict):
@@ -198,6 +232,51 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
 
     _ensure_loaded()
     cfg = _cfg(chat_id)
+    # WATCH_T / UNWATCH_T with explicit token
+    if data.startswith("UNWATCH_T:") or data.startswith("WATCH_T:"):
+        tok = data.split(":",1)[1].strip().lower()
+        wl = _wl(chat_id)
+        if data.startswith("UNWATCH_T:"):
+            if tok in wl:
+                wl.remove(tok); _save_db()
+                _safe_acb(cb_id, "Removed from watchlist.", False)
+                if _send_message: _send_message(chat_id, f"Removed `{tok}` from watchlist.")
+            else:
+                _safe_acb(cb_id, "Not in watchlist.", False)
+            return True
+        else:
+            if tok not in wl and len(wl) < LIMIT:
+                wl.append(tok); _save_db()
+                _safe_acb(cb_id, "Added to watchlist.", False)
+                if _send_message: _send_message(chat_id, f"Watching `{tok}`. Total: {len(wl)}")
+            else:
+                _safe_acb(cb_id, "Already watching or list full.", False)
+            return True
+
+    # Legacy WATCH/UNWATCH without token — use message token or last_token
+    if data in ("WATCH","UNWATCH"):
+        msg_text = (msg.get("text") or "") + "\n" + (msg.get("caption") or "")
+        tok = _find_token_in_text(msg_text) or cfg.get("last_token")
+        if not (isinstance(tok, str) and tok.startswith("0x") and len(tok)==42):
+            _safe_acb(cb_id, "Scan a token first.", True)
+            return True
+        wl = _wl(chat_id)
+        if data == "WATCH":
+            if tok not in wl and len(wl) < LIMIT:
+                wl.append(tok); _save_db()
+                _safe_acb(cb_id, "Added to watchlist.", False)
+                if _send_message: _send_message(chat_id, f"Watching `{tok}`. Total: {len(wl)}")
+            else:
+                _safe_acb(cb_id, "Already watching or list full.", False)
+            return True
+        else:
+            if tok in wl:
+                wl.remove(tok); _save_db()
+                _safe_acb(cb_id, "Removed from watchlist.", False)
+                if _send_message: _send_message(chat_id, f"Removed `{tok}` from watchlist.")
+            else:
+                _safe_acb(cb_id, "Not in watchlist.", False)
+            return True
 
     def reply(msg):
         if _send_message:
@@ -223,7 +302,20 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
             reply(f"Watchlist is full (limit {LIMIT}). Remove some with `/unwatch 0x...`")
             return True
         wl.append(tok); _save_db()
-        reply(f"Watching `{tok}`. Total: {len(wl)}")
+        # Info + buttons
+        try:
+            mkt = _fetch_market(tok) if _fetch_market else None
+        except Exception:
+            mkt = None
+        if isinstance(mkt, dict):
+            psym = mkt.get("pairSymbol") or "Token"
+            chain = mkt.get("chain") or "—"
+            links = mkt.get("links") or {}
+            kb = _build_watch_keyboard(links, tok, watched=True)
+            header = f"*Watching — {psym}*  `[{chain}]`\n`{tok}`"
+            _send_message(chat_id, header, reply_markup=kb)
+        else:
+            reply(f"Watching `{tok}`. Total: {len(wl)}")
         return True
 
     # UNWATCH
@@ -241,7 +333,20 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
         tok = token.lower()
         if tok in wl:
             wl.remove(tok); _save_db()
-            reply(f"Removed `{tok}` from watchlist. Total: {len(wl)}")
+            # Info + buttons (offer to watch back)
+            try:
+                mkt = _fetch_market(tok) if _fetch_market else None
+            except Exception:
+                mkt = None
+            if isinstance(mkt, dict):
+                psym = mkt.get("pairSymbol") or "Token"
+                chain = mkt.get("chain") or "—"
+                links = mkt.get("links") or {}
+                kb = _build_watch_keyboard(links, tok, watched=False)
+                header = f"*Unwatched — {psym}*  `[{chain}]`\n`{tok}`"
+                _send_message(chat_id, header, reply_markup=kb)
+            else:
+                reply(f"Removed `{tok}` from watchlist. Total: {len(wl)}")
         else:
             reply(f"Not in watchlist: `{tok}`")
         return True
@@ -331,10 +436,56 @@ def handle_callback(cb):
     data = (cb.get("data") or "")
     msg = cb.get("message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
+    cb_id = cb.get("id")
     if not chat_id:
         return False
     _ensure_loaded()
     cfg = _cfg(chat_id)
+    # WATCH_T / UNWATCH_T with explicit token
+    if data.startswith("UNWATCH_T:") or data.startswith("WATCH_T:"):
+        tok = data.split(":",1)[1].strip().lower()
+        wl = _wl(chat_id)
+        if data.startswith("UNWATCH_T:"):
+            if tok in wl:
+                wl.remove(tok); _save_db()
+                _safe_acb(cb_id, "Removed from watchlist.", False)
+                if _send_message: _send_message(chat_id, f"Removed `{tok}` from watchlist.")
+            else:
+                _safe_acb(cb_id, "Not in watchlist.", False)
+            return True
+        else:
+            if tok not in wl and len(wl) < LIMIT:
+                wl.append(tok); _save_db()
+                _safe_acb(cb_id, "Added to watchlist.", False)
+                if _send_message: _send_message(chat_id, f"Watching `{tok}`. Total: {len(wl)}")
+            else:
+                _safe_acb(cb_id, "Already watching or list full.", False)
+            return True
+
+    # Legacy WATCH/UNWATCH without token — use message token or last_token
+    if data in ("WATCH","UNWATCH"):
+        msg_text = (msg.get("text") or "") + "\n" + (msg.get("caption") or "")
+        tok = _find_token_in_text(msg_text) or cfg.get("last_token")
+        if not (isinstance(tok, str) and tok.startswith("0x") and len(tok)==42):
+            _safe_acb(cb_id, "Scan a token first.", True)
+            return True
+        wl = _wl(chat_id)
+        if data == "WATCH":
+            if tok not in wl and len(wl) < LIMIT:
+                wl.append(tok); _save_db()
+                _safe_acb(cb_id, "Added to watchlist.", False)
+                if _send_message: _send_message(chat_id, f"Watching `{tok}`. Total: {len(wl)}")
+            else:
+                _safe_acb(cb_id, "Already watching or list full.", False)
+            return True
+        else:
+            if tok in wl:
+                wl.remove(tok); _save_db()
+                _safe_acb(cb_id, "Removed from watchlist.", False)
+                if _send_message: _send_message(chat_id, f"Removed `{tok}` from watchlist.")
+            else:
+                _safe_acb(cb_id, "Not in watchlist.", False)
+            return True
 
     if data.startswith("UNWATCH_T:"):
         token = data.split(":",1)[1].strip().lower()
