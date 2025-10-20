@@ -1,4 +1,3 @@
-
 # watchlite_0_1_0.py — minimal, non-invasive Watchlist + Alerts (lite) for Metridex
 # Requirements: no new ENV. Uses JSON files next to server: watch_db.json, watch_state.json
 # Features:
