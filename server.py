@@ -720,316 +720,6 @@ def _derive_token_address_quickfix(mkt: dict, links: dict) -> str | None:
             return "0x" + m.group(1)
     return None
 # === /QUICKFIX ===
-# === WATCHLIST (lite) =========================================================
-WATCH_DB_PATH = os.getenv("WATCH_DB_PATH","./watch_db.json")
-WATCHLIST_LIMIT = int(os.getenv("WATCHLIST_LIMIT","200"))
-_last_msg_by_chat = {}
-
-def _load_watch_db():
-    try:
-        with open(WATCH_DB_PATH,"r",encoding="utf-8") as f:
-            j=json.load(f)
-            return j if isinstance(j, dict) else {}
-    except Exception:
-        return {}
-
-def _save_watch_db(db):
-    try:
-        with open(WATCH_DB_PATH,"w",encoding="utf-8") as f:
-            json.dump(db or {}, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-def _bundle_token_info(bundle):
-    try:
-        m = (bundle.get("market") or {})
-        token = (m.get("tokenAddress") or "—")
-        chain = (m.get("chain") or "—")
-        symbol = (m.get("pairSymbol") or "")
-        return token, (chain or "—"), (symbol or "")
-    except Exception:
-        return "—","—",""
-
-def _watch_list(chat_id: int):
-    db = _load_watch_db()
-    return db.get(str(chat_id)) or []
-
-def _watch_add(chat_id: int, token: str, chain: str, symbol: str = ""):
-    db = _load_watch_db()
-    arr = db.get(str(chat_id)) or []
-    token = (token or "").lower()
-    chain = (chain or "").lower()
-    if not (token.startswith("0x") and len(token) == 42):
-        return False, "Invalid token"
-    if any((x.get("token") or "").lower() == token for x in arr):
-        return True, "Already watching"
-    if len(arr) >= WATCHLIST_LIMIT:
-        return False, f"Watchlist is full ({WATCHLIST_LIMIT})."
-    arr.append({"token": token, "chain": chain, "symbol": symbol})
-    db[str(chat_id)] = arr
-    _save_watch_db(db)
-    return True, "Added"
-
-def _watch_remove(chat_id: int, token: str):
-    db = _load_watch_db()
-    arr = db.get(str(chat_id)) or []
-    token = (token or "").lower()
-    new = [x for x in arr if (x.get("token") or "").lower() != token]
-    db[str(chat_id)] = new
-    _save_watch_db(db)
-    return len(arr) != len(new)
-
-def _format_watchlist_md(chat_id: int) -> str:
-    lst = _watch_list(chat_id)
-    if not lst:
-        return "👀 *Watchlist*\n(Empty)"
-    lines = ["👀 *Watchlist*"]
-    for i, it in enumerate(lst, 1):
-        tok = it.get("token") or "—"
-        ch  = (it.get("chain") or "—").upper()
-        sym = it.get("symbol") or ""
-        if sym:
-            lines.append(f"{i}. `{tok}` — *{sym}* ({ch})")
-        else:
-            lines.append(f"{i}. `{tok}` ({ch})")
-    return "\n".join(lines)
-# === /WATCHLIST ===============================================================
-# === WATCH ALERTS (lite) ======================================================
-WATCH_ALERTS_ENABLED = int(os.getenv("WATCH_ALERTS_ENABLED","1"))
-WATCH_ALERTS_INTERVAL_MIN = int(os.getenv("WATCH_ALERTS_INTERVAL_MIN","15"))
-ALERTS_D5M = float(os.getenv("ALERTS_D5M","2"))
-ALERTS_D1H = float(os.getenv("ALERTS_D1H","5"))
-ALERTS_D24H = float(os.getenv("ALERTS_D24H","10"))
-ALERTS_VOL24 = float(os.getenv("ALERTS_VOL24","250000"))  # USD
-ALERTS_COOLDOWN_MIN = int(os.getenv("ALERTS_COOLDOWN_MIN","60"))
-WATCH_STATE_PATH = os.getenv("WATCH_STATE_PATH","./watch_state.json")
-
-def _load_watch_state():
-    try:
-        with open(WATCH_STATE_PATH,"r",encoding="utf-8") as f:
-            j=json.load(f)
-            return j if isinstance(j, dict) else {}
-    except Exception:
-        return {}
-
-def _save_watch_state(st):
-    try:
-        with open(WATCH_STATE_PATH,"w",encoding="utf-8") as f:
-            json.dump(st or {}, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-def _fmt_usd(x):
-    try:
-        x = float(x or 0)
-    except Exception:
-        return "—"
-    if x >= 1_000_000:
-        return f"${x/1_000_000:.2f}M"
-    if x >= 1_000:
-        return f"${x/1_000:.1f}k"
-    return f"${x:.0f}"
-
-def _num(x):
-    # Convert percent string/number to float
-    try:
-        if isinstance(x, str):
-            x = x.strip().replace("%","")
-        return float(x)
-    except Exception:
-        return 0.0
-
-def _state_for_chat(st, chat_id):
-    s = st.get(str(chat_id))
-    if not isinstance(s, dict):
-        s = {"enabled": True, "last_run": 0, "last": {}}
-        st[str(chat_id)] = s
-    s.setdefault("enabled", True)
-    s.setdefault("last_run", 0)
-    s.setdefault("last", {})
-    return s
-
-def _should_notify(last_ts, now_ts, cooldown_min):
-    try:
-        return (now_ts - (last_ts or 0)) >= cooldown_min*60
-    except Exception:
-        return True
-
-def _tick_watch_alerts(force=False):
-    if not WATCH_ALERTS_ENABLED:
-        return
-    now = int(time.time())
-    st = _load_watch_state()
-    db = _load_watch_db()
-    # Global throttle per file to avoid too frequent scans
-    g = st.get("__global__", {"last_run": 0})
-    if not force and now - int(g.get("last_run", 0)) < WATCH_ALERTS_INTERVAL_MIN*60:
-        return
-    g["last_run"] = now
-    st["__global__"] = g
-
-    for chat_id_str, items in db.items():
-        try:
-            chat_id = int(chat_id_str)
-        except Exception:
-            continue
-        chat_state = _state_for_chat(st, chat_id)
-        if not chat_state.get("enabled", True):
-            continue
-        th = _get_chat_thresholds(chat_id)
-        if not force and now - int(chat_state.get("last_run", 0)) < th.get("interval", WATCH_ALERTS_INTERVAL_MIN)*60:
-            continue
-        last_map = chat_state.get("last") or {}
-
-        for it in (items or []):
-            token = (it.get("token") or "").lower()
-            if not (token.startswith("0x") and len(token)==42):
-                continue
-            try:
-                mkt = fetch_market(token) or {}
-            except Exception as e:
-                print("ALERT fetch_market error", token, e, traceback.format_exc())
-                mkt = {}
-            if not mkt:
-                continue
-
-            pc = mkt.get("priceChanges") or {}
-            d5  = _num(pc.get("m5") or pc.get("5m") or 0)
-            d1h = _num(pc.get("h1") or pc.get("1h") or 0)
-            d24 = _num(pc.get("h24") or pc.get("24h") or 0)
-            vol = mkt.get("volume24hUsd") or mkt.get("vol24hUsd") or mkt.get("volume24h") or 0
-            try:
-                vol = float(vol)
-            except Exception:
-                vol = 0.0
-
-            sym = mkt.get("pairSymbol") or mkt.get("symbol") or ""
-            chain = (mkt.get("chain") or "").upper() or (it.get("chain") or "—").upper()
-            pair = mkt.get("pairAddress") or ""
-            dex_url = mkt.get("dexUrl") or ""
-            scan_url = mkt.get("scanUrl") or _explorer_url(chain, token) or ""
-
-            lm = last_map.get(token) or {}
-            # Cooldowns by metric
-            t_last_d5  = int(lm.get("d5", 0))
-            t_last_d1h = int(lm.get("d1h", 0))
-            t_last_d24 = int(lm.get("d24", 0))
-            t_last_vol = int(lm.get("vol", 0))
-
-            alerts = []
-            if abs(d5) >= ALERTS_D5M and _should_notify(t_last_d5, now, ALERTS_COOLDOWN_MIN):
-                alerts.append(f"Δ5m {d5:+.2f}%")
-                lm["d5"] = now
-            if abs(d1h) >= ALERTS_D1H and _should_notify(t_last_d1h, now, ALERTS_COOLDOWN_MIN):
-                alerts.append(f"Δ1h {d1h:+.2f}%")
-                lm["d1h"] = now
-            if abs(d24) >= ALERTS_D24H and _should_notify(t_last_d24, now, ALERTS_COOLDOWN_MIN):
-                alerts.append(f"Δ24h {d24:+.2f}%")
-                lm["d24"] = now
-            if vol >= ALERTS_VOL24 and _should_notify(t_last_vol, now, ALERTS_COOLDOWN_MIN):
-                alerts.append(f"Vol24h {_fmt_usd(vol)}")
-                lm["vol"] = now
-
-            if alerts:
-                title = f"👀 *Watch alert* — *{sym or token[:6]}* ({chain})"
-                body  = " • ".join(alerts)
-                msg = f"{title}\n{body}"
-                try:
-                    kb = _alert_keyboard(dex_url, scan_url, token)
-                    send_message(chat_id, msg, reply_markup=kb)
-                except Exception as e:
-                    print("ALERT send_message error", e)
-                last_map[token] = lm
-
-        chat_state["last"] = last_map
-        chat_state["last_run"] = now
-        st[str(chat_id)] = chat_state
-
-    _save_watch_state(st)
-
-# Commands for alerts
-def _toggle_alerts(chat_id, enable: bool):
-    st = _load_watch_state()
-    cs = _state_for_chat(st, chat_id)
-    cs["enabled"] = bool(enable)
-    st[str(chat_id)] = cs
-    _save_watch_state(st)
-    return cs
-
-def _alerts_status_md(chat_id):
-    st = _load_watch_state()
-    cs = _state_for_chat(st, chat_id)
-    enabled = cs.get("enabled", True)
-    th = _get_chat_thresholds(chat_id)
-    return (
-        "🔔 *Alerts*: ON\n"
-        if enabled else
-        "🔕 *Alerts*: OFF\n"
-    ) + (
-        f"Interval: {th.get('interval')}m • Cooldown: {th.get('cooldown')}m\n"
-        f"Thresholds: Δ5m≥{th.get('d5'):.1f}% • Δ1h≥{th.get('d1h'):.1f}% • Δ24h≥{th.get('d24'):.1f}% • Vol24h≥{_fmt_usd(th.get('vol'))}"
-    )
-# === /WATCH ALERTS ============================================================
-def _alert_keyboard(dex_url: str, scan_url: str, token: str):
-    try:
-        rows = []
-        row = []
-        if dex_url:
-            row.append({"text": "🟢 Open in DEX", "url": dex_url})
-        if scan_url:
-            row.append({"text": "🔍 Open in Scan", "url": scan_url})
-        if row:
-            rows.append(row)
-        if token and token.startswith("0x") and len(token) == 42:
-            rows.append([{"text": "👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
-        return {"inline_keyboard": rows} if rows else None
-    except Exception:
-        return None
-
-def _get_chat_thresholds(chat_id):
-    st = _load_watch_state()
-    cs = _state_for_chat(st, chat_id)
-    th = cs.get("th") or {}
-    try:
-        return {
-            "d5": float(th.get("d5", ALERTS_D5M)),
-            "d1h": float(th.get("d1h", ALERTS_D1H)),
-            "d24": float(th.get("d24", ALERTS_D24H)),
-            "vol": float(th.get("vol", ALERTS_VOL24)),
-            "interval": int(th.get("interval", WATCH_ALERTS_INTERVAL_MIN)),
-            "cooldown": int(th.get("cooldown", ALERTS_COOLDOWN_MIN)),
-        }
-    except Exception:
-        return {
-            "d5": ALERTS_D5M, "d1h": ALERTS_D1H, "d24": ALERTS_D24H,
-            "vol": ALERTS_VOL24, "interval": WATCH_ALERTS_INTERVAL_MIN,
-            "cooldown": ALERTS_COOLDOWN_MIN
-        }
-
-def _set_chat_thresholds(chat_id, **kwargs):
-    st = _load_watch_state()
-    cs = _state_for_chat(st, chat_id)
-    th = cs.get("th") or {}
-    th.update({k:v for k,v in kwargs.items() if v is not None})
-    cs["th"] = th
-    st[str(chat_id)] = cs
-    _save_watch_state(st)
-    return th
-
-def _parse_amount(val: str):
-    try:
-        s = str(val).strip().lower().replace("%","").replace("$","")
-        mult = 1.0
-        if s.endswith("k"):
-            mult, s = 1000.0, s[:-1]
-        elif s.endswith("m"):
-            mult, s = 1_000_000.0, s[:-1]
-        return float(s) * mult
-    except Exception:
-        return None
-
-
-
 def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown', disable_web_page_preview=None):
     data = {"chat_id": chat_id, "text": mdv2_escape(str(text)), "parse_mode": PARSE_MODE}
     if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
@@ -1196,104 +886,9 @@ def on_message(msg):
         return jsonify({"ok": True})
 
     # Only non-command messages trigger scan
-
-    # --- Watchlist commands (lite) ---
-    if low.startswith("/watchlist"):
-        txt = _format_watchlist_md(chat_id)
-        send_message(chat_id, txt)
-        return jsonify({"ok": True})
-
-    if low.startswith("/watch"):
-        parts = text.split()
-        token_arg = parts[1].strip() if len(parts) > 1 else None
-        if token_arg and token_arg.lower().startswith("0x") and len(token_arg) in (42,66):
-            last_id = _last_msg_by_chat.get(chat_id)
-            bndl = load_bundle(chat_id, last_id) if last_id else {}
-            _, chain_guess, sym_guess = _bundle_token_info(bndl or {})
-            ok_, msg_ = _watch_add(chat_id, token_arg[:42], chain_guess or "eth", sym_guess or "")
-            send_message(chat_id, f"👀 *Watch*: {msg_}\n`{token_arg[:42]}`")
-            return jsonify({"ok": True})
-        last_id = _last_msg_by_chat.get(chat_id)
-        bndl = load_bundle(chat_id, last_id) if last_id else {}
-        token, chain, sym = _bundle_token_info(bndl or {})
-        if token and token.startswith("0x") and len(token) == 42:
-            ok_, msg_ = _watch_add(chat_id, token, chain or "eth", sym or "")
-            send_message(chat_id, f"👀 *Watch*: {msg_}\n`{token}`")
-        else:
-            send_message(chat_id, "👀 *Watch*: nothing to add — send a token first.")
-        return jsonify({"ok": True})
-
-    if low.startswith("/unwatch"):
-        parts = text.split()
-        token_arg = parts[1].strip() if len(parts) > 1 else None
-        if not token_arg:
-            last_id = _last_msg_by_chat.get(chat_id)
-            bndl = load_bundle(chat_id, last_id) if last_id else {}
-            token_arg, _, _ = _bundle_token_info(bndl or {})
-        if token_arg and token_arg.startswith("0x") and len(token_arg) == 42:
-            removed = _watch_remove(chat_id, token_arg[:42])
-            msg_ = "Removed" if removed else "Not found"
-            send_message(chat_id, f"👀 *Unwatch*: {msg_}\n`{token_arg[:42]}`")
-        else:
-            send_message(chat_id, "👀 *Unwatch*: specify a token, e.g. /unwatch 0x…")
-        return jsonify({"ok": True})
-    # --- /Watchlist commands ---
-
-    # --- Alerts commands (lite) ---
-    if low.startswith("/alerts_on"):
-        _toggle_alerts(chat_id, True)
-        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
-        return jsonify({"ok": True})
-
-    if low.startswith("/alerts_off"):
-        _toggle_alerts(chat_id, False)
-        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
-        return jsonify({"ok": True})
-
-    if low.startswith("/alerts"):
-        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
-        return jsonify({"ok": True})
-    # --- /Alerts commands ---
-
-    # --- Alerts config (lite) ---
-    if low.startswith("/alerts_set"):
-        parts = text.split()[1:]
-        if parts and parts[0].lower() == "reset":
-            _set_chat_thresholds(chat_id, d5=None, d1h=None, d24=None, vol=None, interval=None, cooldown=None)
-            send_message(chat_id, "🔄 *Alerts settings reset*")
-            send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
-            return jsonify({"ok": True})
-        update = {}
-        keymap = {"d5":"d5","d1h":"d1h","d24":"d24","vol":"vol","int":"interval","interval":"interval","cd":"cooldown","cooldown":"cooldown"}
-        for p in parts:
-            if "=" not in p: 
-                continue
-            k, v = p.split("=", 1)
-            k = (k or "").lower().strip()
-            v = (v or "").strip()
-            kk = keymap.get(k)
-            if not kk:
-                continue
-            val = _parse_amount(v)
-            if val is None:
-                continue
-            update[kk] = float(val)
-        if update:
-            _set_chat_thresholds(chat_id, **update)
-            send_message(chat_id, "✅ *Alerts updated*")
-        else:
-            send_message(chat_id, "ℹ️ Usage: /alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60")
-        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
-        return jsonify({"ok": True})
-    # --- /Alerts config ---
     if text.startswith("/"):
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
-
-        try:
-            _tick_watch_alerts()
-        except Exception:
-            pass
 
     ok, _tier = can_scan(chat_id)
     if not ok:
@@ -1452,14 +1047,38 @@ def on_message(msg):
                 market["ageDays"] = round(age_days, 2)
 
     verdict = compute_verdict(market)
+    # --- precompute website intel and pass into ctx so renderers can show it ---
+    links = (market.get("links") or {})
+    web = {
 
-    # FAST PATH: Skip heavy precomputations (webintel/why/why++/LP) in on_message
+        "whois": {"created": None, "registrar": None},
+
+        "ssl": {"ok": None, "expires": None, "issuer": None},
+
+        "wayback": {"first": None}
+
+    }
+
+    site_url = None
     try:
-        _dom = derive_domain(((market.get("links") or {}).get("site")))
+
+        site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
+
+        if site_url:
+
+            web = analyze_website(site_url)
+
+    except Exception:
+
+        pass
+
+    web = _enrich_webintel_fallback(derive_domain(site_url), web)
+    # >>> FIX: pass precomputed webintel into ctx so renderers see it
+    try:
+        _dom = derive_domain(site_url)
     except Exception:
         _dom = None
-    ctx = {"webintel": {}, "domain": _dom}
-
+    ctx = {"webintel": web or {}, "domain": _dom}
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
     # Reuse same ctx (no re-computation)
@@ -1484,7 +1103,6 @@ def on_message(msg):
     except Exception:
         lp = "LP lock: unknown"
 
-    
     links = (market.get("links") or {})
     bundle = {
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
@@ -1498,18 +1116,13 @@ def on_message(msg):
             "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
         },
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
-        # lazy fields (computed on callbacks): details/why/whypp/lp/webintel
+        "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
     }
-
 
     sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
     msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
-        try:
-            _last_msg_by_chat[chat_id] = msg_id
-        except Exception:
-            pass
         try:
             tg("editMessageReplyMarkup", {
                 "chat_id": chat_id,
@@ -1531,21 +1144,7 @@ def on_message(msg):
 
 
 def on_callback(cb):
-    try:
-        _tick_watch_alerts()
-    except Exception:
-        pass
-    # Quick handler for UNWATCH from alert cards (no bundle required)
-    data = cb.get("data") or ""
     cb_id = cb["id"]
-    msg = cb.get("message") or {}
-    chat_id = msg.get("chat", {}).get("id")
-    if isinstance(data, str) and data.startswith("UNWATCH_T:"):
-        tok = data.split(":",1)[1][:42]
-        removed = _watch_remove(chat_id, tok)
-        send_message(chat_id, f"👀 *Unwatch*: {'Removed' if removed else 'Not found'}\n`{tok}`")
-        answer_callback_query(cb_id, "Removed from Watchlist." if removed else "Token not found.", False)
-        return jsonify({"ok": True})
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
     chat_id = msg.get("chat", {}).get("id")
@@ -1582,85 +1181,35 @@ def on_callback(cb):
         send_message(chat_id, bundle.get("details", "(no details)"),
                      reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
 
-    
     elif action == "WHY":
-        txt = bundle.get("why")
-        if not txt:
-            try:
-                v = bundle.get("verdict") or {}
-                mkt = bundle.get("market") or {}
-                txt = safe_render_why(v, mkt, DEFAULT_LANG)
-                bundle["why"] = txt
-                try:
-                    store_bundle(chat_id, orig_msg_id, bundle)
-                except Exception:
-                    pass
-            except Exception:
-                txt = "*Why?* n/a"
+        txt = bundle.get("why") or "*Why?*\n• No specific risk factors detected"
         send_message(chat_id, txt, reply_markup=None)
         answer_callback_query(cb_id, "Why? posted.", False)
 
-    
     elif action == "WHYPP":
-        txt = bundle.get("whypp")
-        if not txt:
-            try:
-                v = bundle.get("verdict") or {}
-                mkt = bundle.get("market") or {}
-                txt = safe_render_whypp(v, mkt, DEFAULT_LANG)
-                bundle["whypp"] = txt
-                try:
-                    store_bundle(chat_id, orig_msg_id, bundle)
-                except Exception:
-                    pass
-            except Exception:
-                txt = "*Why++* n/a"
+        txt = bundle.get("whypp") or "*Why++* n/a"
         MAX = 3500
         if len(txt) <= MAX:
             send_message(chat_id, txt, reply_markup=None)
         else:
-            # split into segments
-            i = 0
-            s = txt
-            while s:
+            chunk = txt[:MAX]
+            txt = txt[MAX:]
+            send_message(chat_id, chunk, reply_markup=None)
+            i = 1
+            while txt:
                 i += 1
-                chunk_part = s[:MAX]
-                s = s[MAX:]
+                chunk_part = txt[:MAX]
+                txt = txt[MAX:]
                 prefix = f"Why++ ({i})\n"
                 send_message(chat_id, prefix + chunk_part, reply_markup=None)
         answer_callback_query(cb_id, "Why++ posted.", False)
 
-    
     elif action == "LP":
-        txt = bundle.get("lp")
-        if not txt:
-            try:
-                mkt = bundle.get("market") or {}
-                ch_ = (mkt.get("chain") or "").lower()
-                _map = {"ethereum":"eth","bsc":"bsc","polygon":"polygon","matic":"polygon",
-                        "arbitrum":"arbitrum","base":"base","optimism":"op",
-                        "avalanche":"avax","fantom":"ftm"}
-                _short = _map.get(ch_, ch_ or "eth")
-                pair_addr = mkt.get("pairAddress") or resolve_pair(_short, mkt.get("tokenAddress"))
-                info = check_lp_lock_v2(_short, pair_addr)
-                try:
-                    if isinstance(info, dict) and not info.get('chain'):
-                        info['chain'] = _short
-                except Exception:
-                    pass
-                txt = render_lp(info, DEFAULT_LANG)
-                bundle["lp"] = txt
-                try:
-                    store_bundle(chat_id, orig_msg_id, bundle)
-                except Exception:
-                    pass
-            except Exception:
-                txt = "LP lock: unknown"
-        send_message(chat_id, txt, reply_markup=None)
+        text = bundle.get("lp", "LP lock: n/a")
+        send_message(chat_id, text, reply_markup=None)
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
-
         try:
             # dynamic, human-friendly filename
             mkt = (bundle.get('market') or {})
@@ -1773,28 +1322,6 @@ def on_callback(cb):
             val = ch.get("h24")
         send_message(chat_id, f"*{label}*: {_pct(val)}", reply_markup=None)
         answer_callback_query(cb_id, f"{label}: {_pct(val)}", False)
-
-    elif action == "WATCH":
-        bndl = load_bundle(chat_id, orig_msg_id) or {}
-        token, chain, sym = _bundle_token_info(bndl)
-        if token and token.startswith("0x") and len(token) == 42:
-            ok_, msg_ = _watch_add(chat_id, token, (chain or "eth"), sym or "")
-            send_message(chat_id, f"👀 *Watch*: {msg_}\n`{token}`", reply_markup=None)
-            answer_callback_query(cb_id, "Added to Watchlist." if ok_ else msg_, False)
-        else:
-            send_message(chat_id, "👀 *Watch*: nothing to add — send a token first.")
-            answer_callback_query(cb_id, "No token found.", False)
-
-    elif action == "UNWATCH":
-        bndl = load_bundle(chat_id, orig_msg_id) or {}
-        token, _, _ = _bundle_token_info(bndl)
-        if token and token.startswith("0x") and len(token) == 42:
-            removed = _watch_remove(chat_id, token)
-            send_message(chat_id, f"👀 *Unwatch*: {'Removed' if removed else 'Not found'}\n`{token}`", reply_markup=None)
-            answer_callback_query(cb_id, "Removed from Watchlist." if removed else "Token not found.", False)
-        else:
-            send_message(chat_id, "👀 *Unwatch*: specify a token.", reply_markup=None)
-            answer_callback_query(cb_id, "No token found.", False)
 
     else:
         answer_callback_query(cb_id, "Unsupported action", True)
@@ -2313,499 +1840,478 @@ try:
 except NameError:
     _np_create_invoice = _np_create_invoice_smart
 
-def _explorer_url(chain: str, token: str):
+
+# === WATCHLIST & ALERTS (lite) v1 — non-invasive wrappers ====================
+# No new ENV required; uses JSON files in working dir by default.
+import threading as _th, time as _t, json as _json, os as _os, re as _re
+
+WATCH_DB_PATH = _os.getenv("WATCH_DB_PATH", "./watch_db.json")
+WATCH_STATE_PATH = _os.getenv("WATCH_STATE_PATH", "./watch_state.json")
+WATCHLIST_LIMIT = int(_os.getenv("WATCHLIST_LIMIT", "200"))
+
+_DEFAULT_ALERTS = {
+    "d5": 2.0, "d1h": 5.0, "d24": 10.0, "vol": 250_000.0,
+    "int": 15, "cd": 60, "enabled": True, "preset": "normal", "mute_until": 0,
+    "last_tick": 0, "cooldowns": {}
+}
+_PRESETS = {
+    "fast":   {"d5": 1.0, "d1h": 3.0, "d24": 7.0,  "vol": 150_000.0, "int": 10, "cd": 45},
+    "normal": {"d5": 2.0, "d1h": 5.0, "d24": 10.0, "vol": 250_000.0, "int": 15, "cd": 60},
+    "calm":   {"d5": 3.0, "d1h": 7.0, "d24": 15.0, "vol": 500_000.0, "int": 20, "cd": 60},
+}
+
+def _load_json(path, default):
     try:
-        ch = (chain or "").lower()
-        if not token or not token.startswith("0x") or len(token)!=42:
-            return None
-        if ch in ("eth","ethereum"):
-            return f"https://etherscan.io/token/{token}"
-        if ch in ("bsc","bnb","binance"):
-            return f"https://bscscan.com/token/{token}"
-        if ch in ("polygon","matic"):
-            return f"https://polygonscan.com/token/{token}"
-        return None
+        with open(path, "r", encoding="utf-8") as f:
+            j = _json.load(f)
+            return j if isinstance(j, (dict, list)) else default
     except Exception:
-        return None
-# =================== EXTENSION: presets & mute (non-invasive) =================
-try:
-    _orig_alerts_status_md = _alerts_status_md
-except NameError:
-    def _orig_alerts_status_md(chat_id): return "N/A"
+        return default
 
-try:
-    _orig_tick_watch_alerts = _tick_watch_alerts
-except NameError:
-    def _orig_tick_watch_alerts(force=False): return None
-
-try:
-    _orig_on_callback = on_callback
-except NameError:
-    def _orig_on_callback(cb): return jsonify({"ok": True})
-
-try:
-    _orig_on_message = on_message
-except NameError:
-    def _orig_on_message(msg): return jsonify({"ok": True})
-
-def _preset_thresholds(name: str):
-    n = (name or "").strip().lower()
-    if n == "fast":
-        return {"d5": 1.0, "d1h": 3.0, "d24": 6.0, "vol": 100_000.0, "interval": 10, "cooldown": 45}
-    if n == "calm":
-        return {"d5": 3.0, "d1h": 7.0, "d24": 15.0, "vol": 500_000.0, "interval": 20, "cooldown": 90}
-    return {"d5": 2.0, "d1h": 5.0, "d24": 10.0, "vol": 250_000.0, "interval": 15, "cooldown": 60}
-
-def _mute_chat(chat_id, minutes: int):
-    st = _load_watch_state()
-    cs = _state_for_chat(st, chat_id)
-    now = int(time.time())
-    cs["mute_until"] = now + max(1, int(minutes))*60
-    st[str(chat_id)] = cs
-    _save_watch_state(st)
-    return cs.get("mute_until")
-
-def _unmute_chat(chat_id):
-    st = _load_watch_state()
-    cs = _state_for_chat(st, chat_id)
-    cs["mute_until"] = 0
-    st[str(chat_id)] = cs
-    _save_watch_state(st)
-
-def _fmt_until(ts):
+def _save_json(path, obj):
     try:
-        if not ts:
-            return "—"
-        return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(int(ts)))
-    except Exception:
-        return "—"
-
-def _ensure_alert_keyboard():
-    # define keyboard helpers if not present
-    if "_alert_keyboard" in globals(): 
-        return
-    def _alert_keyboard(dex_url: str, scan_url: str, token: str):
-        try:
-            rows = []
-            row = []
-            if dex_url:
-                row.append({"text": "🟢 Open in DEX", "url": dex_url})
-            if scan_url:
-                row.append({"text": "🔍 Open in Scan", "url": scan_url})
-            if row:
-                rows.append(row)
-            if token and isinstance(token, str) and token.startswith("0x") and len(token)==42:
-                rows.append([{"text": "👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
-            rows.append([{"text": "🔕 Mute 24h", "callback_data": "ALERTS_MUTE:24h"}, {"text": "🔔 Unmute", "callback_data": "ALERTS_UNMUTE"}])
-            return {"inline_keyboard": rows} if rows else None
-        except Exception:
-            return None
-    globals()['_alert_keyboard'] = _alert_keyboard
-
-    if "_explorer_url" not in globals():
-        def _explorer_url(chain: str, token: str):
-            try:
-                ch = (chain or "").lower()
-                if not token or not token.startswith("0x") or len(token)!=42:
-                    return None
-                if ch in ("eth","ethereum"):
-                    return f"https://etherscan.io/token/{token}"
-                if ch in ("bsc","bnb","binance"):
-                    return f"https://bscscan.com/token/{token}"
-                if ch in ("polygon","matic"):
-                    return f"https://polygonscan.com/token/{token}"
-                return None
-            except Exception:
-                return None
-        globals()['_explorer_url'] = _explorer_url
-
-def _alerts_status_md(chat_id):
-    st = _load_watch_state()
-    cs = _state_for_chat(st, chat_id)
-    enabled = cs.get("enabled", True)
-    th = _get_chat_thresholds(chat_id)
-    mute_until = cs.get("mute_until", 0)
-    mute_line = (f"Muted until: {_fmt_until(mute_until)}\n" if mute_until and mute_until>int(time.time()) else "")
-    return (
-        "🔔 *Alerts*: ON\n"
-        if enabled else
-        "🔕 *Alerts*: OFF\n"
-    ) + (
-        f"{mute_line}"
-        f"Interval: {th.get('interval')}m • Cooldown: {th.get('cooldown')}m\n"
-        f"Thresholds: Δ5m≥{th.get('d5'):.1f}% • Δ1h≥{th.get('d1h'):.1f}% • Δ24h≥{th.get('d24'):.1f}% • Vol24h≥{_fmt_usd(th.get('vol'))}"
-    )
-
-def _tick_watch_alerts(force=False):
-    # Enhanced ticker with per-chat intervals, mute, and buttons
-    if not WATCH_ALERTS_ENABLED:
-        return
-    now = int(time.time())
-    st = _load_watch_state()
-    db = _load_watch_db()
-    g = st.get("__global__", {"last_run": 0})
-    if not force and now - int(g.get("last_run", 0)) < WATCH_ALERTS_INTERVAL_MIN*60:
-        return
-    g["last_run"] = now
-    st["__global__"] = g
-
-    _ensure_alert_keyboard()
-
-    for chat_id_str, items in db.items():
-        try:
-            chat_id = int(chat_id_str)
-        except Exception:
-            continue
-        chat_state = _state_for_chat(st, chat_id)
-        if not chat_state.get("enabled", True):
-            continue
-        th = _get_chat_thresholds(chat_id)
-        mu = int(chat_state.get("mute_until", 0))
-        if mu and now < mu:
-            continue
-        if not force and now - int(chat_state.get("last_run", 0)) < th.get("interval", WATCH_ALERTS_INTERVAL_MIN)*60:
-            continue
-        last_map = chat_state.get("last") or {}
-
-        for it in (items or []):
-            token = (it.get("token") or "").lower()
-            if not (token.startswith("0x") and len(token)==42):
-                continue
-            try:
-                mkt = fetch_market(token) or {}
-            except Exception:
-                mkt = {}
-            if not mkt:
-                continue
-
-            pc = mkt.get("priceChanges") or {}
-            d5  = float(str(pc.get("m5") or pc.get("5m") or 0).replace("%","") or 0)
-            d1h = float(str(pc.get("h1") or pc.get("1h") or 0).replace("%","") or 0)
-            d24 = float(str(pc.get("h24") or pc.get("24h") or 0).replace("%","") or 0)
-            vol = mkt.get("volume24hUsd") or mkt.get("vol24hUsd") or mkt.get("volume24h") or 0
-            try: vol = float(vol)
-            except Exception: vol = 0.0
-
-            sym = mkt.get("pairSymbol") or mkt.get("symbol") or ""
-            chain = (mkt.get("chain") or "").upper() or (it.get("chain") or "—").upper()
-            dex_url = mkt.get("dexUrl") or ""
-            scan_url = mkt.get("scanUrl") or _explorer_url(chain, token) or ""
-
-            lm = last_map.get(token) or {}
-            t_last_d5  = int(lm.get("d5", 0)); t_last_d1h = int(lm.get("d1h", 0)); t_last_d24 = int(lm.get("d24", 0)); t_last_vol = int(lm.get("vol", 0))
-
-            alerts = []
-            if abs(d5) >= th.get("d5", ALERTS_D5M) and _should_notify(t_last_d5, now, th.get("cooldown", ALERTS_COOLDOWN_MIN)):
-                alerts.append(f"Δ5m {d5:+.2f}%"); lm["d5"] = now
-            if abs(d1h) >= th.get("d1h", ALERTS_D1H) and _should_notify(t_last_d1h, now, th.get("cooldown", ALERTS_COOLDOWN_MIN)):
-                alerts.append(f"Δ1h {d1h:+.2f}%"); lm["d1h"] = now
-            if abs(d24) >= th.get("d24", ALERTS_D24H) and _should_notify(t_last_d24, now, th.get("cooldown", ALERTS_COOLDOWN_MIN)):
-                alerts.append(f"Δ24h {d24:+.2f}%"); lm["d24"] = now
-            if vol >= th.get("vol", ALERTS_VOL24) and _should_notify(t_last_vol, now, th.get("cooldown", ALERTS_COOLDOWN_MIN)):
-                alerts.append(f"Vol24h {_fmt_usd(vol)}"); lm["vol"] = now
-
-            if alerts:
-                title = f"👀 *Watch alert* — *{sym or token[:6]}* ({chain})"
-                body  = " • ".join(alerts)
-                msg = f"{title}\n{body}"
-                try:
-                    kb = _alert_keyboard(dex_url, scan_url, token)
-                    send_message(chat_id, msg, reply_markup=kb)
-                except Exception as e:
-                    print("ALERT send_message error", e)
-                last_map[token] = lm
-
-        chat_state["last"] = last_map
-        chat_state["last_run"] = now
-        st[str(chat_id)] = chat_state
-
-    _save_watch_state(st)
-
-def on_callback(cb):
-    try:
-        _tick_watch_alerts()
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(obj, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
-    cb_id = cb["id"]
+
+def _get_watchlist(chat_id: int):
+    db = _load_json(WATCH_DB_PATH, {})
+    lst = db.get(str(chat_id))
+    if not isinstance(lst, list):
+        lst = []
+    # normalize
+    out = []
+    for t in lst:
+        if isinstance(t, str) and t.startswith("0x") and len(t)==42:
+            out.append(t.lower())
+    return out
+
+def _set_watchlist(chat_id: int, lst):
+    db = _load_json(WATCH_DB_PATH, {})
+    db[str(chat_id)] = list(dict.fromkeys([t.lower() for t in lst if isinstance(t, str)]))[:WATCHLIST_LIMIT]
+    _save_json(WATCH_DB_PATH, db)
+
+def _add_watch(chat_id: int, token: str):
+    token = (token or "").strip().lower()
+    if not (token.startswith("0x") and len(token)==42):
+        return False, "Invalid token address"
+    lst = _get_watchlist(chat_id)
+    if token in lst:
+        return True, "Already in watchlist"
+    if len(lst) >= WATCHLIST_LIMIT:
+        return False, f"Watchlist is full (limit {WATCHLIST_LIMIT})"
+    lst.append(token)
+    _set_watchlist(chat_id, lst)
+    return True, "Added to watchlist"
+
+def _remove_watch(chat_id: int, token: str):
+    token = (token or "").strip().lower()
+    lst = _get_watchlist(chat_id)
+    if token in lst:
+        lst = [t for t in lst if t != token]
+        _set_watchlist(chat_id, lst)
+        return True, "Removed from watchlist"
+    return False, "Token not in watchlist"
+
+def _get_state(chat_id: int):
+    st = _load_json(WATCH_STATE_PATH, {})
+    s = st.get(str(chat_id)) or {}
+    # merge defaults
+    out = dict(_DEFAULT_ALERTS)
+    out.update({k:v for k,v in s.items() if k in out or k in ("preset","last_token","last_links")})
+    return out
+
+def _set_state(chat_id: int, patch: dict):
+    st = _load_json(WATCH_STATE_PATH, {})
+    cur = st.get(str(chat_id)) or {}
+    cur.update(patch or {})
+    st[str(chat_id)] = cur
+    _save_json(WATCH_STATE_PATH, st)
+
+def _fmt_k(v):
+    try:
+        n = float(v)
+        if abs(n) >= 1_000_000: return f"{n/1_000_000:.1f}m"
+        if abs(n) >= 1_000:     return f"{n/1_000:.0f}k"
+        return f"{n:.0f}"
+    except Exception:
+        return str(v)
+
+def _parse_k(s):
+    s = str(s).strip().lower()
+    m = _re.match(r'^([0-9]+(?:\.[0-9]+)?)\s*([km])?$', s)
+    if not m:
+        return None
+    val = float(m.group(1))
+    suf = m.group(2)
+    if suf == 'm':
+        val *= 1_000_000.0
+    elif suf == 'k':
+        val *= 1_000.0
+    return val
+
+# Hook into store_bundle to capture last scanned token/links for convenience (/watch without arg)
+try:
+    _store_bundle__orig = store_bundle  # imported earlier
+    def store_bundle(chat_id, msg_id, bundle):
+        try:
+            _store_bundle__orig(chat_id, msg_id, bundle)
+        finally:
+            try:
+                mkt = (bundle or {}).get("market") or {}
+                tok = (mkt.get("tokenAddress") or "").lower()
+                lnks = (bundle or {}).get("links") or {}
+                if tok:
+                    _set_state(chat_id, {"last_token": tok, "last_links": lnks})
+            except Exception:
+                pass
+except Exception:
+    pass
+
+# Helpers to build alert keyboard quickly
+def _alert_keyboard(links: dict, token: str, muted: bool):
+    kb = {"inline_keyboard": []}
+    row = []
+    dex = (links or {}).get("dex")
+    if dex:
+        row.append({"text": "🟢 Open in DEX", "url": dex})
+    scan = (links or {}).get("scan")
+    if scan:
+        row.append({"text": "🔍 Open in Scan", "url": scan})
+    if row:
+        kb["inline_keyboard"].append(row)
+    row2 = [{"text": "👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}]
+    if muted:
+        row2.append({"text": "🔔 Unmute", "callback_data": "ALERT_UNMUTE"})
+    else:
+        row2.append({"text": "🔕 Mute 24h", "callback_data": "ALERT_MUTE24:1440"})
+    kb["inline_keyboard"].append(row2)
+    return kb
+
+def _links_enrich_for_alert(market: dict):
+    # Derive links minimal (scan/dex) similarly to QuickScan enrichment
+    links = dict((market.get("links") or {}))
+    chain = (market.get("chain") or "").lower()
+    token = (market.get("tokenAddress") or "").lower()
+    dexId = (links.get("dexId") or "").lower()
+    if not links.get("scan") and token:
+        _scan_bases = {
+            "ethereum": "https://etherscan.io/token/",
+            "eth": "https://etherscan.io/token/",
+            "bsc": "https://bscscan.com/token/",
+            "binance": "https://bscscan.com/token/",
+            "polygon": "https://polygonscan.com/token/",
+            "matic": "https://polygonscan.com/token/",
+            "arbitrum": "https://arbiscan.io/token/",
+            "arb": "https://arbiscan.io/token/",
+            "base": "https://basescan.org/token/",
+            "optimism": "https://optimistic.etherscan.io/token/",
+            "op": "https://optimistic.etherscan.io/token/",
+            "avalanche": "https://snowtrace.io/token/",
+            "avax": "https://snowtrace.io/token/",
+            "fantom": "https://ftmscan.com/token/",
+            "ftm": "https://ftmscan.com/token/",
+        }
+        base = _scan_bases.get(chain)
+        if base:
+            links["scan"] = base + token
+    if not links.get("dex") and token:
+        if dexId in ("uniswap", "uniswapv2", "uniswapv3") and chain in ("ethereum","base","arbitrum","polygon","optimism"):
+            links["dex"] = f"https://app.uniswap.org/explore/tokens/{chain}/{token}"
+        elif dexId.startswith("pancake") and chain in ("bsc","binance"):
+            links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={token}"
+        elif "quickswap" in dexId and chain == "polygon":
+            links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={token}"
+    return links
+
+# Command handlers (thin). Only intercept our commands, delegate otherwise.
+def _watch_try_handle_message(msg) -> bool:
+    chat_id = msg["chat"]["id"]
+    text = (msg.get("text") or "").strip()
+    low = text.split()[0].lower() if text else ""
+    # Normalize bot mention suffix
+    low = low.split("@")[0] if "@" in low else low
+
+    def _reply(txt):
+        send_message(chat_id, txt, reply_markup=None)
+        return True
+
+    parts = text.split()
+    # /watch
+    if low == "/watch":
+        token = parts[1] if len(parts) > 1 else (_get_state(chat_id).get("last_token") or "")
+        ok_, msg_ = _add_watch(chat_id, token)
+        if ok_:
+            _reply(f"*Watchlist*: added `{token}`")
+        else:
+            _reply(f"*Watchlist*: {msg_}")
+        return True
+    # /unwatch
+    if low == "/unwatch":
+        token = parts[1] if len(parts) > 1 else (_get_state(chat_id).get("last_token") or "")
+        ok_, msg_ = _remove_watch(chat_id, token)
+        if ok_:
+            _reply(f"*Watchlist*: removed `{token}`")
+        else:
+            _reply(f"*Watchlist*: {msg_}")
+        return True
+    # /watchlist
+    if low == "/watchlist":
+        lst = _get_watchlist(chat_id)
+        if not lst:
+            return _reply("*Watchlist* is empty")
+        lines = [f"*Watchlist* ({len(lst)}/{WATCHLIST_LIMIT}):"] + [f"• `{t}`" for t in lst[:WATCHLIST_LIMIT]]
+        return _reply("\n".join(lines))
+    # Alerts toggles
+    if low == "/alerts_on":
+        st = _get_state(chat_id); st["enabled"] = True; _set_state(chat_id, st)
+        return _reply("Alerts: *ON*")
+    if low == "/alerts_off":
+        st = _get_state(chat_id); st["enabled"] = False; _set_state(chat_id, st)
+        return _reply("Alerts: *OFF*")
+    if low == "/alerts_mute":
+        minutes = 1440
+        if len(parts) > 1:
+            try:
+                minutes = int(float(parts[1]))
+            except Exception:
+                pass
+        until = int(_t.time()) + minutes*60
+        _set_state(chat_id, {"mute_until": until})
+        return _reply(f"Alerts muted for *{minutes}* min")
+    if low == "/alerts_unmute":
+        _set_state(chat_id, {"mute_until": 0})
+        return _reply("Alerts *unmuted*")
+    if low == "/alerts":
+        st = _get_state(chat_id)
+        mute = st.get("mute_until", 0)
+        mute_str = "ON" if mute and int(_t.time()) < int(mute) else "OFF"
+        if mute_str == "ON":
+            left = max(0, int(mute - int(_t.time())) // 60)
+            mute_str += f" (~{left} min)"
+        txt = (
+            "*Alerts status*\n"
+            f"• enabled: {'ON' if st.get('enabled') else 'OFF'}\n"
+            f"• preset: {st.get('preset','normal')}\n"
+            f"• thresholds: Δ5m {st.get('d5')}%  |  Δ1h {st.get('d1h')}%  |  Δ24h {st.get('d24')}%  |  vol ${_fmt_k(st.get('vol'))}\n"
+            f"• interval: {st.get('int')} min  |  cooldown: {st.get('cd')} min\n"
+            f"• mute: {mute_str}"
+        )
+        return _reply(txt)
+    if low == "/alerts_set":
+        # formats: /alerts_set reset | /alerts_set preset fast|normal|calm | /alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60
+        if len(parts) == 1:
+            return _reply("Usage:\n/alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60\n/alerts_set preset fast|normal|calm\n/alerts_set reset")
+        st = _get_state(chat_id)
+        if parts[1].lower() == "reset":
+            _set_state(chat_id, dict(_DEFAULT_ALERTS))
+            return _reply("Alerts: *defaults restored*")
+        if parts[1].lower() == "preset" and len(parts) >= 3:
+            p = parts[2].lower()
+            if p in _PRESETS:
+                ns = dict(st); ns.update(_PRESETS[p]); ns["preset"] = p
+                _set_state(chat_id, ns)
+                return _reply(f"Alerts preset: *{p}*")
+            return _reply("Unknown preset. Use: fast | normal | calm")
+        # parse kv
+        ns = dict(st)
+        for kv in parts[1:]:
+            if "=" not in kv: continue
+            k, v = kv.split("=",1)
+            k = k.lower().strip(); v=v.strip().lower()
+            if k in ("d5","d1h","d24"):
+                try: ns[k] = float(v)
+                except Exception: pass
+            elif k == "vol":
+                val = _parse_k(v); 
+                if val is not None: ns["vol"] = float(val)
+            elif k in ("int","cd"):
+                try: ns[k] = int(float(v))
+                except Exception: pass
+        ns["preset"] = ns.get("preset","custom")
+        _set_state(chat_id, ns)
+        return _reply("Alerts: *updated*")
+    return False
+
+# Callback wrapper (thin)
+def _watch_try_handle_callback(cb) -> bool:
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
-    chat_id = msg.get("chat", {}).get("id")
-    current_msg_id = msg.get("message_id")
-
-    # Fast shortcuts
-    if isinstance(data, str) and data.startswith("UNWATCH_T:"):
-        tok = data.split(":",1)[1][:42]
-        removed = _watch_remove(chat_id, tok)
-        send_message(chat_id, f"👀 *Unwatch*: {'Removed' if removed else 'Not found'}\n`{tok}`")
-        answer_callback_query(cb_id, "Removed from Watchlist." if removed else "Token not found.", False)
-        return jsonify({"ok": True})
-
-    
-    if isinstance(data, str) and data.startswith("ALERTS_PRESET:"):
-        name = data.split(":",1)[1] or "normal"
-        _set_chat_thresholds(chat_id, **_preset_thresholds(name))
-        answer_callback_query(cb_id, f"Preset: {name}", False)
-        send_message(chat_id, f"✅ *Preset applied*: {name}")
-        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
-        return jsonify({"ok": True})
-    if isinstance(data, str) and data.startswith("ALERTS_MUTE:"):
-        arg = data.split(":",1)[1]
-        minutes = 1440 if arg == "24h" else (480 if arg == "8h" else (60 if arg == "1h" else 60))
-        until = _mute_chat(chat_id, minutes)
-        answer_callback_query(cb_id, "Muted", False)
-        send_message(chat_id, f"🔕 *Alerts muted* until {_fmt_until(until)}")
-        return jsonify({"ok": True})
-
-    if data == "ALERTS_UNMUTE":
-        _unmute_chat(chat_id)
-        answer_callback_query(cb_id, "Unmuted", False)
-        send_message(chat_id, "🔔 *Alerts unmuted*")
-        return jsonify({"ok": True})
-
-    # Fallback to original
-    return _orig_on_callback(cb)
-
-# Wrap on_message to add new commands without touching original logic
-def on_message(msg):
-    try:
-        chat_id = msg.get("chat", {}).get("id")
-        text = (msg.get("text") or "").strip()
-        low = text.lower()
-        if not text:
-            return _orig_on_message(msg)
-
-        if low.startswith("/alerts_mute"):
-            parts = text.split()
-            mins = 1440
-            if len(parts)>1 and parts[1].isdigit():
-                mins = int(parts[1])
-            until = _mute_chat(chat_id, mins)
-            send_message(chat_id, f"🔕 *Alerts muted* until {_fmt_until(until)}")
-            return jsonify({"ok": True})
-
-        if low.startswith("/alerts_unmute"):
-            _unmute_chat(chat_id)
-            send_message(chat_id, "🔔 *Alerts unmuted*")
-            return jsonify({"ok": True})
-
-        if low.startswith("/alerts_set"):
-            parts = text.split()[1:]
-            if parts and parts[0].lower() in ("preset","presets"):
-                name = (parts[1] if len(parts)>1 else "normal").lower()
-                _set_chat_thresholds(chat_id, **_preset_thresholds(name))
-                send_message(chat_id, f"✅ *Preset applied*: {name}")
-                send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
-                return jsonify({"ok": True})
-            if parts and parts[0].lower() == "reset":
-                _set_chat_thresholds(chat_id, d5=None, d1h=None, d24=None, vol=None, interval=None, cooldown=None)
-                send_message(chat_id, "🔄 *Alerts settings reset*")
-                send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
-                return jsonify({"ok": True})
-            # parse key=value pairs
-            update = {}
-            keymap = {"d5":"d5","d1h":"d1h","d24":"d24","vol":"vol","int":"interval","interval":"interval","cd":"cooldown","cooldown":"cooldown"}
-            def _parse_amount(val: str):
-                try:
-                    s = str(val).strip().lower().replace("%","").replace("$","")
-                    mult = 1.0
-                    if s.endswith("k"):
-                        mult, s = 1000.0, s[:-1]
-                    elif s.endswith("m"):
-                        mult, s = 1_000_000.0, s[:-1]
-                    return float(s) * mult
-                except Exception:
-                    return None
-            for p in parts:
-                if "=" not in p: 
-                    continue
-                k, v = p.split("=", 1)
-                kk = keymap.get(k.strip().lower())
-                if not kk:
-                    continue
-                val = _parse_amount(v)
-                if val is None:
-                    continue
-                update[kk] = float(val)
-            if update:
-                _set_chat_thresholds(chat_id, **update)
-                send_message(chat_id, "✅ *Alerts updated*")
-            else:
-                send_message(chat_id, "ℹ️ Usage: /alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60\nOr: /alerts_set preset fast|normal|calm")
-            send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
-            return jsonify({"ok": True})
-
-        # fallthrough: use original handler
-        # --- POST-ACTIONS: watch/watchlist ---
-        if low.startswith("/watch") or low.startswith("/watchlist"):
-            # capture before state
-            before_tokens = set((x.get("token") or "").lower() for x in (_watch_list(chat_id) or []))
-            res = _orig_on_message(msg)
-            after = _watch_list(chat_id) or []
-
-            if low.startswith("/watch"):
-                # try to find newly added token, else use arg or last in list
-                parts = text.split()
-                arg_tok = parts[1].strip() if len(parts) > 1 else None
-                new = [ (x.get("token") or "").lower() for x in after if (x.get("token") or "").lower() not in before_tokens ]
-                tok = (new[-1] if new else (arg_tok or (after[-1].get("token") if after else None)))
-                if tok:
-                    tok = tok[:42]
-                    ch = "eth"
-                    for x in reversed(after):
-                        if (x.get("token") or "").lower() == tok.lower():
-                            ch = x.get("chain") or ch
-                            break
-                    try:
-                        m = fetch_market(tok) or {}
-                    except Exception:
-                        m = {}
-                    dex_url = (m.get("dexUrl") or "")
-                    scan_url = (m.get("scanUrl") or _explorer_url(ch, tok) or "")
-                    kb = _alert_keyboard(dex_url, scan_url, tok)
-                    if kb:
-                        send_message(chat_id, "Quick actions", reply_markup=kb)
-                return res
-
-            # /watchlist: show action buttons for up to 5 первых токенов
-            toks = [(x.get("token"), x.get("chain") or "eth") for x in after[:5]]
-            kb = _tokens_actions_keyboard(toks)
-            if kb:
-                send_message(chat_id, "Quick actions", reply_markup=kb)
-            return res
-
-        return _orig_on_message(msg)
-    except Exception:
-        return _orig_on_message(msg)
-# ================= /EXTENSION =================================================
-
-def _alerts_control_keyboard():
-    try:
-        return {
-            "inline_keyboard": [
-                [
-                    {"text": "Fast", "callback_data": "ALERTS_PRESET:fast"},
-                    {"text": "Normal", "callback_data": "ALERTS_PRESET:normal"},
-                    {"text": "Calm", "callback_data": "ALERTS_PRESET:calm"}
-                ],
-                [
-                    {"text": "Mute 1h", "callback_data": "ALERTS_MUTE:1h"},
-                    {"text": "Mute 8h", "callback_data": "ALERTS_MUTE:8h"},
-                    {"text": "Mute 24h", "callback_data": "ALERTS_MUTE:24h"}
-                ],
-                [
-                    {"text": "Unmute", "callback_data": "ALERTS_UNMUTE"}
-                ]
-            ]
-        }
-    except Exception:
-        return None
-
-def _tokens_actions_keyboard(tokens):
-    # tokens: list of (token, chain)
-    rows = []
-    for token, chain in (tokens or []):
-        dex_url = ""
-        scan_url = _explorer_url(chain, token) or ""
+    chat_id = msg.get("chat",{}).get("id")
+    cb_id = cb.get("id")
+    if data.startswith("UNWATCH_T:"):
+        token = data.split(":",1)[1].strip().lower()
+        ok_, _m = _remove_watch(chat_id, token)
+        answer_callback_query(cb_id, "Unwatched", False)
+        send_message(chat_id, f"*Watchlist*: removed `{token}`")
+        return True
+    if data.startswith("ALERT_MUTE24:"):
         try:
-            m = fetch_market(token) or {}
-            dex_url = m.get("dexUrl") or dex_url
-            scan_url = m.get("scanUrl") or scan_url
+            minutes = int(float(data.split(":",1)[1]))
+        except Exception:
+            minutes = 1440
+        until = int(_t.time()) + minutes*60
+        _set_state(chat_id, {"mute_until": until})
+        answer_callback_query(cb_id, "Muted", False)
+        return True
+    if data == "ALERT_UNMUTE":
+        _set_state(chat_id, {"mute_until": 0})
+        answer_callback_query(cb_id, "Unmuted", False)
+        return True
+    return False
+
+# Wrap original on_message/on_callback
+try:
+    _on_message__orig = on_message
+    def on_message(msg):
+        try:
+            handled = _watch_try_handle_message(msg)
+            if handled: 
+                return jsonify({"ok": True})
+        except Exception as _e:
+            # fall-through to original if our parsing failed
+            pass
+        return _on_message__orig(msg)
+except Exception:
+    pass
+
+try:
+    _on_callback__orig = on_callback
+    def on_callback(cb):
+        try:
+            handled = _watch_try_handle_callback(cb)
+            if handled:
+                return jsonify({"ok": True})
         except Exception:
             pass
-        row1 = []
-        if dex_url:
-            row1.append({"text": "🟢 Open in DEX", "url": dex_url})
-        if scan_url:
-            row1.append({"text": "🔍 Open in Scan", "url": scan_url})
-        if row1:
-            rows.append(row1)
-        if token and token.startswith("0x") and len(token)==42:
-            rows.append([{"text": f"👁️ Unwatch {token[:6]}…", "callback_data": f"UNWATCH_T:{token}"}])
-    return {"inline_keyboard": rows} if rows else None
-
-# === PATCH: DEX/Scan fallbacks & explorer expansion ===========================
-def _generic_scan_url(token: str):
-    try:
-        if token and token.startswith("0x") and len(token)==42:
-            return f"https://blockscan.com/address/{token}"
-        return None
-    except Exception:
-        return None
-
-def _generic_dex_search(token: str):
-    try:
-        if token and token.startswith("0x"):
-            return f"https://dexscreener.com/search?q={token}"
-        return None
-    except Exception:
-        return None
-
-# Redefine _alert_keyboard to ensure buttons even when URLs absent
-try:
-    _prev_alert_keyboard = _alert_keyboard
+        return _on_callback__orig(cb)
 except Exception:
-    _prev_alert_keyboard = None
+    pass
 
-def _alert_keyboard(dex_url: str, scan_url: str, token: str):
-    try:
-        # Fallbacks
-        if not dex_url:
-            dex_url = _generic_dex_search(token) or ""
-        if not scan_url:
-            scan_url = _generic_scan_url(token) or ""
+# Alerts ticker — per-chat interval, cooldown per token/metric, mute 24h
+class _AlertsTicker(_th.Thread):
+    def __init__(self):
+        super().__init__(daemon=True, name="alerts-ticker")
+        self._stop = _th.Event()
 
-        rows = []
-        row = []
-        if dex_url:
-            row.append({"text": "🟢 Open in DEX", "url": dex_url})
-        if scan_url:
-            row.append({"text": "🔍 Open in Scan", "url": scan_url})
-        if row:
-            rows.append(row)
-        if token and isinstance(token, str) and token.startswith("0x") and len(token)==42:
-            rows.append([{"text": "👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
-        return {"inline_keyboard": rows} if rows else None
-    except Exception:
-        # Fall back to previous implementation if anything goes wrong
-        if _prev_alert_keyboard:
+    def stop(self):
+        self._stop.set()
+
+    def _should_run_for_chat(self, chat_id: int, st: dict):
+        if not st.get("enabled", True):
+            return False
+        if int(_t.time()) < int(st.get("mute_until", 0) or 0):
+            return False
+        last = int(st.get("last_tick", 0) or 0)
+        interval = max(3, int(st.get("int", 15) or 15)) * 60
+        return (int(_t.time()) - last) >= interval
+
+    def _mark_tick(self, chat_id: int):
+        _set_state(chat_id, {"last_tick": int(_t.time())})
+
+    def _pct_abs(self, v):
+        try:
+            return abs(float(v or 0.0))
+        except Exception:
+            return 0.0
+
+    def _send_alert(self, chat_id: int, token: str, mkt: dict, metrics_tripped: list, st: dict):
+        pc = (mkt.get("priceChanges") or {})
+        def _fmt(label, key):
             try:
-                return _prev_alert_keyboard(dex_url, scan_url, token)
+                v = float(pc.get(key))
+                arrow = "▲" if v>0 else ("▼" if v<0 else "•")
+                return f"{label} {arrow} {v:+.2f}%"
             except Exception:
-                return None
-        return None
+                return f"{label} —"
+        vol = mkt.get("vol24h")
+        try:
+            vol_s = _fmt_k(vol)
+        except Exception:
+            vol_s = "—"
+        lines = [
+            "*Alert* — QuickScan watch",
+            f"`{(mkt.get('pairSymbol') or 'Token')}`  •  `{(mkt.get('chain') or '').capitalize()}`",
+            f"{_fmt('Δ5m','m5')}  |  {_fmt('Δ1h','h1')}  |  {_fmt('Δ24h','h24')}  |  Vol24h ${vol_s}",
+        ]
+        txt = "\n".join(lines)  # we escape again in send_message
+        links = _links_enrich_for_alert(mkt)
+        kb = _alert_keyboard(links, token, muted = int(_t.time()) < int(st.get("mute_until", 0) or 0))
+        send_message(chat_id, txt, reply_markup=kb)
 
-# Overwrite explorer with broader chain support
-def _explorer_url(chain: str, token: str):
-    try:
-        ch = (chain or "").lower()
-        if not token or not token.startswith("0x") or len(token)!=42:
-            return None
-        if ch in ("eth","ethereum","mainnet"):
-            return f"https://etherscan.io/token/{token}"
-        if ch in ("bsc","bnb","binance"):
-            return f"https://bscscan.com/token/{token}"
-        if ch in ("polygon","matic"):
-            return f"https://polygonscan.com/token/{token}"
-        if ch in ("arbitrum","arb","arb1"):
-            return f"https://arbiscan.io/token/{token}"
-        if ch in ("base","basesepolia","base-mainnet"):
-            return f"https://basescan.org/token/{token}"
-        if ch in ("optimism","op"):
-            return f"https://optimistic.etherscan.io/token/{token}"
-        if ch in ("avalanche","avax"):
-            return f"https://snowtrace.io/token/{token}"
-        if ch in ("fantom","ftm"):
-            return f"https://ftmscan.com/token/{token}"
-        if ch in ("gnosis","gno","xdai"):
-            return f"https://gnosisscan.io/token/{token}"
-        if ch in ("linea",):
-            return f"https://lineascan.build/token/{token}"
-        if ch in ("scroll",):
-            return f"https://scrollscan.com/token/{token}"
-        if ch in ("pulse","pulsechain","plsx","pls"):
-            return f"https://scan.pulsechain.com/token/{token}"
-        # Default to generic multi-chain viewer
-        return _generic_scan_url(token)
-    except Exception:
-        return _generic_scan_url(token)
-# === /PATCH ===================================================================
+    def _check_and_alert(self, chat_id: int, token: str, st: dict):
+        try:
+            mkt = fetch_market(token) or {}
+        except Exception:
+            mkt = {}
+        if not mkt or not mkt.get("ok"):
+            return
+        pc = (mkt.get("priceChanges") or {})
+        tripped = []
+        if self._pct_abs(pc.get("m5"))  >= float(st.get("d5", 2.0)):  tripped.append("d5")
+        if self._pct_abs(pc.get("h1"))  >= float(st.get("d1h", 5.0)): tripped.append("d1h")
+        if self._pct_abs(pc.get("h24")) >= float(st.get("d24",10.0)): tripped.append("d24")
+        try:
+            vol_ok = float(mkt.get("vol24h") or 0.0) >= float(st.get("vol", 250_000.0))
+        except Exception:
+            vol_ok = False
+        if vol_ok: tripped.append("vol")
+        if not tripped:
+            return
+        # cooldowns
+        cd_min = max(1, int(st.get("cd", 60) or 60))
+        now = int(_t.time())
+        st_local = _get_state(chat_id)  # reload to avoid races
+        cds = st_local.get("cooldowns") or {}
+        tok_map = cds.get(token) or {}
+        allowed = False
+        for m in tripped:
+            last = int(tok_map.get(m, 0) or 0)
+            if now - last >= cd_min * 60:
+                allowed = True
+                tok_map[m] = now
+        if not allowed:
+            return
+        cds[token] = tok_map
+        _set_state(chat_id, {"cooldowns": cds})
+        self._send_alert(chat_id, token, mkt, tripped, st_local)
+
+    def run(self):
+        # Stagger startup a bit
+        _t.sleep(2.5)
+        while not self._stop.is_set():
+            try:
+                db = _load_json(WATCH_DB_PATH, {})
+                if isinstance(db, dict):
+                    for chat_id_str, tokens in list(db.items()):
+                        try:
+                            chat_id = int(chat_id_str)
+                        except Exception:
+                            continue
+                        st = _get_state(chat_id)
+                        if self._should_run_for_chat(chat_id, st):
+                            tokens = tokens if isinstance(tokens, list) else []
+                            # mark tick first to avoid overlap on slow runs
+                            self._mark_tick(chat_id)
+                            for tok in tokens[:WATCHLIST_LIMIT]:
+                                if self._stop.is_set(): break
+                                self._check_and_alert(chat_id, str(tok), st)
+                                _t.sleep(0.2)  # polite gap
+            except Exception as _e:
+                # Don't crash the thread
+                pass
+            # short sleep loop
+            for _ in range(30):
+                if self._stop.is_set(): break
+                _t.sleep(1.0)
+
+# Launch ticker once
+try:
+    if not hasattr(app, "_watch_ticker_started"):
+        app._watch_ticker_started = True
+        _ticker = _AlertsTicker()
+        _ticker.start()
+except Exception:
+    pass
+# === /WATCHLIST & ALERTS (lite) ==============================================
