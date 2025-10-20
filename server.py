@@ -1840,17 +1840,27 @@ try:
 except NameError:
     _np_create_invoice = _np_create_invoice_smart
 
-# === WATCHLIST & ALERTS extension (non-invasive) ===
+# === WATCHLIST & ALERTS (v2, throttled) + PERF GUARD bootstrap ===
 try:
-    import watch_alerts as _watch_ext
-    if getattr(_watch_ext, "install_hooks", None):
-        _watch_ext.install_hooks(globals())
-        _watch_ext.start_ticker()
-        print("[watch_alerts] installed")
+    import watch_alerts_v2 as watch_alerts
+    if getattr(watch_alerts, "install_hooks", None):
+        watch_alerts.install_hooks(globals())
+        watch_alerts.start_ticker()
+        print("[watch_alerts_v2] installed")
 except Exception as _e:
     try:
-        print("[watch_alerts] disabled:", _e)
+        print("[watch_alerts_v2] disabled:", _e)
     except Exception:
         pass
-# === /WATCHLIST & ALERTS extension ===
+
+try:
+    import perf_guard as _perf
+    _perf.install(globals())
+    print("[perf_guard] installed")
+except Exception as _e:
+    try:
+        print("[perf_guard] disabled:", _e)
+    except Exception:
+        pass
+# === /bootstrap ===
 
