@@ -884,6 +884,20 @@ def webhook():
         return jsonify({"ok": True})
 
 def on_message(msg):
+    # ---- WATCHLITE: early intercept of new commands (/watch, /unwatch, /watchlist, /alerts*) ----
+    try:
+        _wl_text = (msg.get("text") or msg.get("caption") or "")
+        _wl_chat = ((msg.get("chat") or {}).get("id") or (msg.get("from") or {}).get("id"))
+        if _wl_chat and isinstance(_wl_text, str):
+            if watchlite.handle_message_commands(_wl_chat, _wl_text, None, msg):
+                return jsonify({"ok": True})
+    except Exception as _e_wl_early:
+        try:
+            print("WATCHLITE early intercept error:", _e_wl_early)
+        except Exception:
+            pass
+    # ---- /WATCHLITE early intercept ----
+
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
     low = text.lower()
