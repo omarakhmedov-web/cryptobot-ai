@@ -1,4 +1,3 @@
-
 # perf_guard.py — debounce & reentry guard for Metridex bot
 import time, threading, traceback
 
