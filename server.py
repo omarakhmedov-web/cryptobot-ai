@@ -730,6 +730,41 @@ def send_message_raw(chat_id, text, reply_markup=None):
     if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
     return tg("sendMessage", data)
 
+# === WATCHLITE (non-invasive Watchlist + Alerts) =============================
+try:
+    import watchlite_0_1_0 as watchlite
+except Exception:
+    import importlib, types as _types, sys as _sys
+    watchlite = importlib.import_module("watchlite_0_1_0")
+try:
+    WATCH_DB_PATH = os.getenv("WATCH_DB_PATH", "./watch_db.json")
+    WATCH_STATE_PATH = os.getenv("WATCH_STATE_PATH", "./watch_state.json")
+    WATCHLIST_LIMIT = int(os.getenv("WATCHLIST_LIMIT", "200"))
+except Exception:
+    WATCH_DB_PATH, WATCH_STATE_PATH, WATCHLIST_LIMIT = "./watch_db.json", "./watch_state.json", 200
+
+# Initialize once (starts background ticker thread)
+try:
+    watchlite.init(
+        paths={"db": WATCH_DB_PATH, "state": WATCH_STATE_PATH},
+        limit=WATCHLIST_LIMIT,
+        send_message_fn=send_message,
+        send_message_raw=send_message_raw if 'send_message_raw' in globals() else None,
+        tg_fn=tg,
+        escape_fn=mdv2_escape if 'mdv2_escape' in globals() else None,
+        fetch_market_fn=fetch_market if 'fetch_market' in globals() else None,
+        build_keyboard_fn=build_keyboard if 'build_keyboard' in globals() else None,
+        answer_callback_fn=answer_callback_query if 'answer_callback_query' in globals() else None,
+    )
+except Exception as _e_watch_init:
+    try:
+        print("WATCHLITE init failed:", _e_watch_init)
+    except Exception:
+        pass
+# === /WATCHLITE ==============================================================
+
+
+
 def answer_callback_query(cb_id, text, show_alert=False):
     return tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": str(text), "show_alert": bool(show_alert)})
 
@@ -852,6 +887,17 @@ def on_message(msg):
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
     low = text.lower()
+
+    # --- WATCHLITE intercept: commands (/watch, /unwatch, /watchlist, /alerts*) ---
+    try:
+        if watchlite.handle_message_commands(chat_id, text, load_bundle, msg):
+            return jsonify({"ok": True})
+    except Exception as _e_wl_msg:
+        try:
+            print("WATCHLITE handle_message_commands error:", _e_wl_msg)
+        except Exception:
+            pass
+    # --- /WATCHLITE intercept ---
 
     if low.startswith("/start"):
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
@@ -1124,6 +1170,12 @@ def on_message(msg):
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
         try:
+            # WATCHLITE: remember last token per chat for /watch without args
+            watchlite.note_quickscan(chat_id, bundle, msg_id)
+        except Exception:
+            pass
+
+        try:
             tg("editMessageReplyMarkup", {
                 "chat_id": chat_id,
                 "message_id": msg_id,
@@ -1148,6 +1200,17 @@ def on_callback(cb):
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
     chat_id = msg.get("chat", {}).get("id")
+
+    # --- WATCHLITE intercept: UNWATCH_T, MUTE/UNMUTE ---
+    try:
+        if watchlite.handle_callback(cb):
+            return jsonify({"ok": True})
+    except Exception as _e_wl_cb:
+        try:
+            print("WATCHLITE handle_callback error:", _e_wl_cb)
+        except Exception:
+            pass
+    # --- /WATCHLITE intercept ---
     current_msg_id = msg.get("message_id")
 
     m = parse_cb(data)
