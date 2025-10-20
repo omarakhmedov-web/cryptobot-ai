@@ -2607,6 +2607,44 @@ def on_message(msg):
             return jsonify({"ok": True})
 
         # fallthrough: use original handler
+        # --- POST-ACTIONS: watch/watchlist ---
+        if low.startswith("/watch") or low.startswith("/watchlist"):
+            # capture before state
+            before_tokens = set((x.get("token") or "").lower() for x in (_watch_list(chat_id) or []))
+            res = _orig_on_message(msg)
+            after = _watch_list(chat_id) or []
+
+            if low.startswith("/watch"):
+                # try to find newly added token, else use arg or last in list
+                parts = text.split()
+                arg_tok = parts[1].strip() if len(parts) > 1 else None
+                new = [ (x.get("token") or "").lower() for x in after if (x.get("token") or "").lower() not in before_tokens ]
+                tok = (new[-1] if new else (arg_tok or (after[-1].get("token") if after else None)))
+                if tok:
+                    tok = tok[:42]
+                    ch = "eth"
+                    for x in reversed(after):
+                        if (x.get("token") or "").lower() == tok.lower():
+                            ch = x.get("chain") or ch
+                            break
+                    try:
+                        m = fetch_market(tok) or {}
+                    except Exception:
+                        m = {}
+                    dex_url = (m.get("dexUrl") or "")
+                    scan_url = (m.get("scanUrl") or _explorer_url(ch, tok) or "")
+                    kb = _alert_keyboard(dex_url, scan_url, tok)
+                    if kb:
+                        send_message(chat_id, "Quick actions", reply_markup=kb)
+                return res
+
+            # /watchlist: show action buttons for up to 5 первых токенов
+            toks = [(x.get("token"), x.get("chain") or "eth") for x in after[:5]]
+            kb = _tokens_actions_keyboard(toks)
+            if kb:
+                send_message(chat_id, "Quick actions", reply_markup=kb)
+            return res
+
         return _orig_on_message(msg)
     except Exception:
         return _orig_on_message(msg)
@@ -2633,3 +2671,26 @@ def _alerts_control_keyboard():
         }
     except Exception:
         return None
+
+def _tokens_actions_keyboard(tokens):
+    # tokens: list of (token, chain)
+    rows = []
+    for token, chain in (tokens or []):
+        dex_url = ""
+        scan_url = _explorer_url(chain, token) or ""
+        try:
+            m = fetch_market(token) or {}
+            dex_url = m.get("dexUrl") or dex_url
+            scan_url = m.get("scanUrl") or scan_url
+        except Exception:
+            pass
+        row1 = []
+        if dex_url:
+            row1.append({"text": "🟢 Open in DEX", "url": dex_url})
+        if scan_url:
+            row1.append({"text": "🔍 Open in Scan", "url": scan_url})
+        if row1:
+            rows.append(row1)
+        if token and token.startswith("0x") and len(token)==42:
+            rows.append([{"text": f"👁️ Unwatch {token[:6]}…", "callback_data": f"UNWATCH_T:{token}"}])
+    return {"inline_keyboard": rows} if rows else None
