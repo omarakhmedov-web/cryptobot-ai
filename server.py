@@ -1242,16 +1242,16 @@ def on_message(msg):
     # --- Alerts commands (lite) ---
     if low.startswith("/alerts_on"):
         _toggle_alerts(chat_id, True)
-        send_message(chat_id, _alerts_status_md(chat_id))
+        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
         return jsonify({"ok": True})
 
     if low.startswith("/alerts_off"):
         _toggle_alerts(chat_id, False)
-        send_message(chat_id, _alerts_status_md(chat_id))
+        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
         return jsonify({"ok": True})
 
     if low.startswith("/alerts"):
-        send_message(chat_id, _alerts_status_md(chat_id))
+        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
         return jsonify({"ok": True})
     # --- /Alerts commands ---
 
@@ -1261,7 +1261,7 @@ def on_message(msg):
         if parts and parts[0].lower() == "reset":
             _set_chat_thresholds(chat_id, d5=None, d1h=None, d24=None, vol=None, interval=None, cooldown=None)
             send_message(chat_id, "🔄 *Alerts settings reset*")
-            send_message(chat_id, _alerts_status_md(chat_id))
+            send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
             return jsonify({"ok": True})
         update = {}
         keymap = {"d5":"d5","d1h":"d1h","d24":"d24","vol":"vol","int":"interval","interval":"interval","cd":"cooldown","cooldown":"cooldown"}
@@ -1283,7 +1283,7 @@ def on_message(msg):
             send_message(chat_id, "✅ *Alerts updated*")
         else:
             send_message(chat_id, "ℹ️ Usage: /alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60")
-        send_message(chat_id, _alerts_status_md(chat_id))
+        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
         return jsonify({"ok": True})
     # --- /Alerts config ---
     if text.startswith("/"):
@@ -2512,9 +2512,17 @@ def on_callback(cb):
         answer_callback_query(cb_id, "Removed from Watchlist." if removed else "Token not found.", False)
         return jsonify({"ok": True})
 
+    
+    if isinstance(data, str) and data.startswith("ALERTS_PRESET:"):
+        name = data.split(":",1)[1] or "normal"
+        _set_chat_thresholds(chat_id, **_preset_thresholds(name))
+        answer_callback_query(cb_id, f"Preset: {name}", False)
+        send_message(chat_id, f"✅ *Preset applied*: {name}")
+        send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
+        return jsonify({"ok": True})
     if isinstance(data, str) and data.startswith("ALERTS_MUTE:"):
         arg = data.split(":",1)[1]
-        minutes = 1440 if arg == "24h" else 60
+        minutes = 1440 if arg == "24h" else (480 if arg == "8h" else (60 if arg == "1h" else 60))
         until = _mute_chat(chat_id, minutes)
         answer_callback_query(cb_id, "Muted", False)
         send_message(chat_id, f"🔕 *Alerts muted* until {_fmt_until(until)}")
@@ -2558,12 +2566,12 @@ def on_message(msg):
                 name = (parts[1] if len(parts)>1 else "normal").lower()
                 _set_chat_thresholds(chat_id, **_preset_thresholds(name))
                 send_message(chat_id, f"✅ *Preset applied*: {name}")
-                send_message(chat_id, _alerts_status_md(chat_id))
+                send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
                 return jsonify({"ok": True})
             if parts and parts[0].lower() == "reset":
                 _set_chat_thresholds(chat_id, d5=None, d1h=None, d24=None, vol=None, interval=None, cooldown=None)
                 send_message(chat_id, "🔄 *Alerts settings reset*")
-                send_message(chat_id, _alerts_status_md(chat_id))
+                send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
                 return jsonify({"ok": True})
             # parse key=value pairs
             update = {}
@@ -2595,7 +2603,7 @@ def on_message(msg):
                 send_message(chat_id, "✅ *Alerts updated*")
             else:
                 send_message(chat_id, "ℹ️ Usage: /alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60\nOr: /alerts_set preset fast|normal|calm")
-            send_message(chat_id, _alerts_status_md(chat_id))
+            send_message(chat_id, _alerts_status_md(chat_id), reply_markup=_alerts_control_keyboard())
             return jsonify({"ok": True})
 
         # fallthrough: use original handler
@@ -2603,3 +2611,25 @@ def on_message(msg):
     except Exception:
         return _orig_on_message(msg)
 # ================= /EXTENSION =================================================
+
+def _alerts_control_keyboard():
+    try:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "Fast", "callback_data": "ALERTS_PRESET:fast"},
+                    {"text": "Normal", "callback_data": "ALERTS_PRESET:normal"},
+                    {"text": "Calm", "callback_data": "ALERTS_PRESET:calm"}
+                ],
+                [
+                    {"text": "Mute 1h", "callback_data": "ALERTS_MUTE:1h"},
+                    {"text": "Mute 8h", "callback_data": "ALERTS_MUTE:8h"},
+                    {"text": "Mute 24h", "callback_data": "ALERTS_MUTE:24h"}
+                ],
+                [
+                    {"text": "Unmute", "callback_data": "ALERTS_UNMUTE"}
+                ]
+            ]
+        }
+    except Exception:
+        return None
