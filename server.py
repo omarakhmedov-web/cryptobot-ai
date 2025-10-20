@@ -740,7 +740,7 @@ def send_document(chat_id: int, filename: str, content_bytes: bytes, caption: st
     return tg("sendDocument", payload, files=files)
 
 def parse_cb(data: str):
-    m = re.match(r"^v1:(\w+):(\-?\d+):(\-?\d+)$", data or "")
+    m = _re_wl.match(r"^v1:(\w+):(\-?\d+):(\-?\d+)$", data or "")
     if not m: return None
     return m.group(1), int(m.group(2)), int(m.group(3))
 
@@ -2301,7 +2301,7 @@ def on_callback(cb):
             answer_callback_query(cb.get("id"), "Unmuted.", False)
             return _wl_jsonify({"ok": True})
         # Also catch v1:WATCH / v1:UNWATCH if present in keyboard
-        m = re.match(r"^v1:(WATCH|UNWATCH):(\-?\d+):(\-?\d+)$", data or "")
+        m = _re_wl.match(r"^v1:(WATCH|UNWATCH):(\-?\d+):(\-?\d+)$", data or "")
         if m and chat_id is not None:
             act = m.group(1)
             # Try last token from state
