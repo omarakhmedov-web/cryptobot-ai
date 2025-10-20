@@ -1163,12 +1163,6 @@ def on_message(msg):
     text = (msg.get("text") or "").strip()
     low = text.lower()
 
-    # Absolute early return on /start to avoid any accidental fallthrough
-    if low == "/start":
-        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-        return jsonify({"ok": True})
-
-
     if low.startswith("/start"):
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
@@ -1305,28 +1299,6 @@ def on_message(msg):
     if not ok:
         send_message(chat_id, "Free scans exhausted. Use /upgrade.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
-
-    # --- Strict input guard: only proceed if a token address or URL with token is present ---
-    _addr = None
-    try:
-        m = re.search(r'0x[0-9a-fA-F]{40}', text)
-        if m:
-            _addr = m.group(0)
-        else:
-            # Extract from common DEX/scan URLs
-            m = re.search(r'(?:address|token|outputCurrency|inputCurrency)=0x([0-9a-fA-F]{40})', text)
-            if m:
-                _addr = '0x' + m.group(1)
-    except Exception:
-        _addr = None
-
-    if not _addr:
-        # No clear token → show usage hint and exit early without scanning
-        send_message(chat_id, build_hint_quickscan(HINT_CLICKABLE_LINKS), reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-        return jsonify({"ok": True})
-    # normalize text to extracted address
-    text = _addr
-    # --- /Strict input guard ---
     # --- Processing indicator (safe, minimal) ---
     ph = send_message(chat_id, "Processing…")
     ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
@@ -1480,38 +1452,14 @@ def on_message(msg):
                 market["ageDays"] = round(age_days, 2)
 
     verdict = compute_verdict(market)
-    # --- precompute website intel and pass into ctx so renderers can show it ---
-    links = (market.get("links") or {})
-    web = {
 
-        "whois": {"created": None, "registrar": None},
-
-        "ssl": {"ok": None, "expires": None, "issuer": None},
-
-        "wayback": {"first": None}
-
-    }
-
-    site_url = None
+    # FAST PATH: Skip heavy precomputations (webintel/why/why++/LP) in on_message
     try:
-
-        site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
-
-        if site_url:
-
-            web = analyze_website(site_url)
-
-    except Exception:
-
-        pass
-
-    web = _enrich_webintel_fallback(derive_domain(site_url), web)
-    # >>> FIX: pass precomputed webintel into ctx so renderers see it
-    try:
-        _dom = derive_domain(site_url)
+        _dom = derive_domain(((market.get("links") or {}).get("site")))
     except Exception:
         _dom = None
-    ctx = {"webintel": web or {}, "domain": _dom}
+    ctx = {"webintel": {}, "domain": _dom}
+
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
     # Reuse same ctx (no re-computation)
@@ -1536,6 +1484,7 @@ def on_message(msg):
     except Exception:
         lp = "LP lock: unknown"
 
+    
     links = (market.get("links") or {})
     bundle = {
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
@@ -1549,8 +1498,9 @@ def on_message(msg):
             "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
         },
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
-        "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
+        # lazy fields (computed on callbacks): details/why/whypp/lp/webintel
     }
+
 
     sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
     msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
@@ -1570,7 +1520,11 @@ def on_message(msg):
             print("editMessageReplyMarkup failed:", e)
 
     # --- Remove processing indicator if present ---
-    
+    if 'ph_id' in locals() and ph_id:
+        try:
+            tg("deleteMessage", {"chat_id": chat_id, "message_id": ph_id})
+        except Exception:
+            pass
     # --- /Remove processing indicator ---
     register_scan(chat_id)
     return jsonify({"ok": True})
@@ -1628,35 +1582,85 @@ def on_callback(cb):
         send_message(chat_id, bundle.get("details", "(no details)"),
                      reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
 
+    
     elif action == "WHY":
-        txt = bundle.get("why") or "*Why?*\n• No specific risk factors detected"
+        txt = bundle.get("why")
+        if not txt:
+            try:
+                v = bundle.get("verdict") or {}
+                mkt = bundle.get("market") or {}
+                txt = safe_render_why(v, mkt, DEFAULT_LANG)
+                bundle["why"] = txt
+                try:
+                    store_bundle(chat_id, orig_msg_id, bundle)
+                except Exception:
+                    pass
+            except Exception:
+                txt = "*Why?* n/a"
         send_message(chat_id, txt, reply_markup=None)
         answer_callback_query(cb_id, "Why? posted.", False)
 
+    
     elif action == "WHYPP":
-        txt = bundle.get("whypp") or "*Why++* n/a"
+        txt = bundle.get("whypp")
+        if not txt:
+            try:
+                v = bundle.get("verdict") or {}
+                mkt = bundle.get("market") or {}
+                txt = safe_render_whypp(v, mkt, DEFAULT_LANG)
+                bundle["whypp"] = txt
+                try:
+                    store_bundle(chat_id, orig_msg_id, bundle)
+                except Exception:
+                    pass
+            except Exception:
+                txt = "*Why++* n/a"
         MAX = 3500
         if len(txt) <= MAX:
             send_message(chat_id, txt, reply_markup=None)
         else:
-            chunk = txt[:MAX]
-            txt = txt[MAX:]
-            send_message(chat_id, chunk, reply_markup=None)
-            i = 1
-            while txt:
+            # split into segments
+            i = 0
+            s = txt
+            while s:
                 i += 1
-                chunk_part = txt[:MAX]
-                txt = txt[MAX:]
+                chunk_part = s[:MAX]
+                s = s[MAX:]
                 prefix = f"Why++ ({i})\n"
                 send_message(chat_id, prefix + chunk_part, reply_markup=None)
         answer_callback_query(cb_id, "Why++ posted.", False)
 
+    
     elif action == "LP":
-        text = bundle.get("lp", "LP lock: n/a")
-        send_message(chat_id, text, reply_markup=None)
+        txt = bundle.get("lp")
+        if not txt:
+            try:
+                mkt = bundle.get("market") or {}
+                ch_ = (mkt.get("chain") or "").lower()
+                _map = {"ethereum":"eth","bsc":"bsc","polygon":"polygon","matic":"polygon",
+                        "arbitrum":"arbitrum","base":"base","optimism":"op",
+                        "avalanche":"avax","fantom":"ftm"}
+                _short = _map.get(ch_, ch_ or "eth")
+                pair_addr = mkt.get("pairAddress") or resolve_pair(_short, mkt.get("tokenAddress"))
+                info = check_lp_lock_v2(_short, pair_addr)
+                try:
+                    if isinstance(info, dict) and not info.get('chain'):
+                        info['chain'] = _short
+                except Exception:
+                    pass
+                txt = render_lp(info, DEFAULT_LANG)
+                bundle["lp"] = txt
+                try:
+                    store_bundle(chat_id, orig_msg_id, bundle)
+                except Exception:
+                    pass
+            except Exception:
+                txt = "LP lock: unknown"
+        send_message(chat_id, txt, reply_markup=None)
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
+
         try:
             # dynamic, human-friendly filename
             mkt = (bundle.get('market') or {})
@@ -2563,16 +2567,6 @@ def on_callback(cb):
 
 # Wrap on_message to add new commands without touching original logic
 def on_message(msg):
-    # Hard guard: do not trigger any post-actions on /start|/help|/upgrade
-    try:
-        chat_id = msg.get("chat", {}).get("id")
-        text = (msg.get("text") or "").strip()
-        low = text.lower()
-        if low.startswith("/start") or low.startswith("/help") or low.startswith("/upgrade"):
-            return _orig_on_message(msg)
-    except Exception:
-        pass
-
     try:
         chat_id = msg.get("chat", {}).get("id")
         text = (msg.get("text") or "").strip()
