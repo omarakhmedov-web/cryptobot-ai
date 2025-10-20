@@ -1163,6 +1163,12 @@ def on_message(msg):
     text = (msg.get("text") or "").strip()
     low = text.lower()
 
+    # Absolute early return on /start to avoid any accidental fallthrough
+    if low == "/start":
+        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+
+
     if low.startswith("/start"):
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
@@ -1299,6 +1305,28 @@ def on_message(msg):
     if not ok:
         send_message(chat_id, "Free scans exhausted. Use /upgrade.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
+
+    # --- Strict input guard: only proceed if a token address or URL with token is present ---
+    _addr = None
+    try:
+        m = re.search(r'0x[0-9a-fA-F]{40}', text)
+        if m:
+            _addr = m.group(0)
+        else:
+            # Extract from common DEX/scan URLs
+            m = re.search(r'(?:address|token|outputCurrency|inputCurrency)=0x([0-9a-fA-F]{40})', text)
+            if m:
+                _addr = '0x' + m.group(1)
+    except Exception:
+        _addr = None
+
+    if not _addr:
+        # No clear token → show usage hint and exit early without scanning
+        send_message(chat_id, build_hint_quickscan(HINT_CLICKABLE_LINKS), reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
+    # normalize text to extracted address
+    text = _addr
+    # --- /Strict input guard ---
     # --- Processing indicator (safe, minimal) ---
     ph = send_message(chat_id, "Processing…")
     ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
@@ -2535,6 +2563,16 @@ def on_callback(cb):
 
 # Wrap on_message to add new commands without touching original logic
 def on_message(msg):
+    # Hard guard: do not trigger any post-actions on /start|/help|/upgrade
+    try:
+        chat_id = msg.get("chat", {}).get("id")
+        text = (msg.get("text") or "").strip()
+        low = text.lower()
+        if low.startswith("/start") or low.startswith("/help") or low.startswith("/upgrade"):
+            return _orig_on_message(msg)
+    except Exception:
+        pass
+
     try:
         chat_id = msg.get("chat", {}).get("id")
         text = (msg.get("text") or "").strip()
