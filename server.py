@@ -732,10 +732,10 @@ def send_message_raw(chat_id, text, reply_markup=None):
 
 # === WATCHLITE (non-invasive Watchlist + Alerts) =============================
 try:
-    import watchlite_0_1_0 as watchlite
+    import watchlite_0_1_3 as watchlite
 except Exception:
     import importlib, types as _types, sys as _sys
-    watchlite = importlib.import_module("watchlite_0_1_0")
+    watchlite = importlib.import_module("watchlite_0_1_3")
 try:
     WATCH_DB_PATH = os.getenv("WATCH_DB_PATH", "./watch_db.json")
     WATCH_STATE_PATH = os.getenv("WATCH_STATE_PATH", "./watch_state.json")
@@ -830,7 +830,7 @@ WELCOME = (
     "Welcome to Metridex.\n"
     "Send a token address, TX hash, or a link — I'll run a QuickScan.\n\n"
     "Commands: /quickscan, /upgrade, /limits\n"
-    f"Help: {HELP_URL}"
+    f"Help: {HELP_URL}\nWatchlist & Alerts — /watch_help"
 )
 UPGRADE_TEXT = (
     "Metridex Pro — full QuickScan access\n"
