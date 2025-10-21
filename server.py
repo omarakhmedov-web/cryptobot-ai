@@ -945,7 +945,21 @@ def on_message(msg):
         _handle_diag_command(chat_id)
         return jsonify({"ok": True})
 
-    # Only non-command messages trigger scan
+    
+    # Guard: don't show welcome for watch-related commands; delegate to watchlite
+    try:
+        if re.match(r'^/(watch|unwatch|watchlist|alerts[\w_]*)', low):
+            if watchlite.handle_message_commands(chat_id, text, load_bundle, msg):
+                return jsonify({"ok": True})
+            # Even if not handled, avoid falling through to generic welcome for these commands
+            send_message(chat_id, "Usage: `/watch 0x...`, `/unwatch 0x...`, `/watchlist`, `/alerts_on|/alerts_off|/alerts`")
+            return jsonify({"ok": True})
+    except Exception as _e_wl_guard:
+        try:
+            print("WATCHLITE guard error:", _e_wl_guard)
+        except Exception:
+            pass
+# Only non-command messages trigger scan
     if text.startswith("/"):
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
