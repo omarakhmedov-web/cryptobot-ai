@@ -47,6 +47,16 @@ def build_keyboard(chat_id: int,
         if help_url:
             rows.append([{"text": "ℹ️ How it works?", "url": help_url}])
 
+    # Top row: Quick actions
+    try:
+        rows.insert(0, [
+            {"text": "QuickScan", "callback_data": _cb(chat_id, msg_id, "QS")},
+            {"text": "Watchlist", "callback_data": _cb(chat_id, msg_id, "WATCHLIST")},
+            {"text": "Premium", "url": (links.get("pro") or links.get("day_pass") or help_url)},
+            {"text": "Community", "url": (help_url or links.get("help"))},
+        ])
+    except Exception:
+        pass
         return {"inline_keyboard": rows}
 
     # ---------------- COMMON NAV (DEX/Scan/DS) ----------------
@@ -70,6 +80,10 @@ def build_keyboard(chat_id: int,
 
     # ---------------- CONTEXT-SPECIFIC ACTIONS ----------------
     if ctx == "quick":
+        # Optional Share link
+        share = (links or {}).get("share")
+        if share:
+            rows.append([{"text": "🔗 Share this scan", "url": share}])
         rows.append([{"text": "📄 More details", "callback_data": _cb(chat_id, msg_id, "DETAILS")}])
         rows.append([
             {"text": "❓ Why?",  "callback_data": _cb(chat_id, msg_id, "WHY")},
@@ -84,6 +98,9 @@ def build_keyboard(chat_id: int,
         rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
 
     elif ctx == "details":
+        share = (links or {}).get("share")
+        if share:
+            rows.append([{"text": "🔗 Share this scan", "url": share}])
         # Keep only Copy CA here to avoid duplicate DEX/Scan; DS/DEX/Scan come from common nav above
         rows.append([{"text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA")}])
 
@@ -99,6 +116,9 @@ def build_keyboard(chat_id: int,
         rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
 
     elif ctx == "onchain":
+        share = (links or {}).get("share")
+        if share:
+            rows.append([{"text": "🔗 Share this scan", "url": share}])
         # On-chain view retains navigation + insights
         rows.append([
             {"text": "❓ Why?",  "callback_data": _cb(chat_id, msg_id, "WHY")},
