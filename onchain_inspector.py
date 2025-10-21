@@ -508,7 +508,7 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
     upgradeable = bool(impl_hex and isinstance(impl_hex, str) and impl_hex not in ("0x", "0x0") and int(impl_hex,16) != 0)
 
     # Honeypot (best-effort; cached)
-    hp = _honeypot_fetch_cached(short, token) or _honeypot_defaults()
+    hp, hp_meta = _honeypot_fetch_cached(short, token)
 
     out: Dict[str, Any] = {
         "ok": True,
@@ -527,6 +527,7 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
         "maxTx": None,
         "maxWallet": None,
         "honeypot": hp,
+        "honeypot_meta": hp_meta,
     }
     # Post-formatting
     try:
