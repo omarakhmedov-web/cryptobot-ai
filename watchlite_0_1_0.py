@@ -105,6 +105,57 @@ def _find_token_in_text(text):
     m = re.search(r'(0x[a-fA-F0-9]{40})', text)
     return m.group(1) if m else None
 
+def _chain_slug(name):
+    n = (name or "").lower()
+    if n in ("eth","ethereum","mainnet"): return "ethereum"
+    if n in ("bsc","bnb","binance-smart-chain","binance smart chain"): return "bsc"
+    if n in ("polygon","matic"): return "polygon"
+    if n.startswith("arbitrum"): return "arbitrum"
+    if n in ("base",): return "base"
+    if n in ("optimism","op"): return "optimism"
+    if n in ("avalanche","avax"): return "avalanche"
+    if n in ("fantom","ftm"): return "fantom"
+    return n or "ethereum"
+
+def _scan_url(chain, token):
+    cs = _chain_slug(chain)
+    routes = {
+        "ethereum": f"https://etherscan.io/token/{token}",
+        "bsc": f"https://bscscan.com/token/{token}",
+        "polygon": f"https://polygonscan.com/token/{token}",
+        "arbitrum": f"https://arbiscan.io/token/{token}",
+        "base": f"https://basescan.org/token/{token}",
+        "optimism": f"https://optimistic.etherscan.io/token/{token}",
+        "avalanche": f"https://snowtrace.io/token/{token}",
+        "fantom": f"https://ftmscan.com/token/{token}",
+    }
+    return routes.get(cs, f"https://etherscan.io/token/{token}")
+
+def _dex_url(chain, token, mkt=None):
+    # Prefer dexscreener pair if present, else token search
+    cs = _chain_slug(chain)
+    pair = None
+    if isinstance(mkt, dict):
+        pair = (mkt.get("pairAddress") or mkt.get("pair") or "").strip() or None
+        if not pair:
+            # some sources nest in links
+            pair = ((mkt.get("links") or {}).get("pair") or "").strip() or None
+    if pair:
+        return f"https://dexscreener.com/{cs}/{pair}"
+    # token search as fallback
+    return f"https://dexscreener.com/search?q={token}"
+
+def _normalized_links(links, chain, token, mkt=None):
+    # Merge provided links with our fallbacks
+    out = {}
+    if isinstance(links, dict):
+        out.update({k:v for k,v in links.items() if isinstance(v, str) and v})
+    # Always ensure scan exists
+    out.setdefault("scan", _scan_url(chain, token))
+    # DEX only if provided or we can build a plausible url
+    out.setdefault("dex", _dex_url(chain, token, mkt))
+    return out
+
 def _safe_acb(cb_id, text="OK", alert=False):
     try:
         if _answer_cb:
@@ -123,10 +174,9 @@ def _build_watch_keyboard(links, token, watched):
     if isinstance(links, dict):
         if links.get("dex"):  rows.append([{"text":"🟢 Open in DEX", "url": links["dex"]}])
         if links.get("scan"): rows.append([{"text":"🔍 Open in Scan", "url": links["scan"]}])
-    if watched:
-        rows.append([{"text":"👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
-    else:
-        rows.append([{"text":"👁️ Watch", "callback_data": f"WATCH_T:{token}"}])
+    rows.append([{"text":"👁️ Watch", "callback_data": f"WATCH_T:{token}"}, {"text":"👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
+    # preset controls row
+    rows.append([{"text":"⚡ Fast", "callback_data":"ALERT_PRESET:fast"}, {"text":"🟨 Normal", "callback_data":"ALERT_PRESET:normal"}, {"text":"🌙 Calm", "callback_data":"ALERT_PRESET:calm"}])
     rows.append([{"text":"🔕 Mute 24h", "callback_data":"MUTE_24H"}, {"text":"🔔 Unmute", "callback_data":"UNMUTE"}])
     return {"inline_keyboard": rows}
 
@@ -257,16 +307,10 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
         if isinstance(mkt, dict):
             psym = mkt.get("pairSymbol") or "Token"
             chain = mkt.get("chain") or "—"
-            links = mkt.get("links") or {}
+            links = _normalized_links(mkt.get("links") or {}, chain, tok, mkt)
             kb = _build_watch_keyboard(links, tok, watched=True)
             header = f"*Watching — {psym}*  `[{chain}]`\n`{tok}`"
             reply(header, reply_markup=kb)
-            # One-time onboarding tip
-            if not cfg["hints"].get("watch_tip_shown"):
-                tip = ("*Tip:* Use `/watchlist` to manage tokens, `/alerts` to view/edit thresholds.\n"
-                       "Quick presets below.")
-                reply(tip, reply_markup=_build_presets_keyboard())
-                cfg["hints"]["watch_tip_shown"] = True; _save_state()
         else:
             reply(f"Watching `{tok}`. Total: {len(_wl(chat_id))}")
         return True
@@ -286,7 +330,7 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
             if isinstance(mkt, dict):
                 psym = mkt.get("pairSymbol") or "Token"
                 chain = mkt.get("chain") or "—"
-                links = mkt.get("links") or {}
+                links = _normalized_links(mkt.get("links") or {}, chain, tok, mkt)
                 kb = _build_watch_keyboard(links, tok, watched=False)
                 header = f"*Unwatched — {psym}*  `[{chain}]`\n`{tok}`"
                 reply(header, reply_markup=kb)
@@ -522,7 +566,7 @@ def _maybe_alert_for_token(cid, tok, cfg):
     chain = (mkt.get("chain") or "—"); psym = mkt.get("pairSymbol") or "Token"
     header = f"*Alert — {psym}*  `[{chain}]`"
     text = header + "\n" + "\n".join(lines)
-    links = mkt.get("links") or {}
+    links = _normalized_links(mkt.get("links") or {}, chain, tok, mkt)
     kb = _build_alert_keyboard(links, tok)
     if _send_message:
         _send_message(cid, text, reply_markup=kb); _save_state()
