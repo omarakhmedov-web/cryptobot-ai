@@ -174,7 +174,7 @@ def _build_watch_keyboard(links, token, watched):
     if isinstance(links, dict):
         if links.get("dex"):  rows.append([{"text":"🟢 Open in DEX", "url": links["dex"]}])
         if links.get("scan"): rows.append([{"text":"🔍 Open in Scan", "url": links["scan"]}])
-    rows.append([{"text":"👁️ Watch", "callback_data": f"WATCH_T:{token}"}, {"text":"👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
+    rows.append([{"text":"👁️ Watch", "callback_data":"WATCH"}, {"text":"👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
     # preset controls row
     rows.append([{"text":"⚡ Fast", "callback_data":"ALERT_PRESET:fast"}, {"text":"🟨 Normal", "callback_data":"ALERT_PRESET:normal"}, {"text":"🌙 Calm", "callback_data":"ALERT_PRESET:calm"}])
     rows.append([{"text":"🔕 Mute 24h", "callback_data":"MUTE_24H"}, {"text":"🔔 Unmute", "callback_data":"UNMUTE"}])
