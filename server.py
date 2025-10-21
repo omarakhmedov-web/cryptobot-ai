@@ -1000,6 +1000,117 @@ Write **Why++** with 8–12 bullets:
         except Exception: pass
         return None
 
+
+# === D0 START UX HELPERS (personalized welcome, rating, start keyboard) ======
+_USERS_DB_PATH = os.getenv("USERS_DB_PATH", "./users_db.json")
+
+def _users_db_load():
+    try:
+        with open(_USERS_DB_PATH, "r", encoding="utf-8") as f:
+            j = json.load(f)
+            return j if isinstance(j, dict) else {}
+    except Exception:
+        return {}
+
+def _users_db_save(db: dict):
+    try:
+        with open(_USERS_DB_PATH, "w", encoding="utf-8") as f:
+            json.dump(db or {}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _mark_seen(chat_id: int):
+    try:
+        db = _users_db_load()
+        now = int(time.time())
+        rec = db.get(str(chat_id), {})
+        if not rec.get("first_seen"):
+            rec["first_seen"] = now
+        rec["last_seen"] = now
+        db[str(chat_id)] = rec
+        _users_db_save(db)
+    except Exception:
+        pass
+
+def _is_new_user(chat_id: int) -> bool:
+    try:
+        db = _users_db_load()
+        rec = db.get(str(chat_id))
+        return rec is None
+    except Exception:
+        return True
+
+def _rating_emoji(score: int) -> str:
+    try:
+        s = int(score or 0)
+    except Exception:
+        s = 0
+    if s >= 70: return "🟢"
+    if s >= 40: return "🟡"
+    return "🔴"
+
+def _build_start_keyboard(chat_id: int, links: dict | None = None) -> dict:
+    """
+    Inline keyboard with four primary buttons:
+    QuickScan (callback), Watchlist (callback), Premium (URL), Community (URL -> HELP)
+    """
+    links = links or {}
+    pk = _pricing_links()
+    kb = [
+        [ # row 1
+            {"text": "QuickScan", "callback_data": f"v1:QS:0:{chat_id}"},
+            {"text": "Watchlist", "callback_data": f"v1:WATCHLIST:0:{chat_id}"},
+        ],
+        [ # row 2
+            {"text": "Premium", "url": pk.get("pro") or pk.get("day_pass") or HELP_URL},
+            {"text": "Community", "url": HELP_URL},
+        ]
+    ]
+    return {"inline_keyboard": kb}
+
+def _build_quick_extras(verdict, market: dict) -> str:
+    """Add compact rating + chart line. No inline markdown links (MarkdownV2 escaping)."""
+    try:
+        score = getattr(verdict, "score", None)
+        rating = max(0, min(10, int(round((score or 0)/10)))) if score is not None else None
+    except Exception:
+        rating = None
+    emo = _rating_emoji(score if score is not None else 0)
+    legend = ""
+    if isinstance(score, (int, float)):
+        if score >= 70:
+            legend = "сильный сетап"
+        elif score >= 40:
+            legend = "стабильный, не хайповый"
+        else:
+            legend = "повышенные риски"
+    parts = []
+    if rating is not None:
+        parts.append(f"Rating: {emo} {rating}/10 — {legend}")
+    try:
+        ds = ((market or {}).get("links") or {}).get("dexscreener")
+        if ds:
+            parts.append(f"Chart: {ds}")
+    except Exception:
+        pass
+    return "\n".join(parts) if parts else ""
+
+def _welcome_text(is_new: bool) -> str:
+    # MarkdownV2 safe: avoid []() in text; send raw URLs via buttons
+    if is_new:
+        return (
+            "Привет\! Я Metridex — твой суперсканер крипты\. "
+            "Разоблачу скам за секунды и найду гемы\. Готов к первому скану\? 🚀\n"
+            "Добро пожаловать, новичок\! Вот быстрый туториал: /help\n"
+            "Уже просканировано 1M\+ токенов"
+        )
+    return (
+        "С возвращением\! Что сканируем сегодня\?\n"
+        "Уже просканировано 1M\+ токенов\n"
+        "Рефералка: /referral — приведи друга и получи премиум\-скан"
+    )
+# === /D0 START UX HELPERS =====================================================
+
 def on_message(msg):
     # ---- WATCHLITE: early intercept of new commands (/watch, /unwatch, /watchlist, /alerts*) ----
     try:
@@ -1039,11 +1150,23 @@ def on_message(msg):
             pass
     # --- /WATCHLITE intercept ---
 
-    if low.startswith("/start"):
+    
+if low.startswith("/start"):
+    try:
+        _mark_seen(chat_id)
+    except Exception:
+        pass
+    is_new = _is_new_user(chat_id)
+    try:
+        text = _welcome_text(is_new)
+        kb = _build_start_keyboard(chat_id, _pricing_links())
+        send_message(chat_id, text, reply_markup=kb)
+        return jsonify({"ok": True})
+    except Exception as _e_start:
+        # Fallback to legacy welcome
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
-
-    if low.startswith("/upgrade"):
+if low.startswith("/upgrade"):
         send_message(chat_id, UPGRADE_TEXT, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
@@ -1289,6 +1412,14 @@ def on_message(msg):
     ctx = {"webintel": web or {}, "domain": _dom}
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+# --- D0: QuickScan extras (rating + chart) ---
+try:
+    _extras = _build_quick_extras(verdict, market)
+    if _extras:
+        quick = f"{quick}\n\n{_extras}"
+except Exception:
+    pass
+# --- /D0 extras ---
     # Reuse same ctx (no re-computation)
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
@@ -1323,6 +1454,12 @@ def on_message(msg):
         except Exception:
             pass
         lp = render_lp(info, DEFAULT_LANG)
+# --- D0 LP newbie hints ---
+try:
+    lp = f"{lp}\n\n_What it means:_\n• 🔥 Renounced — владелец отказался от контроля\n• 🔒 Locked — LP токены заблокированы до указанной даты"
+except Exception:
+    pass
+# --- /D0 LP newbie hints ---
     except TypeError:
         lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
     except Exception:
@@ -1396,7 +1533,30 @@ def on_callback(cb):
     if not m:
         answer_callback_query(cb_id, "Unsupported action", True)
         return jsonify({"ok": True})
-    action, orig_msg_id, orig_chat_id = m
+
+    # D0: Start menu callbacks
+    if data.endswith(":QS") or (m and m[0] == "QS"):
+        try:
+            send_message(chat_id, build_hint_quickscan(HINT_CLICKABLE_LINKS), reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+            answer_callback_query(cb_id, "QuickScan hint sent.", False)
+            return jsonify({"ok": True})
+        except Exception:
+            pass
+    if data.endswith(":WATCHLIST") or (m and m[0] == "WATCHLIST"):
+        try:
+            # Try to delegate to watchlite
+            handled = False
+            try:
+                handled = watchlite.handle_message_commands(chat_id, "/watchlist", load_bundle, msg or {})
+            except Exception:
+                handled = False
+            if not handled:
+                send_message(chat_id, "Your watchlist: use `/watchlist` to view\\.", reply_markup=None)
+            answer_callback_query(cb_id, "Watchlist opened.", False)
+            return jsonify({"ok": True})
+        except Exception:
+            pass
+        action, orig_msg_id, orig_chat_id = m
 
     if orig_msg_id == 0:
         orig_msg_id = current_msg_id
