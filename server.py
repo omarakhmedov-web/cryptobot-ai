@@ -730,12 +730,36 @@ def send_message_raw(chat_id, text, reply_markup=None):
     if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
     return tg("sendMessage", data)
 
+
 # === WATCHLITE (non-invasive Watchlist + Alerts) =============================
-try:
-    import watchlite_0_1_3 as watchlite
-except Exception:
-    import importlib, types as _types, sys as _sys
-    watchlite = importlib.import_module("watchlite_0_1_3")
+import os, sys, importlib, importlib.util, pathlib
+def _load_watchlite():
+    # 1) Try module names (new → old → generic)
+    for name in ("watchlite_0_1_3", "watchlite_0_1_0", "watchlite"):
+        try:
+            return importlib.import_module(name)
+        except Exception:
+            pass
+    # 2) Try local files relative to this server file
+    base = pathlib.Path(__file__).parent
+    for fname in ("watchlite_0_1_3.py", "watchlite_0_1_0.py", "watchlite.py"):
+        f = base / fname
+        if f.exists():
+            spec = importlib.util.spec_from_file_location("watchlite", str(f))
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["watchlite"] = mod
+            spec.loader.exec_module(mod)
+            return mod
+    # 3) Optional explicit path via env
+    fpath = os.getenv("WATCHLITE_PATH")
+    if fpath and os.path.exists(fpath):
+        spec = importlib.util.spec_from_file_location("watchlite", fpath)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["watchlite"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    raise ModuleNotFoundError("watchlite module not found")
+watchlite = _load_watchlite()
 try:
     WATCH_DB_PATH = os.getenv("WATCH_DB_PATH", "./watch_db.json")
     WATCH_STATE_PATH = os.getenv("WATCH_STATE_PATH", "./watch_state.json")
@@ -830,7 +854,7 @@ WELCOME = (
     "Welcome to Metridex.\n"
     "Send a token address, TX hash, or a link — I'll run a QuickScan.\n\n"
     "Commands: /quickscan, /upgrade, /limits\n"
-    f"Help: {HELP_URL}\nWatchlist & Alerts — /watch_help"
+    f"Help: {HELP_URL}"
 )
 UPGRADE_TEXT = (
     "Metridex Pro — full QuickScan access\n"
