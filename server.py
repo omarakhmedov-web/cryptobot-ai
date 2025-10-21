@@ -1,10 +1,4 @@
 import hashlib
-
-import inspect as _inspect
-import hashlib as _hashlib
-import sys as _sys
-from flask import jsonify as _jsonify
-
 import hmac
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
@@ -2089,69 +2083,57 @@ except NameError:
     _np_create_invoice = _np_create_invoice_smart
 
 
-# ---- DIAGNOSTICS (guarded) ----
-def _runtime_diag_scan(root_dir: str) -> dict:
-    findings = {"openai_imports": [], "openai_client_calls": [], "files_with_proxies_kw": [], "legacy_sdk_calls": []}
+# ---- STARTUP DIAGNOSTICS (logs only) ----
+def _startup_diag():
     try:
-        for dirpath, _, filenames in os.walk(root_dir):
+        import os as __os, sys as __sys, inspect as __inspect, hashlib as __hashlib, re as __re
+        root = __os.getenv("REPO_ROOT", "/opt/render/project/src")
+        print("[DIAG] boot: python", __sys.version)
+        try:
+            sha = __hashlib.sha256(open(__file__,"rb").read()).hexdigest()
+            print("[DIAG] server_sha256:", sha)
+        except Exception as e:
+            print("[DIAG] server_sha256: ERR", e)
+        try:
+            import openai as _openai
+            from openai import OpenAI as _OpenAI
+            print("[DIAG] openai_version:", getattr(_openai,"__version__","?"))
+            print("[DIAG] openai_ctor:", __inspect.signature(_OpenAI.__init__))
+        except Exception as e:
+            print("[DIAG] openai_import_err:", e)
+        # scan
+        findings = {"imports":[], "clients":[], "proxies_kw":[], "legacy_calls":[]}
+        for dirpath, _, filenames in __os.walk(root):
             for fn in filenames:
-                if not fn.endswith(".py") and not fn.startswith("requirements"):
+                if not (fn.endswith(".py") or fn.startswith("requirements")):
                     continue
-                p = os.path.join(dirpath, fn)
+                p = __os.path.join(dirpath, fn)
                 try:
-                    text = open(p, "r", encoding="utf-8", errors="ignore").read()
+                    txt = open(p,"r",encoding="utf-8",errors="ignore").read()
                 except Exception:
                     continue
-                if re.search(r"\bfrom\s+openai\s+import\s+OpenAI\b|\bimport\s+openai\b", text):
-                    findings["openai_imports"].append(os.path.relpath(p, root_dir))
-                if re.search(r"\bOpenAI\s*\(", text):
-                    findings["openai_client_calls"].append(os.path.relpath(p, root_dir))
-                if re.search(r"\bproxies\s*=", text):
-                    findings["files_with_proxies_kw"].append(os.path.relpath(p, root_dir))
-                if re.search(r"\bopenai\.(ChatCompletion|Completion)\.create\s*\(", text):
-                    findings["legacy_sdk_calls"].append(os.path.relpath(p, root_dir))
+                if __re.search(r"\bfrom\s+openai\s+import\s+OpenAI\b|\bimport\s+openai\b", txt):
+                    findings["imports"].append(__os.path.relpath(p, root))
+                if __re.search(r"\bOpenAI\s*\(", txt):
+                    findings["clients"].append(__os.path.relpath(p, root))
+                if __re.search(r"\bproxies\s*=", txt):
+                    findings["proxies_kw"].append(__os.path.relpath(p, root))
+                if __re.search(r"\bopenai\.(ChatCompletion|Completion)\.create\s*\(", txt):
+                    findings["legacy_calls"].append(__os.path.relpath(p, root))
+        for k in list(findings.keys()):
+            findings[k] = sorted(set(findings[k]))
+        print("[DIAG] scan_root:", root)
+        print("[DIAG] scan.imports:", findings["imports"])
+        print("[DIAG] scan.clients:", findings["clients"])
+        print("[DIAG] scan.proxies_kw:", findings["proxies_kw"])
+        print("[DIAG] scan.legacy_calls:", findings["legacy_calls"])
     except Exception as e:
-        findings["scan_error"] = str(e)
-    # dedupe
-    for k,v in list(findings.items()):
-        if isinstance(v, list):
-            findings[k] = sorted(set(v))
-    return findings
+        print("[DIAG] startup_diag_error:", e)
 
-@app.get("/diag/runtime/<token>")
-def diag_runtime(token: str):
-    # hard guard
-    if os.getenv("DIAG_ENABLED", "0") != "1":
-        return _jsonify({"ok": False, "error": "disabled"}), 404
-    if not token or token != os.getenv("DIAG_SECRET", ""):
-        return _jsonify({"ok": False, "error": "forbidden"}), 403
+if os.getenv("DIAG_LOG_ENABLED","0") == "1":
     try:
-        server_sha = _hashlib.sha256(open(__file__, "rb").read()).hexdigest()
-    except Exception:
-        server_sha = None
-    # OpenAI info
-    try:
-        import openai as _openai
-        openai_ver = getattr(_openai, "__version__", "?")
-        from openai import OpenAI as _OpenAI
-        ctor_sig = str(_inspect.signature(_OpenAI.__init__))
-    except Exception as e:
-        openai_ver = f"ERR: {e!s}"
-        ctor_sig = None
-    # repo scan
-    root_dir = os.getenv("REPO_ROOT", "/opt/render/project/src")
-    scan = _runtime_diag_scan(root_dir)
-    data = {
-        "ok": True,
-        "py_version": _sys.version,
-        "server_sha256": server_sha,
-        "openai_version": openai_ver,
-        "openai_ctor_signature": ctor_sig,
-        "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
-        "whypp_model": os.getenv("WHYPP_MODEL", "gpt-4o-mini"),
-        "scan_root": root_dir,
-        "scan": scan,
-    }
-    return _jsonify(data), 200
-# ---- /DIAGNOSTICS ----
+        _startup_diag()
+    except Exception as _e:
+        print("[DIAG] _startup_diag failed:", _e)
+# ---- /STARTUP DIAGNOSTICS ----
 
