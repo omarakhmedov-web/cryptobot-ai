@@ -1,25 +1,14 @@
-# watchlite_0_1_0.py — minimal (v0.1.1 cmd‑match fix), non-invasive Watchlist + Alerts (lite) for Metridex
-# Requirements: no new ENV. Uses JSON files next to server: watch_db.json, watch_state.json
-# Features:
-# - Commands: /watch, /unwatch [0x..], /watchlist
-# - Alerts controls: /alerts_on, /alerts_off, /alerts, /alerts_set, /alerts_mute [min], /alerts_unmute
-# - Presets: /alerts_set preset fast|normal|normal|calm
-# - Auto-ticker (lite) per chat, interval default 15 min, cooldown default 60 min per token+metric
-# - Callback: UNWATCH_T:<token>, MUTE_24H, UNMUTE (intercepted before main on_callback)
-# - Uses server's send_message(), mdv2_escape(), tg(), build_keyboard(), fetch_market()
+# watchlite_0_1_3.py — Watchlist + Alerts (lite) with help UX (presets + tips)
+# Non-invasive: plug into existing server helpers. No new required ENV.
+# Storage: watch_db.json (per-chat tokens), watch_state.json (per-chat config/state)
 
 import os, json, time, threading, re
 
-def _is_cmd(low: str, base: str) -> bool:
-    if not isinstance(low, str):
-        return False
-    return re.match(rf'^/{base}(?:@[\w_]+)?(?:\s|$)', low) is not None
+DB_PATH = "./watch_db.json"
+STATE_PATH = "./watch_state.json"
+LIMIT = 200
 
-_DEFAULT_DB = "./watch_db.json"
-_DEFAULT_STATE = "./watch_state.json"
-_DEFAULT_LIMIT = 200
-
-# callbacks into server
+# server callbacks (wired via init())
 _send_message = None
 _send_raw = None
 _escape = None
@@ -28,11 +17,7 @@ _build_kbd = None
 _fetch_market = None
 _answer_cb = None
 
-DB_PATH = _DEFAULT_DB
-STATE_PATH = _DEFAULT_STATE
-LIMIT = _DEFAULT_LIMIT
-
-# In-memory caches
+# In-memory
 _db = {}
 _state = {}
 _lock = threading.RLock()
@@ -50,16 +35,16 @@ _PRESETS = {
     "calm":   {"d5": 3.0, "d1h": 8.0,  "d24": 15.0, "vol": 400000.0, "int": 30, "cd": 90},
 }
 
+def _now(): return int(time.time())
+
 def _ensure_loaded():
     global _db, _state
     with _lock:
-        # DB
         try:
             with open(DB_PATH, "r", encoding="utf-8") as f:
                 _db = json.load(f) or {}
         except Exception:
             _db = {}
-        # STATE
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
                 _state = json.load(f) or {}
@@ -82,9 +67,6 @@ def _save_state():
         except Exception:
             pass
 
-def _now():
-    return int(time.time())
-
 def _cfg(cid):
     s = _state.setdefault(str(cid), {})
     s.setdefault("enabled", True)
@@ -95,7 +77,8 @@ def _cfg(cid):
     s.setdefault("mute_until_ts", 0)
     s.setdefault("last_tick_ts", 0)
     s.setdefault("last_token", None)
-    s.setdefault("last_alerts", {})  # key: f"{token}:{metric}" -> ts
+    s.setdefault("last_alerts", {})  # key=f"{token}:{metric}" -> ts
+    s.setdefault("hints", {})        # onboarding flags
     return s
 
 def _wl(cid):
@@ -103,15 +86,18 @@ def _wl(cid):
 
 def _md(text):
     if _escape:
-        return _escape(text)
+        try: return _escape(text)
+        except Exception: pass
     return text
 
-
 def _find_token_in_text(text):
-    if not isinstance(text, str):
-        return None
+    if not isinstance(text, str): return None
     m = re.search(r'(0x[a-fA-F0-9]{40})', text)
     return m.group(1) if m else None
+
+def _is_cmd(low: str, base: str) -> bool:
+    if not isinstance(low, str): return False
+    return re.match(rf'^/{base}(?:@[\w_]+)?(?:\s|$)', low) is not None
 
 def _safe_acb(cb_id, text="OK", alert=False):
     try:
@@ -126,13 +112,20 @@ def _safe_acb(cb_id, text="OK", alert=False):
     except Exception:
         pass
 
+def _build_alert_keyboard(links, token):
+    rows = []
+    if isinstance(links, dict):
+        if links.get("dex"): rows.append([{"text":"🟢 Open in DEX", "url": links["dex"]}])
+        if links.get("scan"): rows.append([{"text":"🔍 Open in Scan", "url": links["scan"]}])
+    rows.append([{"text":"👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
+    rows.append([{"text":"🔕 Mute 24h", "callback_data":"MUTE_24H"}, {"text":"🔔 Unmute", "callback_data":"UNMUTE"}])
+    return {"inline_keyboard": rows}
+
 def _build_watch_keyboard(links, token, watched):
     rows = []
     if isinstance(links, dict):
-        if links.get("dex"):
-            rows.append([{"text":"🟢 Open in DEX", "url": links["dex"]}])
-        if links.get("scan"):
-            rows.append([{"text":"🔍 Open in Scan", "url": links["scan"]}])
+        if links.get("dex"): rows.append([{"text":"🟢 Open in DEX", "url": links["dex"]}])
+        if links.get("scan"): rows.append([{"text":"🔍 Open in Scan", "url": links["scan"]}])
     if watched:
         rows.append([{"text":"👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
     else:
@@ -140,7 +133,17 @@ def _build_watch_keyboard(links, token, watched):
     rows.append([{"text":"🔕 Mute 24h", "callback_data":"MUTE_24H"}, {"text":"🔔 Unmute", "callback_data":"UNMUTE"}])
     return {"inline_keyboard": rows}
 
-def init(paths=None, limit=None, send_message_fn=None, send_message_raw=None, tg_fn=None, escape_fn=None, fetch_market_fn=None, build_keyboard_fn=None, answer_callback_fn=None):
+def _build_presets_keyboard():
+    return {"inline_keyboard":[
+        [
+            {"text":"⚡ Fast",   "callback_data":"ALERT_PRESET:fast"},
+            {"text":"🟨 Normal", "callback_data":"ALERT_PRESET:normal"},
+            {"text":"🌙 Calm",   "callback_data":"ALERT_PRESET:calm"},
+        ]
+    ]}
+
+def init(paths=None, limit=None, send_message_fn=None, send_message_raw=None, tg_fn=None, escape_fn=None,
+         fetch_market_fn=None, build_keyboard_fn=None, answer_callback_fn=None):
     global DB_PATH, STATE_PATH, LIMIT, _send_message, _send_raw, _escape, _tg, _fetch_market, _build_kbd, _answer_cb
     if isinstance(paths, dict):
         DB_PATH = paths.get("db") or DB_PATH
@@ -154,59 +157,27 @@ def init(paths=None, limit=None, send_message_fn=None, send_message_raw=None, tg
     _fetch_market = fetch_market_fn or _fetch_market
     _build_kbd = build_keyboard_fn or _build_kbd
     _answer_cb = answer_callback_fn or _answer_cb
-
     _ensure_loaded()
     _start_ticker_once()
 
 def _start_ticker_once():
     global _ticker_started
-    if _ticker_started:
-        return
+    if _ticker_started: return
     t = threading.Thread(target=_ticker_loop, name="watchlite-ticker", daemon=True)
     t.start()
     _ticker_started = True
 
 def _fmt_thresholds(cfg):
     th = cfg.get("thresholds") or {}
-    s = cfg
     return (f"d5={th.get('d5', _DEFAULT_THRESHOLDS['d5'])}%  "
             f"d1h={th.get('d1h', _DEFAULT_THRESHOLDS['d1h'])}%  "
             f"d24={th.get('d24', _DEFAULT_THRESHOLDS['d24'])}%  "
             f"vol≈${int(th.get('vol', _DEFAULT_THRESHOLDS['vol'])):,}  "
-            f"int={s.get('interval_min', _DEFAULT_INTERVAL_MIN)}m  "
-            f"cd={s.get('cooldown_min', _DEFAULT_COOLDOWN_MIN)}m")
-
-def _parse_set_args(text):
-    # supports: reset | preset X | d5=2 d1h=5 d24=10 vol=250k int=15 cd=60
-    low = text.strip().lower()
-    if " reset" in low or low.endswith(" reset") or low.strip() == "/alerts_set reset":
-        return {"reset": True}
-    m = re.search(r"preset\s+([a-z]+)", low)
-    preset = m.group(1) if m else None
-    kv = {}
-    for k in ("d5","d1h","d24","vol","int","cd"):
-        mo = re.search(rf"{k}\s*=\s*([0-9]+(?:\.[0-9]+)?[kKmM]?)", low)
-        if mo:
-            val = mo.group(1)
-            if k == "vol":
-                v = val.lower()
-                mult = 1
-                if v.endswith("k"): mult = 1000; v=v[:-1]
-                elif v.endswith("m"): mult = 1000000; v=v[:-1]
-                try:
-                    kv[k] = float(v) * mult
-                except Exception:
-                    pass
-            else:
-                try:
-                    kv[k] = float(val)
-                except Exception:
-                    pass
-    return {"preset": preset, "kv": kv}
+            f"int={cfg.get('interval_min', _DEFAULT_INTERVAL_MIN)}m  "
+            f"cd={cfg.get('cooldown_min', _DEFAULT_COOLDOWN_MIN)}m")
 
 def _status_text(cid):
-    cfg = _cfg(cid)
-    wl = _wl(cid)
+    cfg = _cfg(cid); wl = _wl(cid)
     enabled = cfg.get("enabled", True)
     mute_ts = int(cfg.get("mute_until_ts") or 0)
     muted = mute_ts > _now()
@@ -220,57 +191,63 @@ def _status_text(cid):
     if muted:
         mins = int(round(mute_left/60.0))
         lines.append(f"*Mute:* {mins} min left")
+    lines.append("Presets: `/alerts_set preset fast|normal|calm` • Custom: `/alerts_set d5=… d1h=… d24=… vol=… int=… cd=…`")
+    lines.append("Help: `/watch_help`, `/alerts_help`")
     return "\n".join(lines)
 
+def _pct(v):
+    try:
+        n = float(v); arrow = "▲" if n>0 else ("▼" if n<0 else "•")
+        return f"{arrow} {n:+.2f}%"
+    except Exception:
+        return "—"
+
+def note_quickscan(chat_id: int, bundle: dict, msg_id=None):
+    if not isinstance(bundle, dict): return
+    mkt = (bundle.get("market") or {})
+    tok = (mkt.get("tokenAddress") or "").strip()
+    if tok and tok.startswith("0x") and len(tok)==42:
+        _ensure_loaded(); _cfg(chat_id)["last_token"] = tok; _save_state()
 
 def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_msg=None):
     """Return True if handled fully (intercepted); otherwise False to delegate to original on_message."""
-    if not isinstance(text, str):
-        return False
+    if not isinstance(text, str): return False
     low = text.strip().lower()
-    if not low.startswith("/"):
-        return False
+    if not low.startswith("/"): return False
 
-    _ensure_loaded()
-    cfg = _cfg(chat_id)
+    _ensure_loaded(); cfg = _cfg(chat_id)
 
-    def reply(msg):
-        if _send_message:
-            _send_message(chat_id, msg)
+    def reply(msg, **kw):
+        if _send_message: _send_message(chat_id, msg, **kw)
 
     # /watch
     if _is_cmd(low, 'watch'):
         parts = text.split(None, 1)
-        token = None
-        if len(parts) > 1:
-            token = parts[1].strip()
-        if not token:
-            token = cfg.get("last_token")
+        token = parts[1].strip() if len(parts)>1 else cfg.get("last_token")
         if not (isinstance(token, str) and token.startswith("0x") and len(token)==42):
-            reply("Usage: `/watch 0x...` or scan a token first, then `/watch` (no args).")
-            return True
-        wl = _wl(chat_id)
-        tok = token.lower()
-        if tok in wl:
-            # Already watching — всё равно пришлём карточку
-            pass
-        else:
+            reply("Usage: `/watch 0x...` or scan a token first, then `/watch` (no args)."); return True
+        wl = _wl(chat_id); tok = token.lower()
+        if tok not in wl:
             if len(wl) >= LIMIT:
-                reply(f"Watchlist is full (limit {LIMIT}). Remove some with `/unwatch 0x...`")
-                return True
+                reply(f"Watchlist is full (limit {LIMIT}). Remove some with `/unwatch 0x...`"); return True
             wl.append(tok); _save_db()
-        # Info + buttons after watch
-        try:
-            mkt = _fetch_market(tok) if _fetch_market else None
-        except Exception:
-            mkt = None
+        # send info card
+        mkt = None
+        try: mkt = _fetch_market(tok) if _fetch_market else None
+        except Exception: mkt = None
         if isinstance(mkt, dict):
             psym = mkt.get("pairSymbol") or "Token"
             chain = mkt.get("chain") or "—"
             links = mkt.get("links") or {}
             kb = _build_watch_keyboard(links, tok, watched=True)
             header = f"*Watching — {psym}*  `[{chain}]`\n`{tok}`"
-            _send_message(chat_id, header, reply_markup=kb)
+            reply(header, reply_markup=kb)
+            # one-time tip
+            if not cfg["hints"].get("watch_tip_shown"):
+                tip = ("*Tip:* Use `/watchlist` to manage tokens, `/alerts` to view/edit thresholds.\n"
+                       "Quick presets below.")
+                reply(tip, reply_markup=_build_presets_keyboard())
+                cfg["hints"]["watch_tip_shown"] = True; _save_state()
         else:
             reply(f"Watching `{tok}`. Total: {len(_wl(chat_id))}")
         return True
@@ -278,29 +255,22 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
     # /unwatch
     if _is_cmd(low, 'unwatch'):
         parts = text.split(None, 1)
-        token = None
-        if len(parts) > 1:
-            token = parts[1].strip()
-        if not token:
-            token = cfg.get("last_token")
+        token = parts[1].strip() if len(parts)>1 else cfg.get("last_token")
         if not (isinstance(token, str) and token.startswith("0x") and len(token)==42):
-            reply("Usage: `/unwatch 0x...` or scan a token first, then `/unwatch` (no args).")
-            return True
-        wl = _wl(chat_id)
-        tok = token.lower()
+            reply("Usage: `/unwatch 0x...` or scan a token first, then `/unwatch` (no args)."); return True
+        wl = _wl(chat_id); tok = token.lower()
         if tok in wl:
             wl.remove(tok); _save_db()
-            try:
-                mkt = _fetch_market(tok) if _fetch_market else None
-            except Exception:
-                mkt = None
+            mkt = None
+            try: mkt = _fetch_market(tok) if _fetch_market else None
+            except Exception: mkt = None
             if isinstance(mkt, dict):
                 psym = mkt.get("pairSymbol") or "Token"
                 chain = mkt.get("chain") or "—"
                 links = mkt.get("links") or {}
                 kb = _build_watch_keyboard(links, tok, watched=False)
                 header = f"*Unwatched — {psym}*  `[{chain}]`\n`{tok}`"
-                _send_message(chat_id, header, reply_markup=kb)
+                reply(header, reply_markup=kb)
             else:
                 reply(f"Removed `{tok}` from watchlist. Total: {len(_wl(chat_id))}")
         else:
@@ -311,74 +281,91 @@ def handle_message_commands(chat_id: int, text: str, load_bundle_fn=None, raw_ms
     if _is_cmd(low, 'watchlist'):
         wl = _wl(chat_id)
         if not wl:
-            reply("Watchlist is empty. Add with `/watch 0x...`")
+            reply("Watchlist is empty. Add with `/watch 0x...` or scan a token then `/watch`. For help: `/watch_help`")
             return True
-        lines = ["*Watchlist*"]
-        for i, t in enumerate(wl, 1):
-            lines.append(f"{i}. `{t}`")
-        reply("\n".join(lines))
-        return True
+        lines = ["*Watchlist*"] + [f"{i}. `{t}`" for i,t in enumerate(wl,1)]
+        reply("\n".join(lines)); return True
 
-    # Toggles
-    if _is_cmd(low, 'alerts_on'):
-        cfg["enabled"] = True; _save_state(); reply("Alerts: ON"); return True
-    if _is_cmd(low, 'alerts_off'):
-        cfg["enabled"] = False; _save_state(); reply("Alerts: OFF"); return True
+    # Alerts toggles/config
+    if _is_cmd(low, 'alerts_on'):  cfg["enabled"]=True;  _save_state(); reply("Alerts: ON");  return True
+    if _is_cmd(low, 'alerts_off'): cfg["enabled"]=False; _save_state(); reply("Alerts: OFF"); return True
 
     if _is_cmd(low, 'alerts_set'):
-        p = _parse_set_args(text)
-        if p.get("reset"):
-            cfg["thresholds"] = dict(_DEFAULT_THRESHOLDS)
-            cfg["interval_min"] = _DEFAULT_INTERVAL_MIN
-            cfg["cooldown_min"] = _DEFAULT_COOLDOWN_MIN
-            cfg["preset"] = "normal"
-            _save_state()
-            reply("Alerts config reset to defaults.")
-            return True
-        if p.get("preset"):
-            name = (p["preset"] or "").strip().lower()
+        lowtxt = text.strip()
+        if " reset" in lowtxt or lowtxt.endswith(" reset") or lowtxt == "/alerts_set reset":
+            cfg["thresholds"]=dict(_DEFAULT_THRESHOLDS); cfg["interval_min"]=_DEFAULT_INTERVAL_MIN
+            cfg["cooldown_min"]=_DEFAULT_COOLDOWN_MIN; cfg["preset"]="normal"; _save_state()
+            reply("Alerts config reset to defaults."); return True
+        m = re.search(r"preset\s+([a-z]+)", lowtxt.lower())
+        if m:
+            name = m.group(1).strip().lower()
             if name in _PRESETS:
                 pr = _PRESETS[name]
                 cfg["thresholds"] = {k: pr[k] for k in ("d5","d1h","d24","vol")}
-                cfg["interval_min"] = pr["int"]
-                cfg["cooldown_min"] = pr["cd"]
-                cfg["preset"] = name
-                _save_state()
-                reply(f"Preset applied: *{name}*\n" + _fmt_thresholds(cfg))
-                return True
+                cfg["interval_min"] = pr["int"]; cfg["cooldown_min"] = pr["cd"]; cfg["preset"]=name; _save_state()
+                reply(f"Preset applied: *{name}*\n" + _fmt_thresholds(cfg)); return True
             else:
-                reply("Unknown preset. Use: `fast`, `normal`, or `calm`.")
-                return True
-        kv = p.get("kv") or {}
-        if kv:
-            th = cfg["thresholds"]
-            for k,v in kv.items():
-                if k in ("d5","d1h","d24","vol"):
-                    th[k] = float(v)
-                elif k == "int":
-                    cfg["interval_min"] = max(1, int(float(v)))
-                elif k == "cd":
-                    cfg["cooldown_min"] = max(1, int(float(v)))
-            cfg["preset"] = "custom"
-            _save_state()
-            reply("Alerts updated.\n" + _fmt_thresholds(cfg))
-            return True
-        reply("Usage: `/alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60` or `preset fast|normal|calm` or `reset`.")
-        return True
+                reply("Unknown preset. Use: `fast`, `normal`, or `calm`."); return True
+        # Parse kv
+        th = cfg["thresholds"]
+        kv = {}
+        for k in ("d5","d1h","d24","vol","int","cd"):
+            mo = re.search(rf"{k}\s*=\s*([0-9]+(?:\.[0-9]+)?[kKmM]?)", lowtxt)
+            if mo:
+                v = mo.group(1)
+                if k=="vol":
+                    mult=1; vv=v.lower()
+                    if vv.endswith("k"): mult=1000; vv=vv[:-1]
+                    elif vv.endswith("m"): mult=1000000; vv=vv[:-1]
+                    try: kv[k]=float(vv)*mult
+                    except: pass
+                else:
+                    try: kv[k]=float(v)
+                    except: pass
+        changed=False
+        for k,v in kv.items():
+            if k in ("d5","d1h","d24","vol"): th[k]=float(v); changed=True
+            elif k=="int": cfg["interval_min"]=max(1,int(float(v))); changed=True
+            elif k=="cd":  cfg["cooldown_min"]=max(1,int(float(v))); changed=True
+        if changed:
+            cfg["preset"]="custom"; _save_state(); reply("Alerts updated.\n"+_fmt_thresholds(cfg)); return True
+        reply("Usage: `/alerts_set d5=2 d1h=5 d24=10 vol=250k int=15 cd=60` or `preset fast|normal|calm` or `reset`."); return True
 
     if _is_cmd(low, 'alerts_mute'):
-        minutes = 1440
-        parts = text.split(None,1)
+        minutes=1440
+        parts=text.split(None,1)
         if len(parts)>1:
-            try: minutes = max(1, int(float(parts[1].strip())))
-            except Exception: minutes = 1440
-        cfg["mute_until_ts"] = _now() + minutes*60; _save_state(); reply(f"Muted alerts for {minutes} minutes."); return True
+            try: minutes=max(1,int(float(parts[1].strip())))
+            except: minutes=1440
+        cfg["mute_until_ts"]=_now()+minutes*60; _save_state(); reply(f"Muted alerts for {minutes} minutes."); return True
 
     if _is_cmd(low, 'alerts_unmute'):
-        cfg["mute_until_ts"] = 0; _save_state(); reply("Unmuted alerts."); return True
+        cfg["mute_until_ts"]=0; _save_state(); reply("Unmuted alerts."); return True
 
     if _is_cmd(low, 'alerts'):
         reply(_status_text(chat_id)); return True
+
+    # Help commands
+    if _is_cmd(low, 'watch_help'):
+        lines = [
+            "*Watchlist — how to use*",
+            "1) Paste a token (0x…), TX hash or pair link to scan it.",
+            "2) Add: `/watch 0x...` or just `/watch` right after a scan.",
+            "3) Manage: `/watchlist` to view, `/unwatch 0x...` to remove.",
+            "4) Alerts: `/alerts` for status. Presets: `/alerts_set preset fast|normal|calm`.",
+        ]
+        reply("\n".join(lines), reply_markup=_build_presets_keyboard()); return True
+
+    if _is_cmd(low, 'alerts_help'):
+        lines = [
+            "*Alerts — thresholds & presets*",
+            "• Triggers: |Δ5m|, |Δ1h|, |Δ24h|, Vol24h.",
+            "• Defaults: d5=2% d1h=5% d24=10% vol=$250k int=15m cd=60m",
+            "• Presets: `/alerts_set preset fast|normal|calm`",
+            "• Custom: `/alerts_set d5=1.5 d1h=4 d24=8 vol=150k int=10 cd=45`",
+            "• Mute: `/alerts_mute 60`  /  `/alerts_unmute`",
+        ]
+        reply("\n".join(lines), reply_markup=_build_presets_keyboard()); return True
 
     return False
 
@@ -386,13 +373,26 @@ def handle_callback(cb):
     """Intercept own callbacks. Return True if consumed; else False to delegate."""
     data = (cb.get("data") or "")
     msg = cb.get("message") or {}
-    chat_id = (msg.get("chat") or {}).get("id")
+    chat_id = ((msg.get("chat") or {}).get("id"))
     cb_id = cb.get("id")
-    if not chat_id:
-        return False
-    _ensure_loaded()
-    cfg = _cfg(chat_id)
-    # WATCH_T / UNWATCH_T with explicit token
+    if not chat_id: return False
+
+    _ensure_loaded(); cfg = _cfg(chat_id)
+
+    # Presets
+    if data.startswith("ALERT_PRESET:"):
+        name = data.split(":",1)[1].strip().lower()
+        if name in _PRESETS:
+            pr = _PRESETS[name]
+            cfg["thresholds"] = {k: pr[k] for k in ("d5","d1h","d24","vol")}
+            cfg["interval_min"] = pr["int"]; cfg["cooldown_min"] = pr["cd"]; cfg["preset"]=name; _save_state()
+            _safe_acb(cb_id, f"Preset applied: {name}", False)
+            if _send_message: _send_message(chat_id, "Preset applied.\n"+_fmt_thresholds(cfg))
+            return True
+        else:
+            _safe_acb(cb_id, "Unknown preset.", True); return True
+
+    # Tokenized watch/unwatch
     if data.startswith("UNWATCH_T:") or data.startswith("WATCH_T:"):
         tok = data.split(":",1)[1].strip().lower()
         wl = _wl(chat_id)
@@ -405,7 +405,7 @@ def handle_callback(cb):
                 _safe_acb(cb_id, "Not in watchlist.", False)
             return True
         else:
-            if tok not in wl and len(wl) < LIMIT:
+            if tok not in wl and len(wl)<LIMIT:
                 wl.append(tok); _save_db()
                 _safe_acb(cb_id, "Added to watchlist.", False)
                 if _send_message: _send_message(chat_id, f"Watching `{tok}`. Total: {len(wl)}")
@@ -413,16 +413,15 @@ def handle_callback(cb):
                 _safe_acb(cb_id, "Already watching or list full.", False)
             return True
 
-    # Legacy WATCH/UNWATCH without token — use message token or last_token
+    # Legacy WATCH/UNWATCH without token: resolve from message or state
     if data in ("WATCH","UNWATCH"):
         msg_text = (msg.get("text") or "") + "\n" + (msg.get("caption") or "")
         tok = _find_token_in_text(msg_text) or cfg.get("last_token")
         if not (isinstance(tok, str) and tok.startswith("0x") and len(tok)==42):
-            _safe_acb(cb_id, "Scan a token first.", True)
-            return True
+            _safe_acb(cb_id, "Scan a token first.", True); return True
         wl = _wl(chat_id)
         if data == "WATCH":
-            if tok not in wl and len(wl) < LIMIT:
+            if tok not in wl and len(wl)<LIMIT:
                 wl.append(tok); _save_db()
                 _safe_acb(cb_id, "Added to watchlist.", False)
                 if _send_message: _send_message(chat_id, f"Watching `{tok}`. Total: {len(wl)}")
@@ -439,148 +438,83 @@ def handle_callback(cb):
             return True
 
     if data == "MUTE_24H":
-        cfg["mute_until_ts"] = _now() + 24*3600; _save_state()
-        if _answer_cb: _answer_cb(cb["id"], "Muted for 24h.", False)
+        cfg["mute_until_ts"] = _now()+24*3600; _save_state()
+        _safe_acb(cb_id, "Muted for 24h.", False)
         if _send_message: _send_message(chat_id, "Muted alerts for 24h.")
         return True
 
     if data == "UNMUTE":
         cfg["mute_until_ts"] = 0; _save_state()
-        if _answer_cb: _answer_cb(cb["id"], "Unmuted.", False)
+        _safe_acb(cb_id, "Unmuted.", False)
         if _send_message: _send_message(chat_id, "Unmuted alerts.")
         return True
 
     return False
 
-def note_quickscan(chat_id: int, bundle: dict, msg_id=None):
-    """Record last token from QuickScan result to support /watch with no args."""
-    if not isinstance(bundle, dict):
-        return
-    mkt = (bundle.get("market") or {})
-    tok = (mkt.get("tokenAddress") or "").strip()
-    if tok and tok.startswith("0x") and len(tok)==42:
-        _ensure_loaded()
-        cfg = _cfg(chat_id)
-        cfg["last_token"] = tok
-        _save_state()
-
-def _pct(v):
-    try:
-        n = float(v)
-        arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
-        return f"{arrow} {n:+.2f}%"
-    except Exception:
-        return "—"
-
-def _build_alert_keyboard(links, token, ctx="alert"):
-    # Buttons: Open in DEX, Open in Scan, Unwatch, Mute 24h/Unmute
-    rows = []
-    if isinstance(links, dict):
-        if links.get("dex"):
-            rows.append([{"text":"🟢 Open in DEX", "url": links["dex"]}])
-        if links.get("scan"):
-            rows.append([{"text":"🔍 Open in Scan", "url": links["scan"]}])
-    rows.append([{"text":"👁️ Unwatch", "callback_data": f"UNWATCH_T:{token}"}])
-    rows.append([{"text":"🔕 Mute 24h", "callback_data":"MUTE_24H"}, {"text":"🔔 Unmute", "callback_data":"UNMUTE"}])
-    return {"inline_keyboard": rows}
-
 def _maybe_alert_for_token(cid, tok, cfg):
-    # guard: muted
     now = _now()
-    if (cfg.get("mute_until_ts") or 0) > now:
-        return
-
+    if (cfg.get("mute_until_ts") or 0) > now: return
     # fetch market
-    try:
-        mkt = _fetch_market(tok) if _fetch_market else None
-    except Exception:
-        mkt = None
-    if not (isinstance(mkt, dict) and mkt.get("ok")):
-        return
+    try: mkt = _fetch_market(tok) if _fetch_market else None
+    except Exception: mkt = None
+    if not (isinstance(mkt, dict) and mkt.get("ok")): return
 
     ch = mkt.get("priceChanges") or {}
     vol = mkt.get("vol24h") or 0
     th = cfg.get("thresholds") or _DEFAULT_THRESHOLDS
-    triggered = []  # list of (metric,label,val,thr)
+    triggered = []
+
     def _add(metric, label, val, thr):
         try:
-            if abs(float(val)) >= float(thr):
-                triggered.append((metric,label,val,thr))
-        except Exception:
-            pass
+            if abs(float(val)) >= float(thr): triggered.append((metric,label,val,thr))
+        except Exception: pass
 
-    if "m5" in ch: _add("d5",  "Δ5m", ch.get("m5"),  th.get("d5", _DEFAULT_THRESHOLDS["d5"]))
-    if "h1" in ch: _add("d1h", "Δ1h", ch.get("h1"),  th.get("d1h", _DEFAULT_THRESHOLDS["d1h"]))
-    if "h24" in ch: _add("d24","Δ24h", ch.get("h24"), th.get("d24", _DEFAULT_THRESHOLDS["d24"]))
-    try:
-        v_ok = float(vol) >= float(th.get("vol", _DEFAULT_THRESHOLDS["vol"]))
-    except Exception:
-        v_ok = False
-    if v_ok:
-        triggered.append(("vol","Vol24h", vol, th.get("vol", _DEFAULT_THRESHOLDS["vol"])))
+    if "m5" in ch:  _add("d5",  "Δ5m",  ch.get("m5"),  th.get("d5",  _DEFAULT_THRESHOLDS["d5"]))
+    if "h1" in ch:  _add("d1h", "Δ1h",  ch.get("h1"),  th.get("d1h", _DEFAULT_THRESHOLDS["d1h"]))
+    if "h24" in ch: _add("d24", "Δ24h", ch.get("h24"), th.get("d24", _DEFAULT_THRESHOLDS["d24"]))
 
-    if not triggered:
-        return
+    try: v_ok = float(vol) >= float(th.get("vol", _DEFAULT_THRESHOLDS["vol"]))
+    except Exception: v_ok = False
+    if v_ok: triggered.append(("vol","Vol24h",vol, th.get("vol", _DEFAULT_THRESHOLDS["vol"])))
 
-    # cooldown per metric+token
+    if not triggered: return
+
+    # cooldown per token+metric
     cd = int(cfg.get("cooldown_min", _DEFAULT_COOLDOWN_MIN))*60
     la = cfg.setdefault("last_alerts", {})
-    any_send = False
-    send_lines = []
-    for metric, label, val, thr in triggered:
-        key = f"{tok}:{metric}"
-        last = int(la.get(key) or 0)
-        if now - last < cd:
-            continue
-        la[key] = now
-        send_lines.append(f"*{label}*: {_pct(val)} (≥ {thr})")
-        any_send = True
+    any_send=False; lines=[]
+    for metric,label,val,thr in triggered:
+        key=f"{tok}:{metric}"; last=int(la.get(key) or 0)
+        if now - last < cd: continue
+        la[key]=now; lines.append(f"*{label}*: {_pct(val)} (≥ {thr})"); any_send=True
 
-    if not any_send:
-        return
+    if not any_send: return
 
-    # Compose alert text
-    chain = mkt.get("chain") or "—"
-    psym = mkt.get("pairSymbol") or "Token"
+    # Compose and send
+    chain = (mkt.get("chain") or "—"); psym = mkt.get("pairSymbol") or "Token"
     header = f"*Alert — {psym}*  `[{chain}]`"
-    text = header + "\n" + "\n".join(send_lines)
-
-    # Keyboard
+    text = header + "\n" + "\n".join(lines)
     links = mkt.get("links") or {}
-    kb = _build_alert_keyboard(links, tok, ctx="alert")
-
+    kb = _build_alert_keyboard(links, tok)
     if _send_message:
-        _send_message(cid, text, reply_markup=kb)
-        _save_state()
+        _send_message(cid, text, reply_markup=kb); _save_state()
 
 def _ticker_loop():
     while True:
         try:
-            time.sleep(30)  # coarse tick
+            time.sleep(30)
             _ensure_loaded()
             now = _now()
-            # Iterate chats
             for cid, cfg in list(_state.items()):
-                try:
-                    cid_int = int(cid)
-                except Exception:
-                    continue
-                if not cfg.get("enabled", True):
-                    continue
+                try: cid_int = int(cid)
+                except Exception: continue
+                if not cfg.get("enabled", True): continue
                 interval = max(1, int(cfg.get("interval_min", _DEFAULT_INTERVAL_MIN)))*60
                 last = int(cfg.get("last_tick_ts") or 0)
-                if now - last < interval:
-                    continue
-                # mark tick
-                cfg["last_tick_ts"] = now
-                _save_state()
-
-                # go over tokens
+                if now - last < interval: continue
+                cfg["last_tick_ts"]=now; _save_state()
                 wl = _db.get(str(cid), []) or []
-                if not wl:
-                    continue
                 for tok in list(wl):
                     _maybe_alert_for_token(cid_int, tok, cfg)
         except Exception:
-            # keep thread alive
             time.sleep(1)
