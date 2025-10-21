@@ -438,16 +438,6 @@ def handle_callback(cb):
                 _safe_acb(cb_id, "Not in watchlist.", False)
             return True
 
-    if data.startswith("UNWATCH_T:"):
-        token = data.split(":",1)[1].strip().lower()
-        wl = _wl(chat_id)
-        if token in wl:
-            wl.remove(token); _save_db()
-            if _answer_cb: _answer_cb(cb["id"], "Removed from watchlist.", False)
-            if _send_message: _send_message(chat_id, f"Removed `{token}` from watchlist.")
-            return True
-        return False
-
     if data == "MUTE_24H":
         cfg["mute_until_ts"] = _now() + 24*3600; _save_state()
         if _answer_cb: _answer_cb(cb["id"], "Muted for 24h.", False)
