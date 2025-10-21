@@ -10,6 +10,27 @@ except Exception:
     import requests as _rq
     from urllib.parse import urlparse as _urlparse
 
+# === Lightweight per-chat rate limiter ==========================================
+from collections import deque
+import time as _time
+_RL_BUCKETS = {}
+RL_REQUESTS_PER_MIN = int(os.getenv("RL_REQUESTS_PER_MIN", "20"))  # per chat
+RL_MIN_INTERVAL_SEC = float(os.getenv("RL_MIN_INTERVAL_SEC", "0.8"))  # per chat
+
+def _rl_allow(key: str) -> bool:
+    now = _time.time()
+    dq = _RL_BUCKETS.setdefault(key, deque())
+    # drop old (>60s)
+    while dq and now - dq[0] > 60.0:
+        dq.popleft()
+    if dq and (now - dq[-1]) < RL_MIN_INTERVAL_SEC:
+        return False
+    if len(dq) >= RL_REQUESTS_PER_MIN:
+        return False
+    dq.append(now)
+    return True
+# === /rate limiter ===============================================================
+
     def derive_domain(url):
         try:
             if not url:
@@ -190,6 +211,11 @@ def analyze_website(site_url: str | None):
 from flask import Flask, request, jsonify
 
 from limits import can_scan, register_scan
+
+from chain_client import fetch_onchain_factors
+import openai
+from ratelimit import limits, sleep_and_retry  # global API rate caps
+
 
 # --- Owner-bypass for limits (OMEGA-713K) ---
 try:
@@ -907,7 +933,72 @@ def webhook():
         print("WEBHOOK ERROR", e, traceback.format_exc())
         return jsonify({"ok": True})
 
+
+# === AI Why++ (uses OpenAI if key present) ======================================
+def _generate_whypp_ai(market: dict, why_text: str, webintel: dict) -> str | None:
+    try:
+        api_key = os.getenv("OPENAI_API_KEY") or ""
+        if not api_key:
+            return None
+        openai.api_key = api_key
+        model = os.getenv("WHYPP_MODEL", "gpt-4o-mini")
+        # Build compact, structured prompt
+        pair = market.get("pairSymbol") or market.get("symbol") or "Token"
+        chain = market.get("chain") or market.get("chainId") or "—"
+        volatility = market.get("priceChanges") or {}
+        liq = market.get("liquidity") or market.get("liquidityUSD") or market.get("liquidityUsd") or "—"
+        wtxt = []
+        if isinstance(webintel, dict):
+            dom = (webintel.get("domain") or webintel.get("url") or "—")
+            flags = webintel.get("flags") or {}
+            wtxt.append(f"domain: {dom}")
+            if flags:
+                wtxt.append("flags: " + ", ".join([f"{k}={v}" for k, v in flags.items()]))
+        webintel_line = " | ".join(wtxt) if wtxt else "n/a"
+        sys_prompt = "You are a concise crypto risk analyst for a Telegram bot. Output Markdown bullet list under a bold 'Why++' title. Keep it compact and factual. Avoid hype."
+        user_prompt = f"""Pair: {pair} | Chain: {chain}
+Liquidity: {liq} | Price deltas: {volatility}
+Website intel: {webintel_line}
+
+Base 'Why?' factors:
+{why_text}
+
+Write an expanded **Why++** section with 6–10 bullets:
+- Start with top positives (2–4), then key risks (2–4), then context (age/liquidity/volume if notable).
+- Use short bullets (max ~15 words).
+- Prefer concrete numbers already known; avoid fabricating unseen data.
+- No investment advice. MarkdownV2 compatible (avoid unescaped special chars)."""
+        # Newer SDK (>=1.0)
+        resp = openai.ChatCompletion.create(
+            model=model,
+            messages=[{"role":"system","content":sys_prompt},
+                      {"role":"user","content":user_prompt}],
+            temperature=0.2,
+            max_tokens=500,
+        )
+        out = resp["choices"][0]["message"]["content"].strip()
+        if not out.lower().startswith("**why++**"):
+            out = "**Why++**\n" + out
+        return out
+    except Exception as _e_ai:
+        try:
+            print("WHY++ AI error:", _e_ai)
+        except Exception:
+            pass
+        return None
+# === /AI Why++ ==================================================================
 def on_message(msg):
+
+    try:
+        _key = f"msg:{chat_id}"
+        if not _rl_allow(_key):
+            try:
+                send_message(chat_id, "Please wait…")
+            except Exception:
+                pass
+            return jsonify({"ok": True}) if 'jsonify' in globals() else None
+    except Exception:
+        pass
     # ---- WATCHLITE: early intercept of new commands (/watch, /unwatch, /watchlist, /alerts*) ----
     try:
         _wl_text = (msg.get("text") or msg.get("caption") or "")
@@ -1248,6 +1339,17 @@ def on_message(msg):
 
 
 def on_callback(cb):
+
+    try:
+        _key = f"cb:{chat_id}"
+        if not _rl_allow(_key):
+            try:
+                answer_callback_query(cb.get("id"), "Too many requests, slow down…", False)
+            except Exception:
+                pass
+            return jsonify({"ok": True})
+    except Exception:
+        pass
     cb_id = cb["id"]
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
@@ -1379,7 +1481,9 @@ def on_callback(cb):
     
 
     elif action == "ONCHAIN":
-        # MDX v4.2: robust inspector->v2 fallback (fast, Polygon-safe)
+            
+
+        # Metridex v4.3: inspector → v2 → chain_client fallback
         mkt = (bundle.get('market') if isinstance(bundle, dict) else None) or {}
         # Normalize chain
         chain = (mkt.get('chain') or mkt.get('chainId') or '').strip().lower()
@@ -1394,8 +1498,12 @@ def on_callback(cb):
         except Exception as _e:
             oc = {'ok': False, 'error': str(_e)}
         ok = bool((oc or {}).get('ok'))
-        # If inspector failed or returned stub — fallback to v2
-        if not ok or not (oc.get('codePresent') is True or oc.get('name') or (oc.get('decimals') is not None)):
+        if ok and (oc.get('codePresent') is True or oc.get('name') or (oc.get('decimals') is not None)):
+            text = format_onchain_text(oc, mkt)
+            send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, bundle.get('links') if isinstance(bundle, dict) else {}, ctx='onchain'))
+            answer_callback_query(cb_id, 'On-chain ready.', False)
+        else:
+            # Fallback to legacy v2
             try:
                 from onchain_v2 import check_contract_v2
                 from renderers_onchain_v2 import render_onchain_v2
@@ -1404,12 +1512,28 @@ def on_callback(cb):
                 send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, bundle.get('links') if isinstance(bundle, dict) else {}, ctx='onchain'))
                 answer_callback_query(cb_id, 'On-chain ready.', False)
             except Exception as _e2:
-                send_message(chat_id, "On-chain\ninspection failed")
-                answer_callback_query(cb_id, 'On-chain failed.', False)
-        else:
-            text = format_onchain_text(oc, mkt)
-            send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, bundle.get('links') if isinstance(bundle, dict) else {}, ctx='onchain'))
-            answer_callback_query(cb_id, 'On-chain ready.', False)
+                # Final fallback: lightweight Web3 checks via chain_client
+                try:
+                    factors = fetch_onchain_factors(token_addr, chain_hint=chain or 'ethereum')
+                    lines = ["*On-chain (lite)*"]
+                    lines.append(f"honeypot: {'True' if factors.get('honeypot') else 'False'}")
+                    taxes = factors.get('taxes') or {}
+                    lines.append(f"taxes: buy {taxes.get('buy',0)}% / sell {taxes.get('sell',0)}%")
+                    owner = factors.get('owner') or '—'
+                    lines.append(f"owner: {owner}")
+                    lp = factors.get('lp_lock') or {}
+                    status = lp.get('status') or 'unknown'
+                    until = lp.get('until') or '—'
+                    lines.append(f"LP lock: {status} until {until}")
+                    text = "\n".join(lines)
+                    send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, bundle.get('links') if isinstance(bundle, dict) else {}, ctx='onchain'))
+                    answer_callback_query(cb_id, 'On-chain ready (lite).', False)
+                except Exception:
+                    send_message(chat_id, "On-chain\ninspection failed")
+                    answer_callback_query(cb_id, 'On-chain failed.', False)
+
+
+
     elif action == "COPY_CA":
         mkt = (bundle.get("market") or {})
         token = (mkt.get("tokenAddress") or "—")
