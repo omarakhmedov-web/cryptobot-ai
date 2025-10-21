@@ -29,6 +29,67 @@ import requests as _rq
 import time
 import datetime as _dt
 from typing import Any, Dict, Optional, List
+
+# === D0 sparkline (ASCII) ====================================================
+_SPARKLINE_ENABLED = (os.getenv("SPARKLINE_ENABLED", "1") not in ("0","false","False",""))
+
+def _pick_prices_for_spark(market: Dict[str, Any]):
+    # Try common keys from various feeders
+    cands = [
+        ("sparkline", None),
+        ("spark", None),
+        ("prices", None),
+        ("priceSeries", None),
+        ("series", None),
+        ("priceLast24h", None),
+        (("chart","spark"), None),
+        (("chart","prices"), None),
+        (("links","sparkline"), None),
+    ]
+    out = None
+    for key, _ in cands:
+        try:
+            cur = market
+            if isinstance(key, tuple):
+                for k in key:
+                    cur = (cur or {}).get(k)
+            else:
+                cur = (market or {}).get(key)
+            if isinstance(cur, (list, tuple)) and len(cur) >= 4:
+                out = [float(x) for x in cur if isinstance(x, (int,float,str))]
+                if len(out) >= 4:
+                    break
+        except Exception:
+            continue
+    return out
+
+def _sparkline(values):
+    # Map values to 8-level unicode blocks
+    if not values or not isinstance(values, (list,tuple)):
+        return None
+    try:
+        vals = [float(x) for x in values if x is not None]
+    except Exception:
+        return None
+    if len(vals) < 4:
+        return None
+    lo, hi = min(vals), max(vals)
+    if hi == lo:
+        return "▅▅▅▅▅"
+    # compress to <= 24 points to keep message short
+    want = 24
+    if len(vals) > want:
+        step = len(vals) / want
+        idx = [int(i*step) for i in range(want)]
+        vals = [vals[i] for i in idx]
+    blocks = "▁▂▃▄▅▆▇█"
+    out = []
+    for v in vals:
+        t = (v - lo) / (hi - lo)
+        out.append(blocks[min(int(t * (len(blocks)-1)), len(blocks)-1)])
+    return "".join(out)
+# === /D0 sparkline ============================================================
+
 try:
     from lp_lite_v2 import check_lp_lock_v2
 except Exception:
@@ -646,7 +707,7 @@ def _wayback_summary(domain: str):
         pass
     return _cache_put(_wb_cache, key, out)
 
-def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
+def _render_quick__base(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
     chain = _fmt_chain(_get(market, "chain"))
     price = _fmt_num(_get(market, "price"), prefix="$")
