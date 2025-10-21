@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional
 from web3 import Web3, HTTPProvider
 from web3.exceptions import ContractLogicError
 from common import chain_from_hint
+import datetime as _dt
 
 # Настройки Infura (или другой провайдер)
 INFURA_URL = os.getenv("INFURA_URL", "https://mainnet.infura.io/v3/YOUR_INFURA_KEY")  # Замени на свой ключ
@@ -64,7 +65,7 @@ def fetch_onchain_factors(address: Optional[str], chain_hint: str = "ethereum") 
 
     # Honeypot: Симуляция buy/sell
     try:
-        dummy_tx = contract.functions.transfer(w3.eth.default_account or "0x0000000000000000000000000000000000000001", 1).build_transaction({'gas': 100000, 'gasPrice': w3.to_wei('20', 'gwei')})
+        dummy_tx = contract.functions.transfer(w3.eth.default_account or "0x0000000000000000000000000000000000000001", 1).build_transaction({'from': '0x0000000000000000000000000000000000000000', 'gas': 100000, 'gasPrice': w3.to_wei('20', 'gwei')})
         w3.eth.call(dummy_tx)
         factors["honeypot"] = False
     except ContractLogicError:
