@@ -239,6 +239,15 @@ except Exception as _e:
 
 from risk_engine import compute_verdict
 import onchain_inspector
+
+from openai import OpenAI
+__whypp_client = None
+def _get_ai_client():
+    global __whypp_client
+    if __whypp_client is None:
+        __whypp_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    return __whypp_client
+
 from renderers_mdx import render_quick, render_details, render_why, render_whypp, render_lp
 from pair_resolver import resolve_pair
 try:
@@ -686,6 +695,14 @@ def mdv2_escape(text: str) -> str:
     if text is None: return ""
     return _MD2_PATTERN.sub(lambda m: '\\' + m.group(0), str(text))
 
+
+def _is_contract_address(s: str) -> bool:
+    try:
+        return bool(re.match(r"^0x[0-9a-fA-F]{40}$", s or ""))
+    except Exception:
+        return False
+
+
 def tg(method, payload=None, files=None, timeout=12):
     payload = payload or {}
     try:
@@ -908,13 +925,15 @@ def webhook():
         return jsonify({"ok": True})
 
 
+
 def _generate_whypp_ai_enriched(market: dict, why_text: str, webintel: dict, onchain: dict | None) -> str | None:
     try:
-        api_key = os.getenv("OPENAI_API_KEY") or ""
-        if not api_key:
+        key = os.getenv("OPENAI_API_KEY") or ""
+        if not key:
             return None
-        openai.api_key = api_key
+        client = _get_ai_client()
         model = os.getenv("WHYPP_MODEL", "gpt-4o-mini")
+
         pair = market.get("pairSymbol") or market.get("symbol") or "Token"
         chain = (market.get("chain") or market.get("chainId") or "—")
         ch = market.get("priceChanges") or {}
@@ -930,6 +949,7 @@ def _generate_whypp_ai_enriched(market: dict, why_text: str, webintel: dict, onc
                 ssl_obj = webintel["ssl"]; ssl = f"ok={ssl_obj.get('ok')} exp={ssl_obj.get('expires')}"
             flags = webintel.get("flags") or webintel.get("rdap_flags") or {}
             if isinstance(flags, dict): rdap_flags = [k for k,v in flags.items() if v]
+
         oc_lines = []
         if isinstance(onchain, dict):
             if "honeypot" in onchain: oc_lines.append(f"honeypot={bool(onchain.get('honeypot'))}")
@@ -941,6 +961,7 @@ def _generate_whypp_ai_enriched(market: dict, why_text: str, webintel: dict, onc
                 status = lp.get('status') or 'unknown'; until = lp.get('until') or '—'
                 oc_lines.append(f"lp_lock={status}, until={until}")
         oc_summary = " | ".join(oc_lines) if oc_lines else "n/a"
+
         sys_prompt = (
             "You are a senior DeFi risk analyst writing compact Telegram bot summaries. "
             "Use strict facts provided, avoid assumptions, keep bullets ≤15 words, "
@@ -960,21 +981,25 @@ Write **Why++** with 8–12 bullets:
 - 3–5 key risks (LP lock, ownership, taxes, honeypot, volatility)
 - 2–3 neutral context items (age, volume, domain intel)
 - No promises or advice; concise; MarkdownV2 compatible."""
-        resp = openai.ChatCompletion.create(
+
+        resp = client.chat.completions.create(
             model=model,
-            messages=[{"role":"system","content":sys_prompt},
-                      {"role":"user","content":user_prompt}],
+            messages=[
+                {"role":"system","content":sys_prompt},
+                {"role":"user","content":user_prompt}
+            ],
             temperature=0.2,
             max_tokens=int(os.getenv("WHYPP_MAX_TOKENS","640")),
         )
-        out = resp["choices"][0]["message"]["content"].strip()
-        if not out.lower().startswith("**why++**"):
+        out = (resp.choices[0].message.content or "").strip()
+        if out and not out.lower().startswith("**why++**"):
             out = "**Why++**\n" + out
-        return out
+        return out or None
     except Exception as _e_ai:
-        try: print("WHY++ AI enriched error:", _e_ai)
+        try: print("WHYPP AI error:", _e_ai)
         except Exception: pass
         return None
+
 def on_message(msg):
     # ---- WATCHLITE: early intercept of new commands (/watch, /unwatch, /watchlist, /alerts*) ----
     try:
@@ -992,6 +1017,15 @@ def on_message(msg):
 
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
+
+    import re as _re
+    # --- A) Normalize watch/unwatch forms before anything else ---
+    text = (msg.get("text") or "").strip()
+    print(f"[PARSE] raw={repr(text)}")
+    if _re.match(r"^(watch|unwatch)(/|\s)+", text, flags=_re.I):
+        text = _re.sub(r"^(watch|unwatch)(/|\s)+", lambda m: f"/{m.group(1).lower()} ", text, flags=_re.I).strip()
+        msg["text"] = text
+        print(f"[PARSE] normalized to={repr(text)}")
     low = text.lower()
 
     # --- WATCHLITE intercept: commands (/watch, /unwatch, /watchlist, /alerts*) ---
@@ -1051,6 +1085,12 @@ def on_message(msg):
             print("WATCHLITE guard error:", _e_wl_guard)
         except Exception:
             pass
+    # Guard: avoid falling through after command handling
+    if re.match(r'^/(watch|unwatch|watchlist|alerts[\w_]*)', (msg.get("text") or "").lower()):
+        # If not already handled above, show usage and return
+        send_message(chat_id, "Usage: `/watch 0x...`, `/unwatch 0x...`, `/watchlist`, `/alerts_on|/alerts_off|/alerts`")
+        return jsonify({"ok": True})
+
 # Only non-command messages trigger scan
     if text.startswith("/"):
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
@@ -1060,13 +1100,15 @@ def on_message(msg):
     if not ok:
         send_message(chat_id, "Free scans exhausted. Use /upgrade.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
-    # --- Processing indicator (safe, minimal) ---
-    ph = send_message(chat_id, "Processing…")
-    ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
-    try:
-        tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
-    except Exception:
-        pass
+    # --- Processing indicator (address-only) ---
+    ph_id = None
+    if _is_contract_address(text):
+        ph = send_message(chat_id, "Processing…")
+        ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
+        try:
+            tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+        except Exception:
+            pass
     # --- /Processing indicator ---
 
 
