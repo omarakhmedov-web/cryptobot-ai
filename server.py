@@ -375,7 +375,7 @@ HINT_CLICKABLE_LINKS = os.getenv("HINT_CLICKABLE_LINKS", "0") == "1"
 CALLBACK_DEDUP_TTL_SEC = int(os.getenv("CALLBACK_DEDUP_TTL_SEC", "30"))
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-PARSE_MODE = "MarkdownV2"
+PARSE_MODE = "HTML"
 if not BOT_TOKEN:
     try:
         print('[CONFIG] BOT_TOKEN is empty - Telegram sends will fail')
@@ -1188,15 +1188,15 @@ def _welcome_text(is_new: bool) -> str:
     # MarkdownV2 safe: avoid []() in text; send raw URLs via buttons
     if is_new:
         return (
-            "Привет\! Я Metridex — твой суперсканер крипты\. "
+            "Welcome!\! Я Metridex — твой суперсканер крипты\. "
             "Разоблачу скам за секунды и найду гемы\. Готов к первому скану\? 🚀\n"
-            "Добро пожаловать, новичок\! Вот быстрый туториал: /help\n"
+            "Welcome, newcomer!\! Вот быстрый туториал: /help\n"
             "Уже просканировано 1M\+ токенов"
         )
     return (
-        "С возвращением\! Что сканируем сегодня\?\n"
+        "Welcome back!\! What should we scan today?\?\n"
         "Уже просканировано 1M\+ токенов\n"
-        "Рефералка: /referral — приведи друга и получи премиум\-скан"
+        "Referral: /referral — приведи друга и получи премиум\-скан"
     )
 # === /D0 START UX HELPERS =====================================================
 
