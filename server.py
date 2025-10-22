@@ -375,6 +375,12 @@ CALLBACK_DEDUP_TTL_SEC = int(os.getenv("CALLBACK_DEDUP_TTL_SEC", "30"))
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PARSE_MODE = "MarkdownV2"
+if not BOT_TOKEN:
+    try:
+        print('[CONFIG] BOT_TOKEN is empty - Telegram sends will fail')
+    except Exception:
+        pass
+
 
 app = Flask(__name__)
 
@@ -707,12 +713,20 @@ def tg(method, payload=None, files=None, timeout=12):
     payload = payload or {}
     try:
         r = requests.post(f"{TELEGRAM_API}/{method}", data=payload, files=files, timeout=timeout)
-        try:
-            return r.json()
-        except Exception:
-            return {"ok": False, "status_code": r.status_code, "text": r.text}
+        ct = r.headers.get('content-type','') if hasattr(r, 'headers') else ''
+        j = r.json() if isinstance(ct, str) and ct.startswith('application/json') else {'ok': False, 'status_code': getattr(r, 'status_code', None), 'text': getattr(r, 'text', None)}
+        if not getattr(r, 'ok', False) or (isinstance(j, dict) and not j.get('ok', False)):
+            try:
+                print('TG FAIL', method, getattr(r,'status_code',None), j)
+            except Exception:
+                pass
+        return j
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        try:
+            print('TG ERROR', method, str(e))
+        except Exception:
+            pass
+        return {'ok': False, 'error': str(e)}
 
 
 # === QUICKFIX: token address derivation for ONCHAIN ===
@@ -737,10 +751,59 @@ def _derive_token_address_quickfix(mkt: dict, links: dict) -> str | None:
             return "0x" + m.group(1)
     return None
 # === /QUICKFIX ===
-def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown', disable_web_page_preview=None):
-    data = {"chat_id": chat_id, "text": mdv2_escape(str(text)), "parse_mode": PARSE_MODE}
-    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
-    return tg("sendMessage", data)
+def send_message(chat_id, text, reply_markup=None, parse_mode=PARSE_MODE, disable_web_page_preview=None):
+    MAX_LEN = 4000
+    raw = str(text)
+    chunks = []
+    if len(raw) <= MAX_LEN:
+        chunks = [raw]
+    else:
+        buf = ''
+        for part in raw.split('\n\n'):
+            if len(buf) + len(part) + 2 <= MAX_LEN:
+                buf = part if not buf else buf + '\n\n' + part
+            else:
+                if buf:
+                    chunks.append(buf)
+                if len(part) > MAX_LEN:
+                    for i in range(0, len(part), MAX_LEN):
+                        chunks.append(part[i:i+MAX_LEN])
+                    buf = ''
+                else:
+                    buf = part
+        if buf:
+            chunks.append(buf)
+    last_resp = None
+    for idx, ch in enumerate(chunks):
+        data = {'chat_id': chat_id}
+        if parse_mode == 'MarkdownV2':
+            data['text'] = mdv2_escape(ch)
+            data['parse_mode'] = 'MarkdownV2'
+        elif parse_mode:
+            data['text'] = ch
+            data['parse_mode'] = parse_mode
+        else:
+            data['text'] = ch
+        if disable_web_page_preview is not None:
+            data['disable_web_page_preview'] = bool(disable_web_page_preview)
+        if reply_markup and idx == 0:
+            data['reply_markup'] = json.dumps(reply_markup)
+        resp = tg('sendMessage', data)
+        if not (isinstance(resp, dict) and resp.get('ok')):
+            data.pop('parse_mode', None)
+            data['text'] = ch
+            resp2 = tg('sendMessage', data)
+            if not (isinstance(resp2, dict) and resp2.get('ok')):
+                try:
+                    print('sendMessage failed for chunk', idx, resp, resp2)
+                except Exception:
+                    pass
+                last_resp = resp2 if isinstance(resp2, dict) else resp
+            else:
+                last_resp = resp2
+        else:
+            last_resp = resp
+    return last_resp if last_resp is not None else {'ok': False, 'error': 'no send attempt'}
 
 def send_message_raw(chat_id, text, reply_markup=None):
     data = {"chat_id": chat_id, "text": str(text)}
