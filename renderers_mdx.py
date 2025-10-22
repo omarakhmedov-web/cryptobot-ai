@@ -734,6 +734,36 @@ def _render_quick__base(verdict, market: Dict[str, Any], ctx: Dict[str, Any], la
     ]
     return "\n".join(lines)
 
+# --- D0: sparkline in QuickScan (wrapper over base) ---
+def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
+    """
+    Public QuickScan renderer expected by server.py.
+    Renders the base block and, if enabled, appends an ASCII sparkline built
+    from any available 24h price series in `market`.
+    """
+    try:
+        base = _render_quick__base(verdict, market, ctx, lang)
+    except Exception as _e:
+        try:
+            # minimal failsafe to avoid import-time crashes
+            pair = (market or {}).get("pairSymbol") or (market or {}).get("pair") or "—"
+        except Exception:
+            pair = "—"
+        return f"*Metridex QuickScan — {pair}*
+• data temporarily unavailable"
+    if not _SPARKLINE_ENABLED:
+        return base
+    try:
+        prices = _pick_prices_for_spark(market or {})
+        sp = _sparkline(prices)
+        if sp:
+            return base + "\n" + f"sparkline: {sp}"
+    except Exception:
+        pass
+    return base
+# --- /D0: sparkline wrapper ---
+
+
 def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
     pair = _get(market, "pairSymbol", default="—")
     chain = _fmt_chain(_get(market, "chain"))
