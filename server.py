@@ -916,15 +916,22 @@ def webhook():
         return jsonify({'ok': False, 'err': 'bad secret header'}), 403
     try:
         upd = request.get_json(force=True, silent=True) or {}
-        if "message" in upd: return on_message(upd["message"])
-        if "edited_message" in upd: return on_message(upd["edited_message"])
-        if "callback_query" in upd: return on_callback(upd["callback_query"])
-        return jsonify({"ok": True})
+        resp = None
+        if 'message' in upd:
+            resp = on_message(upd['message'])
+        elif 'edited_message' in upd:
+            resp = on_message(upd['edited_message'])
+        elif 'callback_query' in upd:
+            resp = on_callback(upd['callback_query'])
+        # Normalize response to a valid Flask response:
+        if resp is None:
+            return jsonify({'ok': True})
+        if isinstance(resp, dict):
+            return jsonify(resp)
+        return resp
     except Exception as e:
-        print("WEBHOOK ERROR", e, traceback.format_exc())
-        return jsonify({"ok": True})
-
-
+        print('WEBHOOK ERROR', e, traceback.format_exc())
+        return jsonify({'ok': True})
 
 def _generate_whypp_ai_enriched(market: dict, why_text: str, webintel: dict, onchain: dict | None) -> str | None:
     try:
