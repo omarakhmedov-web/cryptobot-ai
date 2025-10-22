@@ -47,18 +47,17 @@ def build_keyboard(chat_id: int,
         if help_url:
             rows.append([{"text": "ℹ️ How it works?", "url": help_url}])
 
-    # Top row: Quick actions
+        # Top row: Quick actions
     try:
+        _help = (links.get("help") or "https://metridex.com/help")
         rows.insert(0, [
             {"text": "QuickScan", "callback_data": _cb(chat_id, msg_id, "QS")},
             {"text": "Watchlist", "callback_data": _cb(chat_id, msg_id, "WATCHLIST")},
-            {"text": "Premium", "url": (links.get("pro") or links.get("day_pass") or help_url)},
-            {"text": "Community", "url": (help_url or links.get("help"))},
+            {"text": "Premium", "url": (links.get("pro") or links.get("day_pass") or _help)},
+            {"text": "Community", "url": _help},
         ])
     except Exception:
         pass
-        return {"inline_keyboard": rows}
-
     # ---------------- COMMON NAV (DEX/Scan/DS) ----------------
     dex_url  = links.get("dex") or None
     scan_url = links.get("scan") or None
