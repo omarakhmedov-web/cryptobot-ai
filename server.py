@@ -1198,11 +1198,11 @@ def _build_quick_extras(verdict, market: dict) -> str:
     legend = ""
     if isinstance(score, (int, float)):
         if score >= 70:
-            legend = "сильный сетап"
+            legend = "strong"
         elif score >= 40:
-            legend = "стабильный, не хайповый"
+            legend = "stable, not hype"
         else:
-            legend = "повышенные риски"
+            legend = "elevated risk"
     parts = []
     if rating is not None:
         parts.append(f"Rating: {emo} {rating}/10 — {legend}")
@@ -1215,21 +1215,130 @@ def _build_quick_extras(verdict, market: dict) -> str:
     return "\n".join(parts) if parts else ""
 
 def _welcome_text(is_new: bool) -> str:
-    # MarkdownV2 safe: avoid []() in text; send raw URLs via buttons
-    if is_new:
-        return (
-            "Welcome!\! Я Metridex — твой суперсканер крипты\. "
-            "Разоблачу скам за секунды и найду гемы\. Готов к первому скану\? 🚀\n"
-            "Welcome, newcomer!\! Вот быстрый туториал: /help\n"
-            "Уже просканировано 1M\+ токенов"
-        )
+    # English-only welcome
     return (
-        "Welcome back!\! What should we scan today?\?\n"
-        "Уже просканировано 1M\+ токенов\n"
-        "Referral: /referral — приведи друга и получи премиум\-скан"
+        "Welcome back! What should we scan today?\n"
+        "Scanned 1M+ tokens\n"
+        "Referral: /referral — invite a friend and get a premium scan"
     )
-# === /D0 START UX HELPERS =====================================================
 
+
+
+def _run_quickscan_flow(chat_id: int, text: str, msg: dict):
+    try:
+        try:
+            ok, _tier = can_scan(chat_id)
+        except Exception:
+            ok, _tier = True, "Free"
+        if not ok:
+            send_message(chat_id, "Free scans exhausted. Use /upgrade or open Premium.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+            return jsonify({"ok": True})
+        # Processing indicator (address-only)
+        ph_id = None
+        try:
+            if _is_contract_address(text):
+                ph = send_message(chat_id, "Processing…")
+                if isinstance(ph, dict) and ph.get("ok"):
+                    ph_id = ph.get("result", {}).get("message_id")
+            try:
+                tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+            except Exception:
+                pass
+            # Fetch market
+            try:
+                market = fetch_market(text) or {}
+            except Exception:
+                market = {}
+            if not market.get("ok"):
+                import re as _re
+                if _re.match(r"^0x[a-fA-F0-9]{64}$", text):
+                    pass  # tx hash fallthrough
+                elif _re.match(r"^0x[a-fA-F0-9]{40}$", text):
+                    market.setdefault("tokenAddress", text)
+                market.setdefault("chain", market.get("chain") or "—")
+                market.setdefault("sources", [])
+                market.setdefault("priceChanges", {})
+                market.setdefault("links", {})
+            # Enrich links (DEX, Scan, DexScreener)
+            try:
+                _links = market.get("links") or {}
+            except Exception:
+                _links = {}
+            _chain = (market.get("chain") or "").lower()
+            _token = (market.get("tokenAddress") or "").lower()
+            _pair  = (market.get("pairAddress") or "").lower()
+            _dexId = (_links.get("dexId") or "").lower()
+            if not _links.get("dexscreener") and _chain and _pair:
+                _links["dexscreener"] = f"https://dexscreener.com/{_chain}/{_pair}"
+            if not _links.get("scan") and _token:
+                _scan_bases = {
+                    "ethereum": "https://etherscan.io/token/",
+                    "eth": "https://etherscan.io/token/",
+                    "bsc": "https://bscscan.com/token/",
+                    "binance": "https://bscscan.com/token/",
+                    "polygon": "https://polygonscan.com/token/",
+                    "matic": "https://polygonscan.com/token/",
+                    "arbitrum": "https://arbiscan.io/token/",
+                    "arb": "https://arbiscan.io/token/",
+                    "base": "https://basescan.org/token/",
+                    "optimism": "https://optimistic.etherscan.io/token/",
+                    "op": "https://optimistic.etherscan.io/token/",
+                    "avalanche": "https://snowtrace.io/token/",
+                    "avax": "https://snowtrace.io/token/",
+                    "fantom": "https://ftmscan.com/token/",
+                    "ftm": "https://ftmscan.com/token/",
+                }
+                base = _scan_bases.get(_chain)
+                if base:
+                    _links["scan"] = base + _token
+            if not _links.get("dex") and _token:
+                if _dexId in ("uniswap", "uniswapv2", "uniswapv3") and _chain in ("ethereum","base","arbitrum","polygon","optimism"):
+                    _links["dex"] = f"https://app.uniswap.org/explore/tokens/{_chain}/{_token}"
+                elif _dexId.startswith("pancake") and _chain in ("bsc","binance"):
+                    _links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={_token}"
+                elif "quickswap" in _dexId and _chain == "polygon":
+                    _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
+            market["links"] = _links
+            # Verdict + webintel
+            verdict = compute_verdict(market)
+            links = (market.get("links") or {})
+            site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
+            web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
+            try:
+                if site_url:
+                    web = analyze_website(site_url)
+            except Exception:
+                pass
+            try:
+                dom = derive_domain(site_url)
+            except Exception:
+                dom = None
+            ctx = {"webintel": _enrich_webintel_fallback(dom, web), "domain": dom}
+            quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+            try:
+                _extras = _build_quick_extras(verdict, market)
+                if _extras:
+                    quick = f"{quick}\n\n{_extras}"
+            except Exception:
+                pass
+            send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="quick"))
+            # Optional: clean up placeholder
+            if ph_id:
+                try:
+                    tg("deleteMessage", {"chat_id": chat_id, "message_id": ph_id})
+                except Exception:
+                    pass
+            return jsonify({"ok": True})
+        except Exception as _inner:
+            try: print("QUICKSCAN inner error:", _inner)
+            except Exception: pass
+            return jsonify({"ok": True})
+    except Exception as e:
+        try:
+            print("QUICKSCAN FLOW ERROR:", e)
+        except Exception:
+            pass
+        return jsonify({"ok": True})
 def _on_message_core(msg):
     verdict = None
     market = {}
@@ -1261,6 +1370,9 @@ def _on_message_core(msg):
         msg["text"] = text
         print(f"[PARSE] normalized to={repr(text)}")
     low = text.lower()
+    # Early path: non-command messages trigger QuickScan flow
+    if not low.startswith('/'):
+        return _run_quickscan_flow(chat_id, text, msg)
 
     # --- WATCHLITE intercept: commands (/watch, /unwatch, /watchlist, /alerts*) ---
     try:
