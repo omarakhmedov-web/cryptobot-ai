@@ -3,6 +3,27 @@ import hmac
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
 
+
+# ---- Safe callback query answer (avoids 400 on stale/invalid query) ----
+def answer_callback_safe(cb_id, text=None, show_alert=False):
+    try:
+        if not cb_id:
+            return
+        data = {"callback_query_id": cb_id}
+        if text:
+            data["text"] = text
+        if show_alert:
+            data["show_alert"] = True
+        resp = telegram_call("answerCallbackQuery", data)
+        return resp
+    except Exception as e:
+        try:
+            print("TG WARN answerCallbackQuery ignored:", e)
+        except Exception:
+            pass
+        return None
+# -----------------------------------------------------------------------
+
 try:
     from webintel import analyze_website, derive_domain
 except Exception:
@@ -1596,6 +1617,19 @@ def _on_message_core(msg):
         register_scan(chat_id)
         return jsonify({"ok": True})
 
+
+
+def _callback_fresh(update):
+    try:
+        cb = update.get("callback_query") or {}
+        msg = cb.get("message") or {}
+        ts = msg.get("date")
+        if ts is None:
+            return True
+        import time
+        return (int(time.time()) - int(ts)) <= 8
+    except Exception:
+        return True
 
 def on_message(msg):
     # Global guard: never fail silently on user text
