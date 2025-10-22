@@ -1151,22 +1151,27 @@ def on_message(msg):
     # --- /WATCHLITE intercept ---
 
     
-if low.startswith("/start"):
-    try:
-        _mark_seen(chat_id)
-    except Exception:
-        pass
-    is_new = _is_new_user(chat_id)
-    try:
-        text = _welcome_text(is_new)
-        kb = _build_start_keyboard(chat_id, _pricing_links())
-        send_message(chat_id, text, reply_markup=kb)
+    if low.startswith("/start"):
+        try:
+            _mark_seen(chat_id)
+        except Exception:
+            pass
+        is_new = _is_new_user(chat_id)
+        try:
+            _text = _welcome_text(is_new)
+            kb = _build_start_keyboard(chat_id, _pricing_links())
+            send_message(chat_id, _text, reply_markup=kb)
+            return jsonify({"ok": True})
+        except Exception as _e_start:
+            # Fallback to legacy welcome
+            send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+            return jsonify({"ok": True})
+
+    if low.startswith("/diag"):
+        _handle_diag_command(chat_id)
         return jsonify({"ok": True})
-    except Exception as _e_start:
-        # Fallback to legacy welcome
-        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-        return jsonify({"ok": True})
-if low.startswith("/upgrade"):
+
+    if low.startswith("/upgrade"):
         send_message(chat_id, UPGRADE_TEXT, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
@@ -1184,17 +1189,11 @@ if low.startswith("/upgrade"):
         msg_txt = (
             f"*Plan:* {plan}\n"
             f"*Free quota:* {FREE_DAILY_SCANS}/day\n"
-            f"*Now:* {allowed}\n\n"
-            "Upgrade for unlimited scans: /upgrade"
+            f"*Now:* {allowed}\n"
         )
         send_message(chat_id, msg_txt, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
-    if low.startswith("/diag"):
-        _handle_diag_command(chat_id)
-        return jsonify({"ok": True})
-
-    
     # Guard: don't show welcome for watch-related commands; delegate to watchlite
     try:
         if re.match(r'^/(watch|unwatch|watchlist|alerts[\w_]*)', low):
@@ -1208,307 +1207,301 @@ if low.startswith("/upgrade"):
             print("WATCHLITE guard error:", _e_wl_guard)
         except Exception:
             pass
-    # Guard: avoid falling through after command handling
-    if re.match(r'^/(watch|unwatch|watchlist|alerts[\w_]*)', (msg.get("text") or "").lower()):
-        # If not already handled above, show usage and return
-        send_message(chat_id, "Usage: `/watch 0x...`, `/unwatch 0x...`, `/watchlist`, `/alerts_on|/alerts_off|/alerts`")
-        return jsonify({"ok": True})
+    # Only non-command messages trigger scan
+        if text.startswith("/"):
+            send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+            return jsonify({"ok": True})
 
-# Only non-command messages trigger scan
-    if text.startswith("/"):
-        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-        return jsonify({"ok": True})
-
-    ok, _tier = can_scan(chat_id)
-    if not ok:
-        send_message(chat_id, "Free scans exhausted. Use /upgrade.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-        return jsonify({"ok": True})
-    # --- Processing indicator (address-only) ---
-    ph_id = None
-    if _is_contract_address(text):
-        ph = send_message(chat_id, "Processing…")
-        ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
-        try:
-            tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
-        except Exception:
-            pass
-    # --- /Processing indicator ---
-
-
-    # QuickScan flow
-    try:
-        market = fetch_market(text) or {}
-    except Exception as e:
-        print('QUICKSCAN ERROR (fetch_market)', e, traceback.format_exc())
-        market = {}
-
-    if not market.get("ok"):
-        if re.match(r"^0x[a-fA-F0-9]{64}$", text):
-            pass
-        elif re.match(r"^0x[a-fA-F0-9]{40}$", text):
-            market.setdefault("tokenAddress", text)
-        market.setdefault("chain", market.get("chain") or "—")
-        market.setdefault("sources", [])
-        market.setdefault("priceChanges", {})
-        market.setdefault("links", {})
-    # --- OMEGA-713K D1: robust Age computation ---
-    try:
-        _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
-        _now = market.get("asOf") or int(time.time())
-
-        # If _ts missing, pull from DexScreener pairs endpoint (one-shot, 5s)
-        if not _ts:
+        ok, _tier = can_scan(chat_id)
+        if not ok:
+            send_message(chat_id, "Free scans exhausted. Use /upgrade or open Premium.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+            return jsonify({"ok": True})
+        # --- Processing indicator (address-only) ---
+        ph_id = None
+        if _is_contract_address(text):
+            ph = send_message(chat_id, "Processing…")
+            ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
             try:
-                import os as _os, requests as _rq
-                _chain0 = (market.get("chain") or "").lower()
-                _map = {"ethereum":"ethereum","eth":"ethereum","bsc":"bsc","binance":"bsc","polygon":"polygon","matic":"polygon",
-                        "arbitrum":"arbitrum","base":"base","optimism":"optimism","op":"optimism","avalanche":"avalanche","fantom":"fantom","ftm":"fantom"}
-                _short = _map.get(_chain0, _chain0)
-                _pair_addr0 = (market.get("pairAddress") or "").lower()
-                if _short and _pair_addr0:
-                    _base0 = (_os.getenv("DS_PROXY_URL") or _os.getenv("DEXSCREENER_PROXY_BASE") or "https://api.dexscreener.com").rstrip("/")
-                    _url0 = f"{_base0}/latest/dex/pairs/{_short}/{_pair_addr0}"
-                    _r0 = _rq.get(_url0, timeout=5)
-                    if _r0.ok:
-                        _j0 = _r0.json() or {}
-                        _pd0 = _j0.get("pair")
-                        if not isinstance(_pd0, dict):
-                            _ps0 = _j0.get("pairs") or _j0.get("data") or []
-                            if isinstance(_ps0, list) and _ps0:
-                                _pd0 = _ps0[0] if isinstance(_ps0[0], dict) else {}
-                        if isinstance(_pd0, dict):
-                            _ts = _pd0.get("pairCreatedAt") or _pd0.get("createdAt") or _pd0.get("launchedAt")
+                tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
             except Exception:
                 pass
-    
-        if isinstance(_ts, (int, float)) and _ts:
-            # normalize milliseconds to seconds when needed
-            if _ts > 10_000_000_000:  # looks like ms
-                _ts = int(_ts // 1000)
-            _age_days = max(0.0, round((_now - int(_ts)) / 86400.0, 2))
-            market["ageDays"] = _age_days
-    except Exception:
-        pass
-    # --- /D1 Age ---
+        # --- /Processing indicator ---
 
-    # --- OMEGA-713K: Buttons links enrichment ---
-    try:
-        _links = market.get("links") or {}
-    except Exception:
-        _links = {}
-    _chain = (market.get("chain") or "").lower()
-    _token = (market.get("tokenAddress") or "").lower()
-    _pair  = (market.get("pairAddress") or "").lower()
-    _dexId = (_links.get("dexId") or "").lower()
 
-    # DexScreener link (kept separate from real DEX)
-    if not _links.get("dexscreener"):
-        ds_url = (_links.get("dexscreener") or "").strip()
-        if not ds_url and _chain and _pair:
-            ds_url = f"https://dexscreener.com/{_chain}/{_pair}"
-        if ds_url:
-            _links["dexscreener"] = ds_url
-
-    # Scan link per chain
-    if not _links.get("scan") and _token:
-        _scan_bases = {
-            "ethereum": "https://etherscan.io/token/",
-            "eth": "https://etherscan.io/token/",
-            "bsc": "https://bscscan.com/token/",
-            "binance": "https://bscscan.com/token/",
-            "polygon": "https://polygonscan.com/token/",
-            "matic": "https://polygonscan.com/token/",
-            "arbitrum": "https://arbiscan.io/token/",
-            "arb": "https://arbiscan.io/token/",
-            "base": "https://basescan.org/token/",
-            "optimism": "https://optimistic.etherscan.io/token/",
-            "op": "https://optimistic.etherscan.io/token/",
-            "avalanche": "https://snowtrace.io/token/",
-            "avax": "https://snowtrace.io/token/",
-            "fantom": "https://ftmscan.com/token/",
-            "ftm": "https://ftmscan.com/token/",
-        }
-        base = _scan_bases.get(_chain)
-        if base:
-            _links["scan"] = base + _token
-
-    # Real DEX link (shows as 'Open in DEX' if not DexScreener)
-    if not _links.get("dex") and _token:
-        if _dexId in ("uniswap", "uniswapv2", "uniswapv3") and _chain in ("ethereum","base","arbitrum","polygon","optimism"):
-            _links["dex"] = f"https://app.uniswap.org/explore/tokens/{_chain}/{_token}"
-        elif _dexId.startswith("pancake") and _chain in ("bsc","binance"):
-            _links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={_token}"
-        elif "quickswap" in _dexId and _chain == "polygon":
-            _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
-
-    # Discover project website if missing (DexScreener fallback)
-    if not _links.get("site"):
+        # QuickScan flow
         try:
-            _site_guess = _discover_site_via_ds(_chain, _pair, _token, timeout=6)
-            if _site_guess:
-                _links["site"] = _site_guess
-        except Exception:
-            pass
-    # Prefer known_domains override if site is missing
-    if not _links.get("site") and _token:
-        _known = _load_known_domains()
-        _site = (_known.get(_token.lower()) or {}).get("site") if isinstance(_known, dict) else None
-        if _site:
-            _links["site"] = _site
-    market["links"] = _links
-    # --- /OMEGA-713K ---
-
-
-    # Ensure asof timestamp and pair age
-    if not market.get("asof"):
-        market["asof"] = int(time.time() * 1000)
-    if not market.get("ageDays"):
-        pc = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
-        if pc:
-            try:
-                ts = int(pc)
-            except Exception:
-                ts = None
-            if ts:
-                if ts < 10**12:
-                    ts *= 1000
-                age_days = (time.time()*1000 - ts) / (1000*60*60*24)
-                if age_days < 0:
-                    age_days = 0
-                market["ageDays"] = round(age_days, 2)
-
-    verdict = compute_verdict(market)
-    # --- precompute website intel and pass into ctx so renderers can show it ---
-    links = (market.get("links") or {})
-    web = {
-
-        "whois": {"created": None, "registrar": None},
-
-        "ssl": {"ok": None, "expires": None, "issuer": None},
-
-        "wayback": {"first": None}
-
-    }
-
-    site_url = None
-    try:
-
-        site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
-
-        if site_url:
-
-            web = analyze_website(site_url)
-
-    except Exception:
-
-        pass
-
-    web = _enrich_webintel_fallback(derive_domain(site_url), web)
-    # >>> FIX: pass precomputed webintel into ctx so renderers see it
-    try:
-        _dom = derive_domain(site_url)
-    except Exception:
-        _dom = None
-    ctx = {"webintel": web or {}, "domain": _dom}
-
-    quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
-# --- D0: QuickScan extras (rating + chart) ---
-try:
-    _extras = _build_quick_extras(verdict, market)
-    if _extras:
-        quick = f"{quick}\n\n{_extras}"
-except Exception:
-    pass
-# --- /D0 extras ---
-    # Reuse same ctx (no re-computation)
-    details = render_details(verdict, market, ctx, DEFAULT_LANG)
-    why = safe_render_why(verdict, market, DEFAULT_LANG)
-    whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
-
-    # --- AI Why++ enrichment (OpenAI) ----------------------------------------
-    try:
-        _ctx_onchain = None
-        if os.getenv("WHYPP_ENRICH_ONCHAIN","1") == "1":
-            try:
-                _token_addr = market.get('tokenAddress')
-                _chain_hint = (market.get('chain') or market.get('chainId') or 'ethereum')
-                _ctx_onchain = fetch_onchain_factors(_token_addr, chain_hint=_chain_hint)
-            except Exception:
-                _ctx_onchain = None
-        _webintel = (ctx.get('webintel') if isinstance(ctx, dict) else {}) or {}
-        _ai_whypp = _generate_whypp_ai_enriched(market, why, _webintel, _ctx_onchain)
-        if _ai_whypp:
-            whypp = _ai_whypp
-    except Exception as _e_ai_over:
-        pass
-    # --------------------------------------------------------------------------
-    try:
-        ch_ = (market.get("chain") or "").lower()
-        _map = {"ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op","base":"base","avalanche":"avax","fantom":"ftm"}
-        _short = _map.get(ch_, ch_ or "eth")
-        pair_addr = market.get("pairAddress") or resolve_pair(_short, market.get("tokenAddress"))
-        info = check_lp_lock_v2(_short, pair_addr)
-        try:
-            if isinstance(info, dict) and not info.get('chain'):
-                info['chain'] = _short
-        except Exception:
-            pass
-        lp = render_lp(info, DEFAULT_LANG)
-# --- D0 LP newbie hints ---
-try:
-    lp = f"{lp}\n\n_What it means:_\n• 🔥 Renounced — владелец отказался от контроля\n• 🔒 Locked — LP токены заблокированы до указанной даты"
-except Exception:
-    pass
-# --- /D0 LP newbie hints ---
-    except TypeError:
-        lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
-    except Exception:
-        lp = "LP lock: unknown"
-
-    links = (market.get("links") or {})
-    bundle = {
-        "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
-        "reasons": list(getattr(verdict, "reasons", []) or []),
-        "market": {
-            "pairSymbol": market.get("pairSymbol"), "chain": market.get("chain"),
-            "price": market.get("price"), "fdv": market.get("fdv"), "mc": market.get("mc"),
-            "liq": market.get("liq"), "vol24h": market.get("vol24h"),
-            "priceChanges": market.get("priceChanges") or {},
-            "tokenAddress": market.get("tokenAddress"), "pairAddress": market.get("pairAddress"),
-            "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
-        },
-        "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
-        "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
-    }
-
-    sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
-    msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
-    if msg_id:
-        store_bundle(chat_id, msg_id, bundle)
-        try:
-            # WATCHLITE: remember last token per chat for /watch without args
-            watchlite.note_quickscan(chat_id, bundle, msg_id)
-        except Exception:
-            pass
-
-        try:
-            tg("editMessageReplyMarkup", {
-                "chat_id": chat_id,
-                "message_id": msg_id,
-                "reply_markup": json.dumps(build_keyboard(chat_id, msg_id, links, ctx="quick"))
-            })
+            market = fetch_market(text) or {}
         except Exception as e:
-            print("editMessageReplyMarkup failed:", e)
+            print('QUICKSCAN ERROR (fetch_market)', e, traceback.format_exc())
+            market = {}
 
-    # --- Remove processing indicator if present ---
-    if 'ph_id' in locals() and ph_id:
+        if not market.get("ok"):
+            if re.match(r"^0x[a-fA-F0-9]{64}$", text):
+                pass
+            elif re.match(r"^0x[a-fA-F0-9]{40}$", text):
+                market.setdefault("tokenAddress", text)
+            market.setdefault("chain", market.get("chain") or "—")
+            market.setdefault("sources", [])
+            market.setdefault("priceChanges", {})
+            market.setdefault("links", {})
+        # --- OMEGA-713K D1: robust Age computation ---
         try:
-            tg("deleteMessage", {"chat_id": chat_id, "message_id": ph_id})
+            _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
+            _now = market.get("asOf") or int(time.time())
+
+            # If _ts missing, pull from DexScreener pairs endpoint (one-shot, 5s)
+            if not _ts:
+                try:
+                    import os as _os, requests as _rq
+                    _chain0 = (market.get("chain") or "").lower()
+                    _map = {"ethereum":"ethereum","eth":"ethereum","bsc":"bsc","binance":"bsc","polygon":"polygon","matic":"polygon",
+                            "arbitrum":"arbitrum","base":"base","optimism":"optimism","op":"optimism","avalanche":"avalanche","fantom":"fantom","ftm":"fantom"}
+                    _short = _map.get(_chain0, _chain0)
+                    _pair_addr0 = (market.get("pairAddress") or "").lower()
+                    if _short and _pair_addr0:
+                        _base0 = (_os.getenv("DS_PROXY_URL") or _os.getenv("DEXSCREENER_PROXY_BASE") or "https://api.dexscreener.com").rstrip("/")
+                        _url0 = f"{_base0}/latest/dex/pairs/{_short}/{_pair_addr0}"
+                        _r0 = _rq.get(_url0, timeout=5)
+                        if _r0.ok:
+                            _j0 = _r0.json() or {}
+                            _pd0 = _j0.get("pair")
+                            if not isinstance(_pd0, dict):
+                                _ps0 = _j0.get("pairs") or _j0.get("data") or []
+                                if isinstance(_ps0, list) and _ps0:
+                                    _pd0 = _ps0[0] if isinstance(_ps0[0], dict) else {}
+                            if isinstance(_pd0, dict):
+                                _ts = _pd0.get("pairCreatedAt") or _pd0.get("createdAt") or _pd0.get("launchedAt")
+                except Exception:
+                    pass
+    
+            if isinstance(_ts, (int, float)) and _ts:
+                # normalize milliseconds to seconds when needed
+                if _ts > 10_000_000_000:  # looks like ms
+                    _ts = int(_ts // 1000)
+                _age_days = max(0.0, round((_now - int(_ts)) / 86400.0, 2))
+                market["ageDays"] = _age_days
         except Exception:
             pass
-    # --- /Remove processing indicator ---
-    register_scan(chat_id)
-    return jsonify({"ok": True})
+        # --- /D1 Age ---
+
+        # --- OMEGA-713K: Buttons links enrichment ---
+        try:
+            _links = market.get("links") or {}
+        except Exception:
+            _links = {}
+        _chain = (market.get("chain") or "").lower()
+        _token = (market.get("tokenAddress") or "").lower()
+        _pair  = (market.get("pairAddress") or "").lower()
+        _dexId = (_links.get("dexId") or "").lower()
+
+        # DexScreener link (kept separate from real DEX)
+        if not _links.get("dexscreener"):
+            ds_url = (_links.get("dexscreener") or "").strip()
+            if not ds_url and _chain and _pair:
+                ds_url = f"https://dexscreener.com/{_chain}/{_pair}"
+            if ds_url:
+                _links["dexscreener"] = ds_url
+
+        # Scan link per chain
+        if not _links.get("scan") and _token:
+            _scan_bases = {
+                "ethereum": "https://etherscan.io/token/",
+                "eth": "https://etherscan.io/token/",
+                "bsc": "https://bscscan.com/token/",
+                "binance": "https://bscscan.com/token/",
+                "polygon": "https://polygonscan.com/token/",
+                "matic": "https://polygonscan.com/token/",
+                "arbitrum": "https://arbiscan.io/token/",
+                "arb": "https://arbiscan.io/token/",
+                "base": "https://basescan.org/token/",
+                "optimism": "https://optimistic.etherscan.io/token/",
+                "op": "https://optimistic.etherscan.io/token/",
+                "avalanche": "https://snowtrace.io/token/",
+                "avax": "https://snowtrace.io/token/",
+                "fantom": "https://ftmscan.com/token/",
+                "ftm": "https://ftmscan.com/token/",
+            }
+            base = _scan_bases.get(_chain)
+            if base:
+                _links["scan"] = base + _token
+
+        # Real DEX link (shows as 'Open in DEX' if not DexScreener)
+        if not _links.get("dex") and _token:
+            if _dexId in ("uniswap", "uniswapv2", "uniswapv3") and _chain in ("ethereum","base","arbitrum","polygon","optimism"):
+                _links["dex"] = f"https://app.uniswap.org/explore/tokens/{_chain}/{_token}"
+            elif _dexId.startswith("pancake") and _chain in ("bsc","binance"):
+                _links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={_token}"
+            elif "quickswap" in _dexId and _chain == "polygon":
+                _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
+
+        # Discover project website if missing (DexScreener fallback)
+        if not _links.get("site"):
+            try:
+                _site_guess = _discover_site_via_ds(_chain, _pair, _token, timeout=6)
+                if _site_guess:
+                    _links["site"] = _site_guess
+            except Exception:
+                pass
+        # Prefer known_domains override if site is missing
+        if not _links.get("site") and _token:
+            _known = _load_known_domains()
+            _site = (_known.get(_token.lower()) or {}).get("site") if isinstance(_known, dict) else None
+            if _site:
+                _links["site"] = _site
+        market["links"] = _links
+        # --- /OMEGA-713K ---
+
+
+        # Ensure asof timestamp and pair age
+        if not market.get("asof"):
+            market["asof"] = int(time.time() * 1000)
+        if not market.get("ageDays"):
+            pc = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
+            if pc:
+                try:
+                    ts = int(pc)
+                except Exception:
+                    ts = None
+                if ts:
+                    if ts < 10**12:
+                        ts *= 1000
+                    age_days = (time.time()*1000 - ts) / (1000*60*60*24)
+                    if age_days < 0:
+                        age_days = 0
+                    market["ageDays"] = round(age_days, 2)
+
+        verdict = compute_verdict(market)
+        # --- precompute website intel and pass into ctx so renderers can show it ---
+        links = (market.get("links") or {})
+        web = {
+
+            "whois": {"created": None, "registrar": None},
+
+            "ssl": {"ok": None, "expires": None, "issuer": None},
+
+            "wayback": {"first": None}
+
+        }
+
+        site_url = None
+        try:
+
+            site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
+
+            if site_url:
+
+                web = analyze_website(site_url)
+
+        except Exception:
+
+            pass
+
+        web = _enrich_webintel_fallback(derive_domain(site_url), web)
+        # >>> FIX: pass precomputed webintel into ctx so renderers see it
+        try:
+            _dom = derive_domain(site_url)
+        except Exception:
+            _dom = None
+        ctx = {"webintel": web or {}, "domain": _dom}
+
+        quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+    # --- D0: QuickScan extras (rating + chart) ---
+    try:
+        _extras = _build_quick_extras(verdict, market)
+        if _extras:
+            quick = f"{quick}\n\n{_extras}"
+    except Exception:
+        pass
+    # --- /D0 extras ---
+        # Reuse same ctx (no re-computation)
+        details = render_details(verdict, market, ctx, DEFAULT_LANG)
+        why = safe_render_why(verdict, market, DEFAULT_LANG)
+        whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
+
+        # --- AI Why++ enrichment (OpenAI) ----------------------------------------
+        try:
+            _ctx_onchain = None
+            if os.getenv("WHYPP_ENRICH_ONCHAIN","1") == "1":
+                try:
+                    _token_addr = market.get('tokenAddress')
+                    _chain_hint = (market.get('chain') or market.get('chainId') or 'ethereum')
+                    _ctx_onchain = fetch_onchain_factors(_token_addr, chain_hint=_chain_hint)
+                except Exception:
+                    _ctx_onchain = None
+            _webintel = (ctx.get('webintel') if isinstance(ctx, dict) else {}) or {}
+            _ai_whypp = _generate_whypp_ai_enriched(market, why, _webintel, _ctx_onchain)
+            if _ai_whypp:
+                whypp = _ai_whypp
+        except Exception as _e_ai_over:
+            pass
+        # --------------------------------------------------------------------------
+        try:
+            ch_ = (market.get("chain") or "").lower()
+            _map = {"ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op","base":"base","avalanche":"avax","fantom":"ftm"}
+            _short = _map.get(ch_, ch_ or "eth")
+            pair_addr = market.get("pairAddress") or resolve_pair(_short, market.get("tokenAddress"))
+            info = check_lp_lock_v2(_short, pair_addr)
+            try:
+                if isinstance(info, dict) and not info.get('chain'):
+                    info['chain'] = _short
+            except Exception:
+                pass
+            lp = render_lp(info, DEFAULT_LANG)
+        except TypeError:
+            lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
+        except Exception:
+            lp = "LP lock: unknown"
+        # --- D0 LP newbie hints ---
+        try:
+            lp = f"{lp}\n\n_What it means:_\n• 🔥 Renounced — владелец отказался от контроля\n• 🔒 Locked — LP токены заблокированы до указанной даты"
+        except Exception:
+            pass
+        # --- /D0 LP newbie hints ---
+
+        links = (market.get("links") or {})
+        bundle = {
+            "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
+            "reasons": list(getattr(verdict, "reasons", []) or []),
+            "market": {
+                "pairSymbol": market.get("pairSymbol"), "chain": market.get("chain"),
+                "price": market.get("price"), "fdv": market.get("fdv"), "mc": market.get("mc"),
+                "liq": market.get("liq"), "vol24h": market.get("vol24h"),
+                "priceChanges": market.get("priceChanges") or {},
+                "tokenAddress": market.get("tokenAddress"), "pairAddress": market.get("pairAddress"),
+                "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
+            },
+            "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
+            "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
+        }
+
+        sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
+        msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
+        if msg_id:
+            store_bundle(chat_id, msg_id, bundle)
+            try:
+                # WATCHLITE: remember last token per chat for /watch without args
+                watchlite.note_quickscan(chat_id, bundle, msg_id)
+            except Exception:
+                pass
+
+            try:
+                tg("editMessageReplyMarkup", {
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "reply_markup": json.dumps(build_keyboard(chat_id, msg_id, links, ctx="quick"))
+                })
+            except Exception as e:
+                print("editMessageReplyMarkup failed:", e)
+
+        # --- Remove processing indicator if present ---
+        if 'ph_id' in locals() and ph_id:
+            try:
+                tg("deleteMessage", {"chat_id": chat_id, "message_id": ph_id})
+            except Exception:
+                pass
+        # --- /Remove processing indicator ---
+        register_scan(chat_id)
+        return jsonify({"ok": True})
 
 
 def on_callback(cb):
