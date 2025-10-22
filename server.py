@@ -1112,6 +1112,10 @@ def _welcome_text(is_new: bool) -> str:
 # === /D0 START UX HELPERS =====================================================
 
 def on_message(msg):
+    verdict = None
+    market = {}
+    quick = ""
+    details = ""
     # ---- WATCHLITE: early intercept of new commands (/watch, /unwatch, /watchlist, /alerts*) ----
     try:
         _wl_text = (msg.get("text") or msg.get("caption") or "")
@@ -1414,7 +1418,7 @@ def on_message(msg):
         pass
     # --- /D0 extras ---
         # Reuse same ctx (no re-computation)
-        details = render_details(verdict, market, ctx, DEFAULT_LANG)
+        details = render_details(verdict if verdict is not None else object(), market or {}, ctx, DEFAULT_LANG)
         why = safe_render_why(verdict, market, DEFAULT_LANG)
         whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
