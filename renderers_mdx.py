@@ -749,8 +749,7 @@ def render_quick(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str
             pair = (market or {}).get("pairSymbol") or (market or {}).get("pair") or "—"
         except Exception:
             pair = "—"
-        return f"*Metridex QuickScan — {pair}*
-• data temporarily unavailable"
+        return f"*Metridex QuickScan — {pair}*\n• data temporarily unavailable"
     if not _SPARKLINE_ENABLED:
         return base
     try:
