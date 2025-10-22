@@ -1212,9 +1212,9 @@ def on_message(msg):
         except Exception:
             pass
     # Only non-command messages trigger scan
-        if text.startswith("/"):
-            send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-            return jsonify({"ok": True})
+    if text.startswith("/"):
+        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        return jsonify({"ok": True})
 
         ok, _tier = can_scan(chat_id)
         if not ok:
@@ -1506,7 +1506,6 @@ def on_message(msg):
         # --- /Remove processing indicator ---
         register_scan(chat_id)
         return jsonify({"ok": True})
-
 
 def on_callback(cb):
     cb_id = cb["id"]
