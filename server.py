@@ -752,12 +752,12 @@ def _derive_token_address_quickfix(mkt: dict, links: dict) -> str | None:
             return "0x" + m.group(1)
     return None
 # === /QUICKFIX ===
-# --- Safe wrappers to avoid crashes on None verdict/market (D0 hotfix) ---
-def _safe_safe_build_quick_extras(verdict, market):
+# --- Safe wrappers (D0) ---
+def _safe_build_quick_extras(verdict, market):
     try:
         if verdict is None or market is None:
             return ""
-        return _safe_build_quick_extras(verdict, market)
+        return _build_quick_extras(verdict, market)
     except Exception:
         return ""
 
@@ -765,10 +765,10 @@ def render_details_safe(verdict, market, ctx, lang):
     try:
         if verdict is None or market is None:
             return "Details temporarily unavailable\n• Pair: —\n• As of: — UTC"
-        return render_details_safe(verdict, market, ctx, lang)
+        return render_details(verdict, market, ctx, lang)
     except Exception:
         return "Details temporarily unavailable\n• Pair: —\n• As of: — UTC"
-# --- End safe wrappers ---
+# --- /Safe wrappers ---
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=PARSE_MODE, disable_web_page_preview=None):
     MAX_LEN = 4000
@@ -1157,7 +1157,7 @@ def _build_start_keyboard(chat_id: int, links: dict | None = None) -> dict:
     ]
     return {"inline_keyboard": kb}
 
-def _safe_build_quick_extras(verdict, market: dict) -> str:
+def _build_quick_extras(verdict, market: dict) -> str:
     """Add compact rating + chart line. No inline markdown links (MarkdownV2 escaping)."""
     try:
         score = getattr(verdict, "score", None)
@@ -1200,8 +1200,7 @@ def _welcome_text(is_new: bool) -> str:
     )
 # === /D0 START UX HELPERS =====================================================
 
-def on_message(msg):
-    verdict = None; market = None
+def _on_message_core(msg):
     verdict = None
     market = {}
     quick = ""
@@ -1501,14 +1500,14 @@ def on_message(msg):
         quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
     # --- D0: QuickScan extras (rating + chart) ---
     try:
-        _extras = _safe_build_quick_extras(verdict, market)
+        _extras = _build_quick_extras(verdict, market)
         if _extras:
             quick = f"{quick}\n\n{_extras}"
     except Exception:
         pass
     # --- /D0 extras ---
         # Reuse same ctx (no re-computation)
-        details = render_details_safe(verdict if verdict is not None else object(), market or {}, ctx, DEFAULT_LANG)
+        details = render_details(verdict if verdict is not None else object(), market or {}, ctx, DEFAULT_LANG)
         why = safe_render_why(verdict, market, DEFAULT_LANG)
         whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
@@ -1596,6 +1595,28 @@ def on_message(msg):
         # --- /Remove processing indicator ---
         register_scan(chat_id)
         return jsonify({"ok": True})
+
+
+def on_message(msg):
+    # Global guard: never fail silently on user text
+    try:
+        _text_raw = (msg.get("text") or "").strip()
+    except Exception:
+        _text_raw = ""
+    try:
+        return _on_message_core(msg)
+    except Exception:
+        try:
+            chat_id = msg.get("chat", {}).get("id")
+        except Exception:
+            chat_id = None
+        if chat_id and _text_raw and not _text_raw.startswith("/"):
+            try:
+                send_message(chat_id, "Unable to scan this input. Paste a *token address* (0x…), *TX hash*, or a DexScreener pair URL.")
+            except Exception:
+                pass
+        return jsonify({"ok": True})
+
 
 def on_callback(cb):
     cb_id = cb["id"]
