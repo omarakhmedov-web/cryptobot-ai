@@ -1632,6 +1632,50 @@ def _callback_fresh(update):
         return True
 
 def on_message(msg):
+
+# == D0 address quick reply (always respond) ==
+try:
+    chat = msg.get("chat", {}) or {}
+    chat_id = chat.get("id")
+    raw_text = (msg.get("text") or "").strip()
+except Exception:
+    chat_id = None
+    raw_text = ""
+is_command = raw_text.startswith("/") if raw_text else False
+# Simple address / pair detection
+import re as _re
+is_addr = bool(_re.search(r"\b0x[a-fA-F0-9]{40}\b", raw_text or ""))
+is_pair = ("dexscreener.com/" in (raw_text or "")) or ("dexscreener" in (raw_text or ""))
+if chat_id and raw_text and not is_command and (is_addr or is_pair):
+    try:
+        send_message(chat_id, "Processing…", parse_mode="HTML")
+    except Exception:
+        pass
+    # Try existing quick scan path if available
+    handled = False
+    try:
+        if 'render_quick' in globals():
+            verdict, market = None, None
+            try:
+                candidate = _derive_token_address_quickfix(raw_text) if '_derive_token_address_quickfix' in globals() else raw_text
+            except Exception:
+                candidate = raw_text
+            try:
+                quick = render_quick(candidate, lang='en')
+                if quick:
+                    send_message(chat_id, quick, parse_mode="HTML")
+                    handled = True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if not handled:
+        try:
+            send_message(chat_id, "<b>QuickScan:</b> accepted input. Tap <b>Details</b> for more.", parse_mode="HTML")
+        except Exception:
+            pass
+    return jsonify({"ok": True})
+# == /D0 address quick reply ==
     # Global guard: never fail silently on user text
     try:
         _text_raw = (msg.get("text") or "").strip()
@@ -2382,3 +2426,27 @@ try:
     _np_create_invoice = _np_create_invoice_smart
 except NameError:
     _np_create_invoice = _np_create_invoice_smart
+
+def on_start(message):
+    chat_id = message.get("chat", {}).get("id")
+    if not chat_id:
+        return jsonify({"ok": True})
+    # EN-only, HTML-safe
+    body = (
+        "<b>Welcome back!</b> What should we scan today?\n"
+        "<b>Scanned 1M+ tokens</b>\n"
+        "Referral: <code>/referral</code> — invite a friend and get a premium scan\n\n"
+        "Paste a <b>token address</b>, <b>TX hash</b> or <b>URL</b> to scan.\n"
+        "Examples:\n"
+        "<code>0x6982508145454ce325ddbe47a25d4ec3d2311933</code> — ERC-20\n"
+        "dexscreener.com/ethereum/0x… — pair\n\n"
+        "Then tap <b>More details</b> / <b>Why?</b> / <b>On-chain</b> for deeper info."
+    )
+    try:
+        send_message(chat_id, body, parse_mode="HTML")
+    except Exception as e:
+        try:
+            print("TG WARN /start send failed:", e)
+        except Exception:
+            pass
+    return jsonify({"ok": True})
