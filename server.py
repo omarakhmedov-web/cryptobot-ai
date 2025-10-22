@@ -1019,6 +1019,15 @@ def webhook():
         return jsonify({'ok': False, 'err': 'bad secret header'}), 403
     try:
         upd = request.get_json(force=True, silent=True) or {}
+        try:
+            _k = list(upd.keys())
+            _cid = upd.get('message',{}).get('chat',{}).get('id') if 'message' in upd else (
+                upd.get('edited_message',{}).get('chat',{}).get('id') if 'edited_message' in upd else (
+                upd.get('callback_query',{}).get('message',{}).get('chat',{}).get('id') if 'callback_query' in upd else None))
+            print('WEBHOOK UPDATE', {'keys': _k, 'chat_id': _cid})
+        except Exception:
+            pass
+
         resp = None
         if 'message' in upd:
             resp = on_message(upd['message'])
