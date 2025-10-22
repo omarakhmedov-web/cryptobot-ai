@@ -1633,67 +1633,67 @@ def _callback_fresh(update):
 
 def on_message(msg):
 
-# == D0 address quick reply (always respond) ==
-try:
-    chat = msg.get("chat", {}) or {}
-    chat_id = chat.get("id")
-    raw_text = (msg.get("text") or "").strip()
-except Exception:
-    chat_id = None
-    raw_text = ""
-is_command = raw_text.startswith("/") if raw_text else False
-# Simple address / pair detection
-import re as _re
-is_addr = bool(_re.search(r"\b0x[a-fA-F0-9]{40}\b", raw_text or ""))
-is_pair = ("dexscreener.com/" in (raw_text or "")) or ("dexscreener" in (raw_text or ""))
-if chat_id and raw_text and not is_command and (is_addr or is_pair):
+    # == D0 address quick reply (always respond) ==
     try:
-        send_message(chat_id, "Processing…", parse_mode="HTML")
+        chat = msg.get("chat", {}) or {}
+        chat_id = chat.get("id")
+        raw_text = (msg.get("text") or "").strip()
     except Exception:
-        pass
-    # Try existing quick scan path if available
-    handled = False
-    try:
-        if 'render_quick' in globals():
-            verdict, market = None, None
-            try:
-                candidate = _derive_token_address_quickfix(raw_text) if '_derive_token_address_quickfix' in globals() else raw_text
-            except Exception:
-                candidate = raw_text
-            try:
-                quick = render_quick(candidate, lang='en')
-                if quick:
-                    send_message(chat_id, quick, parse_mode="HTML")
-                    handled = True
-            except Exception:
-                pass
-    except Exception:
-        pass
-    if not handled:
+        chat_id = None
+        raw_text = ""
+    is_command = raw_text.startswith("/") if raw_text else False
+    # Simple address / pair detection
+    import re as _re
+    is_addr = bool(_re.search(r"\b0x[a-fA-F0-9]{40}\b", raw_text or ""))
+    is_pair = ("dexscreener.com/" in (raw_text or "")) or ("dexscreener" in (raw_text or ""))
+    if chat_id and raw_text and not is_command and (is_addr or is_pair):
         try:
-            send_message(chat_id, "<b>QuickScan:</b> accepted input. Tap <b>Details</b> for more.", parse_mode="HTML")
+            send_message(chat_id, "Processing…", parse_mode="HTML")
         except Exception:
             pass
-    return jsonify({"ok": True})
-# == /D0 address quick reply ==
-    # Global guard: never fail silently on user text
-    try:
-        _text_raw = (msg.get("text") or "").strip()
-    except Exception:
-        _text_raw = ""
-    try:
-        return _on_message_core(msg)
-    except Exception:
+        # Try existing quick scan path if available
+        handled = False
         try:
-            chat_id = msg.get("chat", {}).get("id")
+            if 'render_quick' in globals():
+                verdict, market = None, None
+                try:
+                    candidate = _derive_token_address_quickfix(raw_text) if '_derive_token_address_quickfix' in globals() else raw_text
+                except Exception:
+                    candidate = raw_text
+                try:
+                    quick = render_quick(candidate, lang='en')
+                    if quick:
+                        send_message(chat_id, quick, parse_mode="HTML")
+                        handled = True
+                except Exception:
+                    pass
         except Exception:
-            chat_id = None
-        if chat_id and _text_raw and not _text_raw.startswith("/"):
+            pass
+        if not handled:
             try:
-                send_message(chat_id, "Unable to scan this input. Paste a *token address* (0x…), *TX hash*, or a DexScreener pair URL.")
+                send_message(chat_id, "<b>QuickScan:</b> accepted input. Tap <b>Details</b> for more.", parse_mode="HTML")
             except Exception:
                 pass
         return jsonify({"ok": True})
+    # == /D0 address quick reply ==
+        # Global guard: never fail silently on user text
+        try:
+            _text_raw = (msg.get("text") or "").strip()
+        except Exception:
+            _text_raw = ""
+        try:
+            return _on_message_core(msg)
+        except Exception:
+            try:
+                chat_id = msg.get("chat", {}).get("id")
+            except Exception:
+                chat_id = None
+            if chat_id and _text_raw and not _text_raw.startswith("/"):
+                try:
+                    send_message(chat_id, "Unable to scan this input. Paste a *token address* (0x…), *TX hash*, or a DexScreener pair URL.")
+                except Exception:
+                    pass
+            return jsonify({"ok": True})
 
 
 def on_callback(cb):
