@@ -268,6 +268,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
 WEBHOOK_PATH = f"/webhook/{BOT_WEBHOOK_SECRET}" if BOT_WEBHOOK_SECRET else "/webhook/secret-not-set"
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en")
+FORCE_EN_START = True
 
 def build_webintel_ctx(market: dict) -> dict:
     try:
@@ -751,6 +752,24 @@ def _derive_token_address_quickfix(mkt: dict, links: dict) -> str | None:
             return "0x" + m.group(1)
     return None
 # === /QUICKFIX ===
+# --- Safe wrappers to avoid crashes on None verdict/market (D0 hotfix) ---
+def _safe_safe_build_quick_extras(verdict, market):
+    try:
+        if verdict is None or market is None:
+            return ""
+        return _safe_build_quick_extras(verdict, market)
+    except Exception:
+        return ""
+
+def render_details_safe(verdict, market, ctx, lang):
+    try:
+        if verdict is None or market is None:
+            return "Details temporarily unavailable\n• Pair: —\n• As of: — UTC"
+        return render_details_safe(verdict, market, ctx, lang)
+    except Exception:
+        return "Details temporarily unavailable\n• Pair: —\n• As of: — UTC"
+# --- End safe wrappers ---
+
 def send_message(chat_id, text, reply_markup=None, parse_mode=PARSE_MODE, disable_web_page_preview=None):
     MAX_LEN = 4000
     raw = str(text)
@@ -1138,7 +1157,7 @@ def _build_start_keyboard(chat_id: int, links: dict | None = None) -> dict:
     ]
     return {"inline_keyboard": kb}
 
-def _build_quick_extras(verdict, market: dict) -> str:
+def _safe_build_quick_extras(verdict, market: dict) -> str:
     """Add compact rating + chart line. No inline markdown links (MarkdownV2 escaping)."""
     try:
         score = getattr(verdict, "score", None)
@@ -1182,6 +1201,7 @@ def _welcome_text(is_new: bool) -> str:
 # === /D0 START UX HELPERS =====================================================
 
 def on_message(msg):
+    verdict = None; market = None
     verdict = None
     market = {}
     quick = ""
@@ -1481,14 +1501,14 @@ def on_message(msg):
         quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
     # --- D0: QuickScan extras (rating + chart) ---
     try:
-        _extras = _build_quick_extras(verdict, market)
+        _extras = _safe_build_quick_extras(verdict, market)
         if _extras:
             quick = f"{quick}\n\n{_extras}"
     except Exception:
         pass
     # --- /D0 extras ---
         # Reuse same ctx (no re-computation)
-        details = render_details(verdict if verdict is not None else object(), market or {}, ctx, DEFAULT_LANG)
+        details = render_details_safe(verdict if verdict is not None else object(), market or {}, ctx, DEFAULT_LANG)
         why = safe_render_why(verdict, market, DEFAULT_LANG)
         whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
