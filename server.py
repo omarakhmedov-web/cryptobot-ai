@@ -1527,7 +1527,7 @@ def on_message(msg):
             lp = "LP lock: unknown"
         # --- D0 LP newbie hints ---
         try:
-            lp = f"{lp}\n\n_What it means:_\n• 🔥 Renounced — владелец отказался от контроля\n• 🔒 Locked — LP токены заблокированы до указанной даты"
+            lp = f"{lp}\n\n_What it means:_\n• 🔥 Renounced — owner is set to the zero address; no central control\n• 🔒 Locked — LP tokens are locked until the shown date"
         except Exception:
             pass
         # --- /D0 LP newbie hints ---
