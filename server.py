@@ -278,7 +278,7 @@ except Exception:
         from lp_lite import check_lp_lock_v2
     except Exception:
         def check_lp_lock_v2(chain, lp_addr):
-            return {"provider": "lite-burn-check", "lpAddress": lp_addr or "—", "until": "—"}
+            return {"provider": "lite-burn-check", "lpAddress": lp_addr or "-", "until": "-"}
 
 try:
     from onchain_inspector import inspect_token
@@ -337,7 +337,7 @@ def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
             r = _rq.get(f"https://rdap.org/domain/{domain}", timeout=2.5)
             if r.ok:
                 j = r.json()
-                if (who.get("created") in (None, "—")):
+                if (who.get("created") in (None, "-")):
                     for ev in (j.get("events") or []):
                         act = str(ev.get("eventAction") or "").lower()
                         if act in ("registration","registered","creation"):
@@ -345,7 +345,7 @@ def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
                             if d:
                                 who["created"] = d
                                 break
-                if (who.get("registrar") in (None, "—")):
+                if (who.get("registrar") in (None, "-")):
                     for ent in (j.get("entities") or []):
                         roles = [str(x).lower() for x in (ent.get("roles") or [])]
                         if any("registrar" in rr for rr in roles):
@@ -365,7 +365,7 @@ def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
         # SSL
         try:
             hr = _rq.head(f"https://{domain}", timeout=2.0, allow_redirects=True)
-            if ssl.get("ok") in (None, "—"):
+            if ssl.get("ok") in (None, "-"):
                 ssl["ok"] = bool(hr.ok) if hr is not None else None
         except Exception:
             pass
@@ -376,7 +376,7 @@ def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
                                   "filter":"statuscode:200", "limit":"1",
                                   "from":"19960101","to":"99991231","sort":"ascending"},
                           timeout=2.5)
-            if rwb.ok and (way.get("first") in (None, "—")):
+            if rwb.ok and (way.get("first") in (None, "-")):
                 j = rwb.json()
                 if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and j[1]:
                     ts = j[1][0]
@@ -413,12 +413,12 @@ from flask import redirect as _redirect
 def _plan_defaults(plan: str):
     p = (plan or "").strip().lower()
     if p.startswith("deep"):
-        return {"amount": 3, "label": os.getenv("CRYPTO_LABEL_DEEP") or "Deep report — $3", "days": 0}
+        return {"amount": 3, "label": os.getenv("CRYPTO_LABEL_DEEP") or "Deep report - $3", "days": 0}
     if p.startswith("day"):
-        return {"amount": 9, "label": os.getenv("CRYPTO_LABEL_DAYPASS") or "Day Pass — $9", "days": 1}
+        return {"amount": 9, "label": os.getenv("CRYPTO_LABEL_DAYPASS") or "Day Pass - $9", "days": 1}
     if p.startswith("team"):
-        return {"amount": 99, "label": os.getenv("CRYPTO_LABEL_TEAMS") or "Teams — from $99", "days": 30}
-    return {"amount": 29, "label": os.getenv("CRYPTO_LABEL_PRO") or "Pro — $29", "days": 30}
+        return {"amount": 99, "label": os.getenv("CRYPTO_LABEL_TEAMS") or "Teams - from $99", "days": 30}
+    return {"amount": 29, "label": os.getenv("CRYPTO_LABEL_PRO") or "Pro - $29", "days": 30}
 
 def _resolve_chat_id_from_query(args):
     for k in ("u","uid","chat","chat_id","tg","user","user_id"):
@@ -540,13 +540,13 @@ def _grant_plan(chat_id: int, plan: str, days: int):
 def _plan_defaults(plan: str):
     plan = (plan or "").strip().lower()
     if plan in ("day","daypass","day-pass","pass"):
-        return {"amount": 9, "label": os.getenv("CRYPTO_LABEL_DAYPASS") or "Day Pass — $9", "days": 1}
+        return {"amount": 9, "label": os.getenv("CRYPTO_LABEL_DAYPASS") or "Day Pass - $9", "days": 1}
     if plan in ("deep","report","deep-report","deep_report"):
-        return {"amount": 3, "label": os.getenv("CRYPTO_LABEL_DEEP") or "Deep report — $3", "days": 0}
+        return {"amount": 3, "label": os.getenv("CRYPTO_LABEL_DEEP") or "Deep report - $3", "days": 0}
     if plan in ("teams","team"):
-        return {"amount": 99, "label": os.getenv("CRYPTO_LABEL_TEAMS") or "Teams — from $99", "days": 30}
+        return {"amount": 99, "label": os.getenv("CRYPTO_LABEL_TEAMS") or "Teams - from $99", "days": 30}
     # default: pro
-    return {"amount": 29, "label": os.getenv("CRYPTO_LABEL_PRO") or "Pro — $29", "days": 30}
+    return {"amount": 29, "label": os.getenv("CRYPTO_LABEL_PRO") or "Pro - $29", "days": 30}
 
 def _resolve_chat_id_from_query(args):
     for k in ("u","uid","chat","chat_id","tg","user","user_id"):
@@ -749,106 +749,6 @@ def tg(method, payload=None, files=None, timeout=12):
         except Exception:
             pass
         return {'ok': False, 'error': str(e)}
-
-
-# === QUICKFIX: token address derivation for ONCHAIN ===
-def _derive_token_address_quickfix(mkt: dict, links: dict) -> str | None:
-    if not isinstance(mkt, dict):
-        return None
-    t = (mkt.get("tokenAddress") or "").strip()
-    if t.startswith("0x") and len(t) == 42:
-        return t
-    for k in ("address","token","token0Address","baseTokenAddress","token1Address","baseToken"):
-        v = mkt.get(k)
-        if isinstance(v, str) and v.startswith("0x") and len(v) == 42:
-            return v
-        if isinstance(v, dict):
-            a = (v.get("address") or "").strip()
-            if a.startswith("0x") and len(a) == 42:
-                return a
-    if isinstance(links, dict):
-        val = f"{links.get('scan') or ''} {links.get('dex') or ''} {links.get('holders') or ''}"
-        m = re.search(r"(?:token|address|inputCurrency|outputCurrency)=?0x([0-9a-fA-F]{40})", val)
-        if m:
-            return "0x" + m.group(1)
-    return None
-# === /QUICKFIX ===
-# --- Safe wrappers (D0) ---
-def _safe_build_quick_extras(verdict, market):
-    try:
-        if verdict is None or market is None:
-            return ""
-        return _build_quick_extras(verdict, market)
-    except Exception:
-        return ""
-
-def render_details_safe(verdict, market, ctx, lang):
-    try:
-        if verdict is None or market is None:
-            return "Details temporarily unavailable\n• Pair: —\n• As of: — UTC"
-        return render_details(verdict, market, ctx, lang)
-    except Exception:
-        return "Details temporarily unavailable\n• Pair: —\n• As of: — UTC"
-# --- /Safe wrappers ---
-
-def send_message(chat_id, text, reply_markup=None, parse_mode=PARSE_MODE, disable_web_page_preview=None):
-    MAX_LEN = 4000
-    raw = str(text)
-    chunks = []
-    if len(raw) <= MAX_LEN:
-        chunks = [raw]
-    else:
-        buf = ''
-        for part in raw.split('\n\n'):
-            if len(buf) + len(part) + 2 <= MAX_LEN:
-                buf = part if not buf else buf + '\n\n' + part
-            else:
-                if buf:
-                    chunks.append(buf)
-                if len(part) > MAX_LEN:
-                    for i in range(0, len(part), MAX_LEN):
-                        chunks.append(part[i:i+MAX_LEN])
-                    buf = ''
-                else:
-                    buf = part
-        if buf:
-            chunks.append(buf)
-    last_resp = None
-    for idx, ch in enumerate(chunks):
-        data = {'chat_id': chat_id}
-        if parse_mode == 'MarkdownV2':
-            data['text'] = mdv2_escape(ch)
-            data['parse_mode'] = 'MarkdownV2'
-        elif parse_mode:
-            data['text'] = ch
-            data['parse_mode'] = parse_mode
-        else:
-            data['text'] = ch
-        if disable_web_page_preview is not None:
-            data['disable_web_page_preview'] = bool(disable_web_page_preview)
-        if reply_markup and idx == 0:
-            data['reply_markup'] = json.dumps(reply_markup)
-        resp = tg('sendMessage', data)
-        if not (isinstance(resp, dict) and resp.get('ok')):
-            data.pop('parse_mode', None)
-            data['text'] = ch
-            resp2 = tg('sendMessage', data)
-            if not (isinstance(resp2, dict) and resp2.get('ok')):
-                try:
-                    print('sendMessage failed for chunk', idx, resp, resp2)
-                except Exception:
-                    pass
-                last_resp = resp2 if isinstance(resp2, dict) else resp
-            else:
-                last_resp = resp2
-        else:
-            last_resp = resp
-    return last_resp if last_resp is not None else {'ok': False, 'error': 'no send attempt'}
-
-def send_message_raw(chat_id, text, reply_markup=None):
-    data = {"chat_id": chat_id, "text": str(text)}
-    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
-    return tg("sendMessage", data)
 
 
 # === WATCHLITE (non-invasive Watchlist + Alerts) =============================
@@ -1054,7 +954,7 @@ def _generate_whypp_ai_enriched(market: dict, why_text: str, webintel: dict, onc
         model = os.getenv("WHYPP_MODEL", "gpt-4o-mini")
 
         pair = market.get("pairSymbol") or market.get("symbol") or "Token"
-        chain = (market.get("chain") or market.get("chainId") or "—")
+        chain = (market.get("chain") or market.get("chainId") or "-")
         ch = market.get("priceChanges") or {}
         age = market.get("age") or market.get("ageDays") or ""
         liq = market.get("liquidity") or market.get("liquidityUSD") or market.get("liquidityUsd") or ""
@@ -1077,7 +977,7 @@ def _generate_whypp_ai_enriched(market: dict, why_text: str, webintel: dict, onc
             owner = onchain.get("owner");  oc_lines.append(f"owner={owner}") if owner else None
             lp = onchain.get("lp_lock") or {}
             if lp:
-                status = lp.get('status') or 'unknown'; until = lp.get('until') or '—'
+                status = lp.get('status') or 'unknown'; until = lp.get('until') or '-'
                 oc_lines.append(f"lp_lock={status}, until={until}")
         oc_summary = " | ".join(oc_lines) if oc_lines else "n/a"
 
@@ -1143,616 +1043,163 @@ def _mark_seen(chat_id: int):
         db = _users_db_load()
         now = int(time.time())
         rec = db.get(str(chat_id), {})
-        if not rec.get("first_seen"):
-            rec["first_seen"] = now
-        rec["last_seen"] = now
+        rec["seen"] = now
         db[str(chat_id)] = rec
         _users_db_save(db)
     except Exception:
         pass
 
-def _is_new_user(chat_id: int) -> bool:
+# === QUICKFIX: token address derivation for ONCHAIN ===
+def _derive_token_address_quickfix(mkt: dict, links: dict) -> str | None:
+    if not isinstance(mkt, dict):
+        return None
+    t = (mkt.get("tokenAddress") or "").strip()
+    if t.startswith("0x") and len(t) == 42:
+        return t
+    for k in ("address","token","token0Address","baseTokenAddress","token1Address","baseToken"):
+        v = mkt.get(k)
+        if isinstance(v, str) and v.startswith("0x") and len(v) == 42:
+            return v
+        if isinstance(v, dict):
+            a = (v.get("address") or "").strip()
+            if a.startswith("0x") and len(a) == 42:
+                return a
+    if isinstance(links, dict):
+        val = f"{links.get('scan') or ''} {links.get('dex') or ''} {links.get('holders') or ''}"
+        m = re.search(r"(?:token|address|inputCurrency|outputCurrency)=?0x([0-9a-fA-F]{40})", val)
+        if m:
+            return "0x" + m.group(1)
+    return None
+# === /QUICKFIX ===
+# --- Safe wrappers (D0) ---
+def _safe_build_quick_extras(verdict, market):
     try:
-        db = _users_db_load()
-        rec = db.get(str(chat_id))
-        return rec is None
+        if verdict is None or market is None:
+            return ""
+        return _build_quick_extras(verdict, market)
     except Exception:
-        return True
+        return ""
 
-def _rating_emoji(score: int) -> str:
+def render_details_safe(verdict, market, ctx, lang):
     try:
-        s = int(score or 0)
+        if verdict is None or market is None:
+            return "Details temporarily unavailable\n• Pair: -\n• As of: - UTC"
+        return render_details(verdict, market, ctx, lang)
     except Exception:
-        s = 0
-    if s >= 70: return "🟢"
-    if s >= 40: return "🟡"
-    return "🔴"
+        return "Details temporarily unavailable\n• Pair: -\n• As of: - UTC"
+# --- /Safe wrappers ---
 
-def _build_start_keyboard(chat_id: int, links: dict | None = None) -> dict:
-    """
-    Inline keyboard with four primary buttons:
-    QuickScan (callback), Watchlist (callback), Premium (URL), Community (URL -> HELP)
-    """
-    links = links or {}
-    pk = _pricing_links()
-    kb = [
-        [ # row 1
-            {"text": "QuickScan", "callback_data": f"v1:QS:0:{chat_id}"},
-            {"text": "Watchlist", "callback_data": f"v1:WATCHLIST:0:{chat_id}"},
-        ],
-        [ # row 2
-            {"text": "Premium", "url": pk.get("pro") or pk.get("day_pass") or HELP_URL},
-            {"text": "Community", "url": HELP_URL},
-        ]
-    ]
-    return {"inline_keyboard": kb}
-
-def _build_quick_extras(verdict, market: dict) -> str:
-    """Add compact rating + chart line. No inline markdown links (MarkdownV2 escaping)."""
-    try:
-        score = getattr(verdict, "score", None)
-        rating = max(0, min(10, int(round((score or 0)/10)))) if score is not None else None
-    except Exception:
-        rating = None
-    emo = _rating_emoji(score if score is not None else 0)
-    legend = ""
-    if isinstance(score, (int, float)):
-        if score >= 70:
-            legend = "strong"
-        elif score >= 40:
-            legend = "stable, not hype"
+def send_message(chat_id, text, reply_markup=None, parse_mode=PARSE_MODE, disable_web_page_preview=None):
+    MAX_LEN = 4000
+    raw = str(text)
+    chunks = []
+    if len(raw) <= MAX_LEN:
+        chunks = [raw]
+    else:
+        buf = ''
+        for part in raw.split('\n\n'):
+            if len(buf) + len(part) + 2 <= MAX_LEN:
+                buf = part if not buf else buf + '\n\n' + part
+            else:
+                if buf:
+                    chunks.append(buf)
+                if len(part) > MAX_LEN:
+                    for i in range(0, len(part), MAX_LEN):
+                        chunks.append(part[i:i+MAX_LEN])
+                    buf = ''
+                else:
+                    buf = part
+        if buf:
+            chunks.append(buf)
+    last_resp = None
+    for idx, ch in enumerate(chunks):
+        data = {'chat_id': chat_id}
+        if parse_mode == 'MarkdownV2':
+            data['text'] = mdv2_escape(ch)
+            data['parse_mode'] = 'MarkdownV2'
+        elif parse_mode:
+            data['text'] = ch
+            data['parse_mode'] = parse_mode
         else:
-            legend = "elevated risk"
-    parts = []
-    if rating is not None:
-        parts.append(f"Rating: {emo} {rating}/10 — {legend}")
-    try:
-        ds = ((market or {}).get("links") or {}).get("dexscreener")
-        if ds:
-            parts.append(f"Chart: {ds}")
-    except Exception:
-        pass
-    return "\n".join(parts) if parts else ""
-
-def _welcome_text(is_new: bool) -> str:
-    # English-only welcome
-    return (
-        "Welcome back! What should we scan today?\n"
-        "Scanned 1M+ tokens\n"
-        "Referral: /referral — invite a friend and get a premium scan"
-    )
-
-
-
-def _run_quickscan_flow(chat_id: int, text: str, msg: dict):
-    print('[QS] start', chat_id)
-    try:
-        try:
-            ok, _tier = can_scan(chat_id)
-        except Exception:
-            ok, _tier = True, "Free"
-        if not ok:
-            send_message(chat_id, "Free scans exhausted. Use /upgrade or open Premium.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-            return jsonify({"ok": True})
-        # Processing indicator (address-only)
-        ph_id = None
-        try:
-            if _is_contract_address(text):
-                ph = send_message(chat_id, "Processing…")
-                if isinstance(ph, dict) and ph.get("ok"):
-                    ph_id = ph.get("result", {}).get("message_id")
-            try:
-                tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
-            except Exception:
-                pass
-            # Fetch market
-            try:
-                market = fetch_market(text) or {}
-            except Exception:
-                market = {}
-            if not market.get("ok"):
-                import re as _re
-                if _re.match(r"^0x[a-fA-F0-9]{64}$", text):
-                    pass  # tx hash fallthrough
-                elif _re.match(r"^0x[a-fA-F0-9]{40}$", text):
-                    market.setdefault("tokenAddress", text)
-                market.setdefault("chain", market.get("chain") or "—")
-                market.setdefault("sources", [])
-                market.setdefault("priceChanges", {})
-                market.setdefault("links", {})
-            # Enrich links (DEX, Scan, DexScreener)
-            try:
-                _links = market.get("links") or {}
-            except Exception:
-                _links = {}
-            _chain = (market.get("chain") or "").lower()
-            _token = (market.get("tokenAddress") or "").lower()
-            _pair  = (market.get("pairAddress") or "").lower()
-            _dexId = (_links.get("dexId") or "").lower()
-            if not _links.get("dexscreener") and _chain and _pair:
-                _links["dexscreener"] = f"https://dexscreener.com/{_chain}/{_pair}"
-            if not _links.get("scan") and _token:
-                _scan_bases = {
-                    "ethereum": "https://etherscan.io/token/",
-                    "eth": "https://etherscan.io/token/",
-                    "bsc": "https://bscscan.com/token/",
-                    "binance": "https://bscscan.com/token/",
-                    "polygon": "https://polygonscan.com/token/",
-                    "matic": "https://polygonscan.com/token/",
-                    "arbitrum": "https://arbiscan.io/token/",
-                    "arb": "https://arbiscan.io/token/",
-                    "base": "https://basescan.org/token/",
-                    "optimism": "https://optimistic.etherscan.io/token/",
-                    "op": "https://optimistic.etherscan.io/token/",
-                    "avalanche": "https://snowtrace.io/token/",
-                    "avax": "https://snowtrace.io/token/",
-                    "fantom": "https://ftmscan.com/token/",
-                    "ftm": "https://ftmscan.com/token/",
-                }
-                base = _scan_bases.get(_chain)
-                if base:
-                    _links["scan"] = base + _token
-            if not _links.get("dex") and _token:
-                if _dexId in ("uniswap", "uniswapv2", "uniswapv3") and _chain in ("ethereum","base","arbitrum","polygon","optimism"):
-                    _links["dex"] = f"https://app.uniswap.org/explore/tokens/{_chain}/{_token}"
-                elif _dexId.startswith("pancake") and _chain in ("bsc","binance"):
-                    _links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={_token}"
-                elif "quickswap" in _dexId and _chain == "polygon":
-                    _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
-            market["links"] = _links
-            # Verdict + webintel
-            verdict = compute_verdict(market)
-            links = (market.get("links") or {})
-            site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
-            web = {"whois": {"created": None, "registrar": None}, "ssl": {"ok": None, "expires": None, "issuer": None}, "wayback": {"first": None}}
-            try:
-                if site_url:
-                    web = analyze_website(site_url)
-            except Exception:
-                pass
-            try:
-                dom = derive_domain(site_url)
-            except Exception:
-                dom = None
-            ctx = {"webintel": _enrich_webintel_fallback(dom, web), "domain": dom}
-            quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
-            try:
-                _extras = _build_quick_extras(verdict, market)
-                if _extras:
-                    quick = f"{quick}\n\n{_extras}"
-            except Exception:
-                pass
-            print('[QS] sending quick (no parse_mode)'); send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="quick"), parse_mode=None)
-            # Optional: clean up placeholder
-            if ph_id:
+            data['text'] = ch
+        if disable_web_page_preview is not None:
+            data['disable_web_page_preview'] = bool(disable_web_page_preview)
+        if reply_markup and idx == 0:
+            data['reply_markup'] = json.dumps(reply_markup)
+        resp = tg('sendMessage', data)
+        if not (isinstance(resp, dict) and resp.get('ok')):
+            data.pop('parse_mode', None)
+            data['text'] = ch
+            resp2 = tg('sendMessage', data)
+            if not (isinstance(resp2, dict) and resp2.get('ok')):
                 try:
-                    tg("deleteMessage", {"chat_id": chat_id, "message_id": ph_id})
+                    print('sendMessage failed for chunk', idx, resp, resp2)
                 except Exception:
                     pass
-            return jsonify({"ok": True})
-        except Exception as _inner:
-            try: print("QUICKSCAN inner error:", _inner)
-            except Exception: pass
-            return jsonify({"ok": True})
-    except Exception as e:
-        try:
-            print("QUICKSCAN FLOW ERROR:", e)
-        except Exception:
-            pass
-        return jsonify({"ok": True})
+                last_resp = resp2 if isinstance(resp2, dict) else resp
+            else:
+                last_resp = resp2
+        else:
+            last_resp = resp
+    return last_resp if last_resp is not None else {'ok': False, 'error': 'no send attempt'}
+
+def send_message_raw(chat_id, text, reply_markup=None):
+    data = {"chat_id": chat_id, "text": str(text)}
+    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+    return tg("sendMessage", data)
+
+
 def _on_message_core(msg):
-    print('[MSG] _on_message_core enter')
-    verdict = None
-    market = {}
-    quick = ""
-    details = ""
-    # ---- WATCHLITE: early intercept of new commands (/watch, /unwatch, /watchlist, /alerts*) ----
     try:
-        _wl_text = (msg.get("text") or msg.get("caption") or "")
-        _wl_chat = ((msg.get("chat") or {}).get("id") or (msg.get("from") or {}).get("id"))
-        if _wl_chat and isinstance(_wl_text, str):
-            if watchlite.handle_message_commands(_wl_chat, _wl_text, None, msg):
-                return jsonify({"ok": True})
-    except Exception as _e_wl_early:
-        try:
-            print("WATCHLITE early intercept error:", _e_wl_early)
-        except Exception:
-            pass
-    # ---- /WATCHLITE early intercept ----
-
-    chat_id = msg["chat"]["id"]
-    text = (msg.get("text") or "").strip()
-
-    import re as _re
-    # --- A) Normalize watch/unwatch forms before anything else ---
-    text = (msg.get("text") or "").strip()
-    print(f"[PARSE] raw={repr(text)}")
-    if _re.match(r"^(watch|unwatch)(/|\s)+", text, flags=_re.I):
-        text = _re.sub(r"^(watch|unwatch)(/|\s)+", lambda m: f"/{m.group(1).lower()} ", text, flags=_re.I).strip()
-        msg["text"] = text
-        print(f"[PARSE] normalized to={repr(text)}")
-    low = text.lower()
-    # Early path: non-command messages trigger QuickScan flow
-    if not low.startswith('/'):
-        return _run_quickscan_flow(chat_id, text, msg)
-
-    # --- WATCHLITE intercept: commands (/watch, /unwatch, /watchlist, /alerts*) ---
-    try:
-        if watchlite.handle_message_commands(chat_id, text, load_bundle, msg):
-            return jsonify({"ok": True})
-    except Exception as _e_wl_msg:
-        try:
-            print("WATCHLITE handle_message_commands error:", _e_wl_msg)
-        except Exception:
-            pass
-    # --- /WATCHLITE intercept ---
-
-    
-    if low.startswith("/start"):
-        try:
+        chat = msg.get("chat", {}) or {}
+        chat_id = chat.get("id")
+        raw_text = (msg.get("text") or "").strip()
+    except Exception:
+        return jsonify({"ok": True})
+    if not raw_text:
+        return jsonify({"ok": True})
+    if raw_text.startswith("/"):
+        cmd_parts = raw_text.lower().split()
+        cmd = cmd_parts[0][1:]
+        args = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
+        if cmd in ("start", "help"):
+            # Mark user seen for personalized welcome
             _mark_seen(chat_id)
-        except Exception:
-            pass
-        is_new = _is_new_user(chat_id)
-        try:
-            _text = _welcome_text(is_new)
-            kb = _build_start_keyboard(chat_id, _pricing_links())
-            send_message(chat_id, _text, reply_markup=kb)
+            if FORCE_EN_START:
+                send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+            else:
+                on_start(msg)
             return jsonify({"ok": True})
-        except Exception as _e_start:
-            # Fallback to legacy welcome
-            print('[START] sending welcome'); send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        elif cmd == "quickscan":
+            send_message(chat_id, build_hint_quickscan(HINT_CLICKABLE_LINKS), reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
             return jsonify({"ok": True})
-
-    if low.startswith("/diag"):
-        _handle_diag_command(chat_id)
-        return jsonify({"ok": True})
-
-    if low.startswith("/upgrade"):
-        send_message(chat_id, UPGRADE_TEXT, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-        return jsonify({"ok": True})
-
-    if low.startswith("/quickscan"):
-        send_message(chat_id, build_hint_quickscan(HINT_CLICKABLE_LINKS), reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-        return jsonify({"ok": True})
-
-    if low.startswith("/limits"):
+        elif cmd == "upgrade":
+            send_message(chat_id, UPGRADE_TEXT, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="upgrade"))
+            return jsonify({"ok": True})
+        elif cmd == "limits":
+            is_pro, tier = can_scan(chat_id)
+            remaining = FREE_DAILY_SCANS - register_scan(chat_id, dry=True) if not is_pro else "unlimited"
+            txt = f"You are *{tier}* user\n• Daily QuickScans: {'unlimited' if is_pro else FREE_DAILY_SCANS}\n• Remaining: {remaining}"
+            send_message(chat_id, txt, reply_markup=None)
+            return jsonify({"ok": True})
+        elif cmd == "diag":
+            _handle_diag_command(chat_id)
+            return jsonify({"ok": True})
+        # WATCHLITE commands (/watch, /watchlist, /unwatch, etc.)
         try:
-            ok, tier = can_scan(chat_id)
-            plan = (tier or "Free")
-            allowed = "✅ allowed now" if ok else "⛔ not allowed now"
-        except Exception:
-            plan, allowed = "Free", "—"
-        msg_txt = (
-            f"*Plan:* {plan}\n"
-            f"*Free quota:* {FREE_DAILY_SCANS}/day\n"
-            f"*Now:* {allowed}\n"
-        )
-        send_message(chat_id, msg_txt, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-        return jsonify({"ok": True})
-
-    # Guard: don't show welcome for watch-related commands; delegate to watchlite
-    try:
-        if re.match(r'^/(watch|unwatch|watchlist|alerts[\w_]*)', low):
-            if watchlite.handle_message_commands(chat_id, text, load_bundle, msg):
+            if watchlite.handle_message_commands(chat_id, raw_text, load_bundle, msg):
                 return jsonify({"ok": True})
-            # Even if not handled, avoid falling through to generic welcome for these commands
-            send_message(chat_id, "Usage: `/watch 0x...`, `/unwatch 0x...`, `/watchlist`, `/alerts_on|/alerts_off|/alerts`")
-            return jsonify({"ok": True})
-    except Exception as _e_wl_guard:
-        try:
-            print("WATCHLITE guard error:", _e_wl_guard)
-        except Exception:
-            pass
-    # Only non-command messages trigger scan
-    if text.startswith("/"):
-        print('[START] sending welcome'); send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-        return jsonify({"ok": True})
-
-        ok, _tier = can_scan(chat_id)
-        if not ok:
-            send_message(chat_id, "Free scans exhausted. Use /upgrade or open Premium.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
-            return jsonify({"ok": True})
-        # --- Processing indicator (address-only) ---
-        ph_id = None
-        if _is_contract_address(text):
-            ph = send_message(chat_id, "Processing…")
-            ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
+        except Exception as e_wl:
             try:
-                tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+                print("WATCHLITE command error:", e_wl)
             except Exception:
                 pass
-        # --- /Processing indicator ---
-
-
-        # QuickScan flow
-        try:
-            market = fetch_market(text) or {}
-        except Exception as e:
-            print('QUICKSCAN ERROR (fetch_market)', e, traceback.format_exc())
-            market = {}
-
-        if not market.get("ok"):
-            if re.match(r"^0x[a-fA-F0-9]{64}$", text):
-                pass
-            elif re.match(r"^0x[a-fA-F0-9]{40}$", text):
-                market.setdefault("tokenAddress", text)
-            market.setdefault("chain", market.get("chain") or "—")
-            market.setdefault("sources", [])
-            market.setdefault("priceChanges", {})
-            market.setdefault("links", {})
-        # --- OMEGA-713K D1: robust Age computation ---
-        try:
-            _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
-            _now = market.get("asOf") or int(time.time())
-
-            # If _ts missing, pull from DexScreener pairs endpoint (one-shot, 5s)
-            if not _ts:
-                try:
-                    import os as _os, requests as _rq
-                    _chain0 = (market.get("chain") or "").lower()
-                    _map = {"ethereum":"ethereum","eth":"ethereum","bsc":"bsc","binance":"bsc","polygon":"polygon","matic":"polygon",
-                            "arbitrum":"arbitrum","base":"base","optimism":"optimism","op":"optimism","avalanche":"avalanche","fantom":"fantom","ftm":"fantom"}
-                    _short = _map.get(_chain0, _chain0)
-                    _pair_addr0 = (market.get("pairAddress") or "").lower()
-                    if _short and _pair_addr0:
-                        _base0 = (_os.getenv("DS_PROXY_URL") or _os.getenv("DEXSCREENER_PROXY_BASE") or "https://api.dexscreener.com").rstrip("/")
-                        _url0 = f"{_base0}/latest/dex/pairs/{_short}/{_pair_addr0}"
-                        _r0 = _rq.get(_url0, timeout=5)
-                        if _r0.ok:
-                            _j0 = _r0.json() or {}
-                            _pd0 = _j0.get("pair")
-                            if not isinstance(_pd0, dict):
-                                _ps0 = _j0.get("pairs") or _j0.get("data") or []
-                                if isinstance(_ps0, list) and _ps0:
-                                    _pd0 = _ps0[0] if isinstance(_ps0[0], dict) else {}
-                            if isinstance(_pd0, dict):
-                                _ts = _pd0.get("pairCreatedAt") or _pd0.get("createdAt") or _pd0.get("launchedAt")
-                except Exception:
-                    pass
-    
-            if isinstance(_ts, (int, float)) and _ts:
-                # normalize milliseconds to seconds when needed
-                if _ts > 10_000_000_000:  # looks like ms
-                    _ts = int(_ts // 1000)
-                _age_days = max(0.0, round((_now - int(_ts)) / 86400.0, 2))
-                market["ageDays"] = _age_days
-        except Exception:
-            pass
-        # --- /D1 Age ---
-
-        # --- OMEGA-713K: Buttons links enrichment ---
-        try:
-            _links = market.get("links") or {}
-        except Exception:
-            _links = {}
-        _chain = (market.get("chain") or "").lower()
-        _token = (market.get("tokenAddress") or "").lower()
-        _pair  = (market.get("pairAddress") or "").lower()
-        _dexId = (_links.get("dexId") or "").lower()
-
-        # DexScreener link (kept separate from real DEX)
-        if not _links.get("dexscreener"):
-            ds_url = (_links.get("dexscreener") or "").strip()
-            if not ds_url and _chain and _pair:
-                ds_url = f"https://dexscreener.com/{_chain}/{_pair}"
-            if ds_url:
-                _links["dexscreener"] = ds_url
-
-        # Scan link per chain
-        if not _links.get("scan") and _token:
-            _scan_bases = {
-                "ethereum": "https://etherscan.io/token/",
-                "eth": "https://etherscan.io/token/",
-                "bsc": "https://bscscan.com/token/",
-                "binance": "https://bscscan.com/token/",
-                "polygon": "https://polygonscan.com/token/",
-                "matic": "https://polygonscan.com/token/",
-                "arbitrum": "https://arbiscan.io/token/",
-                "arb": "https://arbiscan.io/token/",
-                "base": "https://basescan.org/token/",
-                "optimism": "https://optimistic.etherscan.io/token/",
-                "op": "https://optimistic.etherscan.io/token/",
-                "avalanche": "https://snowtrace.io/token/",
-                "avax": "https://snowtrace.io/token/",
-                "fantom": "https://ftmscan.com/token/",
-                "ftm": "https://ftmscan.com/token/",
-            }
-            base = _scan_bases.get(_chain)
-            if base:
-                _links["scan"] = base + _token
-
-        # Real DEX link (shows as 'Open in DEX' if not DexScreener)
-        if not _links.get("dex") and _token:
-            if _dexId in ("uniswap", "uniswapv2", "uniswapv3") and _chain in ("ethereum","base","arbitrum","polygon","optimism"):
-                _links["dex"] = f"https://app.uniswap.org/explore/tokens/{_chain}/{_token}"
-            elif _dexId.startswith("pancake") and _chain in ("bsc","binance"):
-                _links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={_token}"
-            elif "quickswap" in _dexId and _chain == "polygon":
-                _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
-
-        # Discover project website if missing (DexScreener fallback)
-        if not _links.get("site"):
-            try:
-                _site_guess = _discover_site_via_ds(_chain, _pair, _token, timeout=6)
-                if _site_guess:
-                    _links["site"] = _site_guess
-            except Exception:
-                pass
-        # Prefer known_domains override if site is missing
-        if not _links.get("site") and _token:
-            _known = _load_known_domains()
-            _site = (_known.get(_token.lower()) or {}).get("site") if isinstance(_known, dict) else None
-            if _site:
-                _links["site"] = _site
-        market["links"] = _links
-        # --- /OMEGA-713K ---
-
-
-        # Ensure asof timestamp and pair age
-        if not market.get("asof"):
-            market["asof"] = int(time.time() * 1000)
-        if not market.get("ageDays"):
-            pc = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
-            if pc:
-                try:
-                    ts = int(pc)
-                except Exception:
-                    ts = None
-                if ts:
-                    if ts < 10**12:
-                        ts *= 1000
-                    age_days = (time.time()*1000 - ts) / (1000*60*60*24)
-                    if age_days < 0:
-                        age_days = 0
-                    market["ageDays"] = round(age_days, 2)
-
-        verdict = compute_verdict(market)
-        # --- precompute website intel and pass into ctx so renderers can show it ---
-        links = (market.get("links") or {})
-        web = {
-
-            "whois": {"created": None, "registrar": None},
-
-            "ssl": {"ok": None, "expires": None, "issuer": None},
-
-            "wayback": {"first": None}
-
-        }
-
-        site_url = None
-        try:
-
-            site_url = links.get("site") or os.getenv("WEBINTEL_SITE_OVERRIDE")
-
-            if site_url:
-
-                web = analyze_website(site_url)
-
-        except Exception:
-
-            pass
-
-        web = _enrich_webintel_fallback(derive_domain(site_url), web)
-        # >>> FIX: pass precomputed webintel into ctx so renderers see it
-        try:
-            _dom = derive_domain(site_url)
-        except Exception:
-            _dom = None
-        ctx = {"webintel": web or {}, "domain": _dom}
-
-        quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
-    # --- D0: QuickScan extras (rating + chart) ---
-    try:
-        _extras = _build_quick_extras(verdict, market)
-        if _extras:
-            quick = f"{quick}\n\n{_extras}"
-    except Exception:
-        pass
-    # --- /D0 extras ---
-        # Reuse same ctx (no re-computation)
-        details = render_details(verdict if verdict is not None else object(), market or {}, ctx, DEFAULT_LANG)
-        why = safe_render_why(verdict, market, DEFAULT_LANG)
-        whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
-
-        # --- AI Why++ enrichment (OpenAI) ----------------------------------------
-        try:
-            _ctx_onchain = None
-            if os.getenv("WHYPP_ENRICH_ONCHAIN","1") == "1":
-                try:
-                    _token_addr = market.get('tokenAddress')
-                    _chain_hint = (market.get('chain') or market.get('chainId') or 'ethereum')
-                    _ctx_onchain = fetch_onchain_factors(_token_addr, chain_hint=_chain_hint)
-                except Exception:
-                    _ctx_onchain = None
-            _webintel = (ctx.get('webintel') if isinstance(ctx, dict) else {}) or {}
-            _ai_whypp = _generate_whypp_ai_enriched(market, why, _webintel, _ctx_onchain)
-            if _ai_whypp:
-                whypp = _ai_whypp
-        except Exception as _e_ai_over:
-            pass
-        # --------------------------------------------------------------------------
-        try:
-            ch_ = (market.get("chain") or "").lower()
-            _map = {"ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op","base":"base","avalanche":"avax","fantom":"ftm"}
-            _short = _map.get(ch_, ch_ or "eth")
-            pair_addr = market.get("pairAddress") or resolve_pair(_short, market.get("tokenAddress"))
-            info = check_lp_lock_v2(_short, pair_addr)
-            try:
-                if isinstance(info, dict) and not info.get('chain'):
-                    info['chain'] = _short
-            except Exception:
-                pass
-            lp = render_lp(info, DEFAULT_LANG)
-        except TypeError:
-            lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
-        except Exception:
-            lp = "LP lock: unknown"
-        # --- D0 LP newbie hints ---
-        try:
-            lp = f"{lp}\n\n_What it means:_\n• 🔥 Renounced — owner is set to the zero address; no central control\n• 🔒 Locked — LP tokens are locked until the shown date"
-        except Exception:
-            pass
-        # --- /D0 LP newbie hints ---
-
-        links = (market.get("links") or {})
-        bundle = {
-            "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
-            "reasons": list(getattr(verdict, "reasons", []) or []),
-            "market": {
-                "pairSymbol": market.get("pairSymbol"), "chain": market.get("chain"),
-                "price": market.get("price"), "fdv": market.get("fdv"), "mc": market.get("mc"),
-                "liq": market.get("liq"), "vol24h": market.get("vol24h"),
-                "priceChanges": market.get("priceChanges") or {},
-                "tokenAddress": market.get("tokenAddress"), "pairAddress": market.get("pairAddress"),
-                "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
-            },
-            "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
-            "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
-        }
-
-        sent = print('[QS] sending quick'); send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
-        msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
-        if msg_id:
-            store_bundle(chat_id, msg_id, bundle)
-            try:
-                # WATCHLITE: remember last token per chat for /watch without args
-                watchlite.note_quickscan(chat_id, bundle, msg_id)
-            except Exception:
-                pass
-
-            try:
-                tg("editMessageReplyMarkup", {
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "reply_markup": json.dumps(build_keyboard(chat_id, msg_id, links, ctx="quick"))
-                })
-            except Exception as e:
-                print("editMessageReplyMarkup failed:", e)
-
-        # --- Remove processing indicator if present ---
-        if 'ph_id' in locals() and ph_id:
-            try:
-                tg("deleteMessage", {"chat_id": chat_id, "message_id": ph_id})
-            except Exception:
-                pass
-        # --- /Remove processing indicator ---
-        register_scan(chat_id)
-        return jsonify({"ok": True})
-
-
-
-def _callback_fresh(update):
-    try:
-        cb = update.get("callback_query") or {}
-        msg = cb.get("message") or {}
-        ts = msg.get("date")
-        if ts is None:
-            return True
-        import time
-        return (int(time.time()) - int(ts)) <= 8
-    except Exception:
-        return True
+    # Non-command or unknown command -> try scan
+    if can_scan(chat_id)[0]:
+        quick_scan(chat_id, raw_text)
+    else:
+        send_message(chat_id, "Daily limit reached. Use /upgrade for unlimited access.", reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="upgrade"))
+    return jsonify({"ok": True})
 
 def on_message(msg):
 
@@ -1786,7 +1233,7 @@ def on_message(msg):
                 try:
                     quick = render_quick(candidate, lang='en')
                     if quick:
-                        print('[QS] sending quick'); send_message(chat_id, quick, parse_mode="HTML")
+                        send_message(chat_id, quick, parse_mode="HTML")
                         handled = True
                 except Exception:
                     pass
@@ -2007,7 +1454,7 @@ def on_callback(cb):
             answer_callback_query(cb_id, 'On-chain ready.', False)
     elif action == "COPY_CA":
         mkt = (bundle.get("market") or {})
-        token = (mkt.get("tokenAddress") or "—")
+        token = (mkt.get("tokenAddress") or "-")
         send_message(chat_id, f"*Contract address*\n`{token}`", reply_markup=_mk_copy_keyboard(token, links))
         answer_callback_query(cb_id, "Address ready to copy.", False)
 
@@ -2021,7 +1468,7 @@ def on_callback(cb):
                 arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
                 return f"{arrow} {n:+.2f}%"
             except Exception:
-                return "—"
+                return "-"
         if action == "DELTA_M5":
             val = ch.get("m5")
         elif action == "DELTA_1H":
@@ -2128,10 +1575,10 @@ def _diag_make(token_default="0x6982508145454Ce325dDbE47a25d4ec3d2311933"):
         j2 = _rpc_call(rpc, "eth_blockNumber", [])
         rpc_ok[short] = ("result" in j1 and "result" in j2)
     actions = []
-    if not fm_ok: actions.append("dex_client.py: fetch_market() отсутствует — заменить файл.")
-    if ds_direct is False and not ds_proxy: actions.append("DexScreener блокируется — задайте DEXSCREENER_PROXY_BASE (CF worker)." )
-    if not any(v for v in rpc_ok.values() if v is not None): actions.append("Нет доступных RPC — заполните *_RPC_URL_PRIMARY.")
-    if not it_ok: actions.append("onchain_inspector.py не найден — кнопка On-chain будет пустой.")
+    if not fm_ok: actions.append("dex_client.py: fetch_market() отсутствует - заменить файл.")
+    if ds_direct is False and not ds_proxy: actions.append("DexScreener блокируется - задайте DEXSCREENER_PROXY_BASE (CF worker)." )
+    if not any(v for v in rpc_ok.values() if v is not None): actions.append("Нет доступных RPC - заполните *_RPC_URL_PRIMARY.")
+    if not it_ok: actions.append("onchain_inspector.py не найден - кнопка On-chain будет пустой.")
     summary = {
         "fetch_market_present": fm_ok,
         "onchain_present": it_ok,
@@ -2168,7 +1615,7 @@ def diag_http():
 def _format_diag(summary: dict) -> str:
     rpc_good = [k for k,v in (summary.get("rpc_ok") or {}).items() if v]
     lines = []
-    ok = lambda b: "✅" if b else ("❌" if b is False else "—")
+    ok = lambda b: "✅" if b else ("❌" if b is False else "-")
     lines.append(f"*fetch_market()*: {ok(summary.get('fetch_market_present'))}")
     lines.append(f"*On-chain модуль*: {ok(summary.get('onchain_present'))}")
     lines.append(f"*DexScreener direct*: {ok(summary.get('dexscreener_direct_ok'))}")
@@ -2192,7 +1639,7 @@ def _handle_diag_command(chat_id: int):
 def _mk_copy_keyboard(token: str, links: dict | None):
     links = links or {}
     kb = {"inline_keyboard": []}
-    if token and token != "—":
+    if token and token != "-":
         kb["inline_keyboard"].append([{
             "text": "📋 Copy to input",
             "switch_inline_query_current_chat": token
@@ -2251,7 +1698,7 @@ def _build_html_report(bundle: dict) -> bytes:
         mp = {"ethereum":"Ethereum","eth":"Ethereum","bsc":"BSC","binance smart chain":"BSC","polygon":"Polygon","matic":"Polygon",
               "arbitrum":"Arbitrum","arb":"Arbitrum","optimism":"Optimism","op":"Optimism","base":"Base","avalanche":"Avalanche",
               "avax":"Avalanche","fantom":"Fantom","ftm":"Fantom","sol":"Solana","solana":"Solana"}
-        return mp.get(c, c.capitalize() if c else "—")
+        return mp.get(c, c.capitalize() if c else "-")
 
     def fmt_time_ms(ts):
         try:
@@ -2259,10 +1706,10 @@ def _build_html_report(bundle: dict) -> bytes:
             if ts < 10**12: ts *= 1000
             return _dt.datetime.utcfromtimestamp(ts/1000.0).strftime("%Y-%m-%d %H:%M UTC")
         except Exception:
-            return "—"
+            return "-"
 
-    pair  = g(m, "pairSymbol", default="—")
-    chain = fmt_chain(g(m, "chain", default="—"))
+    pair  = g(m, "pairSymbol", default="-")
+    chain = fmt_chain(g(m, "chain", default="-"))
     price = fmt_money(g(m, "price", default=None))
     fdv   = g(m, "fdv", default=None)
     mc    = g(m, "mc", default=None)
@@ -2271,7 +1718,7 @@ def _build_html_report(bundle: dict) -> bytes:
     ch5   = g(m, "priceChanges","m5", default=None)
     ch1   = g(m, "priceChanges","h1", default=None)
     ch24  = g(m, "priceChanges","h24", default=None)
-    token = g(m, "tokenAddress", default="—")
+    token = g(m, "tokenAddress", default="-")
     asof  = fmt_time_ms(g(m, "asof", default=None))
 
     whois = g(web, "whois", default={})
@@ -2291,7 +1738,7 @@ def _build_html_report(bundle: dict) -> bytes:
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{html.escape(str(pair))} — Metridex QuickScan</title>
+<title>{html.escape(str(pair))} - Metridex QuickScan</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body {{ background:#0b0b0f; color:#e7e7ea; font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif; margin:0; }}
@@ -2360,7 +1807,7 @@ pre {{ white-space:pre-wrap; }}
 def _build_html_report_safe(bundle: dict) -> bytes:
     try:
         def _s(x): 
-            return str(x) if x is not None else "—"
+            return str(x) if x is not None else "-"
         def _fmt_time(v):
             try:
                 ts = int(v)
@@ -2369,12 +1816,12 @@ def _build_html_report_safe(bundle: dict) -> bytes:
                 from datetime import datetime as _dt
                 return _dt.utcfromtimestamp(ts/1000.0).strftime("%Y-%m-%d %H:%M UTC")
             except Exception:
-                return "—"
+                return "-"
         def _fmt_num(v, prefix="$"):
             try:
                 n = float(v)
             except Exception:
-                return "—"
+                return "-"
             a = abs(n)
             if a >= 1_000_000_000: s = f"{n/1_000_000_000:.2f}B"
             elif a >= 1_000_000:  s = f"{n/1_000_000:.2f}M"
@@ -2387,9 +1834,9 @@ def _build_html_report_safe(bundle: dict) -> bytes:
                 arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
                 return f"{arrow} {n:+.2f}%"
             except Exception:
-                return "—"
+                return "-"
         def _fmt_chain(c):
-            c = (str(c) if c is not None else "—").strip().lower()
+            c = (str(c) if c is not None else "-").strip().lower()
             mp = {
                 "ethereum":"Ethereum","eth":"Ethereum",
                 "bsc":"BSC","binance smart chain":"BSC",
@@ -2401,7 +1848,7 @@ def _build_html_report_safe(bundle: dict) -> bytes:
                 "fantom":"Fantom","ftm":"Fantom",
                 "sol":"Solana","solana":"Solana",
             }
-            return mp.get(c, c.capitalize() if c else "—")
+            return mp.get(c, c.capitalize() if c else "-")
         def _fmt_age(v):
             try:
                 d = float(v)
@@ -2409,8 +1856,7 @@ def _build_html_report_safe(bundle: dict) -> bytes:
                 if d < 1:      return f"{d*24:.1f}h"
                 return f"{d:.1f}d"
             except Exception:
-                return "—"
-
+                return "-"
 
 
         m = bundle.get("market") or {}
@@ -2435,10 +1881,9 @@ def _build_html_report_safe(bundle: dict) -> bytes:
         score_ui = ("15" if (str(score) in ("0","0.0") and str(level).lower().startswith("low")) else str(score))
 
 
-
         html = (
             "<!doctype html><html><head><meta charset='utf-8'/>"
-            "<title>Metridex QuickScan — " + pair + "</title>"
+            "<title>Metridex QuickScan - " + pair + "</title>"
             "<style>"
             "body{background:#0b0b0f;color:#e7e5e4;font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;margin:24px}"
             "h1{font-size:24px;margin:0 0 12px}"
@@ -2447,7 +1892,7 @@ def _build_html_report_safe(bundle: dict) -> bytes:
             ".pill{display:inline-block;background:#1f2937;border-radius:999px;padding:3px 8px;margin-left:8px;color:#f59e0b;font-weight:600}"
             "a{color:#93c5fd}"
             "</style></head><body>"
-            "<h1>Metridex QuickScan — " + pair + " <span class='pill'>Score: " + score_ui + "</span></h1>"
+            "<h1>Metridex QuickScan - " + pair + " <span class='pill'>Score: " + score_ui + "</span></h1>"
             "<div class='meta'>"
             "<div>Chain: " + chain + "</div><div>Price: " + price + "</div>"
             "<div>FDV: " + fdv + "</div><div>MC: " + mc + "</div>"
@@ -2558,11 +2003,11 @@ def on_start(message):
     body = (
         "<b>Welcome back!</b> What should we scan today?\n"
         "<b>Scanned 1M+ tokens</b>\n"
-        "Referral: <code>/referral</code> — invite a friend and get a premium scan\n\n"
+        "Referral: <code>/referral</code> - invite a friend and get a premium scan\n\n"
         "Paste a <b>token address</b>, <b>TX hash</b> or <b>URL</b> to scan.\n"
         "Examples:\n"
-        "<code>0x6982508145454ce325ddbe47a25d4ec3d2311933</code> — ERC-20\n"
-        "dexscreener.com/ethereum/0x… — pair\n\n"
+        "<code>0x6982508145454ce325ddbe47a25d4ec3d2311933</code> - ERC-20\n"
+        "dexscreener.com/ethereum/0x… - pair\n\n"
         "Then tap <b>More details</b> / <b>Why?</b> / <b>On-chain</b> for deeper info."
     )
     try:
