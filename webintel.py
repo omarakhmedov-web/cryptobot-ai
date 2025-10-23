@@ -97,9 +97,8 @@ def _https_head_probe(host: str) -> Dict[str, Any]:
     return {"ok": ok, "_server": server, "_hsts": hsts}
 
 def _https_tls_info(host: str) -> Tuple[Optional[bool], Optional[str], Optional[str]]:
-    """Perform TLS handshake to obtain notAfter and issuer CN.
-    Returns (ssl_ok, expires_iso_or_raw, issuer_cn). All None on failure.
-    """
+    """Return (ssl_ok, expires_iso_or_raw, issuer_cn)."""
+    # Strategy 1: verified handshake
     try:
         ctx = ssl.create_default_context()
         with socket.create_connection((host, 443), timeout=_WE_TLS_TIMEOUT) as sock:
@@ -113,8 +112,7 @@ def _https_tls_info(host: str) -> Tuple[Optional[bool], Optional[str], Optional[
                 if isinstance(grp, tuple):
                     for kv in grp:
                         if len(kv) >= 2 and kv[0] == 'commonName':
-                            issuer_cn = kv[1]
-                            break
+                            issuer_cn = kv[1]; break
         expires_iso = None
         if not_after:
             try:
@@ -125,47 +123,89 @@ def _https_tls_info(host: str) -> Tuple[Optional[bool], Optional[str], Optional[
                 expires_iso = raw_not_after  # fallback to raw string
         return True, expires_iso, issuer_cn
     except Exception:
-        # Unverified fallback to at least extract notAfter/issuer
-        try:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            with socket.create_connection((host, 443), timeout=_WE_TLS_TIMEOUT) as sock:
-                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                    cert = ssock.getpeercert()
-            not_after = cert.get("notAfter"); raw_not_after = not_after
-            issuer = cert.get("issuer")
-            issuer_cn = None
-            if isinstance(issuer, tuple):
-                for grp in issuer:
-                    if isinstance(grp, tuple):
-                        for kv in grp:
-                            if len(kv) >= 2 and kv[0] == 'commonName':
-                                issuer_cn = kv[1]
-                                break
-            expires_iso = None
-            if not_after:
-                try:
-                    from datetime import datetime
-                    dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
-                    expires_iso = dt.date().isoformat()
-                except Exception:
-                    expires_iso = raw_not_after  # fallback to raw string
-            # Return None for ok so caller can fallback to HEAD; provide expires/issuer
-            return None, expires_iso, issuer_cn
-        except Exception:
-            return None, None, None
-def _wayback_first(host: str) -> Optional[str]:
+        pass
+
+    # Strategy 2: unverified handshake (get some data even if cert invalid)
     try:
-        r = _rq.get("https://web.archive.org/cdx/search/cdx", params={
-            "url": host, "output": "json", "fl": "timestamp",
-            "filter": "statuscode:200", "limit": "1",
-            "from": "19960101", "to": "99991231", "sort": "ascending",
-        }, timeout=_WE_TIMEOUT)
-        if r.ok:
-            j = r.json()
-            if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and j[1]:
-                ts = j[1][0]
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with socket.create_connection((host, 443), timeout=_WE_TLS_TIMEOUT) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+        not_after = cert.get("notAfter"); raw_not_after = not_after
+        issuer = cert.get("issuer")
+        issuer_cn = None
+        if isinstance(issuer, tuple):
+            for grp in issuer:
+                if isinstance(grp, tuple):
+                    for kv in grp:
+                        if len(kv) >= 2 and kv[0] == 'commonName':
+                            issuer_cn = kv[1]; break
+        expires_iso = None
+        if not_after:
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+                expires_iso = dt.date().isoformat()
+            except Exception:
+                expires_iso = raw_not_after
+        return None, expires_iso, issuer_cn
+    except Exception:
+        pass
+
+    # Strategy 3: ssl.get_server_certificate (PEM) + decode
+    try:
+        pem = ssl.get_server_certificate((host, 443))
+        try:
+            # Python internal decoder (available in CPython)
+            from ssl import PEM_cert_to_DER_cert
+            from _ssl import _test_decode_cert
+            info = _test_decode_cert(PEM_cert_to_DER_cert(pem))
+            raw_not_after = info.get("notAfter")
+        except Exception:
+            raw_not_after = None
+        expires_iso = None
+        if raw_not_after:
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(raw_not_after, "%b %d %H:%M:%S %Y %Z")
+                expires_iso = dt.date().isoformat()
+            except Exception:
+                expires_iso = raw_not_after
+        return None, expires_iso, None
+    except Exception:
+        return None, None, None
+def _wayback_first(host: str) -> Optional[str]:
+    def _cdx_query(u: str) -> Optional[str]:
+        try:
+            r = _rq.get("https://web.archive.org/cdx/search/cdx", params={
+                "url": u, "output": "json", "fl": "timestamp",
+                "filter": "statuscode:200", "limit": "1",
+                "from": "19960101", "to": "99991231", "sort": "ascending",
+            }, timeout=_WE_TIMEOUT)
+            if r.ok:
+                j = r.json()
+                if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and j[1]:
+                    ts = j[1][0]
+                    return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+        except Exception:
+            return None
+        return None
+
+    # Try exact host, then wildcard path, then www
+    for candidate in (host, f"{host}/*", f"www.{host}", f"www.{host}/*"):
+        d = _cdx_query(candidate)
+        if d:
+            return d
+
+    # Fallback to "available"
+    try:
+        rr = _rq.get(f"https://archive.org/wayback/available?url={host}", timeout=6)
+        if rr.ok:
+            jj = rr.json(); m = jj.get("archived_snapshots", {}).get("closest", {})
+            ts = (m.get("timestamp") or "")[:8]
+            if ts:
                 return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
     except Exception:
         pass
