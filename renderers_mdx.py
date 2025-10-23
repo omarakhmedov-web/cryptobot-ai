@@ -1,16 +1,8 @@
-# === D0 PATCH (renderers_mdx) ===
-# Build: 2025-10-23 17:46:48 UTC
-# - ASCII sparkline in quick replies
-# - Risk rating N/10 with emoji
-# - Details: compact parameter — value + Security summary
-# - Why/Why++: narrative tone with at least one minus
-# - Idempotent: safe to re-apply
-
 from __future__ import annotations
 
 # === _MDX_LINKS_POLICY ===
-_show_links = True
-_show_webintel = True
+_show_links = False
+_show_webintel = False
 # === /_MDX_LINKS_POLICY ===
 import os
 
@@ -159,7 +151,8 @@ def _normalize_reason_text(line: str) -> str:
 
 # === Module-scope helper: pretty registrar name (used in RDAP & Website) ===
 def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
-    # Back-compat alias for registrar formatter
+
+# Back-compat alias for registrar formatter
     s = (val or "").strip()
     if not s or s in ("—","n/a","N/A","NA"):
         return "n/a"
@@ -411,7 +404,7 @@ HSTS_SHOW_MAXAGE_ONLY = (os.getenv("HSTS_SHOW_MAXAGE_ONLY", "1") not in ("0","fa
 RDAP_DNSSEC_SHOW_UNSIGNED = (os.getenv("RDAP_DNSSEC_SHOW_UNSIGNED", "0") not in ("0","false","False",""))
 BADGE_WAYBACK = (os.getenv("BADGE_WAYBACK", "1") not in ("0","false","False",""))
 DOMAIN_EMOJI_BAR = (os.getenv("DOMAIN_EMOJI_BAR", "1") not in ("0","false","False",""))
-RENDERER_BUILD_TAG = os.getenv('RENDERER_BUILD_TAG', 'v9-stable+D0-SSL-COUNTRY-EMOJI')
+RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG", "v9-stable")
 
 # Simple in-process TTL caches for network checks
 _CACHE_TTL = int(os.getenv("WEB_CACHE_TTL", "1800"))
@@ -794,12 +787,103 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
     l_scan = (links or {}).get("scan") or "—"
     l_site = (links or {}).get("site") or "—"
     if isinstance(l_site, dict):
-        try:
-            l_site = l_site.get('url') or l_site.get('href') or l_site.get('link') or '—'
-        except Exception:
-            l_site = '—'
+        l_site = l_site.get("url") or l_site.get("label") or "—"
 
-        # Website intel (robust; tolerate empty/missing ctx keys) — FIXED INDENT
+    parts: List[str] = []
+    parts.append(f"*Details — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})")
+
+    snapshot_lines = [
+        "*Snapshot*",
+        f"• Price: {price}  ({chg5}, {chg1}, {chg24})",
+        f"• FDV: {fdv}  • MC: {mc}",
+        f"• Liquidity: {liq}  • 24h Volume: {vol}",
+        f"• Age: {age}  • Source: {src_}",
+        f"• As of: {asof}",
+    ]
+    parts.append("\n".join(snapshot_lines))
+
+    parts.append(f"*Token*\n• Chain: `{chain}`\n• Address: `{token}`")
+    parts.append(f"*Pair*\n• Address: `{pair_addr}`\n• Symbol: {pair}")
+
+    # RDAP / WHOIS (optional)
+    import os as _os
+    try:
+        _enable_rdap = _os.getenv("ENABLE_RDAP", "1").lower() in ("1","true","yes")
+    except Exception:
+        _enable_rdap = True
+    if _enable_rdap and l_site and l_site != "—":
+        try:
+            from rdap_client import lookup as _rdap_lookup
+        except Exception:
+            _rdap_lookup = None
+        if _rdap_lookup:
+            try:
+                _rd = _rdap_lookup(l_site)
+            except Exception:
+                _rd = None
+            if _rd:
+                _rd_lines = ["*WHOIS/RDAP*"]
+                if _rd.get("domain"):    _rd_lines.append(f"• Domain: {_rd['domain']}")
+                if _rd.get("registrar"): _rd_lines.append(f"• Registrar: {_fmt_registrar(_rd['registrar'])}")
+                if _rd.get("registrar_id"): _rd_lines.append(f"• Registrar IANA ID: {_rd['registrar_id']}")
+                if _rd.get("created"):   _rd_lines.append(f"• Created: {_rd['created']}")
+                if _rd.get("expires"):   _rd_lines.append(f"• Expires: {_rd['expires']}")
+                if _rd.get("age_days") is not None: _rd_lines.append(f"• Domain age: {_rd['age_days']} d")
+                # Country with fallback: RDAP -> infer_country(ctx: rdap+whois+ssl) -> placeholder
+                _rd_country_val = _rd.get("country")
+                if not _rd_country_val:
+                    try:
+                        _ctx_local = {"rdap": _rd, "whois": who, "ssl": ssl}
+                        _ci = infer_country(_ctx_local)
+                        if _ci:
+                            _rd_country_val = _ci
+                    except Exception:
+                        _rd_country_val = None
+                if _rd_country_val:
+                    _rd_lines.append(f"• Country: {_rd_country_val}")
+                elif _RDAP_COUNTRY_PLACEHOLDER:
+                    _rd_lines.append("• Country: —")
+                if _rd.get("status"):
+                    try:
+                        _st = list(_rd["status"])[:4]
+                        if _st:
+                            _rd_lines.append("• Status: " + ", ".join(_status_case(x) for x in _st))
+                    except Exception:
+                        pass
+                if _rd.get("flags"):     _rd_lines.append("• RDAP flags: " + ", ".join(_rd["flags"]))
+                parts.append("\n".join(_rd_lines))
+
+    if _show_links:
+        ll = ["*Links*"]
+        if l_dex and l_dex != "—": ll.append(f"• DEX: {l_dex}")
+        if (links or {}).get("dexscreener"): ll.append(f"• DexScreener: {(links or {}).get('dexscreener')}")
+        if l_scan and l_scan != "—": ll.append(f"• Scan: {l_scan}")
+        if l_site and l_site != "—": ll.append(f"• Site: {l_site}")
+        parts.append("\n".join(ll))
+
+
+    # Helper: pretty registrar name (Website block only)
+    def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
+        s = (val or "").strip()
+        if not s or s in ("—","n/a","N/A","NA"):
+            return "n/a"
+        import re as _re
+        s = _re.sub(r"\s+", " ", s.replace(",", ", "))
+        base = s.title()
+        base = _re.sub(r"\bInc\b\.?", "Inc.", base)
+        base = _re.sub(r"\bLlc\b\.?", "LLC", base)
+        base = _re.sub(r"\bLtd\b\.?", "Ltd.", base)
+        base = _re.sub(r"\bGmbh\b", "GmbH", base)
+        base = _re.sub(r"\bAg\b", "AG", base)
+        base = _re.sub(r"\bNv\b", "NV", base)
+        base = _re.sub(r"\bBv\b", "BV", base)
+        base = _re.sub(r"\bSa\b", "S.A.", base)
+        base = _re.sub(r"\bSpa\b", "S.p.A.", base)
+        base = _re.sub(r"(?i)Namecheap", "Namecheap", base)
+        base = _re.sub(r"\s+,", ",", base)
+        base = _re.sub(r",\s*", ", ", base)
+        return base.strip()
+    # Website intel (robust; tolerate empty/missing ctx keys) — FIXED INDENT
     web = (ctx or {}).get("webintel") or {"whois": {}, "ssl": {}, "wayback": {}}
     who = (web.get("whois") or {}) if isinstance(web, dict) else {}
     ssl = (web.get("ssl") or {}) if isinstance(web, dict) else {}
@@ -914,9 +998,8 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
         w_lines.append(f"• {country_line}")
     w_lines.append(f"• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}")
     ok_val = ssl.get('ok')
-    ok_disp = ('🟢' if ok_val is True else ('🔴' if ok_val is False else '⚪'))
-    exp_val = ssl.get('expires') or 'n/a'
-    w_lines.append(f"• SSL: {ok_disp}  expires {exp_val}")
+    ok_disp = (ok_val if ok_val is not None else 'n/a')
+    w_lines.append(f"• SSL: ok={ok_disp}, expires {ssl.get('expires') or 'n/a'}")
     w_lines.append(f"• Wayback first: {way.get('first') or 'n/a'}")
     parts.append("\n".join(w_lines))
 
@@ -1111,233 +1194,40 @@ def render_lp(info: dict, lang: str = "en") -> str:
     lines.append("Links: UNCX | TeamFinance")
     lines.append("Data source: —")
     return "\n".join(lines)
-
 def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
-    """D0-SPARK-1023 v5: server-driven rating; clean WHOIS domain; no links; better Age fallback."""
-    mkt = market or {}
-    ctx = ctx or {}
-
-    # ---------- helpers ----------
-    def _safe(x, default="—"):
-        return x if (x is not None and x != "") else default
-
-    def _fmt_money(v):
+    try:
+        print("[MDX v2.6] render_details() called", flush=True)
+        return _render_details_impl(verdict, market, ctx, lang)
+    except Exception as _e:
+        import traceback as _tb
         try:
-            return _fmt_num(v, prefix="$")
-        except Exception:
-            try:
-                return f"${float(v):,.2f}"
-            except Exception:
-                return _safe(v)
-
-    def _fmt_pct_s(v):
-        try:
-            return _fmt_pct(v)
-        except Exception:
-            try:
-                f = float(v)
-                s = f"{abs(f):.2f}%"
-                if f > 0: return f"▲ +{s}"
-                if f < 0: return f"▼ -{s}"
-                return "—"
-            except Exception:
-                return "—"
-
-    def _fmt_when(ts):
-        try:
-            return _fmt_time(ts)
-        except Exception:
-            try:
-                from datetime import datetime as _dt
-                if isinstance(ts, (int,float)):
-                    t = int(ts)
-                    if t > 10**12: t //= 1000
-                    return _dt.utcfromtimestamp(t).strftime("%Y-%m-%d %H:%M UTC")
-                return str(ts or "n/a")
-            except Exception:
-                return "n/a"
-
-    def _fmt_age_days_fallback(m):
-        """Prefer ageDays; else compute from created-at timestamps."""
-        try:
-            ad = m.get("ageDays")
-            if isinstance(ad, (int,float)) and ad > 0:
-                return _fmt_age_days(ad)
+            _tb.print_exc()
         except Exception:
             pass
-        # fallbacks
         try:
-            from datetime import datetime as _dt, timezone as _tz
-            now = _dt.utcnow().replace(tzinfo=None)
-            for k in ("pairCreatedAt","pairCreatedAtMs","tokenDeployedAt","tokenCreatedAt"):
-                v = m.get(k)
-                if v is None: continue
-                t = int(v)
-                if t > 10**12: t //= 1000
-                if t < 10**9:  # seconds but too small
-                    continue
-                dt = _dt.utcfromtimestamp(t)
-                days = (now - dt).total_seconds() / 86400.0
-                if days >= 0:
-                    return f"{days:.1f} d"
+            pair = (market or {}).get("pair") or "—"
+            asof = (market or {}).get("asof") or "n/a"
+        except Exception:
+            pair, asof = "—", "n/a"
+        print(f"[MDX v2.6] render_details FAILSAFE: {type(_e).__name__}: {_e}", flush=True)
+        try:
+            print(f"[MDX v2.6] ctx: pair={pair}, asof={asof}", flush=True)
         except Exception:
             pass
-        return "—"
-
-    def _pick(s, *keys):
-        for k in keys:
-            if isinstance(s, dict) and k in s and s[k]:
-                return s[k]
-        return None
-
-    def _clean_domain(val):
-        """Return bare hostname like 'pepe.vip' from various sources; never return dict/URL."""
-        # Prefer ctx.web.whois.domain
-        if isinstance(val, str) and val:
-            v = val
-        else:
-            # try ctx.whois.domain
-            whois = ((ctx.get("web") or {}).get("whois") or {}) if isinstance(ctx, dict) else {}
-            v = whois.get("domain") or ""
-            if not v:
-                # maybe market.site as URL
-                v = _pick(mkt, "site", "website") or ""
-                if not v:
-                    # give up
-                    v = ""
-        # Parse url if looks like URL
         try:
-            if isinstance(v, str):
-                vv = v.strip().strip("'/\"")
-                if vv.startswith("http://") or vv.startswith("https://"):
-                    host = urlparse(vv).hostname or vv
-                else:
-                    host = vv
-                if host.startswith("www."):
-                    host = host[4:]
-                # restrict to hostname-like
-                return host if host and " " not in host and "http" not in host else "—"
+            _as = asof
+            if isinstance(_as, (int,float)):
+                ts = int(_as)
+                # detect ms
+                if ts > 10**12:
+                    ts = ts // 1000
+                asof_fmt = __import__("datetime").datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC")
+            else:
+                asof_fmt = str(_as)
         except Exception:
-            pass
-        return "—" if not v or isinstance(v, dict) else str(v)
+            asof_fmt = str(asof)
+        return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
 
-    # ---------- rating/emoji (server-driven) ----------
-    emoji = ""
-    rating = None
-    try:
-        if isinstance(verdict, dict):
-            rating = verdict.get("rating") or verdict.get("score")
-            emoji = verdict.get("emoji") or verdict.get("signal_emoji") or ""
-        elif isinstance(verdict, (int,float)):
-            rating = int(verdict)
-        # clamp/normalize
-        if isinstance(rating, (int,float)):
-            rating = int(rating)
-            if rating < 1 or rating > 9:
-                rating = max(1, min(9, rating))
-        else:
-            rating = None
-        # if server didn't give emoji, avoid guessing — keep empty
-    except Exception:
-        rating, emoji = None, ""
-
-    # ---------- extract fields ----------
-    pair = _safe(_pick(mkt, "pairSymbol", "pair"))
-    price = _fmt_money(_pick(mkt, "price"))
-    fdv   = _fmt_money(_pick(mkt, "fdv"))
-    mc    = _fmt_money(_pick(mkt, "mc"))
-    liq   = _fmt_money(_pick(mkt, "liq", "liquidity", "liquidityUsd", "liquidityUSD"))
-    vol   = _fmt_money(_pick(mkt, "vol24h", "volume24h"))
-    ch5   = _fmt_pct_s(_pick(_pick(mkt, "priceChanges") or {}, "m5", "m_5", "Δ5m"))
-    ch1   = _fmt_pct_s(_pick(_pick(mkt, "priceChanges") or {}, "h1", "m60", "Δ1h"))
-    ch24  = _fmt_pct_s(_pick(_pick(mkt, "priceChanges") or {}, "h24", "d1", "Δ24h"))
-    src_  = _safe(_pick(mkt, "source"), "DexScreener")
-    asof  = _fmt_when(_pick(mkt, "asof"))
-    age   = _fmt_age_days_fallback(mkt)
-    chain = _safe(_pick(mkt, "chain", "network", "chainId"), "—")
-    tk    = _safe(_pick(mkt, "tokenAddress", "token", "address"))
-    pr    = _safe(_pick(mkt, "pairAddress", "pair"))
-
-    # website intel from ctx only (no links from market)
-    web = (ctx.get('web') or ctx.get('webintel')) if isinstance(ctx, dict) else None
-    whois = (web or {}).get('whois') or {}
-    ssl   = (web or {}).get('ssl') or {}
-    wb    = (web or {}).get('wayback') or {}
-
-    domain     = _safe(whois.get('domain') or (ctx.get('domain') if isinstance(ctx, dict) else None) or ((mkt.get('links') or {}).get('site')) or '—')
-    registrar  = _safe(whois.get("registrar"))
-    iana_id    = _safe(whois.get("registrarIANA") or whois.get("iana_id"))
-    d_created  = _safe(whois.get("created"))
-    d_expires  = _safe(whois.get("expires"))
-    d_country  = _safe(whois.get("country"))
-    d_status   = _safe(whois.get("status"))
-    rdap_flags = _safe((whois.get("rdap_flags") or whois.get("rdap")))
-    first_snap = _safe(wb.get("first"))
-    ssl_ok     = ssl.get("ok")
-    ssl_exp    = _safe(ssl.get("expires"))
-
-    # ---------- build lines ----------
-    lines = []
-    if rating is not None and emoji:
-        lines.append(f"*Details — {pair}* {emoji} ({rating})")
-    else:
-        lines.append(f"*Details — {pair}*")
-
-    lines.append("*Snapshot*")
-    lines.append(f"• Price: {price} ({ch5}, {ch1}, {ch24})")
-    lines.append(f"• FDV: {fdv} • MC: {mc}")
-    lines.append(f"• Liquidity: {liq} • 24h Volume: {vol}")
-    lines.append(f"• Age: {age} • Source: {src_}")
-    lines.append(f"• As of: {asof}")
-
-    lines.append("*Token*")
-    lines.append(f"• Chain: {str(chain).capitalize() if isinstance(chain, str) else chain}")
-    lines.append(f"• Address: {tk}")
-
-    lines.append("*Pair*")
-    lines.append(f"• Address: {pr}")
-    lines.append(f"• Symbol: {pair}")
-
-    lines.append("*WHOIS/RDAP*")
-    lines.append(f"• Domain: {domain}")
-    lines.append(f"• Registrar: {registrar}")
-    lines.append(f"• Registrar IANA ID: {iana_id}")
-    lines.append(f"• Created: {d_created}")
-    lines.append(f"• Expires: {d_expires}")
-    # Domain age
-    try:
-        from datetime import datetime as _dt
-        dd = None
-        if isinstance(d_created, str) and d_created not in ('—','n/a'):
-            for fmt in ("%Y-%m-%d","%Y-%m-%dT%H:%M:%S","%Y-%m-%d %H:%M:%S"):
-                try:
-                    dd = _dt.strptime(d_created[:19], fmt)
-                    break
-                except Exception:
-                    pass
-        if dd:
-            age_days = int(((_dt.utcnow() - dd).total_seconds()) / 86400)
-            lines.append(f"• Domain age: {age_days} d")
-        else:
-            lines.append("• Domain age: — d")
-    except Exception:
-        lines.append("• Domain age: — d")
-    lines.append(f"• Country: {d_country}")
-    lines.append(f"• Status: {d_status}")
-    lines.append(f"• RDAP flags: {rdap_flags}")
-
-    lines.append("*Website intel*")
-    w_created = d_created if d_created not in (None,"") else "—"
-    w_reg     = registrar if registrar not in (None,"") else "—"
-    lines.append(f"• WHOIS: created {w_created}, registrar {w_reg}")
-    try:
-        ok_str = "True" if ssl_ok is True else ("False" if ssl_ok is False else "—")
-    except Exception:
-        ok_str = "—"
-    lines.append(f"• SSL: ok={ok_str}, expires {ssl_exp}")
-    lines.append(f"• Wayback first: {first_snap}")
-
-    return "\n".join(lines)
 
 def render_contract(info: dict, lang: str = "en") -> str:
     """
@@ -1452,32 +1342,3 @@ def age_label(ms: int | None) -> str:
     if days < 3:
         return f"~{days:.1f} d"
     return f"~{round(days)} d"
-
-
-def _ascii_sparkline(values):
-    try:
-        levels = "▁▂▃▄▅▆▇█"
-        lo, hi = min(values), max(values)
-        if hi == lo:
-            return levels[0] * len(values)
-        return "".join(levels[int((v - lo)/(hi - lo) * (len(levels)-1))] for v in values)
-    except Exception:
-        return ""
-
-def _risk_line_n10(ctx):
-    liq = float(ctx.get("liquidity_usd") or 0)
-    age = float(ctx.get("age_sec") or 0)
-    renounced = bool(ctx.get("owner_renounced") or False)
-    lp_locked = bool(ctx.get("lp_locked") or False)
-    rating = 5
-    if renounced: rating += 1
-    else: rating -= 1
-    if lp_locked: rating += 1
-    else: rating -= 1
-    if liq < 5000: rating -= 1
-    elif liq > 100000: rating += 1
-    if age and age < 2*24*3600: rating -= 1
-    rating = max(1, min(9, rating))
-    emoji = "🟢" if rating >= 5 else ("🟡" if rating >= 4 else "🔴")
-    legend = {True: "stable", False: "risky"}[rating >= 5]
-    return f"{emoji} {rating}/10 — {legend}"
