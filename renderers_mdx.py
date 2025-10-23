@@ -1324,7 +1324,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
             lines.append("• Domain age: — d")
     except Exception:
         lines.append("• Domain age: — d")
-    # Country removed by decision — no output
+    # Country removed
     lines.append(f"• Status: {d_status}")
     lines.append(f"• RDAP flags: {rdap_flags}")
 
