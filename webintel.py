@@ -79,7 +79,7 @@ def _rdap_whois(host: str) -> Dict[str, Any]:
                 break
             except Exception:
                 pass
-        return {"created": created, "registrar": registrar}
+        return {"created": created, "registrar": registrar, "rdap": j}
     except Exception:
         return {"created": None, "registrar": None}
 
@@ -126,7 +126,18 @@ def _https_tls_info(host: str) -> Tuple[Optional[bool], Optional[str], Optional[
                 dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
                 expires_iso = dt.date().isoformat()
             except Exception:
-                expires_iso = None
+                try:
+                    import re as _re
+                    m = _re.search(r"([A-Za-z]{3,9})\s+(\d{1,2})\s+(\d{4})", not_after or '')
+                    if m:
+                        mon, day, year = m.group(1), int(m.group(2)), int(m.group(3))
+                        months = {'Jan':1,'January':1,'Feb':2,'February':2,'Mar':3,'March':3,'Apr':4,'April':4,'May':5,'Jun':6,'June':6,'Jul':7,'July':7,'Aug':8,'August':8,'Sep':9,'September':9,'Oct':10,'October':10,'Nov':11,'November':11,'Dec':12,'December':12}
+                        mm = months.get(mon)
+                        expires_iso = f"{year:04d}-{mm:02d}-{day:02d}" if mm else None
+                    else:
+                        expires_iso = None
+                except Exception:
+                    expires_iso = None
         return True, expires_iso, issuer_cn
     except Exception:
         return None, None, None
@@ -194,6 +205,7 @@ def analyze_website(url: Optional[str], *, domain_block: Optional[Dict[str, Any]
         who = _rdap_whois(host)
         out["whois"]["created"] = who.get("created")
         out["whois"]["registrar"] = who.get("registrar")
+        out["rdap"] = who.get("rdap")
 
         # 2) HEAD probe (reachability + headers)
         head = _https_head_probe(host)
