@@ -1322,7 +1322,7 @@ def _run_quickscan_flow(chat_id: int, text: str, msg: dict):
                     quick = f"{quick}\n\n{_extras}"
             except Exception:
                 pass
-            print('[QS] sending quick'); send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="quick"))
+            print('[QS] sending quick (no parse_mode)'); send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="quick"), parse_mode=None)
             # Optional: clean up placeholder
             if ph_id:
                 try:
