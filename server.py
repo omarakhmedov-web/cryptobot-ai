@@ -3,6 +3,7 @@ import hmac
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
 
+
 # ---- Safe callback query answer (avoids 400 on stale/invalid query) ----
 def answer_callback_safe(cb_id, text=None, show_alert=False):
     try:
@@ -1197,11 +1198,11 @@ def _build_quick_extras(verdict, market: dict) -> str:
     legend = ""
     if isinstance(score, (int, float)):
         if score >= 70:
-            legend = "сильный сетап"
+            legend = "strong setup"
         elif score >= 40:
-            legend = "стабильный, не хайповый"
+            legend = "stable, not hype"
         else:
-            legend = "повышенные риски"
+            legend = "elevated risks"
     parts = []
     if rating is not None:
         parts.append(f"Rating: {emo} {rating}/10 — {legend}")
@@ -1743,34 +1744,9 @@ def on_message(msg):
     is_addr = bool(_re.search(r"\b0x[a-fA-F0-9]{40}\b", raw_text or ""))
     is_pair = ("dexscreener.com/" in (raw_text or "")) or ("dexscreener" in (raw_text or ""))
     if chat_id and raw_text and not is_command and (is_addr or is_pair):
-        try:
-            send_message(chat_id, "Processing…", parse_mode="HTML")
-        except Exception:
-            pass
-        # Try existing quick scan path if available
-        handled = False
-        try:
-            if 'render_quick' in globals():
-                verdict, market = None, None
-                try:
-                    candidate = _derive_token_address_quickfix(raw_text) if '_derive_token_address_quickfix' in globals() else raw_text
-                except Exception:
-                    candidate = raw_text
-                try:
-                    quick = render_quick(candidate, lang='en')
-                    if quick:
-                        send_message(chat_id, quick, parse_mode="HTML")
-                        handled = True
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        if not handled:
-            try:
-                send_message(chat_id, "<b>QuickScan:</b> accepted input. Tap <b>Details</b> for more.", parse_mode="HTML")
-            except Exception:
-                pass
-        return jsonify({"ok": True})
+        # Route to the robust QuickScan flow (renders full QuickScan + keyboard)
+        return _run_quickscan_flow(chat_id, raw_text, msg)
+
     # == /D0 address quick reply ==
         # Global guard: never fail silently on user text
         try:
