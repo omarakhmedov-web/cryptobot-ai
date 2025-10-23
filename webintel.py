@@ -98,7 +98,7 @@ def _https_head_probe(host: str) -> Dict[str, Any]:
 
 def _https_tls_info(host: str) -> Tuple[Optional[bool], Optional[str], Optional[str]]:
     """Perform TLS handshake to obtain notAfter and issuer CN.
-    Returns (ssl_ok, expires_iso, issuer_cn). All None on failure.
+    Returns (ssl_ok, expires_iso_or_raw, issuer_cn). All None on failure.
     """
     try:
         ctx = ssl.create_default_context()
@@ -106,32 +106,55 @@ def _https_tls_info(host: str) -> Tuple[Optional[bool], Optional[str], Optional[
             with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                 cert = ssock.getpeercert()
         not_after = cert.get("notAfter"); raw_not_after = not_after
-        issuer = cert.get("issuer")  # tuple of tuples like ((('countryName','US'),), (('organizationName','...'),), (('commonName','R3'),))
+        issuer = cert.get("issuer")
         issuer_cn = None
         if isinstance(issuer, tuple):
             for grp in issuer:
                 if isinstance(grp, tuple):
                     for kv in grp:
-                        try:
-                            if len(kv) >= 2 and kv[0] == 'commonName':
-                                issuer_cn = kv[1]
-                                raise StopIteration
-                        except StopIteration:
+                        if len(kv) >= 2 and kv[0] == 'commonName':
+                            issuer_cn = kv[1]
                             break
         expires_iso = None
         if not_after:
-            raw_expires = not_after
-            # e.g. 'Dec 16 14:26:31 2025 GMT'
             try:
                 from datetime import datetime
                 dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
                 expires_iso = dt.date().isoformat()
             except Exception:
-                expires_iso = raw_expires  # fallback to raw string
+                expires_iso = raw_not_after  # fallback to raw string
         return True, expires_iso, issuer_cn
     except Exception:
-        return None, None, None
-
+        # Unverified fallback to at least extract notAfter/issuer
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((host, 443), timeout=_WE_TLS_TIMEOUT) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                    cert = ssock.getpeercert()
+            not_after = cert.get("notAfter"); raw_not_after = not_after
+            issuer = cert.get("issuer")
+            issuer_cn = None
+            if isinstance(issuer, tuple):
+                for grp in issuer:
+                    if isinstance(grp, tuple):
+                        for kv in grp:
+                            if len(kv) >= 2 and kv[0] == 'commonName':
+                                issuer_cn = kv[1]
+                                break
+            expires_iso = None
+            if not_after:
+                try:
+                    from datetime import datetime
+                    dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+                    expires_iso = dt.date().isoformat()
+                except Exception:
+                    expires_iso = raw_not_after  # fallback to raw string
+            # Return None for ok so caller can fallback to HEAD; provide expires/issuer
+            return None, expires_iso, issuer_cn
+        except Exception:
+            return None, None, None
 def _wayback_first(host: str) -> Optional[str]:
     try:
         r = _rq.get("https://web.archive.org/cdx/search/cdx", params={
