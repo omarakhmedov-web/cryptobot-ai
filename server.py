@@ -56,6 +56,15 @@ except Exception:
                             pass
         except Exception:
             pass
+
+        # If some keys still missing, try compact _rdap_more
+        try:
+            more = _rdap_more(domain)
+            for k in ("expires","registrarIANA","status","rdap_flags","country"):
+                if more.get(k) and (who.get(k) in (None, "—")):
+                    who[k] = more[k]
+        except Exception:
+            pass
         try:
             hr = _rq.head(f"https://{host}", timeout=2.0, allow_redirects=True)
             out["ssl"]["ok"] = bool(hr.ok) if hr is not None else None
@@ -271,7 +280,7 @@ DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en")
 
 
 def _rdap_more(domain: str):
-    """Lightweight RDAP fields extractor (expires, registrar IANA ID, status list)."""
+    """Lightweight RDAP fields extractor (expires, registrar IANA ID, status list, country)."""
     try:
         import requests as _rq
         r = _rq.get(f"https://rdap.org/domain/{domain}", timeout=2.5)
@@ -279,7 +288,7 @@ def _rdap_more(domain: str):
             return {}
         j = r.json() or {}
         out = {}
-        # Expires date from events
+        # Expires from events
         try:
             for ev in (j.get("events") or []):
                 act = str(ev.get("eventAction") or "").lower()
@@ -290,7 +299,7 @@ def _rdap_more(domain: str):
                         break
         except Exception:
             pass
-        # Registrar IANA ID from 'registrar' entity publicIds
+        # Registrar IANA ID
         try:
             for ent in (j.get("entities") or []):
                 roles = [str(x).lower() for x in (ent.get("roles") or [])]
@@ -304,15 +313,32 @@ def _rdap_more(domain: str):
                     break
         except Exception:
             pass
-        # Status list (canonical)
+        # Status list
         try:
             st = j.get("status")
             if isinstance(st, list) and st:
-                # Join and keep raw-ish; renderer will case-format as needed
                 out["status"] = ", ".join(str(x) for x in st if x)
         except Exception:
             pass
-        # RDAP flags
+        # Country from registrant/admin/tech entity vCard 'adr'
+        try:
+            for ent in (j.get("entities") or []):
+                roles = [str(x).lower() for x in (ent.get("roles") or [])]
+                if any(rr in roles for rr in ("registrant","administrative","technical")):
+                    v = ent.get("vcardArray") or []
+                    items = v[1] if isinstance(v, list) and len(v) > 1 else []
+                    for it in items:
+                        # ADR structure: ["adr", params, "text", ["", "", street, city, region, code, country]]
+                        if it and it[0] == "adr" and len(it) > 3 and isinstance(it[3], list) and it[3]:
+                            country = it[3][-1]
+                            if isinstance(country, str) and country.strip():
+                                out["country"] = country.strip()
+                                raise StopIteration
+        except StopIteration:
+            pass
+        except Exception:
+            pass
+        # Flags
         flags = []
         if out.get("expires"): flags.append("has_expiry")
         if flags:
@@ -320,21 +346,32 @@ def _rdap_more(domain: str):
         return out
     except Exception:
         return {}
-
 def _tls_expires_quick(domain: str):
-    try:
-        ctx = ssl.create_default_context()
-        with socket.create_connection((domain, 443), timeout=2.5) as sock:
-            with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
-                cert = ssock.getpeercert()
-        if cert and "notAfter" in cert:
-            try:
-                exp = dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").strftime("%Y-%m-%d")
-            except Exception:
-                exp = cert.get("notAfter")
-            return exp
-    except Exception:
+    def _one(host):
+        try:
+            ctx = ssl.create_default_context()
+            with socket.create_connection((host, 443), timeout=2.5) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                    cert = ssock.getpeercert()
+            if cert and "notAfter" in cert:
+                try:
+                    return dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                except Exception:
+                    # Fallback keep as string; try common ISO
+                    try:
+                        return dt.datetime.fromisoformat(cert["notAfter"][:19])
+                    except Exception:
+                        return None
+        except Exception:
+            return None
         return None
+    # Try bare domain, then www.domain
+    best = _one(domain)
+    if best is None and not domain.lower().startswith("www."):
+        best = _one("www." + domain)
+    if isinstance(best, dt.datetime):
+        return best.strftime("%Y-%m-%d")
+    return None
     return None
 
 def build_webintel_ctx(market: dict) -> dict:
