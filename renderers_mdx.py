@@ -201,6 +201,108 @@ try:
 except Exception:
     _render_onchain_v2 = None
 import socket as _socket, ssl as _ssl
+# === D0 HOTFIX HELPERS: local fetch for SSL expires & Wayback first ===
+import socket as _sk, ssl as _ssl, requests as _rq
+from datetime import datetime as _dt
+
+def _mdx_host_from(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return ""
+    s = s.replace("https://", "").replace("http://", "")
+    s = s.split("/")[0].strip()
+    if s.startswith("www."):
+        s = s[4:]
+    return s
+
+def _mdx_ssl_expires(host: str, timeout: float = 5.0) -> str:
+    if not host:
+        return ""
+    # Strategy 1: verified
+    try:
+        ctx = _ssl.create_default_context()
+        with _sk.create_connection((host, 443), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+        raw = cert.get("notAfter")
+        if raw:
+            try:
+                dt = _dt.strptime(raw, "%b %d %H:%M:%S %Y %Z")
+                return dt.date().isoformat()
+            except Exception:
+                return raw
+    except Exception:
+        pass
+    # Strategy 2: unverified
+    try:
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        with _sk.create_connection((host, 443), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+        raw = cert.get("notAfter")
+        if raw:
+            try:
+                dt = _dt.strptime(raw, "%b %d %H:%M:%S %Y %Z")
+                return dt.date().isoformat()
+            except Exception:
+                return raw
+    except Exception:
+        pass
+    # Strategy 3: server certificate decode
+    try:
+        pem = _ssl.get_server_certificate((host, 443))
+        try:
+            from ssl import PEM_cert_to_DER_cert
+            from _ssl import _test_decode_cert
+            info = _test_decode_cert(PEM_cert_to_DER_cert(pem))
+            raw = info.get("notAfter")
+        except Exception:
+            raw = None
+        if raw:
+            try:
+                dt = _dt.strptime(raw, "%b %d %H:%M:%S %Y %Z")
+                return dt.date().isoformat()
+            except Exception:
+                return raw
+    except Exception:
+        pass
+    return ""
+
+def _mdx_wayback_first(host: str, timeout: float = 3.0) -> str:
+    if not host:
+        return ""
+    def _cdx(q: str) -> str:
+        try:
+            r = _rq.get("https://web.archive.org/cdx/search/cdx",
+                        params={"url": q, "output": "json", "fl": "timestamp",
+                                "filter": "statuscode:200", "limit": "1",
+                                "from": "19960101", "to": "99991231", "sort": "ascending"},
+                        timeout=timeout)
+            if r.ok:
+                j = r.json()
+                if isinstance(j, list) and len(j) >= 2 and isinstance(j[1], list) and j[1]:
+                    ts = j[1][0]
+                    return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+        except Exception:
+            return ""
+        return ""
+    for cand in (host, f"{host}/*", f"www.{host}", f"www.{host}/*"):
+        d = _cdx(cand)
+        if d:
+            return d
+    try:
+        rr = _rq.get(f"https://archive.org/wayback/available?url={host}", timeout=timeout)
+        if rr.ok:
+            jj = rr.json()
+            ts = (jj.get("archived_snapshots", {}).get("closest", {}) or {}).get("timestamp", "")
+            if ts:
+                return f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}"
+    except Exception:
+        pass
+    return ""
+# === END HOTFIX HELPERS ===
 
 # ---- helpers ----
 def _fmt_num(v: Optional[float], prefix: str = "", none: str = "—") -> str:
@@ -910,15 +1012,12 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
             _ci = None
         country_line = (None if _rd_country else (country_label(_ci) if _ci else None))
     w_lines = ["*Website intel*"]
-    if False and country_line:  # Country removed
+    if country_line:
         w_lines.append(f"• {country_line}")
     w_lines.append(f"• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}")
     ok_val = ssl.get('ok')
-    try:
-        ok_indicator = '🟢' if ok_val is True else ('🔴' if ok_val is False else '⚪')
-    except Exception:
-        ok_indicator = '⚪'
-    w_lines.append(f"• SSL: {ok_indicator}  expires {ssl.get('expires') or '—'}")
+    ok_disp = (ok_val if ok_val is not None else 'n/a')
+    w_lines.append(f"• SSL: ok={ok_disp}, expires {ssl.get('expires') or 'n/a'}")
     w_lines.append(f"• Wayback first: {way.get('first') or 'n/a'}")
     parts.append("\n".join(w_lines))
 
@@ -1278,6 +1377,25 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     ssl_ok     = ssl.get("ok")
     ssl_exp    = _safe(ssl.get("expires"))
 
+
+    # --- D0 HOTFIX: fill missing expires/wayback locally ---
+    _host = _mdx_host_from(domain if isinstance(domain, str) else "")
+    if (not ssl_exp) or (ssl_exp in ("—", "n/a")):
+        try:
+            _exp = _mdx_ssl_expires(_host, timeout=5.0)
+            if _exp:
+                ssl_exp = _exp
+        except Exception:
+            pass
+    if (not first_snap) or (first_snap in ("—", "n/a")):
+        try:
+            _wb = _mdx_wayback_first(_host, timeout=3.5)
+            if _wb:
+                first_snap = _wb
+        except Exception:
+            pass
+    # --- END HOTFIX ---
+
     # ---------- build lines ----------
     lines = []
     if rating is not None and emoji:
@@ -1324,7 +1442,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
             lines.append("• Domain age: — d")
     except Exception:
         lines.append("• Domain age: — d")
-    # Country removed
+    lines.append(f"• Country: {d_country or '—'}")
     lines.append(f"• Status: {d_status}")
     lines.append(f"• RDAP flags: {rdap_flags}")
 
@@ -1333,10 +1451,10 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     w_reg     = registrar if registrar not in (None,"") else "—"
     lines.append(f"• WHOIS: created {w_created}, registrar {w_reg}")
     try:
-        ssl_indicator = '🟢' if ssl_ok is True else ('🔴' if ssl_ok is False else '⚪')
+        ok_str = "True" if ssl_ok is True else ("False" if ssl_ok is False else "—")
     except Exception:
-        ssl_indicator = '⚪'
-    lines.append(f"• SSL: {ssl_indicator}  expires {ssl_exp}")
+        ok_str = "—"
+    lines.append(f"• SSL: ok={ok_str}, expires {ssl_exp}")
     lines.append(f"• Wayback first: {first_snap}")
 
     return "\n".join(lines)
