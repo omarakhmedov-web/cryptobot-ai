@@ -1112,58 +1112,208 @@ def render_lp(info: dict, lang: str = "en") -> str:
     return "\n".join(lines)
 
 def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
-    """D0-SPARK-1023: robust Details builder with graceful fallback (no exceptions)."""
+    """D0-SPARK-1023: Rich Details with rating emoji, Snapshot, Token, Pair, WHOIS/RDAP, Website intel.
+    Tolerates missing fields; never raises.
+    """
     mkt = market or {}
-    # Extract
-    pair = (mkt.get("pairSymbol") or mkt.get("pair") or "—")
-    try:
-        price = _fmt_num(mkt.get("price"), prefix="$")
-    except Exception:
-        price = str(mkt.get("price") or "—")
-    try:
-        fdv  = _fmt_num(mkt.get("fdv"), prefix="$")
-    except Exception:
-        fdv = str(mkt.get("fdv") or "—")
-    try:
-        mc   = _fmt_num(mkt.get("mc"), prefix="$")
-    except Exception:
-        mc = str(mkt.get("mc") or "—")
-    try:
-        liq  = _fmt_num(mkt.get("liq"), prefix="$")
-    except Exception:
-        liq = str(mkt.get("liq") or "—")
-    try:
-        vol  = _fmt_num(mkt.get("vol24h"), prefix="$")
-    except Exception:
-        vol = str(mkt.get("vol24h") or "—")
-    try:
-        ch5  = _fmt_pct(_get(mkt, "priceChanges", "m5"))
-        ch1  = _fmt_pct(_get(mkt, "priceChanges", "h1"))
-        ch24 = _fmt_pct(_get(mkt, "priceChanges", "h24"))
-    except Exception:
-        ch5, ch1, ch24 = "—", "—", "—"
-    try:
-        src_ = _get(mkt, "source", default="DexScreener")
-    except Exception:
-        src_ = "—"
-    try:
-        asof = _fmt_time(_get(mkt, "asof"))
-    except Exception:
-        asof = str(mkt.get("asof") or "n/a")
-    try:
-        age  = _fmt_age_days(_get(mkt, "ageDays"))
-    except Exception:
-        age = "—"
-    # Assemble
-    lines = []
-    lines.append(f"*Details — {pair}*")
-    lines.append(f"• Price: {price}  ({ch5}, {ch1}, {ch24})")
-    lines.append(f"• FDV: {fdv}  • MC: {mc}")
-    lines.append(f"• Liquidity: {liq}  • 24h Volume: {vol}")
-    lines.append(f"• Age: {age}  • Source: {src_}")
-    lines.append(f"• As of: {asof}")
-    return "\n".join(lines)
+    ctx = ctx or {}
 
+    # --- helpers (local, safe) ---
+    def _safe(x, default="—"):
+        return x if (x is not None and x != "") else default
+
+    def _fmt_money(v):
+        try:
+            return _fmt_num(v, prefix="$")
+        except Exception:
+            try:
+                return f"${float(v):,.2f}"
+            except Exception:
+                return _safe(v)
+
+    def _fmt_pct_s(v):
+        try:
+            return _fmt_pct(v)
+        except Exception:
+            try:
+                f = float(v)
+                s = f"{abs(f):.2f}%"
+                if f > 0: return f"▲ +{s}"
+                if f < 0: return f"▼ -{s}"
+                return "—"
+            except Exception:
+                return "—"
+
+    def _fmt_when(ts):
+        try:
+            return _fmt_time(ts)
+        except Exception:
+            try:
+                from datetime import datetime as _dt
+                if isinstance(ts, (int,float)):
+                    t = int(ts)
+                    if t > 10**12: t //= 1000
+                    return _dt.utcfromtimestamp(t).strftime("%Y-%m-%d %H:%M UTC")
+                return str(ts or "n/a")
+            except Exception:
+                return "n/a"
+
+    def _fmt_age_days(v):
+        try:
+            return _fmt_age_days(v)
+        except Exception:
+            try:
+                d = float(v)
+                return f"{d:.1f} d"
+            except Exception:
+                return "—"
+
+    def _pick(s, *keys):
+        for k in keys:
+            if isinstance(s, dict) and k in s and s[k]:
+                return s[k]
+        return None
+
+    # --- rating / emoji for header ---
+    emoji = ""
+    rating = None
+    try:
+        # Prefer ctx-derived quick risk
+        if '_risk_line_n10' in globals():
+            # Fake a small ctx that _risk_line_n10 expects (liquidity, age, owner_renounced, lp_locked)
+            c = {
+                "liquidity_usd": _pick(mkt, "liq", "liquidity", "liquidityUsd", "liquidityUSD"),
+                "age_sec": None,
+                "owner_renounced": None,
+                "lp_locked": None,
+            }
+            ad = _pick(mkt, "ageDays", "age")
+            if isinstance(ad, (int,float)):
+                c["age_sec"] = float(ad) * 24 * 3600
+            rr = _risk_line_n10(c)
+            try:
+                renounced = bool(c.get("owner_renounced") or False)
+                lp = bool(c.get("lp_locked") or False)
+                liq = float(c.get("liquidity_usd") or 0)
+                rating = 5 + (1 if renounced else -1) + (1 if lp else -1) + (1 if liq > 100000 else (-1 if liq < 5000 else 0))
+                if ad and float(ad) < 2: rating -= 1
+                rating = max(1, min(9, int(rating)))
+            except Exception:
+                rating = 5
+        elif isinstance(verdict, dict) and "score" in verdict:
+            rating = int(verdict.get("score") or 5)
+        elif isinstance(verdict, (int, float)):
+            rating = int(verdict)
+        else:
+            rating = 5
+        emoji = "🟢" if rating >= 5 else ("🟡" if rating >= 4 else "🔴")
+    except Exception:
+        emoji, rating = "", None
+
+    # --- extract core fields ---
+    pair = _safe(_pick(mkt, "pairSymbol", "pair"))
+    price = _fmt_money(_pick(mkt, "price"))
+    fdv   = _fmt_money(_pick(mkt, "fdv"))
+    mc    = _fmt_money(_pick(mkt, "mc"))
+    liq   = _fmt_money(_pick(mkt, "liq", "liquidity", "liquidityUsd", "liquidityUSD"))
+    vol   = _fmt_money(_pick(mkt, "vol24h", "volume24h"))
+    ch5   = _fmt_pct_s(_pick(_pick(mkt, "priceChanges") or {}, "m5", "m_5", "Δ5m"))
+    ch1   = _fmt_pct_s(_pick(_pick(mkt, "priceChanges") or {}, "h1", "m60", "Δ1h"))
+    ch24  = _fmt_pct_s(_pick(_pick(mkt, "priceChanges") or {}, "h24", "d1", "Δ24h"))
+    src_  = _safe(_pick(mkt, "source"), "DexScreener")
+    asof  = _fmt_when(_pick(mkt, "asof"))
+    age   = _fmt_age_days(_pick(mkt, "ageDays", "age"))
+    chain = _safe(_pick(mkt, "chain", "network", "chainId"), "—")
+    tk    = _safe(_pick(mkt, "tokenAddress", "token", "address"))
+    pr    = _safe(_pick(mkt, "pairAddress", "pair"))
+
+    # --- website intel from ctx ---
+    web = ctx.get("web") if isinstance(ctx, dict) else None
+    whois = (web or {}).get("whois") or {}
+    ssl   = (web or {}).get("ssl") or {}
+    wb    = (web or {}).get("wayback") or {}
+
+    domain     = _safe(whois.get("domain") or _pick(mkt, "site") or _pick(mkt, "links") or "—")
+    registrar  = _safe(whois.get("registrar"))
+    iana_id    = _safe(whois.get("registrarIANA") or whois.get("iana_id"))
+    d_created  = _safe(whois.get("created"))
+    d_expires  = _safe(whois.get("expires"))
+    d_country  = _safe(whois.get("country"))
+    d_status   = _safe(whois.get("status"))
+    rdap_flags = _safe((whois.get("rdap_flags") or whois.get("rdap")))
+    first_snap = _safe(wb.get("first"))
+    ssl_ok     = ssl.get("ok")
+    ssl_exp    = _safe(ssl.get("expires"))
+    ssl_iss    = _safe(ssl.get("issuer"))
+
+    # --- build lines ---
+    lines = []
+    # Header
+    if rating is not None and emoji:
+        lines.append(f"*Details — {pair}* {emoji} ({rating})")
+    else:
+        lines.append(f"*Details — {pair}*")
+
+    # Snapshot
+    lines.append("*Snapshot*")
+    lines.append(f"• Price: {price} ({ch5}, {ch1}, {ch24})")
+    lines.append(f"• FDV: {fdv} • MC: {mc}")
+    lines.append(f"• Liquidity: {liq} • 24h Volume: {vol}")
+    lines.append(f"• Age: {age} • Source: {src_}")
+    lines.append(f"• As of: {asof}")
+
+    # Token
+    lines.append("*Token*")
+    lines.append(f"• Chain: {str(chain).capitalize() if isinstance(chain, str) else chain}")
+    lines.append(f"• Address: {tk}")
+
+    # Pair
+    lines.append("*Pair*")
+    lines.append(f"• Address: {pr}")
+    lines.append(f"• Symbol: {pair}")
+
+    # WHOIS/RDAP (detailed)
+    lines.append("*WHOIS/RDAP*")
+    lines.append(f"• Domain: {domain}")
+    lines.append(f"• Registrar: {registrar}")
+    lines.append(f"• Registrar IANA ID: {iana_id}")
+    lines.append(f"• Created: {d_created}")
+    lines.append(f"• Expires: {d_expires}")
+    # Domain age (days)
+    try:
+        from datetime import datetime as _dt
+        dd = None
+        if isinstance(d_created, str) and d_created not in ('—','n/a'):
+            for fmt in ("%Y-%m-%d","%Y-%m-%dT%H:%M:%S","%Y-%m-%d %H:%M:%S"):
+                try:
+                    dd = _dt.strptime(d_created[:19], fmt)
+                    break
+                except Exception:
+                    pass
+        if dd:
+            age_days = int(((_dt.utcnow() - dd).total_seconds()) / 86400)
+            lines.append(f"• Domain age: {age_days} d")
+        else:
+            lines.append("• Domain age: — d")
+    except Exception:
+        lines.append("• Domain age: — d")
+    lines.append(f"• Country: {d_country}")
+    lines.append(f"• Status: {d_status}")
+    lines.append(f"• RDAP flags: {rdap_flags}")
+
+    # Website intel (compact recap)
+    lines.append("*Website intel*")
+    w_created = d_created if d_created not in (None,"") else "—"
+    w_reg     = registrar if registrar not in (None,"") else "—"
+    lines.append(f"• WHOIS: created {w_created}, registrar {w_reg}")
+    try:
+        ok_str = "True" if ssl_ok is True else ("False" if ssl_ok is False else "—")
+    except Exception:
+        ok_str = "—"
+    lines.append(f"• SSL: ok={ok_str}, expires {ssl_exp}")
+    lines.append(f"• Wayback first: {first_snap}")
+
+    return "\n".join(lines)
 
 def render_contract(info: dict, lang: str = "en") -> str:
     """
