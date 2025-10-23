@@ -1321,7 +1321,6 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
             lines.append("• Domain age: — d")
     except Exception:
         lines.append("• Domain age: — d")
-        d_country = infer_country(_meta) and country_label(infer_country(_meta)).split(': ',1)[1]
     lines.append(f"• Country: {d_country or '—'}")
     lines.append(f"• Status: {d_status}")
     lines.append(f"• RDAP flags: {rdap_flags}")
@@ -1334,7 +1333,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
         ok_str = "True" if ssl_ok is True else ("False" if ssl_ok is False else "—")
     except Exception:
         ok_str = "—"
-    lines.append(f"• SSL: {'🟢' if (ssl_ok is True) else ('🔴' if (ssl_ok is False) else '⚪')}  expires {ssl_exp or '—'}")
+    lines.append(f"• SSL: ok={ok_str}, expires {ssl_exp}")
     lines.append(f"• Wayback first: {first_snap}")
 
     return "\n".join(lines)
