@@ -910,7 +910,7 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
             _ci = None
         country_line = (None if _rd_country else (country_label(_ci) if _ci else None))
     w_lines = ["*Website intel*"]
-    if country_line:
+    if False and country_line:  # Country removed
         w_lines.append(f"• {country_line}")
     w_lines.append(f"• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}")
     ok_val = ssl.get('ok')
@@ -1272,14 +1272,6 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     d_created  = _safe(whois.get("created"))
     d_expires  = _safe(whois.get("expires"))
     d_country  = _safe(whois.get("country"))
-    # Country inference fallback when placeholder
-    if d_country in ('—', 'n/a', '', None):
-        try:
-            d_country_infer = infer_country({'whois': whois, 'ssl': ssl, 'wayback': wb})
-            if d_country_infer:
-                d_country = d_country_infer
-        except Exception:
-            pass
     d_status   = _safe(whois.get("status"))
     rdap_flags = _safe((whois.get("rdap_flags") or whois.get("rdap")))
     first_snap = _safe(wb.get("first"))
@@ -1332,7 +1324,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
             lines.append("• Domain age: — d")
     except Exception:
         lines.append("• Domain age: — d")
-    lines.append(f"• Country: {d_country or '—'}")
+    # Country removed by decision — no output
     lines.append(f"• Status: {d_status}")
     lines.append(f"• RDAP flags: {rdap_flags}")
 
