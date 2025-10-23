@@ -1,3 +1,9 @@
+# === D0 PATCH (buttons) ===
+# Build: 2025-10-23 17:46:48 UTC
+# - Top row actions: QuickScan / Watchlist / Premium / Community
+# - Share button label unified: "Share this scan"
+# - Idempotent: safe to re-apply
+
 # -*- coding: utf-8 -*-
 from typing import Optional, Dict, Any
 
