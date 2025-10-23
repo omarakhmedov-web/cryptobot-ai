@@ -1341,9 +1341,6 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     w_reg     = registrar if registrar not in (None,"") else "—"
     lines.append(f"• WHOIS: created {w_created}, registrar {w_reg}")
     try:
-        ok_str = "True" if ssl_ok is True else ("False" if ssl_ok is False else "—")
-    except Exception:
-    try:
         ssl_indicator = '🟢' if ssl_ok is True else ('🔴' if ssl_ok is False else '⚪')
     except Exception:
         ssl_indicator = '⚪'
