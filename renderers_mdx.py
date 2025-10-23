@@ -1258,12 +1258,12 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     pr    = _safe(_pick(mkt, "pairAddress", "pair"))
 
     # website intel from ctx only (no links from market)
-    web = ctx.get("web") if isinstance(ctx, dict) else None
-    whois = (web or {}).get("whois") or {}
-    ssl   = (web or {}).get("ssl") or {}
-    wb    = (web or {}).get("wayback") or {}
+    web = (ctx.get('web') or ctx.get('webintel')) if isinstance(ctx, dict) else None
+    whois = (web or {}).get('whois') or {}
+    ssl   = (web or {}).get('ssl') or {}
+    wb    = (web or {}).get('wayback') or {}
 
-    domain     = _clean_domain(whois.get("domain"))
+    domain     = _safe(whois.get('domain') or (ctx.get('domain') if isinstance(ctx, dict) else None) or ((mkt.get('links') or {}).get('site')) or '—')
     registrar  = _safe(whois.get("registrar"))
     iana_id    = _safe(whois.get("registrarIANA") or whois.get("iana_id"))
     d_created  = _safe(whois.get("created"))
