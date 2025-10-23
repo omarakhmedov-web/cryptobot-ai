@@ -1225,6 +1225,7 @@ def _welcome_text(is_new: bool) -> str:
 
 
 def _run_quickscan_flow(chat_id: int, text: str, msg: dict):
+    print('[QS] start', chat_id)
     try:
         try:
             ok, _tier = can_scan(chat_id)
@@ -1321,7 +1322,7 @@ def _run_quickscan_flow(chat_id: int, text: str, msg: dict):
                     quick = f"{quick}\n\n{_extras}"
             except Exception:
                 pass
-            send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="quick"))
+            print('[QS] sending quick'); send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="quick"))
             # Optional: clean up placeholder
             if ph_id:
                 try:
@@ -1340,6 +1341,7 @@ def _run_quickscan_flow(chat_id: int, text: str, msg: dict):
             pass
         return jsonify({"ok": True})
 def _on_message_core(msg):
+    print('[MSG] _on_message_core enter')
     verdict = None
     market = {}
     quick = ""
@@ -1399,7 +1401,7 @@ def _on_message_core(msg):
             return jsonify({"ok": True})
         except Exception as _e_start:
             # Fallback to legacy welcome
-            send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+            print('[START] sending welcome'); send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
             return jsonify({"ok": True})
 
     if low.startswith("/diag"):
@@ -1444,7 +1446,7 @@ def _on_message_core(msg):
             pass
     # Only non-command messages trigger scan
     if text.startswith("/"):
-        send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
+        print('[START] sending welcome'); send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
         ok, _tier = can_scan(chat_id)
@@ -1709,7 +1711,7 @@ def _on_message_core(msg):
             "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
         }
 
-        sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
+        sent = print('[QS] sending quick'); send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
         msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
         if msg_id:
             store_bundle(chat_id, msg_id, bundle)
@@ -1784,7 +1786,7 @@ def on_message(msg):
                 try:
                     quick = render_quick(candidate, lang='en')
                     if quick:
-                        send_message(chat_id, quick, parse_mode="HTML")
+                        print('[QS] sending quick'); send_message(chat_id, quick, parse_mode="HTML")
                         handled = True
                 except Exception:
                     pass
