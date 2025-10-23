@@ -127,7 +127,7 @@ def _https_tls_info(host: str) -> Tuple[Optional[bool], Optional[str], Optional[
                 dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
                 expires_iso = dt.date().isoformat()
             except Exception:
-                expires_iso = raw_expires  # fallback to raw
+                expires_iso = raw_expires  # fallback to raw string
         return True, expires_iso, issuer_cn
     except Exception:
         return None, None, None
