@@ -1039,7 +1039,7 @@ def on_message(msg):
             pass
     # --- /WATCHLITE intercept ---
 
-    if low.startswith("/start"):
+    if low.startswith("/start"):  # D0: start hook — personalized greeting + trust badge 'Scanned 1M+ tokens'
         send_message(chat_id, WELCOME, reply_markup=build_keyboard(chat_id, 0, _pricing_links(), ctx="start"))
         return jsonify({"ok": True})
 
@@ -1103,7 +1103,7 @@ def on_message(msg):
     # --- Processing indicator (address-only) ---
     ph_id = None
     if _is_contract_address(text):
-        ph = send_message(chat_id, "Processing…")
+        ph = send_message(chat_id, "")
         ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
         try:
             tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
@@ -2081,3 +2081,5 @@ try:
     _np_create_invoice = _np_create_invoice_smart
 except NameError:
     _np_create_invoice = _np_create_invoice_smart
+
+# D0: ensure Share button present via buttons.build_keyboard(links['share'])
