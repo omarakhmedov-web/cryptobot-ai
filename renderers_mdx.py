@@ -9,8 +9,8 @@
 from __future__ import annotations
 
 # === _MDX_LINKS_POLICY ===
-_show_links = False
-_show_webintel = False
+_show_links = True
+_show_webintel = True
 # === /_MDX_LINKS_POLICY ===
 import os
 
@@ -411,7 +411,7 @@ HSTS_SHOW_MAXAGE_ONLY = (os.getenv("HSTS_SHOW_MAXAGE_ONLY", "1") not in ("0","fa
 RDAP_DNSSEC_SHOW_UNSIGNED = (os.getenv("RDAP_DNSSEC_SHOW_UNSIGNED", "0") not in ("0","false","False",""))
 BADGE_WAYBACK = (os.getenv("BADGE_WAYBACK", "1") not in ("0","false","False",""))
 DOMAIN_EMOJI_BAR = (os.getenv("DOMAIN_EMOJI_BAR", "1") not in ("0","false","False",""))
-RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG", "v9-stable")
+RENDERER_BUILD_TAG = os.getenv('RENDERER_BUILD_TAG', 'v9-stable+D0-SSL-COUNTRY-EMOJI')
 
 # Simple in-process TTL caches for network checks
 _CACHE_TTL = int(os.getenv("WEB_CACHE_TTL", "1800"))
@@ -914,8 +914,9 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
         w_lines.append(f"• {country_line}")
     w_lines.append(f"• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}")
     ok_val = ssl.get('ok')
-    ok_disp = (ok_val if ok_val is not None else 'n/a')
-    w_lines.append(f"• SSL: ok={ok_disp}, expires {ssl.get('expires') or 'n/a'}")
+    ok_disp = ('🟢' if ok_val is True else ('🔴' if ok_val is False else '⚪'))
+    exp_val = ssl.get('expires') or 'n/a'
+    w_lines.append(f"• SSL: {ok_disp}  expires {exp_val}")
     w_lines.append(f"• Wayback first: {way.get('first') or 'n/a'}")
     parts.append("\n".join(w_lines))
 
