@@ -269,6 +269,74 @@ BOT_WEBHOOK_SECRET = os.getenv("BOT_WEBHOOK_SECRET", "").strip()
 WEBHOOK_PATH = f"/webhook/{BOT_WEBHOOK_SECRET}" if BOT_WEBHOOK_SECRET else "/webhook/secret-not-set"
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en")
 
+
+def _rdap_more(domain: str):
+    """Lightweight RDAP fields extractor (expires, registrar IANA ID, status list)."""
+    try:
+        import requests as _rq
+        r = _rq.get(f"https://rdap.org/domain/{domain}", timeout=2.5)
+        if not r.ok:
+            return {}
+        j = r.json() or {}
+        out = {}
+        # Expires date from events
+        try:
+            for ev in (j.get("events") or []):
+                act = str(ev.get("eventAction") or "").lower()
+                if act in ("expiration","expiry","expire"):
+                    d = ev.get("eventDate")
+                    if isinstance(d, str) and len(d) >= 10:
+                        out["expires"] = d[:10]
+                        break
+        except Exception:
+            pass
+        # Registrar IANA ID from 'registrar' entity publicIds
+        try:
+            for ent in (j.get("entities") or []):
+                roles = [str(x).lower() for x in (ent.get("roles") or [])]
+                if any("registrar" in rr for rr in roles):
+                    pids = ent.get("publicIds") or []
+                    for pid in pids:
+                        t = str(pid.get("type") or "").lower()
+                        if "iana" in t and "registrar" in t:
+                            out["registrarIANA"] = pid.get("identifier")
+                            break
+                    break
+        except Exception:
+            pass
+        # Status list (canonical)
+        try:
+            st = j.get("status")
+            if isinstance(st, list) and st:
+                # Join and keep raw-ish; renderer will case-format as needed
+                out["status"] = ", ".join(str(x) for x in st if x)
+        except Exception:
+            pass
+        # RDAP flags
+        flags = []
+        if out.get("expires"): flags.append("has_expiry")
+        if flags:
+            out["rdap_flags"] = ", ".join(flags)
+        return out
+    except Exception:
+        return {}
+
+def _tls_expires_quick(domain: str):
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((domain, 443), timeout=2.5) as sock:
+            with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
+                cert = ssock.getpeercert()
+        if cert and "notAfter" in cert:
+            try:
+                exp = dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").strftime("%Y-%m-%d")
+            except Exception:
+                exp = cert.get("notAfter")
+            return exp
+    except Exception:
+        return None
+    return None
+
 def build_webintel_ctx(market: dict) -> dict:
     try:
         links = (market.get("links") or {})
@@ -310,11 +378,12 @@ def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
     ssl = web.setdefault("ssl", {"ok": None, "expires": None, "issuer": None})
     way = web.setdefault("wayback", {"first": None})
     if domain:
-        # RDAP
+        # RDAP (extend fields)
         try:
             r = _rq.get(f"https://rdap.org/domain/{domain}", timeout=2.5)
             if r.ok:
                 j = r.json()
+                # created
                 if (who.get("created") in (None, "—")):
                     for ev in (j.get("events") or []):
                         act = str(ev.get("eventAction") or "").lower()
@@ -323,6 +392,7 @@ def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
                             if d:
                                 who["created"] = d
                                 break
+                # registrar name
                 if (who.get("registrar") in (None, "—")):
                     for ent in (j.get("entities") or []):
                         roles = [str(x).lower() for x in (ent.get("roles") or [])]
@@ -333,11 +403,50 @@ def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
                                 for it in items:
                                     if it and it[0] == "fn" and len(it) > 3:
                                         who["registrar"] = it[3]
-                                        raise StopIteration
-                            except StopIteration:
-                                break
+                                        break
                             except Exception:
                                 pass
+                            break
+                # IANA ID
+                try:
+                    for ent in (j.get("entities") or []):
+                        roles = [str(x).lower() for x in (ent.get("roles") or [])]
+                        if any("registrar" in rr for rr in roles):
+                            for pid in (ent.get("publicIds") or []):
+                                t = str(pid.get("type") or "").lower()
+                                if "iana" in t and "registrar" in t:
+                                    who["registrarIANA"] = pid.get("identifier")
+                                    raise StopIteration
+                except StopIteration:
+                    pass
+                except Exception:
+                    pass
+                # Expires
+                try:
+                    for ev in (j.get("events") or []):
+                        act = str(ev.get("eventAction") or "").lower()
+                        if act in ("expiration","expiry","expire"):
+                            d = ev.get("eventDate")
+                            if isinstance(d, str) and len(d) >= 10:
+                                who["expires"] = d[:10]
+                                break
+                except Exception:
+                    pass
+                # Status
+                try:
+                    st = j.get("status")
+                    if isinstance(st, list) and st:
+                        who["status"] = ", ".join(str(x) for x in st if x)
+                except Exception:
+                    pass
+                # RDAP flags
+                try:
+                    flags = []
+                    if who.get("expires"): flags.append("has_expiry")
+                    if flags:
+                        who["rdap_flags"] = ", ".join(flags)
+                except Exception:
+                    pass
         except Exception:
             pass
         # SSL
@@ -345,6 +454,14 @@ def _enrich_webintel_fallback(domain: str, web: dict) -> dict:
             hr = _rq.head(f"https://{domain}", timeout=2.0, allow_redirects=True)
             if ssl.get("ok") in (None, "—"):
                 ssl["ok"] = bool(hr.ok) if hr is not None else None
+        except Exception:
+            pass
+        # TLS expiry fallback
+        try:
+            if not ssl.get("expires"):
+                _exp = _tls_expires_quick(domain)
+                if _exp:
+                    ssl["expires"] = _exp
         except Exception:
             pass
         # Wayback
