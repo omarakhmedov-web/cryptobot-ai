@@ -867,6 +867,630 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
         _rd_local = None
     _domain_to_probe = _resolve_domain(_rd_local or {}, market, ctx)
     if _domain_to_probe:
-        lines.append(render_website_meta(details))
+        # SSL probe (TLS handshake) if missing
+        if (ssl.get('ok') is None) or (not ssl.get('expires')):
+            _tls = _tls_probe(_domain_to_probe)
+            if ssl.get('ok') is None and (_tls.get('ok') is not None):
+                ssl['ok'] = _tls['ok']
+            if (not ssl.get('expires')) and _tls.get('expires'):
+                ssl['expires'] = _tls['expires']
+        # TLS WWW fallback
+        if _domain_to_probe and (ssl.get('ok') is None or not ssl.get('expires')):
+            _tls2 = _tls_probe('www.' + _domain_to_probe)
+            if ssl.get('ok') is None and (_tls2.get('ok') is not None):
+                ssl['ok'] = _tls2['ok']
+            if (not ssl.get('expires')) and _tls2.get('expires'):
+                ssl['expires'] = _tls2['expires']
+        # HTTP(S) fallback: if TLS failed but HTTPS is enforced, consider SSL ok=True
+        if _domain_to_probe and (ssl.get('ok') is None):
+            _wp = _web_probe(_domain_to_probe)
+            if isinstance(_wp, dict) and _wp.get('https_enforced') is True:
+                ssl['ok'] = True
+        # Wayback probe if missing
+        if not way.get('first'):
+            _wb = _wayback_summary(_domain_to_probe)
+            if isinstance(_wb, dict) and _wb.get('first'):
+                way['first'] = _wb['first']
+            # Wayback WWW fallback
+            if not way.get('first'):
+                _wb2 = _wayback_summary('www.' + _domain_to_probe)
+                if isinstance(_wb2, dict) and _wb2.get('first'):
+                    way['first'] = _wb2['first']
+
+        _rd_country = None
+        try:
+            _rd_local = locals().get("_rd")
+            if isinstance(_rd_local, dict):
+                _rd_country = _rd_local.get("country") or None
+        except Exception:
+            _rd_country = None
+        try:
+            _ci = infer_country(web)
+        except Exception:
+            _ci = None
+        country_line = (None if _rd_country else (country_label(_ci) if _ci else None))
+    w_lines = ["*Website intel*"]
+    if country_line:
+        w_lines.append(f"• {country_line}")
+    w_lines.append(f"• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}")
+    ok_val = ssl.get('ok')
+    try:
+        ok_indicator = '🟢' if ok_val is True else ('🔴' if ok_val is False else '⚪')
+    except Exception:
+        ok_indicator = '⚪'
+    w_lines.append(f"• SSL: {ok_indicator}  expires {ssl.get('expires') or '—'}")
+    w_lines.append(f"• Wayback first: {way.get('first') or 'n/a'}")
+    parts.append("\n".join(w_lines))
+
+
+
+
+
+    return "\n".join(parts)
+
+
+
+def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
+    # Take up to 3 key reasons, deduplicated, with normalization (age/delta wording).
+    reasons: List[str] = []
+    try:
+        reasons = list(getattr(verdict, "reasons", []) or [])
+    except Exception:
+        reasons = list((verdict or {}).get("reasons") or [])
+    seen = set()
+    uniq: List[str] = []
+    for r in reasons:
+        if not r: 
+            continue
+        if r in seen: 
+            continue
+        seen.add(r)
+        uniq.append(_normalize_reason_text(r))
+        if len(uniq) >= 3:
+            break
+    if not uniq:
+        return "*Why?*\n• No specific risk factors detected"
+    header = "*Why?*"
+    lines = [f"• {r}" for r in uniq]
+    return "\n".join([header] + lines)
+def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
+    # Weighted Top-3 positives and Top-3 risks (chain-aware)
+    m = market or {}
+    pos: List[tuple[str,int]] = []
+    risk: List[tuple[str,int]] = []
+
+    def add_pos(label:str, w:int): pos.append((label,w))
+    def add_risk(label:str, w:int): risk.append((label,w))
+
+    t = _tiers(m)
+
+    liq = _get(m, "liq")
+    vol = _get(m, "vol24h")
+    ch24 = _get(m, "priceChanges","h24")
+    age = _get(m, "ageDays")
+    fdv = _get(m, "fdv"); mc = _get(m, "mc")
+
+    try:
+        if isinstance(liq,(int,float)) and liq >= t["LIQ_POSITIVE"]: add_pos(f"Healthy liquidity (${liq:,.0f})", 3)
+        if isinstance(vol,(int,float)) and vol >= t["VOL_ACTIVE"]:   add_pos(f"Active 24h volume (${vol:,.0f})", 2)
+        if isinstance(age,(int,float)) and age >= 7:                 add_pos(_age_bucket_label(age), 2)
+        if isinstance(ch24,(int,float)):
+            _lbl = _delta24h_positive_label(ch24)
+            if _lbl: add_pos(_lbl, 1)
+    except Exception:
+        pass
+
+    try:
+        if liq is None: add_risk("Liquidity unknown", 2)
+        elif isinstance(liq,(int,float)) and liq < t["LIQ_LOW"]: add_risk(f"Low liquidity (${liq:,.0f})", 3)
+        if vol is None: add_risk("24h volume unknown", 1)
+        elif isinstance(vol,(int,float)) and vol < t["VOL_THIN"]: add_risk(f"Thin 24h volume (${vol:,.0f})", 2)
+        if isinstance(ch24,(int,float)):
+            _abs = abs(ch24)
+            if _abs >= 25:
+                add_risk(f"High daily volatility (|Δ24h| ≈ {_abs:.0f}%)", 3)
+            elif _abs >= 12:
+                add_risk(f"Elevated daily volatility (|Δ24h| ≈ {_abs:.0f}%)", 2)
+        if age is None: add_risk("Pair age unknown", 2)
+        elif isinstance(age,(int,float)) and age < 1: add_risk("Newly created pair (<1d)", 3)
+        if isinstance(fdv,(int,float)) and isinstance(mc,(int,float)) and mc>0 and fdv/mc>5:
+            add_risk(f"FDV/MC high (~{fdv/mc:.1f}x)", 1)
+    except Exception:
+        pass
+
+    pos = sorted(pos, key=lambda x: (-x[1], x[0]))[:3]
+    risk = sorted(risk, key=lambda x: (-x[1], x[0]))[:3]
+
+    lines = ["*Why++*"]
+    if pos:
+        lines.append("_Top positives_")
+        for label, w in pos:
+            lines.append(f"• {label} (w={w})")
+    if risk:
+        lines.append("_Top risks_")
+        for label, w in risk:
+            lines.append(f"• {label} (w={w})")
+    return "\n".join(lines).replace("\n", "\n")
+
+
+def render_lp(info: dict, lang: str = "en") -> str:
+    """
+    LP-lite v2 renderer (compact, serious, accurate).
+    Back-compat: accepts the old "info" dict; if it contains chain + LP token, we compute on-chain.
+    Otherwise, we will format whatever is present in "info" and mark unknowns.
+    """
+    p = info or {}
+    chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
+    lp_token = (p.get("lpAddress") or p.get("lpToken") or p.get("address") or p.get("token") or "—")
+    def _looks_addr(a: str) -> bool:
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+
+    data = None
+    if _looks_addr(lp_token):
+        try:
+            data = check_lp_lock_v2(chain, lp_token)
+        except Exception:
+            data = None
+
+    lines = []
+    def _cap(s: str) -> str:
+        s = (s or "").lower()
+        return {"eth":"Ethereum","bsc":"BSC","polygon":"Polygon"}.get(s, s.capitalize() if s else "—")
+    lines.append(f"LP lock (lite) — {_cap(chain)}")
+    status_map = {"burned":"burned","locked-partial":"locked-partial","unlocked":"unlocked","v3-nft":"v3-NFT","unknown":"unknown"}
+
+    if data and isinstance(data, dict):
+        status = status_map.get(str(data.get("status")),"unknown")
+        lines.append(f"Status: {status}")
+        if status == "v3-NFT":
+            lines.append("Burned: n/a (v3/NFT)")
+            lines.append("Locked: n/a (v3/NFT)")
+        else:
+            burned = data.get("burnedPct")
+            locked = data.get("lockedPct")
+            # Correct LP status normalization
+            try:
+                _locked_val = float(locked) if locked is not None else None
+            except Exception:
+                _locked_val = None
+            _locked_by = (data.get("lockedBy") or "").strip()
+            if status != "v3-NFT" and _locked_val is not None:
+                if _locked_val <= 0.0:
+                    status = "unlocked"
+                elif 0.0 < _locked_val < 100.0 and _locked_by not in ("", "—"):
+                    status = "locked-partial"
+            # Normalize status based on lockedPct and provider
+            try:
+                _locked_val = float(locked) if locked is not None else None
+            except Exception:
+                _locked_val = None
+            lk_by = data.get("lockedBy") or "—"
+            if status != "v3-NFT":
+                if _locked_val is not None:
+                    if _locked_val <= 0.0:
+                        status = "unlocked"
+                    elif _locked_val < 100.0 and lk_by != "—":
+                        status = "locked-partial"
+                    # else keep prior status
+            def _fmt_pct(x):
+                try:
+                    return f"{float(x):.2f}%"
+                except Exception:
+                    return "—"
+            lines.append(f"Burned: {_fmt_pct(burned)}  (0xdead + 0x0)")
+            lk_by = data.get("lockedBy") or "—"
+            lines.append(f"Locked: {_fmt_pct(locked)} via {lk_by}")
+        lp_disp = data.get("lpToken") or lp_token
+        lines.append(f"LP token: {lp_disp}")
+        links = []
+        if data.get("holdersUrl"): links.append("Holders (Etherscan)")
+        if data.get("uncxUrl"): links.append("UNCX")
+        if data.get("teamfinanceUrl"): links.append("TeamFinance")
+        if links:
+            lines.append("Links: " + " | ".join(links))
+        ds = data.get("dataSource") or "—"
+        lines.append(f"Data source: {ds}")
+        return "\n".join(lines)
+
+    # Fallback legacy formatting without compute
+    burned_pct = p.get("burnedPct")
+    locked_pct = p.get("lockedPct")
+    def _fmt_pct2(v):
+        try: return f"{float(v):.2f}%"
+        except Exception: return "—"
+    status = "unknown"
+    try:
+        if burned_pct is not None and float(burned_pct) >= 95.0:
+            status = "burned"
+        elif locked_pct is not None and float(locked_pct) > 0:
+            status = "locked-partial"
+    except Exception:
+        pass
+    lines.append(f"Status: {status}")
+    lines.append(f"Burned: {_fmt_pct2(burned_pct) if burned_pct is not None else '—'}")
+    lines.append(f"Locked: {_fmt_pct2(locked_pct) if locked_pct is not None else '—'}")
+    lines.append(f"LP token: {lp_token}")
+    lines.append("Links: UNCX | TeamFinance")
+    lines.append("Data source: —")
+    return "\n".join(lines)
+
+def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
+    """D0-SPARK-1023 v5: server-driven rating; clean WHOIS domain; no links; better Age fallback."""
+    mkt = market or {}
+    ctx = ctx or {}
+
+    # ---------- helpers ----------
+    def _safe(x, default="—"):
+        return x if (x is not None and x != "") else default
+
+    def _fmt_money(v):
+        try:
+            return _fmt_num(v, prefix="$")
+        except Exception:
+            try:
+                return f"${float(v):,.2f}"
+            except Exception:
+                return _safe(v)
+
+    def _fmt_pct_s(v):
+        try:
+            return _fmt_pct(v)
+        except Exception:
+            try:
+                f = float(v)
+                s = f"{abs(f):.2f}%"
+                if f > 0: return f"▲ +{s}"
+                if f < 0: return f"▼ -{s}"
+                return "—"
+            except Exception:
+                return "—"
+
+    def _fmt_when(ts):
+        try:
+            return _fmt_time(ts)
+        except Exception:
+            try:
+                from datetime import datetime as _dt
+                if isinstance(ts, (int,float)):
+                    t = int(ts)
+                    if t > 10**12: t //= 1000
+                    return _dt.utcfromtimestamp(t).strftime("%Y-%m-%d %H:%M UTC")
+                return str(ts or "n/a")
+            except Exception:
+                return "n/a"
+
+    def _fmt_age_days_fallback(m):
+        """Prefer ageDays; else compute from created-at timestamps."""
+        try:
+            ad = m.get("ageDays")
+            if isinstance(ad, (int,float)) and ad > 0:
+                return _fmt_age_days(ad)
+        except Exception:
+            pass
+        # fallbacks
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            now = _dt.utcnow().replace(tzinfo=None)
+            for k in ("pairCreatedAt","pairCreatedAtMs","tokenDeployedAt","tokenCreatedAt"):
+                v = m.get(k)
+                if v is None: continue
+                t = int(v)
+                if t > 10**12: t //= 1000
+                if t < 10**9:  # seconds but too small
+                    continue
+                dt = _dt.utcfromtimestamp(t)
+                days = (now - dt).total_seconds() / 86400.0
+                if days >= 0:
+                    return f"{days:.1f} d"
+        except Exception:
+            pass
+        return "—"
+
+    def _pick(s, *keys):
+        for k in keys:
+            if isinstance(s, dict) and k in s and s[k]:
+                return s[k]
+        return None
+
+    def _clean_domain(val):
+        """Return bare hostname like 'pepe.vip' from various sources; never return dict/URL."""
+        # Prefer ctx.web.whois.domain
+        if isinstance(val, str) and val:
+            v = val
+        else:
+            # try ctx.whois.domain
+            whois = ((ctx.get("web") or {}).get("whois") or {}) if isinstance(ctx, dict) else {}
+            v = whois.get("domain") or ""
+            if not v:
+                # maybe market.site as URL
+                v = _pick(mkt, "site", "website") or ""
+                if not v:
+                    # give up
+                    v = ""
+        # Parse url if looks like URL
+        try:
+            if isinstance(v, str):
+                vv = v.strip().strip("'/\"")
+                if vv.startswith("http://") or vv.startswith("https://"):
+                    host = urlparse(vv).hostname or vv
+                else:
+                    host = vv
+                if host.startswith("www."):
+                    host = host[4:]
+                # restrict to hostname-like
+                return host if host and " " not in host and "http" not in host else "—"
+        except Exception:
+            pass
+        return "—" if not v or isinstance(v, dict) else str(v)
+
+    # ---------- rating/emoji (server-driven) ----------
+    emoji = ""
+    rating = None
+    try:
+        if isinstance(verdict, dict):
+            rating = verdict.get("rating") or verdict.get("score")
+            emoji = verdict.get("emoji") or verdict.get("signal_emoji") or ""
+        elif isinstance(verdict, (int,float)):
+            rating = int(verdict)
+        # clamp/normalize
+        if isinstance(rating, (int,float)):
+            rating = int(rating)
+            if rating < 1 or rating > 9:
+                rating = max(1, min(9, rating))
+        else:
+            rating = None
+        # if server didn't give emoji, avoid guessing — keep empty
+    except Exception:
+        rating, emoji = None, ""
+
+    # ---------- extract fields ----------
+    pair = _safe(_pick(mkt, "pairSymbol", "pair"))
+    price = _fmt_money(_pick(mkt, "price"))
+    fdv   = _fmt_money(_pick(mkt, "fdv"))
+    mc    = _fmt_money(_pick(mkt, "mc"))
+    liq   = _fmt_money(_pick(mkt, "liq", "liquidity", "liquidityUsd", "liquidityUSD"))
+    vol   = _fmt_money(_pick(mkt, "vol24h", "volume24h"))
+    ch5   = _fmt_pct_s(_pick(_pick(mkt, "priceChanges") or {}, "m5", "m_5", "Δ5m"))
+    ch1   = _fmt_pct_s(_pick(_pick(mkt, "priceChanges") or {}, "h1", "m60", "Δ1h"))
+    ch24  = _fmt_pct_s(_pick(_pick(mkt, "priceChanges") or {}, "h24", "d1", "Δ24h"))
+    src_  = _safe(_pick(mkt, "source"), "DexScreener")
+    asof  = _fmt_when(_pick(mkt, "asof"))
+    age   = _fmt_age_days_fallback(mkt)
+    chain = _safe(_pick(mkt, "chain", "network", "chainId"), "—")
+    tk    = _safe(_pick(mkt, "tokenAddress", "token", "address"))
+    pr    = _safe(_pick(mkt, "pairAddress", "pair"))
+
+    # website intel from ctx only (no links from market)
+    web = (ctx.get('web') or ctx.get('webintel')) if isinstance(ctx, dict) else None
+    whois = (web or {}).get('whois') or {}
+    ssl   = (web or {}).get('ssl') or {}
+    wb    = (web or {}).get('wayback') or {}
+
+    domain     = _safe(whois.get('domain') or (ctx.get('domain') if isinstance(ctx, dict) else None) or ((mkt.get('links') or {}).get('site')) or '—')
+    registrar  = _safe(whois.get("registrar"))
+    iana_id    = _safe(whois.get("registrarIANA") or whois.get("iana_id"))
+    d_created  = _safe(whois.get("created"))
+    d_expires  = _safe(whois.get("expires"))
+    d_country  = _safe(whois.get("country"))
+    # Country inference fallback when placeholder
+    if d_country in ('—', 'n/a', '', None):
+        try:
+            d_country_infer = infer_country({'whois': whois, 'ssl': ssl, 'wayback': wb})
+            if d_country_infer:
+                d_country = d_country_infer
+        except Exception:
+            pass
+    d_status   = _safe(whois.get("status"))
+    rdap_flags = _safe((whois.get("rdap_flags") or whois.get("rdap")))
+    first_snap = _safe(wb.get("first"))
+    ssl_ok     = ssl.get("ok")
+    ssl_exp    = _safe(ssl.get("expires"))
+
+    # ---------- build lines ----------
+    lines = []
+    if rating is not None and emoji:
+        lines.append(f"*Details — {pair}* {emoji} ({rating})")
+    else:
+        lines.append(f"*Details — {pair}*")
+
+    lines.append("*Snapshot*")
+    lines.append(f"• Price: {price} ({ch5}, {ch1}, {ch24})")
+    lines.append(f"• FDV: {fdv} • MC: {mc}")
+    lines.append(f"• Liquidity: {liq} • 24h Volume: {vol}")
+    lines.append(f"• Age: {age} • Source: {src_}")
+    lines.append(f"• As of: {asof}")
+
+    lines.append("*Token*")
+    lines.append(f"• Chain: {str(chain).capitalize() if isinstance(chain, str) else chain}")
+    lines.append(f"• Address: {tk}")
+
+    lines.append("*Pair*")
+    lines.append(f"• Address: {pr}")
+    lines.append(f"• Symbol: {pair}")
+
+    lines.append("*WHOIS/RDAP*")
+    lines.append(f"• Domain: {domain}")
+    lines.append(f"• Registrar: {registrar}")
+    lines.append(f"• Registrar IANA ID: {iana_id}")
+    lines.append(f"• Created: {d_created}")
+    lines.append(f"• Expires: {d_expires}")
+    # Domain age
+    try:
+        from datetime import datetime as _dt
+        dd = None
+        if isinstance(d_created, str) and d_created not in ('—','n/a'):
+            for fmt in ("%Y-%m-%d","%Y-%m-%dT%H:%M:%S","%Y-%m-%d %H:%M:%S"):
+                try:
+                    dd = _dt.strptime(d_created[:19], fmt)
+                    break
+                except Exception:
+                    pass
+        if dd:
+            age_days = int(((_dt.utcnow() - dd).total_seconds()) / 86400)
+            lines.append(f"• Domain age: {age_days} d")
+        else:
+            lines.append("• Domain age: — d")
+    except Exception:
+        lines.append("• Domain age: — d")
+    lines.append(f"• Country: {d_country or '—'}")
+    lines.append(f"• Status: {d_status}")
+    lines.append(f"• RDAP flags: {rdap_flags}")
+
+    lines.append("*Website intel*")
+    w_created = d_created if d_created not in (None,"") else "—"
+    w_reg     = registrar if registrar not in (None,"") else "—"
+    lines.append(f"• WHOIS: created {w_created}, registrar {w_reg}")
+    try:
+        ok_str = "True" if ssl_ok is True else ("False" if ssl_ok is False else "—")
+    except Exception:
+    try:
+        ssl_indicator = '🟢' if ssl_ok is True else ('🔴' if ssl_ok is False else '⚪')
+    except Exception:
+        ssl_indicator = '⚪'
+    lines.append(f"• SSL: {ssl_indicator}  expires {ssl_exp}")
+    lines.append(f"• Wayback first: {first_snap}")
 
     return "\n".join(lines)
+
+def render_contract(info: dict, lang: str = "en") -> str:
+    """
+    CONTRACT block (On-chain) — compact, production-ready.
+    Uses renderers_onchain_v2 if available; otherwise graceful fallback.
+    Expected keys in `info`: chain/network/chainId, token/tokenAddress/address.
+    """
+    p = info or {}
+    chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
+    token = (p.get("token") or p.get("tokenAddress") or p.get("address") or "—")
+    def _looks_addr(a: str) -> bool:
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+    if _render_onchain_v2 and _looks_addr(token):
+        try:
+            return _render_onchain_v2(chain, token)
+        except Exception:
+            pass
+    # Fallback minimal block (no on-chain calls)
+    lines = []
+    lines.append("On-chain")
+    lines.append("Contract code: —")
+    lines.append("Token: — (—)")
+    lines.append("Decimals: —")
+    lines.append("Total supply: —")
+    lines.append("Owner: —")
+    lines.append("Renounced: —")
+    lines.append("Paused: —  Upgradeable: —")
+    lines.append("MaxTx: —  MaxWallet: —")
+    return "\n".join(lines)
+
+
+def render_security(info: dict, lang: str = "en") -> str:
+    """
+    Unified Security block: LP (burn/lock) + Contract (owner/renounced/paused/upgradeable).
+    Keys in `info`:
+      - chain/network/chainId
+      - lpAddress|lpToken
+      - tokenAddress|token|address
+    """
+    p = info or {}
+    chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
+    lp_addr = (p.get("lpAddress") or p.get("lpToken"))
+    tk_addr = (p.get("tokenAddress") or p.get("token") or p.get("address"))
+
+    def _looks_addr(a: str) -> bool:
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+
+    def _cap(s: str) -> str:
+        s = (s or "").lower()
+        return {"eth":"Ethereum","bsc":"BSC","polygon":"Polygon","arb":"Arbitrum","op":"Optimism","base":"Base"}.get(s, s.capitalize() if s else "—")
+
+    # Header
+    lines = [f"Security — {_cap(chain)}"]
+
+    # LP subsection
+    lp_line = "LP: —"
+    try:
+        if 'check_lp_lock_v2' in globals() and _looks_addr(lp_addr):
+            lp = check_lp_lock_v2(chain, lp_addr)  # safe-fallback already defined above in this file
+            burned = lp.get("burnedPct")
+            locked = lp.get("lockedPct")
+            def _fmt_pct(x):
+                try: return f"{float(x):.2f}%"
+                except Exception: return "—"
+            via = lp.get("lockedBy") or "—"
+            lp_line = f"LP: Burned {_fmt_pct(burned)} • Locked {_fmt_pct(locked)} via {via}"
+    except Exception:
+        pass
+    lines.append(lp_line)
+
+    # Contract subsection
+    ct_line = "Contract: —"
+    try:
+        if '_check_contract_v2' in globals() and _check_contract_v2 and _looks_addr(tk_addr):
+            ct = _check_contract_v2(chain, tk_addr)
+            owner = ct.get("owner") or "—"
+            ren = "True" if ct.get("renounced") is True else ("False" if ct.get("renounced") is False else "—")
+            paused = "True" if ct.get("paused") is True else ("False" if ct.get("paused") is False else "—")
+            up = ct.get("upgradeable")
+            up_str = "True ⚠️" if up is True else ("False" if up is False else "—")
+            ct_line = f"Contract: Owner {owner} • Renounced {ren} • Paused {paused} • Upgradeable {up_str}"
+    except Exception:
+        pass
+    lines.append(ct_line)
+
+    return "\n".join(lines)
+
+
+# === Added for compatibility: sanitize_market_fields ========================
+def sanitize_market_fields(mkt: dict | None):
+    """Return market dict with guaranteed keys used by diagnostics, without mutation."""
+    m = dict(mkt or {})
+    # Normalize typical fields to avoid KeyError in diagnostics
+    m.setdefault("pairAddress", m.get("pair") or m.get("pair_address"))
+    m.setdefault("tokenAddress", m.get("token") or m.get("token_address"))
+    m.setdefault("chainId", m.get("chain") or m.get("network") or "eth")
+    m.setdefault("ageMs", m.get("ageMs") or m.get("age") or None)
+    return m
+
+
+# === Added for compatibility: age_label ====================================
+def age_label(ms: int | None) -> str:
+    """Convert milliseconds to a compact label like "~2.1 d". Returns "—" if unknown."""
+    try:
+        v = int(ms) if ms is not None else 0
+    except Exception:
+        v = 0
+    if v <= 0:
+        return "—"
+    # milliseconds -> days with one decimal if < 3 days; otherwise integer
+    days = v / (1000 * 60 * 60 * 24)
+    if days < 3:
+        return f"~{days:.1f} d"
+    return f"~{round(days)} d"
+
+
+def _ascii_sparkline(values):
+    try:
+        levels = "▁▂▃▄▅▆▇█"
+        lo, hi = min(values), max(values)
+        if hi == lo:
+            return levels[0] * len(values)
+        return "".join(levels[int((v - lo)/(hi - lo) * (len(levels)-1))] for v in values)
+    except Exception:
+        return ""
+
+def _risk_line_n10(ctx):
+    liq = float(ctx.get("liquidity_usd") or 0)
+    age = float(ctx.get("age_sec") or 0)
+    renounced = bool(ctx.get("owner_renounced") or False)
+    lp_locked = bool(ctx.get("lp_locked") or False)
+    rating = 5
+    if renounced: rating += 1
+    else: rating -= 1
+    if lp_locked: rating += 1
+    else: rating -= 1
+    if liq < 5000: rating -= 1
+    elif liq > 100000: rating += 1
+    if age and age < 2*24*3600: rating -= 1
+    rating = max(1, min(9, rating))
+    emoji = "🟢" if rating >= 5 else ("🟡" if rating >= 4 else "🔴")
+    legend = {True: "stable", False: "risky"}[rating >= 5]
+    return f"{emoji} {rating}/10 — {legend}"
