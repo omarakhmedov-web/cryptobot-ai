@@ -120,13 +120,14 @@ def _https_tls_info(host: str) -> Tuple[Optional[bool], Optional[str], Optional[
                             break
         expires_iso = None
         if not_after:
+            raw_expires = not_after
             # e.g. 'Dec 16 14:26:31 2025 GMT'
             try:
                 from datetime import datetime
                 dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
                 expires_iso = dt.date().isoformat()
             except Exception:
-                expires_iso = None
+                expires_iso = raw_expires  # fallback to raw
         return True, expires_iso, issuer_cn
     except Exception:
         return None, None, None
