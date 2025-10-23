@@ -411,7 +411,7 @@ HSTS_SHOW_MAXAGE_ONLY = (os.getenv("HSTS_SHOW_MAXAGE_ONLY", "1") not in ("0","fa
 RDAP_DNSSEC_SHOW_UNSIGNED = (os.getenv("RDAP_DNSSEC_SHOW_UNSIGNED", "0") not in ("0","false","False",""))
 BADGE_WAYBACK = (os.getenv("BADGE_WAYBACK", "1") not in ("0","false","False",""))
 DOMAIN_EMOJI_BAR = (os.getenv("DOMAIN_EMOJI_BAR", "1") not in ("0","false","False",""))
-RENDERER_BUILD_TAG = os.getenv('RENDERER_BUILD_TAG', 'v9-stable+D0-SSL-COUNTRY-EMOJI-v2')
+RENDERER_BUILD_TAG = os.getenv("RENDERER_BUILD_TAG", "v9-stable")
 
 # Simple in-process TTL caches for network checks
 _CACHE_TTL = int(os.getenv("WEB_CACHE_TTL", "1800"))
@@ -914,8 +914,8 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
         w_lines.append(f"• {country_line}")
     w_lines.append(f"• WHOIS: created {who.get('created') or 'n/a'}, registrar {who.get('registrar') or 'n/a'}")
     ok_val = ssl.get('ok')
-    ok_disp = ('🟢' if ok_val is True else ('🔴' if ok_val is False else '⚪'))
-    w_lines.append(f"• SSL: {ok_disp}  expires {ssl.get('expires') or 'n/a'}")
+    ok_disp = (ok_val if ok_val is not None else 'n/a')
+    w_lines.append(f"• SSL: ok={ok_disp}, expires {ssl.get('expires') or 'n/a'}")
     w_lines.append(f"• Wayback first: {way.get('first') or 'n/a'}")
     parts.append("\n".join(w_lines))
 
@@ -1271,18 +1271,6 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     d_country  = _safe(whois.get("country"))
     d_status   = _safe(whois.get("status"))
     rdap_flags = _safe((whois.get("rdap_flags") or whois.get("rdap")))
-    # Country inference fallback
-    try:
-        _rd_local = locals().get('_rd')
-        _rd_country = (_rd_local.get('country') if isinstance(_rd_local, dict) else None)
-    except Exception:
-        _rd_country = None
-    if not d_country or d_country in ('—','n/a','None',''):
-        try:
-            _ci = infer_country((ctx.get('web') or ctx.get('webintel')) if isinstance(ctx, dict) else None)
-            d_country = country_label(_ci) if _ci else (_rd_country or '—')
-        except Exception:
-            d_country = _rd_country or d_country or '—'
     first_snap = _safe(wb.get("first"))
     ssl_ok     = ssl.get("ok")
     ssl_exp    = _safe(ssl.get("expires"))
@@ -1333,7 +1321,8 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
             lines.append("• Domain age: — d")
     except Exception:
         lines.append("• Domain age: — d")
-    lines.append(f"• Country: {d_country}")
+        d_country = infer_country(_meta) and country_label(infer_country(_meta)).split(': ',1)[1]
+    lines.append(f"• Country: {d_country or '—'}")
     lines.append(f"• Status: {d_status}")
     lines.append(f"• RDAP flags: {rdap_flags}")
 
@@ -1342,10 +1331,10 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
     w_reg     = registrar if registrar not in (None,"") else "—"
     lines.append(f"• WHOIS: created {w_created}, registrar {w_reg}")
     try:
-        ok_disp = '🟢' if ssl_ok is True else ('🔴' if ssl_ok is False else '⚪')
+        ok_str = "True" if ssl_ok is True else ("False" if ssl_ok is False else "—")
     except Exception:
-        ok_disp = '⚪'
-    lines.append(f"• SSL: {ok_disp}  expires {ssl_exp or '—'}")
+        ok_str = "—"
+    lines.append(f"• SSL: {'🟢' if (ssl_ok is True) else ('🔴' if (ssl_ok is False) else '⚪')}  expires {ssl_exp or '—'}")
     lines.append(f"• Wayback first: {first_snap}")
 
     return "\n".join(lines)
