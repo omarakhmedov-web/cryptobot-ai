@@ -159,8 +159,7 @@ def _normalize_reason_text(line: str) -> str:
 
 # === Module-scope helper: pretty registrar name (used in RDAP & Website) ===
 def _fmt_registrar__INNER_SHOULD_NOT_EXIST(val):
-
-# Back-compat alias for registrar formatter
+    # Back-compat alias for registrar formatter
     s = (val or "").strip()
     if not s or s in ("—","n/a","N/A","NA"):
         return "n/a"
@@ -795,43 +794,12 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
     l_scan = (links or {}).get("scan") or "—"
     l_site = (links or {}).get("site") or "—"
     if isinstance(l_site, dict):
-    # D0: sparkline/rating injected
-    out = locals().get('out', None)
-    try:
-        ctx = token if 'token' in locals() else locals()
-        # synthesize 24h series from deltas if real series absent
-        p0 = float(ctx.get('price') or 0) or 0
-        d1 = float((ctx.get('change_1h') or ctx.get('price_change_1h') or 0) or 0)
-        d6 = float((ctx.get('change_6h') or ctx.get('price_change_6h') or 0) or 0)
-        d24= float((ctx.get('change_24h') or ctx.get('price_change_24h') or 0) or 0)
-        p1 = p0/(1+d1/100) if d1 > -100 else p0
-        p6 = p0/(1+d6/100) if d6 > -100 else p1
-        p24= p0/(1+d24/100) if d24> -100 else p6
-        series = [p24, p24+(p6-p24)*(6/18), p24+(p6-p24)*(12/18), p6, p6+(p1-p6)*(3/5), p1, p0]
-        spark = _ascii_sparkline(series)
-        risk = _risk_line_n10({'liquidity_usd': ctx.get('liquidity_usd'), 'age_sec': ctx.get('age_sec'), 'owner_renounced': ctx.get('owner_renounced'), 'lp_locked': ctx.get('lp_locked')})
-        if out and isinstance(out, str):
-            out = out.strip() + (\"\n\"+spark if spark else \"\") + \"\n\" + risk
-    except Exception:
-        pass
-    return "n/a"
-        import re as _re
-        s = _re.sub(r"\s+", " ", s.replace(",", ", "))
-        base = s.title()
-        base = _re.sub(r"\bInc\b\.?", "Inc.", base)
-        base = _re.sub(r"\bLlc\b\.?", "LLC", base)
-        base = _re.sub(r"\bLtd\b\.?", "Ltd.", base)
-        base = _re.sub(r"\bGmbh\b", "GmbH", base)
-        base = _re.sub(r"\bAg\b", "AG", base)
-        base = _re.sub(r"\bNv\b", "NV", base)
-        base = _re.sub(r"\bBv\b", "BV", base)
-        base = _re.sub(r"\bSa\b", "S.A.", base)
-        base = _re.sub(r"\bSpa\b", "S.p.A.", base)
-        base = _re.sub(r"(?i)Namecheap", "Namecheap", base)
-        base = _re.sub(r"\s+,", ",", base)
-        base = _re.sub(r",\s*", ", ", base)
-        return base.strip()
-    # Website intel (robust; tolerate empty/missing ctx keys) — FIXED INDENT
+        try:
+            l_site = l_site.get('url') or l_site.get('href') or l_site.get('link') or '—'
+        except Exception:
+            l_site = '—'
+
+        # Website intel (robust; tolerate empty/missing ctx keys) — FIXED INDENT
     web = (ctx or {}).get("webintel") or {"whois": {}, "ssl": {}, "wayback": {}}
     who = (web.get("whois") or {}) if isinstance(web, dict) else {}
     ssl = (web.get("ssl") or {}) if isinstance(web, dict) else {}
