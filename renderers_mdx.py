@@ -1110,39 +1110,59 @@ def render_lp(info: dict, lang: str = "en") -> str:
     lines.append("Links: UNCX | TeamFinance")
     lines.append("Data source: —")
     return "\n".join(lines)
+
 def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
+    """D0-SPARK-1023: robust Details builder with graceful fallback (no exceptions)."""
+    mkt = market or {}
+    # Extract
+    pair = (mkt.get("pairSymbol") or mkt.get("pair") or "—")
     try:
-        print("[MDX v2.6] render_details() called", flush=True)
-        return _render_details_impl(verdict, market, ctx, lang)
-    except Exception as _e:
-        import traceback as _tb
-        try:
-            _tb.print_exc()
-        except Exception:
-            pass
-        try:
-            pair = (market or {}).get("pair") or "—"
-            asof = (market or {}).get("asof") or "n/a"
-        except Exception:
-            pair, asof = "—", "n/a"
-        print(f"[MDX v2.6] render_details FAILSAFE: {type(_e).__name__}: {_e}", flush=True)
-        try:
-            print(f"[MDX v2.6] ctx: pair={pair}, asof={asof}", flush=True)
-        except Exception:
-            pass
-        try:
-            _as = asof
-            if isinstance(_as, (int,float)):
-                ts = int(_as)
-                # detect ms
-                if ts > 10**12:
-                    ts = ts // 1000
-                asof_fmt = __import__("datetime").datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC")
-            else:
-                asof_fmt = str(_as)
-        except Exception:
-            asof_fmt = str(asof)
-        return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
+        price = _fmt_num(mkt.get("price"), prefix="$")
+    except Exception:
+        price = str(mkt.get("price") or "—")
+    try:
+        fdv  = _fmt_num(mkt.get("fdv"), prefix="$")
+    except Exception:
+        fdv = str(mkt.get("fdv") or "—")
+    try:
+        mc   = _fmt_num(mkt.get("mc"), prefix="$")
+    except Exception:
+        mc = str(mkt.get("mc") or "—")
+    try:
+        liq  = _fmt_num(mkt.get("liq"), prefix="$")
+    except Exception:
+        liq = str(mkt.get("liq") or "—")
+    try:
+        vol  = _fmt_num(mkt.get("vol24h"), prefix="$")
+    except Exception:
+        vol = str(mkt.get("vol24h") or "—")
+    try:
+        ch5  = _fmt_pct(_get(mkt, "priceChanges", "m5"))
+        ch1  = _fmt_pct(_get(mkt, "priceChanges", "h1"))
+        ch24 = _fmt_pct(_get(mkt, "priceChanges", "h24"))
+    except Exception:
+        ch5, ch1, ch24 = "—", "—", "—"
+    try:
+        src_ = _get(mkt, "source", default="DexScreener")
+    except Exception:
+        src_ = "—"
+    try:
+        asof = _fmt_time(_get(mkt, "asof"))
+    except Exception:
+        asof = str(mkt.get("asof") or "n/a")
+    try:
+        age  = _fmt_age_days(_get(mkt, "ageDays"))
+    except Exception:
+        age = "—"
+    # Assemble
+    lines = []
+    lines.append(f"*Details — {pair}*")
+    lines.append(f"• Price: {price}  ({ch5}, {ch1}, {ch24})")
+    lines.append(f"• FDV: {fdv}  • MC: {mc}")
+    lines.append(f"• Liquidity: {liq}  • 24h Volume: {vol}")
+    lines.append(f"• Age: {age}  • Source: {src_}")
+    lines.append(f"• As of: {asof}")
+    return "\n".join(lines)
 
 
 def render_contract(info: dict, lang: str = "en") -> str:
