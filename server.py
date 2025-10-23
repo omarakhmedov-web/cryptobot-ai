@@ -1,3 +1,4 @@
+# D0 patch tag: SERVER+D0-WEBINTEL-PASSTHRU • 2025-10-23 20:03:20 UTC
 import hashlib
 import hmac
 import os, json, re, traceback, requests
