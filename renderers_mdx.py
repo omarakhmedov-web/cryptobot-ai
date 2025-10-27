@@ -1174,6 +1174,7 @@ def render_lp(info: dict, lang: str = "en") -> str:
 
     if data and isinstance(data, dict):
         status = status_map.get(str(data.get("status")),"unknown")
+        lines.append(f"Status: {status}")
         if status == "v3-NFT":
             lines.append("Burned: n/a (v3/NFT)")
             lines.append("Locked: n/a (v3/NFT)")
@@ -1204,10 +1205,6 @@ def render_lp(info: dict, lang: str = "en") -> str:
                     elif _locked_val < 100.0 and lk_by != "—":
                         status = "locked-partial"
                     # else keep prior status
-                elif _locked_val >= 100.0:
-                    status = "locked"
-
-            lines.append(f"Status: {status}")
             def _fmt_pct(x):
                 try:
                     return f"{float(x):.2f}%"
@@ -1411,18 +1408,15 @@ def age_label(ms: int | None) -> str:
     return f"~{round(days)} d"
 
 
-# === D0.2.3 Wayback deterministic patch (no new ENV; one-file change) =============================
+# === D0.2.3 Wayback deterministic patch ===========================================================
 def _normalize_domain(raw: str) -> str:
     try:
         s = (raw or "").strip().lower()
-        # Remove scheme if present
         if s.startswith("http://") or s.startswith("https://"):
             from urllib.parse import urlparse
             p = urlparse(s)
             s = p.netloc or p.path
-        # Strip path if any sneaks in
         s = s.split("/")[0]
-        # Drop leading wildcards and www.
         s = s.lstrip("*.")
         if s.startswith("www."):
             s = s[4:]
@@ -1431,10 +1425,8 @@ def _normalize_domain(raw: str) -> str:
         return (raw or "").strip().lower()
 
 def _wayback_summary(domain: str):
-    # Deterministic + normalized Wayback probing with soft-retry and TTL cache.
     if not _WAYBACK_SUMMARY or not isinstance(domain, str):
         return None
-
     dom = _normalize_domain(domain)
     key = f"wb:{dom}"
     cached = _cache_get(_wb_cache, key)
@@ -1446,7 +1438,6 @@ def _wayback_summary(domain: str):
         base = "https://web.archive.org/cdx/search/cdx"
         common = {"url": dom, "output": "json", "fl": "timestamp", "filter": "statuscode:200", "from": "19960101", "to": "99991231"}
 
-        # Helper: GET with soft-retry
         def _get(params):
             try:
                 r = _rq.get(base, params=params, timeout=_WAYBACK_TIMEOUT_S)
@@ -1454,7 +1445,6 @@ def _wayback_summary(domain: str):
                     return r
             except Exception:
                 pass
-            # Soft retry
             try:
                 import time as _t
                 _t.sleep(0.35)
@@ -1463,7 +1453,6 @@ def _wayback_summary(domain: str):
             except Exception:
                 return None
 
-        # 1) Earliest (ascending, limit=1)
         r1 = _get({**common, "sort": "ascending", "limit": "1"})
         if r1 is not None:
             try:
@@ -1474,7 +1463,6 @@ def _wayback_summary(domain: str):
             except Exception:
                 pass
 
-        # 2) Latest (descending, limit=1)
         r2 = _get({**common, "sort": "descending", "limit": "1"})
         if r2 is not None:
             try:
@@ -1485,15 +1473,12 @@ def _wayback_summary(domain: str):
             except Exception:
                 pass
 
-        # 3) Fallback for missing 'first': if latest exists, try fetching a small ascending page without strict limit
         if (out["first"] is None) and (out["last"] is not None):
-            r3 = _get({**common, "sort": "ascending", "limit": "50"})  # small page to avoid heavy calls
+            r3 = _get({**common, "sort": "ascending", "limit": "50"})
             if r3 is not None:
                 try:
                     j3 = r3.json()
-                    # pick earliest timestamp from rows (skip header row)
                     if isinstance(j3, list) and len(j3) >= 2:
-                        # rows are [["timestamp"], ["YYYY..."], ["YYYY..."], ...]
                         for row in j3[1:]:
                             if isinstance(row, list) and row:
                                 ts1b = row[0]
@@ -1502,14 +1487,43 @@ def _wayback_summary(domain: str):
                 except Exception:
                     pass
 
-        # 4) Deterministic finalization: if still no 'first' but we do have 'last', set first=last
         if (out["first"] is None) and (out["last"] is not None):
             out["first"] = out["last"]
 
         out["ok"] = bool(out["first"] or out["last"])
     except Exception:
-        # Keep deterministic output shape; ok remains False.
         pass
 
     return _cache_put(_wb_cache, key, out)
 # === /D0.2.3 patch ================================================================================
+
+
+def _age_days_from_pair_created(pair_created_at, asof_ts=None):
+    """
+    Safe fallback to compute pair age in days.
+    Supports epoch seconds or milliseconds. asof_ts may be int/float ISO-like string, or None (use now UTC).
+    """
+    try:
+        import math, time
+        def _to_ts(x):
+            if x is None:
+                return None
+            if isinstance(x, (int, float)):
+                # Heuristic: treat > 10^12 as ms
+                return int(x/1000) if x > 10**12 else int(x)
+            if isinstance(x, str):
+                try:
+                    return int(x)
+                except Exception:
+                    pass
+            return None
+        ts_pair = _to_ts(pair_created_at)
+        if ts_pair is None:
+            return None
+        ts_asof = _to_ts(asof_ts)
+        if ts_asof is None:
+            ts_asof = int(time.time())
+        days = max(0, (ts_asof - ts_pair) / 86400.0)
+        return round(days, 1)
+    except Exception:
+        return None
