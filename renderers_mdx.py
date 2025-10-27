@@ -91,7 +91,7 @@ def _sparkline(values):
 # === /D0 sparkline ============================================================
 
 try:
-    from lp_lite_v2 import check_lp_lock_v2
+    from lp_lite import check_lp_lock_v2
 except Exception:
     def check_lp_lock_v2(chain, lp_addr, rpc_urls=None, timeout_s=6.0, retries=2):
         return {
