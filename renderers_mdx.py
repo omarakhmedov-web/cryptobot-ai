@@ -1174,7 +1174,6 @@ def render_lp(info: dict, lang: str = "en") -> str:
 
     if data and isinstance(data, dict):
         status = status_map.get(str(data.get("status")),"unknown")
-        lines.append(f"Status: {status}")
         if status == "v3-NFT":
             lines.append("Burned: n/a (v3/NFT)")
             lines.append("Locked: n/a (v3/NFT)")
@@ -1205,6 +1204,10 @@ def render_lp(info: dict, lang: str = "en") -> str:
                     elif _locked_val < 100.0 and lk_by != "—":
                         status = "locked-partial"
                     # else keep prior status
+                elif _locked_val >= 100.0:
+                    status = "locked"
+
+            lines.append(f"Status: {status}")
             def _fmt_pct(x):
                 try:
                     return f"{float(x):.2f}%"
@@ -1246,6 +1249,8 @@ def render_lp(info: dict, lang: str = "en") -> str:
             status = "burned"
         elif locked_pct is not None and float(locked_pct) > 0:
             status = "locked-partial"
+        elif locked_pct is not None and float(locked_pct) == 0:
+            status = "unlocked"
     except Exception:
         pass
     lines.append(f"Status: {status}")
