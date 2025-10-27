@@ -57,11 +57,11 @@ def build_keyboard(chat_id: int,
     try:
         _help = (links.get("help") or "https://metridex.com/help")
         rows.insert(0, [
-            {"text": "QuickScan", "callback_data": _cb(chat_id, msg_id, "QS")},
-            {"text": "Watchlist", "callback_data": _cb(chat_id, msg_id, "WATCHLIST")},
-            {"text": "Premium", "url": (links.get("pro") or links.get("day_pass") or _help)},
-            {"text": "Community", "url": _help},
-        ])
+    {"text": "QuickScan", "callback_data": _cb(chat_id, msg_id, "QS")},
+    {"text": "Watchlist", "callback_data": _cb(chat_id, msg_id, "WATCHLIST")},
+    {"text": "Premium",   "callback_data": _cb(chat_id, msg_id, "UPGRADE")},
+    {"text": "Community", "url": "https://x.com/MetridexBot"},
+])
     except Exception:
         pass
     # ---------------- COMMON NAV (DEX/Scan/DS) ----------------
@@ -137,13 +137,11 @@ def build_keyboard(chat_id: int,
         rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
 
     # ---------------- DELTA ROW (bottom) ----------------
-    if ctx not in ("start", "info"):
-        rows.append([
-            {"text": "Δ 5m",  "callback_data": _cb(chat_id, msg_id, "DELTA_M5")},
-            {"text": "Δ 1h",  "callback_data": _cb(chat_id, msg_id, "DELTA_1H")},
-            {"text": "Δ 6h",  "callback_data": _cb(chat_id, msg_id, "DELTA_6H")},
-            {"text": "Δ 24h", "callback_data": _cb(chat_id, msg_id, "DELTA_24H")},
-        ])
-
+    rows.append([
+        {"text": "Δ 5m",  "callback_data": _cb(chat_id, msg_id, "DELTA_M5")},
+        {"text": "Δ 1h",  "callback_data": _cb(chat_id, msg_id, "DELTA_1H")},
+        {"text": "Δ 6h",  "callback_data": _cb(chat_id, msg_id, "DELTA_6H")},
+        {"text": "Δ 24h", "callback_data": _cb(chat_id, msg_id, "DELTA_24H")},
+    ])
 
     return {"inline_keyboard": rows}
