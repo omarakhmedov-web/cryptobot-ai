@@ -59,7 +59,6 @@ def build_keyboard(chat_id: int,
         rows.insert(0, [
     {"text": "QuickScan", "callback_data": _cb(chat_id, msg_id, "QS")},
     {"text": "Watchlist", "callback_data": _cb(chat_id, msg_id, "WATCHLIST")},
-    {"text": "Premium",   "callback_data": _cb(chat_id, msg_id, "UPGRADE")},
     {"text": "Community", "url": "https://x.com/MetridexBot"},
 ])
     except Exception:
