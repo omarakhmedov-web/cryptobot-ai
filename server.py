@@ -1529,10 +1529,9 @@ def on_message(msg):
 
 
 def on_callback(cb):
-
-    # D0 pre-dispatch for top-row actions (QS/WATCHLIST/UPGRADE)
+    # D0 pre-dispatch for top-row actions (QuickScan/Watchlist/Premium)
     try:
-        _a = action.strip().upper()
+        _a = str(action).strip().upper()
     except Exception:
         _a = str(action).upper() if action is not None else ""
     if _a in ("QS", "QUICKSCAN"):
@@ -1549,8 +1548,8 @@ def on_callback(cb):
         return {"ok": True, "handled": True}
     if _a == "UPGRADE":
         try:
-            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Premium: Pro $29/mo • Teams $99/5 seats • Day Pass $9 — details on site.", "show_alert": False})
-            tg_api("sendMessage", {"chat_id": chat_id, "text": "Upgrade plans:\n• Pro — $29/month\n• Teams — $99/month (5 seats)\n• Day Pass — $9\n\nLearn more: https://metridex.com", "parse_mode": "Markdown"})
+            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Plans: Pro $29/mo • Teams $99/5 seats • Day Pass $9.", "show_alert": False})
+            tg_api("sendMessage", {"chat_id": chat_id, "text": "Upgrade plans:\n• Pro — $29/month\n• Teams — $99/month (5 seats)\n• Day Pass — $9\n\nLearn more: https://metridex.com/help", "parse_mode": "Markdown"})
         except Exception:
             pass
         return {"ok": True, "handled": True}
