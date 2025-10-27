@@ -57,7 +57,6 @@ def build_keyboard(chat_id: int,
     try:
         _help = (links.get("help") or "https://metridex.com/help")
         rows.insert(0, [
-    {"text": "QuickScan", "callback_data": _cb(chat_id, msg_id, "QS")},
     {"text": "Watchlist", "callback_data": _cb(chat_id, msg_id, "WATCHLIST")},
     {"text": "Community", "url": "https://x.com/MetridexBot"},
 ])
@@ -142,5 +141,22 @@ def build_keyboard(chat_id: int,
         {"text": "Δ 6h",  "callback_data": _cb(chat_id, msg_id, "DELTA_6H")},
         {"text": "Δ 24h", "callback_data": _cb(chat_id, msg_id, "DELTA_24H")},
     ])
+
+    # Cleanup: hide Δ-row in welcome contexts
+
+    if ctx in ('start', 'info', None):
+
+        _rows = []
+
+        for _r in rows:
+
+            if any(isinstance(_b, dict) and str(_b.get('text','')).strip().startswith('Δ') for _b in _r):
+
+                continue
+
+            _rows.append(_r)
+
+        rows = _rows
+
 
     return {"inline_keyboard": rows}
