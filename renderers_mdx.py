@@ -840,9 +840,9 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
                     except Exception:
                         _rd_country_val = None
                 if _rd_country_val:
-                    _rd_lines.append(f"• Country: {_rd_country_val}")
+                    pass
                 elif _RDAP_COUNTRY_PLACEHOLDER:
-                    _rd_lines.append("• Country: —")
+                    pass
                 if _rd.get("status"):
                     try:
                         _st = list(_rd["status"])[:4]
