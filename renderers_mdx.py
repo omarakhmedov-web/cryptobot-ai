@@ -1404,3 +1404,107 @@ def age_label(ms: int | None) -> str:
     if days < 3:
         return f"~{days:.1f} d"
     return f"~{round(days)} d"
+
+
+# === D0.2.3 Wayback deterministic patch (no new ENV; one-file change) =============================
+def _normalize_domain(raw: str) -> str:
+    try:
+        s = (raw or "").strip().lower()
+        # Remove scheme if present
+        if s.startswith("http://") or s.startswith("https://"):
+            from urllib.parse import urlparse
+            p = urlparse(s)
+            s = p.netloc or p.path
+        # Strip path if any sneaks in
+        s = s.split("/")[0]
+        # Drop leading wildcards and www.
+        s = s.lstrip("*.")
+        if s.startswith("www."):
+            s = s[4:]
+        return s
+    except Exception:
+        return (raw or "").strip().lower()
+
+def _wayback_summary(domain: str):
+    # Deterministic + normalized Wayback probing with soft-retry and TTL cache.
+    if not _WAYBACK_SUMMARY or not isinstance(domain, str):
+        return None
+
+    dom = _normalize_domain(domain)
+    key = f"wb:{dom}"
+    cached = _cache_get(_wb_cache, key)
+    if cached is not None:
+        return cached
+
+    out = {"ok": False, "first": None, "last": None, "url": f"https://web.archive.org/web/*/{dom}"}
+    try:
+        base = "https://web.archive.org/cdx/search/cdx"
+        common = {"url": dom, "output": "json", "fl": "timestamp", "filter": "statuscode:200", "from": "19960101", "to": "99991231"}
+
+        # Helper: GET with soft-retry
+        def _get(params):
+            try:
+                r = _rq.get(base, params=params, timeout=_WAYBACK_TIMEOUT_S)
+                if getattr(r, "ok", False):
+                    return r
+            except Exception:
+                pass
+            # Soft retry
+            try:
+                import time as _t
+                _t.sleep(0.35)
+                r = _rq.get(base, params=params, timeout=_WAYBACK_TIMEOUT_S)
+                return r if getattr(r, "ok", False) else None
+            except Exception:
+                return None
+
+        # 1) Earliest (ascending, limit=1)
+        r1 = _get({**common, "sort": "ascending", "limit": "1"})
+        if r1 is not None:
+            try:
+                j1 = r1.json()
+                if isinstance(j1, list) and len(j1) >= 2 and isinstance(j1[1], list) and j1[1]:
+                    ts1 = j1[1][0]
+                    out["first"] = f"{ts1[0:4]}-{ts1[4:6]}-{ts1[6:8]}"
+            except Exception:
+                pass
+
+        # 2) Latest (descending, limit=1)
+        r2 = _get({**common, "sort": "descending", "limit": "1"})
+        if r2 is not None:
+            try:
+                j2 = r2.json()
+                if isinstance(j2, list) and len(j2) >= 2 and isinstance(j2[1], list) and j2[1]:
+                    ts2 = j2[1][0]
+                    out["last"] = f"{ts2[0:4]}-{ts2[4:6]}-{ts2[6:8]}"
+            except Exception:
+                pass
+
+        # 3) Fallback for missing 'first': if latest exists, try fetching a small ascending page without strict limit
+        if (out["first"] is None) and (out["last"] is not None):
+            r3 = _get({**common, "sort": "ascending", "limit": "50"})  # small page to avoid heavy calls
+            if r3 is not None:
+                try:
+                    j3 = r3.json()
+                    # pick earliest timestamp from rows (skip header row)
+                    if isinstance(j3, list) and len(j3) >= 2:
+                        # rows are [["timestamp"], ["YYYY..."], ["YYYY..."], ...]
+                        for row in j3[1:]:
+                            if isinstance(row, list) and row:
+                                ts1b = row[0]
+                                out["first"] = f"{ts1b[0:4]}-{ts1b[4:6]}-{ts1b[6:8]}"
+                                break
+                except Exception:
+                    pass
+
+        # 4) Deterministic finalization: if still no 'first' but we do have 'last', set first=last
+        if (out["first"] is None) and (out["last"] is not None):
+            out["first"] = out["last"]
+
+        out["ok"] = bool(out["first"] or out["last"])
+    except Exception:
+        # Keep deterministic output shape; ok remains False.
+        pass
+
+    return _cache_put(_wb_cache, key, out)
+# === /D0.2.3 patch ================================================================================
