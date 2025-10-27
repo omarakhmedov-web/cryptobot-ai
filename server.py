@@ -1574,93 +1574,61 @@ def on_callback(cb):
     bundle = load_bundle(chat_id, orig_msg_id) or {}
     links = bundle.get("links")
 
+    
     if action == "WATCHLIST":
-
-        import os, json
-
+        import os, json, time, hashlib, re as _re
         db_path = os.environ.get("WATCH_DB_PATH", "./watch_db.json")
-
-        items = []
-
+        # load db
         try:
-
             with open(db_path, "r", encoding="utf-8") as _f:
-
                 _data = json.load(_f)
-
-            if isinstance(_data, dict):
-
-                _raw = _data.get(str(chat_id)) or _data.get(int(chat_id)) or _data.get("tokens") or []
-
-                if isinstance(_raw, dict) and "tokens" in _raw:
-
-                    items = list(_raw.get("tokens") or [])
-
-                elif isinstance(_raw, list):
-
-                    items = list(_raw)
-
-            elif isinstance(_data, list):
-
-                items = list(_data)
-
         except Exception:
-
-            items = []
-
-        
-
+            _data = {}
+        # extract chat watchlist
+        arr = []
+        if isinstance(_data, dict):
+            _key = str(chat_id) if chat_id is not None else None
+            if _key and _key in _data and isinstance(_data[_key], list):
+                arr = _data[_key]
+        # normalize
         norm = []
-
-        for _x in items:
-
-            try:
-
-                _t = str(_x).strip()
-
-            except Exception:
-
-                _t = None
-
-            if not _t:
-
-                continue
-
-            if _t.startswith("0x") and len(_t) > 14:
-
-                _t = _t[:10] + "…" + _t[-6:]
-
-            norm.append(_t)
-
-        
-
+        for t in arr or []:
+            s = str(t or "").strip()
+            if s:
+                norm.append(s)
+        # empty -> toast only, no message
         if not norm:
-
-            try: answer_callback_query(cb_id, "Watchlist is empty.", False)
-
-            except Exception: pass
-
-            try: send_message(chat_id, "Your watchlist is empty.\nAdd tokens with /watch 0x...", disable_web_page_preview=True)
-
-            except Exception: pass
-
+            try:
+                answer_callback_query(cb_id, "Your watchlist is empty. Add tokens with /watch 0x…", False)
+            except Exception:
+                pass
             return jsonify({"ok": True})
-
-        
-
-        lines = [f"{i+1}) {t}" for i, t in enumerate(norm[:50])]
-
+        # build body
+        lines = [f"{i+1}) {tok}" for i, tok in enumerate(norm[:50])]
         body_text = "Your Watchlist\n" + "\n".join(lines)
-
-        try: answer_callback_query(cb_id, "Watchlist loaded.", False)
-
-        except Exception: pass
-
-        try: send_message(chat_id, body_text, disable_web_page_preview=True)
-
-        except Exception: pass
-
+        # dedup within 10s for same content
+        try:
+            _dedup = globals().setdefault("_DEDUP_WATCHLIST", {})
+            rec = _dedup.get(chat_id)
+            now = time.time()
+            body_hash = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
+            if isinstance(rec, dict) and now - float(rec.get("ts", 0)) < 10.0 and rec.get("hash") == body_hash:
+                answer_callback_query(cb_id, "Already shown.", False)
+                return jsonify({"ok": True})
+            _dedup[chat_id] = {"ts": now, "hash": body_hash}
+        except Exception:
+            pass
+        # respond
+        try:
+            answer_callback_query(cb_id, "Watchlist loaded.", False)
+        except Exception:
+            pass
+        try:
+            send_message(chat_id, body_text, disable_web_page_preview=True)
+        except Exception:
+            pass
         return jsonify({"ok": True})
+
 
 
     if action == "DETAILS":
