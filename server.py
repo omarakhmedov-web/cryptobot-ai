@@ -376,7 +376,7 @@ def _tls_expires_quick(domain: str):
 
 def build_webintel_ctx(market: dict) -> dict:
     try:
-        links = _sanitize_links_policy((market.get("links") or {}), market)
+        links = (market.get("links") or {})
     except Exception:
         links = {}
     try:
@@ -841,41 +841,6 @@ def _healthz_get():
 def _health_get():
     return jsonify({"ok": True, "status": "ok", "ts": int(time.time())}), 200
 # --- /Health endpoints ---
-
-
-
-# === DEX/Scan links strict policy (DEXFIX) ====================================
-# Only allow official domains per chain; else blank them out.
-_DEX_POLICY = {
-    "eth":     {"dex": ["app.uniswap.org"],       "scan": ["etherscan.io"]},
-    "bsc":     {"dex": ["pancakeswap.finance"],   "scan": ["bscscan.com"]},
-    "polygon": {"dex": ["quickswap.exchange"],    "scan": ["polygonscan.com"]},
-}
-
-def _sanitize_links_policy(links: dict | None, market: dict | None) -> dict:
-    links = dict(links or {})
-    m = dict(market or {})
-    ch = str((m.get("chain") or m.get("chainId") or "")).strip().lower()
-    if ch.isdigit():
-        ch = {"1":"eth","56":"bsc","137":"polygon"}.get(ch, ch)
-    if ch in ("matic","poly","pol"):
-        ch = "polygon"
-    pol = _DEX_POLICY.get(ch, {})
-    def _ok(url, allowed_hosts):
-        if not url:
-            return "—"
-        try:
-            u = str(url).strip().lower()
-        except Exception:
-            return "—"
-        for host in (allowed_hosts or []):
-            if host in u:
-                return url
-        return "—"
-    links["dex"]  = _ok(links.get("dex"),  pol.get("dex"))
-    links["scan"] = _ok(links.get("scan"), pol.get("scan"))
-    return links
-# === /DEX/Scan links strict policy ============================================
 
 
 _MD2_SPECIALS = r'_[]()~>#+-=|{}.!*`'
@@ -1564,6 +1529,31 @@ def on_message(msg):
 
 
 def on_callback(cb):
+
+    # D0 pre-dispatch for top-row actions (QS/WATCHLIST/UPGRADE)
+    try:
+        _a = action.strip().upper()
+    except Exception:
+        _a = str(action).upper() if action is not None else ""
+    if _a in ("QS", "QUICKSCAN"):
+        try:
+            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Paste CA (0x…) or reply with an address to QuickScan.", "show_alert": False})
+        except Exception:
+            pass
+        return {"ok": True, "handled": True}
+    if _a == "WATCHLIST":
+        try:
+            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Use /watchlist to view tokens.", "show_alert": False})
+        except Exception:
+            pass
+        return {"ok": True, "handled": True}
+    if _a == "UPGRADE":
+        try:
+            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Premium: Pro $29/mo • Teams $99/5 seats • Day Pass $9 — details on site.", "show_alert": False})
+            tg_api("sendMessage", {"chat_id": chat_id, "text": "Upgrade plans:\n• Pro — $29/month\n• Teams — $99/month (5 seats)\n• Day Pass — $9\n\nLearn more: https://metridex.com", "parse_mode": "Markdown"})
+        except Exception:
+            pass
+        return {"ok": True, "handled": True}
     cb_id = cb["id"]
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
