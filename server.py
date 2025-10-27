@@ -376,7 +376,7 @@ def _tls_expires_quick(domain: str):
 
 def build_webintel_ctx(market: dict) -> dict:
     try:
-        links = (market.get("links") or {})
+        links = _sanitize_links_policy((market.get("links") or {}), market)
     except Exception:
         links = {}
     try:
@@ -841,6 +841,41 @@ def _healthz_get():
 def _health_get():
     return jsonify({"ok": True, "status": "ok", "ts": int(time.time())}), 200
 # --- /Health endpoints ---
+
+
+
+# === DEX/Scan links strict policy (DEXFIX) ====================================
+# Only allow official domains per chain; else blank them out.
+_DEX_POLICY = {
+    "eth":     {"dex": ["app.uniswap.org"],       "scan": ["etherscan.io"]},
+    "bsc":     {"dex": ["pancakeswap.finance"],   "scan": ["bscscan.com"]},
+    "polygon": {"dex": ["quickswap.exchange"],    "scan": ["polygonscan.com"]},
+}
+
+def _sanitize_links_policy(links: dict | None, market: dict | None) -> dict:
+    links = dict(links or {})
+    m = dict(market or {})
+    ch = str((m.get("chain") or m.get("chainId") or "")).strip().lower()
+    if ch.isdigit():
+        ch = {"1":"eth","56":"bsc","137":"polygon"}.get(ch, ch)
+    if ch in ("matic","poly","pol"):
+        ch = "polygon"
+    pol = _DEX_POLICY.get(ch, {})
+    def _ok(url, allowed_hosts):
+        if not url:
+            return "—"
+        try:
+            u = str(url).strip().lower()
+        except Exception:
+            return "—"
+        for host in (allowed_hosts or []):
+            if host in u:
+                return url
+        return "—"
+    links["dex"]  = _ok(links.get("dex"),  pol.get("dex"))
+    links["scan"] = _ok(links.get("scan"), pol.get("scan"))
+    return links
+# === /DEX/Scan links strict policy ============================================
 
 
 _MD2_SPECIALS = r'_[]()~>#+-=|{}.!*`'
