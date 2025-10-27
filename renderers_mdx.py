@@ -258,36 +258,6 @@ def _fmt_age_days(v: Optional[float]) -> str:
         return f"{round(n*24)} h"
     return f"{n:.1f} d"
 
-def _na(s):
-    s = ('' if s is None else str(s)).strip()
-    return 'n/a' if s in ('', '—', '-') else s
-
-def _age_days_from_pair_created(market):
-    try:
-        ts = (market or {}).get("pairCreatedAt") or (market or {}).get("launchedAt") or (market or {}).get("createdAt")
-        if not ts:
-            return None
-        ts = float(ts)
-        if ts > 10_000_000_000:
-            ts = ts / 1000.0
-        import time as _t
-        d = max(0.0, (_t.time() - ts)/86400.0)
-        return round(d, 1)
-    except Exception:
-        return None
-
-def _age_str(market, age_val):
-    try:
-        if isinstance(age_val, (int, float)) and age_val > 0:
-            return f"{float(age_val):.1f} d"
-        s = str(age_val or "").strip()
-        if s and s not in ("—", "-"):
-            return s
-    except Exception:
-        pass
-    d = _age_days_from_pair_created(market)
-    return f"{d:.1f} d" if d is not None else "—"
-
 def _fmt_time(ts_ms: Optional[int]) -> str:
     if ts_ms is None:
         return "—"
@@ -718,7 +688,33 @@ def _wayback_summary(domain: str):
     try:
         base = "https://web.archive.org/cdx/search/cdx"
         params_first = {"url": domain, "output": "json", "fl": "timestamp", "filter": "statuscode:200", "limit": "1", "from": "19960101", "to": "99991231", "sort": "ascending"}
-        r1 = _rq.get(base, params=params_first, timeout=_WAYBACK_TIMEOUT_S)
+        try:
+
+            r1 = _rq.get(base, params=params_first, timeout=_WAYBACK_TIMEOUT_S)
+
+            if not getattr(r1, "ok", False):
+
+                raise RuntimeError("wayback r1 not ok")
+
+        except Exception:
+
+            import time as _t
+
+            _t.sleep(0.35)
+
+            try:
+
+                r1 = _rq.get(base, params=params_first, timeout=_WAYBACK_TIMEOUT_S)
+
+            except Exception:
+
+                class _WBNull:
+
+                    ok = False
+
+                    def json(self): return {}
+
+                r1 = _WBNull()
         if r1.ok:
             j1 = r1.json()
             # fl=timestamp => rows are [["timestamp"], ["YYYYMMDDhhmmss"]]
@@ -726,7 +722,33 @@ def _wayback_summary(domain: str):
                 ts1 = j1[1][0]
                 out["first"] = f"{ts1[0:4]}-{ts1[4:6]}-{ts1[6:8]}"
         params_last = dict(params_first); params_last["sort"] = "descending"
-        r2 = _rq.get(base, params=params_last, timeout=_WAYBACK_TIMEOUT_S)
+        try:
+
+            r2 = _rq.get(base, params=params_last, timeout=_WAYBACK_TIMEOUT_S)
+
+            if not getattr(r2, "ok", False):
+
+                raise RuntimeError("wayback r2 not ok")
+
+        except Exception:
+
+            import time as _t
+
+            _t.sleep(0.35)
+
+            try:
+
+                r2 = _rq.get(base, params=params_last, timeout=_WAYBACK_TIMEOUT_S)
+
+            except Exception:
+
+                class _WBNull:
+
+                    ok = False
+
+                    def json(self): return {}
+
+                r2 = _WBNull()
         if r2.ok:
             j2 = r2.json()
             if isinstance(j2, list) and len(j2) >= 2 and isinstance(j2[1], list) and j2[1]:
@@ -748,7 +770,7 @@ def _render_quick__base(verdict, market: Dict[str, Any], ctx: Dict[str, Any], la
     chg5 = _fmt_pct(_get(market, "priceChanges", "m5"))
     chg1 = _fmt_pct(_get(market, "priceChanges", "h1"))
     chg24= _fmt_pct(_get(market, "priceChanges", "h24"))
-    age  = _age_str(market, _get(market, "ageDays"))
+    age  = _fmt_age_days(_get(market, "ageDays"))
     asof = _fmt_time(_get(market, "asof"))
     src  = _get(market, "source", default="DexScreener")
     sources = _get(market, "sources") or ([src] if src else [])
@@ -759,8 +781,8 @@ def _render_quick__base(verdict, market: Dict[str, Any], ctx: Dict[str, Any], la
         header,
         f"`{chain}`  •  Price: *{price}*",
         f"FDV: {fdv}  •  MC: {mc}  •  Liq: {liq}",
-        f"Vol 24h: {vol}  •  Δ5m {_na(chg5)}  •  Δ1h {_na(chg1)}  •  Δ24h {_na(chg24)}",
-        f"Age: {_na(age)}  •  Source: {src_line}  •  as of {asof}",
+        f"Vol 24h: {vol}  •  Δ5m {chg5}  •  Δ1h {chg1}  •  Δ24h {chg24}",
+        f"Age: {age}  •  Source: {src_line}  •  as of {asof}",
     ]
     return "\n".join(lines)
 
@@ -808,7 +830,7 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
     chg5  = _fmt_pct(_get(market, "priceChanges", "m5"))
     chg1  = _fmt_pct(_get(market, "priceChanges", "h1"))
     chg24 = _fmt_pct(_get(market, "priceChanges", "h24"))
-    age   = _age_str(market, _get(market, "ageDays"))
+    age   = _fmt_age_days(_get(market, "ageDays"))
     src_  = _get(market, "source", default="DexScreener")
     asof  = _fmt_time(_get(market, "asof"))
 
@@ -827,7 +849,7 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
         f"• Price: {price}  ({chg5}, {chg1}, {chg24})",
         f"• FDV: {fdv}  • MC: {mc}",
         f"• Liquidity: {liq}  • 24h Volume: {vol}",
-        f"• Age: {_na(age)}  • Source: {src_}",
+        f"• Age: {age}  • Source: {src_}",
         f"• As of: {asof}",
     ]
     parts.append("\n".join(snapshot_lines))
