@@ -91,7 +91,7 @@ def _sparkline(values):
 # === /D0 sparkline ============================================================
 
 try:
-    from lp_lite import check_lp_lock_v2
+    from lp_lite_v2 import check_lp_lock_v2
 except Exception:
     def check_lp_lock_v2(chain, lp_addr, rpc_urls=None, timeout_s=6.0, retries=2):
         return {
@@ -715,10 +715,10 @@ def _render_quick__base(verdict, market: Dict[str, Any], ctx: Dict[str, Any], la
     mc  = _fmt_num(_get(market, "mc" ), prefix="$")
     liq = _fmt_num(_get(market, "liq"), prefix="$")
     vol = _fmt_num(_get(market, "vol24h"), prefix="$")
-    chg5 = _fmt_pct(_get(market, "priceChanges", "m5", none="n/a"))
-    chg1 = _fmt_pct(_get(market, "priceChanges", "h1", none="n/a"))
-    chg24 = _fmt_pct(_get(market, "priceChanges", "h24", none="n/a"))
-    age  = _age_str(market, _get(market, "ageDays"))
+    chg5 = _fmt_pct(_get(market, "priceChanges", "m5"))
+    chg1 = _fmt_pct(_get(market, "priceChanges", "h1"))
+    chg24= _fmt_pct(_get(market, "priceChanges", "h24"))
+    age  = _fmt_age_days(_get(market, "ageDays"))
     asof = _fmt_time(_get(market, "asof"))
     src  = _get(market, "source", default="DexScreener")
     sources = _get(market, "sources") or ([src] if src else [])
@@ -775,10 +775,10 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
     liq = _fmt_num(_get(market, "liq"), prefix="$")
     vol = _fmt_num(_get(market, "vol24h"), prefix="$")
 
-    chg5 = _fmt_pct(_get(market, "priceChanges", "m5", none="n/a"))
-    chg1 = _fmt_pct(_get(market, "priceChanges", "h1", none="n/a"))
-    chg24 = _fmt_pct(_get(market, "priceChanges", "h24", none="n/a"))
-    age   = _age_str(market, _get(market, "ageDays"))
+    chg5  = _fmt_pct(_get(market, "priceChanges", "m5"))
+    chg1  = _fmt_pct(_get(market, "priceChanges", "h1"))
+    chg24 = _fmt_pct(_get(market, "priceChanges", "h24"))
+    age   = _fmt_age_days(_get(market, "ageDays"))
     src_  = _get(market, "source", default="DexScreener")
     asof  = _fmt_time(_get(market, "asof"))
 
@@ -1352,32 +1352,3 @@ def age_label(ms: int | None) -> str:
     if days < 3:
         return f"~{days:.1f} d"
     return f"~{round(days)} d"
-
-
-
-# === D0 helpers (age/delta fallbacks) ===
-def _age_days_from_pair_created(market):
-    try:
-        ts = (market or {}).get("pairCreatedAt")
-        if not ts:
-            return None
-        ts = float(ts)
-        if ts > 10_000_000_000:
-            ts = ts / 1000.0
-        import time as _t
-        return max(0.0, (_t.time() - ts)/86400.0)
-    except Exception:
-        return None
-
-def _age_str(market, age_val):
-    try:
-        if isinstance(age_val, (int,float)) and age_val > 0:
-            return f"{float(age_val):.1f} d"
-        s = str(age_val or "").strip()
-        if s and s != "—" and s.lower() != "none":
-            return s
-    except Exception:
-        pass
-    d = _age_days_from_pair_created(market)
-    return f"{d:.1f} d" if d is not None else "—"
-
