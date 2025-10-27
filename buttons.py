@@ -137,11 +137,13 @@ def build_keyboard(chat_id: int,
         rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
 
     # ---------------- DELTA ROW (bottom) ----------------
-    rows.append([
-        {"text": "Δ 5m",  "callback_data": _cb(chat_id, msg_id, "DELTA_M5")},
-        {"text": "Δ 1h",  "callback_data": _cb(chat_id, msg_id, "DELTA_1H")},
-        {"text": "Δ 6h",  "callback_data": _cb(chat_id, msg_id, "DELTA_6H")},
-        {"text": "Δ 24h", "callback_data": _cb(chat_id, msg_id, "DELTA_24H")},
-    ])
+    if ctx not in ("start", "info"):
+        rows.append([
+            {"text": "Δ 5m",  "callback_data": _cb(chat_id, msg_id, "DELTA_M5")},
+            {"text": "Δ 1h",  "callback_data": _cb(chat_id, msg_id, "DELTA_1H")},
+            {"text": "Δ 6h",  "callback_data": _cb(chat_id, msg_id, "DELTA_6H")},
+            {"text": "Δ 24h", "callback_data": _cb(chat_id, msg_id, "DELTA_24H")},
+        ])
+
 
     return {"inline_keyboard": rows}
