@@ -1529,29 +1529,148 @@ def on_message(msg):
 
 
 def on_callback(cb):
-    # D0 pre-dispatch for top-row actions (QuickScan/Watchlist/Premium)
+
+
+    # D0: Handle WATCHLIST top-row action (send list from ./watch_db.json or WATCH_DB_PATH)
+
     try:
+
         _a = str(action).strip().upper()
+
     except Exception:
+
         _a = str(action).upper() if action is not None else ""
-    if _a in ("QS", "QUICKSCAN"):
-        try:
-            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Paste CA (0x…) or reply with an address to QuickScan.", "show_alert": False})
-        except Exception:
-            pass
-        return {"ok": True, "handled": True}
+
     if _a == "WATCHLIST":
+
+        def _esc_md(s_):
+
+            s_ = str(s_)
+
+            for ch in r"_*[]()~`>#+-=|{}.!":
+
+                s_ = s_.replace(ch, "\\" + ch)
+
+            return s_
+
+        import json, os
+
+        db_path = os.environ.get("WATCH_DB_PATH", "./watch_db.json")
+
+        items = []
+
         try:
-            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Use /watchlist to view tokens.", "show_alert": False})
+
+            with open(db_path, "r", encoding="utf-8") as _f:
+
+                data = json.load(_f)
+
+            if isinstance(data, dict):
+
+                raw = data.get(str(chat_id)) or data.get(int(chat_id)) or data.get("tokens") or []
+
+                if isinstance(raw, dict) and "tokens" in raw:
+
+                    items = list(raw.get("tokens") or [])
+
+                elif isinstance(raw, list):
+
+                    items = list(raw)
+
+            elif isinstance(data, list):
+
+                items = list(data)
+
         except Exception:
-            pass
-        return {"ok": True, "handled": True}
-    if _a == "UPGRADE":
+
+            items = []
+
+
+
+        norm = []
+
+        for x in items:
+
+            try:
+
+                t = str(x).strip()
+
+            except Exception:
+
+                t = None
+
+            if t:
+
+                if t.startswith("0x") and len(t) > 14:
+
+                    t = t[:10] + "…" + t[-6:]
+
+                norm.append(t)
+
+
+
+        if not norm:
+
+            try:
+
+                tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Watchlist is empty.", "show_alert": False})
+
+            except Exception:
+
+                pass
+
+            try:
+
+                tg_api("sendMessage", {
+
+                    "chat_id": chat_id,
+
+                    "text": "*Your watchlist is empty.*\\nAdd tokens with `/watch 0x...`",
+
+                    "parse_mode": "MarkdownV2",
+
+                    "disable_web_page_preview": True
+
+                })
+
+            except Exception:
+
+                pass
+
+            return {"ok": True, "handled": True}
+
+
+
+        lines = [f"{i+1}) {t}" for i, t in enumerate(norm[:50])]
+
+        body = "*Your Watchlist* (" + str(len(norm)) + "):\\n" + "\\n".join(_esc_md(x) for x in lines)
+
         try:
-            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Plans: Pro $29/mo • Teams $99/5 seats • Day Pass $9.", "show_alert": False})
-            tg_api("sendMessage", {"chat_id": chat_id, "text": "Upgrade plans:\n• Pro — $29/month\n• Teams — $99/month (5 seats)\n• Day Pass — $9\n\nLearn more: https://metridex.com/help", "parse_mode": "Markdown"})
+
+            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Watchlist loaded.", "show_alert": False})
+
         except Exception:
+
             pass
+
+        try:
+
+            tg_api("sendMessage", {
+
+                "chat_id": chat_id,
+
+                "text": body,
+
+                "parse_mode": "MarkdownV2",
+
+                "disable_web_page_preview": True
+
+            })
+
+        except Exception:
+
+            pass
+
         return {"ok": True, "handled": True}
     cb_id = cb["id"]
     data = cb.get("data") or ""
