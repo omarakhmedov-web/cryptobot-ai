@@ -1164,7 +1164,16 @@ def render_lp(info: dict, lang: str = "en") -> str:
         lp_disp = data.get("lpToken") or lp_token
         lines.append(f"LP token: {lp_disp}")
         links = []
-        if data.get("holdersUrl"): links.append("Holders (Etherscan)")
+        # Label scan by chain
+        _chain_norm = (chain or "").lower()
+        _scan_label = "Explorer"
+        if "eth" in _chain_norm:
+            _scan_label = "Etherscan"
+        elif "bsc" in _chain_norm or "binance" in _chain_norm:
+            _scan_label = "BscScan"
+        elif "polygon" in _chain_norm:
+            _scan_label = "Polygonscan"
+        if data.get("holdersUrl"): links.append(f"Holders ({_scan_label})")
         if data.get("uncxUrl"): links.append("UNCX")
         if data.get("teamfinanceUrl"): links.append("TeamFinance")
         if links:
@@ -1191,7 +1200,8 @@ def render_lp(info: dict, lang: str = "en") -> str:
     lines.append(f"Burned: {_fmt_pct2(burned_pct) if burned_pct is not None else '—'}")
     lines.append(f"Locked: {_fmt_pct2(locked_pct) if locked_pct is not None else '—'}")
     lines.append(f"LP token: {lp_token}")
-    lines.append("Links: UNCX | TeamFinance")
+    if chain not in (None, "—", "", "-") and lp_token not in (None, "—", "", "-"):
+        lines.append("Links: UNCX | TeamFinance")
     lines.append("Data source: —")
     return "\n".join(lines)
 def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
