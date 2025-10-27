@@ -1531,147 +1531,6 @@ def on_message(msg):
 def on_callback(cb):
 
 
-    # D0: Handle WATCHLIST top-row action (send list from ./watch_db.json or WATCH_DB_PATH)
-
-    try:
-
-        _a = str(action).strip().upper()
-
-    except Exception:
-
-        _a = str(action).upper() if action is not None else ""
-
-    if _a == "WATCHLIST":
-
-        def _esc_md(s_):
-
-            s_ = str(s_)
-
-            for ch in r"_*[]()~`>#+-=|{}.!":
-
-                s_ = s_.replace(ch, "\\" + ch)
-
-            return s_
-
-        import json, os
-
-        db_path = os.environ.get("WATCH_DB_PATH", "./watch_db.json")
-
-        items = []
-
-        try:
-
-            with open(db_path, "r", encoding="utf-8") as _f:
-
-                data = json.load(_f)
-
-            if isinstance(data, dict):
-
-                raw = data.get(str(chat_id)) or data.get(int(chat_id)) or data.get("tokens") or []
-
-                if isinstance(raw, dict) and "tokens" in raw:
-
-                    items = list(raw.get("tokens") or [])
-
-                elif isinstance(raw, list):
-
-                    items = list(raw)
-
-            elif isinstance(data, list):
-
-                items = list(data)
-
-        except Exception:
-
-            items = []
-
-
-
-        norm = []
-
-        for x in items:
-
-            try:
-
-                t = str(x).strip()
-
-            except Exception:
-
-                t = None
-
-            if t:
-
-                if t.startswith("0x") and len(t) > 14:
-
-                    t = t[:10] + "…" + t[-6:]
-
-                norm.append(t)
-
-
-
-        if not norm:
-
-            try:
-
-                tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Watchlist is empty.", "show_alert": False})
-
-            except Exception:
-
-                pass
-
-            try:
-
-                tg_api("sendMessage", {
-
-                    "chat_id": chat_id,
-
-                    "text": "*Your watchlist is empty.*\\nAdd tokens with `/watch 0x...`",
-
-                    "parse_mode": "MarkdownV2",
-
-                    "disable_web_page_preview": True
-
-                })
-
-            except Exception:
-
-                pass
-
-            return {"ok": True, "handled": True}
-
-
-
-        lines = [f"{i+1}) {t}" for i, t in enumerate(norm[:50])]
-
-        body = "*Your Watchlist* (" + str(len(norm)) + "):\\n" + "\\n".join(_esc_md(x) for x in lines)
-
-        try:
-
-            tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Watchlist loaded.", "show_alert": False})
-
-        except Exception:
-
-            pass
-
-        try:
-
-            tg_api("sendMessage", {
-
-                "chat_id": chat_id,
-
-                "text": body,
-
-                "parse_mode": "MarkdownV2",
-
-                "disable_web_page_preview": True
-
-            })
-
-        except Exception:
-
-            pass
-
-        return {"ok": True, "handled": True}
     cb_id = cb["id"]
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
@@ -1698,7 +1557,7 @@ def on_callback(cb):
     if orig_msg_id == 0:
         orig_msg_id = current_msg_id
 
-    if chat_id != orig_chat_id and orig_chat_id != 0:
+    if str(chat_id) != str(orig_chat_id) and str(orig_chat_id) != '0':
         answer_callback_query(cb_id, "This control expired.", True)
         return jsonify({"ok": True})
 
@@ -1714,6 +1573,95 @@ def on_callback(cb):
 
     bundle = load_bundle(chat_id, orig_msg_id) or {}
     links = bundle.get("links")
+
+    if action == "WATCHLIST":
+
+        import os, json
+
+        db_path = os.environ.get("WATCH_DB_PATH", "./watch_db.json")
+
+        items = []
+
+        try:
+
+            with open(db_path, "r", encoding="utf-8") as _f:
+
+                _data = json.load(_f)
+
+            if isinstance(_data, dict):
+
+                _raw = _data.get(str(chat_id)) or _data.get(int(chat_id)) or _data.get("tokens") or []
+
+                if isinstance(_raw, dict) and "tokens" in _raw:
+
+                    items = list(_raw.get("tokens") or [])
+
+                elif isinstance(_raw, list):
+
+                    items = list(_raw)
+
+            elif isinstance(_data, list):
+
+                items = list(_data)
+
+        except Exception:
+
+            items = []
+
+        
+
+        norm = []
+
+        for _x in items:
+
+            try:
+
+                _t = str(_x).strip()
+
+            except Exception:
+
+                _t = None
+
+            if not _t:
+
+                continue
+
+            if _t.startswith("0x") and len(_t) > 14:
+
+                _t = _t[:10] + "…" + _t[-6:]
+
+            norm.append(_t)
+
+        
+
+        if not norm:
+
+            try: answer_callback_query(cb_id, "Watchlist is empty.", False)
+
+            except Exception: pass
+
+            try: send_message(chat_id, "Your watchlist is empty.\nAdd tokens with /watch 0x...", disable_web_page_preview=True)
+
+            except Exception: pass
+
+            return jsonify({"ok": True})
+
+        
+
+        lines = [f"{i+1}) {t}" for i, t in enumerate(norm[:50])]
+
+        body_text = "Your Watchlist\n" + "\n".join(lines)
+
+        try: answer_callback_query(cb_id, "Watchlist loaded.", False)
+
+        except Exception: pass
+
+        try: send_message(chat_id, body_text, disable_web_page_preview=True)
+
+        except Exception: pass
+
+        return jsonify({"ok": True})
+
 
     if action == "DETAILS":
         answer_callback_query(cb_id, "More details sent.", False)
