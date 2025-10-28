@@ -1,4 +1,5 @@
 import hashlib
+import webintel_lite
 import hmac
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
@@ -1155,6 +1156,11 @@ Write **Why++** with 8–12 bullets:
         return None
 
 def on_message(msg):
+    lp = {}
+    details = None
+    why = None
+    whypp = None
+    web = None
     # SAFE DEFAULTS to avoid UnboundLocalError on failed branches
     quick = quick if 'quick' in locals() else ''
     details = details if 'details' in locals() else ''
@@ -1502,7 +1508,7 @@ def on_message(msg):
             "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
         },
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
-        "details": details, "why": why, "whypp": whypp, "lp": lp, "webintel": web
+        "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, dict) else {}), "webintel": web
     }
 
     sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
