@@ -1319,8 +1319,35 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 f"• As of: {asof_fmt}",
             ]
             return "\n".join(minimal)
+        
         except Exception:
-            return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
+            # Ultra-safe fallback (no helper calls) to avoid 3-line stub
+            mkt = market if isinstance(market, dict) else {}
+            _pair = (mkt.get("pairSymbol") or mkt.get("pair") or "—")
+            _token = (mkt.get("tokenAddress") or "—")
+            _pair_addr = (mkt.get("pairAddress") or "—")
+            _price = mkt.get("price"); _fdv=mkt.get("fdv"); _mc=mkt.get("mc"); _liq=mkt.get("liq"); _vol=mkt.get("vol24h")
+            _pc = mkt.get("priceChanges") or {}; _m5=_pc.get("m5"); _h1=_pc.get("h1"); _h24=_pc.get("h24")
+            try:
+                from datetime import datetime as _dt
+                _asof = mkt.get("asof")
+                _asof_fmt = _dt.utcfromtimestamp(int(_asof)/1000.0).strftime("%Y-%m-%d %H:%M UTC") if _asof else "n/a"
+            except Exception:
+                _asof_fmt = "n/a"
+            _parts = []
+            _parts.append(f"*Details — {_pair}* 🟡 (—)")
+            _parts.append("*Snapshot*")
+            _parts.append(f"• Price: {_price if _price is not None else '—'}  ({_m5 if _m5 is not None else '—'}, {_h1 if _h1 is not None else '—'}, {_h24 if _h24 is not None else '—'})")
+            _parts.append(f"• FDV: {_fdv if _fdv is not None else '—'}  • MC: {_mc if _mc is not None else '—'}")
+            _parts.append(f"• Liquidity: {_liq if _liq is not None else '—'}  • 24h Volume: {_vol if _vol is not None else '—'}")
+            _parts.append("*Token*")
+            _parts.append(f"• Chain: {mkt.get('chain') or '—'}")
+            _parts.append(f"• Address: {_token}")
+            _parts.append("*Pair*")
+            _parts.append(f"• Address: {_pair_addr}")
+            _parts.append(f"• As of: {_asof_fmt}")
+            return "\\n".join(_parts)
+
 
 
 def render_contract(info: dict, lang: str = "en") -> str:
