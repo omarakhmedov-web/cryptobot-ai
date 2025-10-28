@@ -1281,14 +1281,26 @@ def on_message(msg):
     # --- Processing indicator (address-only) ---
     ph_id = None
     if _is_contract_address(text) or re.match(r"^0x[a-fA-F0-9]{64}$", text) or ('http' in text.lower()):
-        tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
-        ph = {"ok": False}  # HOTFIX: disable visible placeholder to avoid stuck messages
+        ph = send_message(chat_id, "Processing…")
         ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
         try:
             tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
         except Exception:
             pass
     # --- /Processing indicator ---
+    # Local helper to always clean the "Processing…" placeholder
+    def _del_ph():
+        try:
+            _id = None
+            try:
+                _id = ph_id
+            except Exception:
+                _id = None
+            if _id:
+                tg("deleteMessage", {"chat_id": chat_id, "message_id": _id})
+        except Exception:
+            pass
+
 
 
     # QuickScan flow
@@ -1525,6 +1537,8 @@ def on_message(msg):
 
     sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
     msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
+    _del_ph()
+
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
         try:
@@ -1549,6 +1563,7 @@ def on_message(msg):
         except Exception:
             pass
     # --- /Remove processing indicator ---
+    _del_ph()
     register_scan(chat_id)
     return jsonify({"ok": True})
 
