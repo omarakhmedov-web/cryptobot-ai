@@ -1094,6 +1094,8 @@ def webhook():
 
 def _generate_whypp_ai_enriched(market: dict, why_text: str, webintel: dict, onchain: dict | None) -> str | None:
     try:
+        if os.getenv('WHYPP_ENABLED','0') != '1':
+            return None
         key = os.getenv("OPENAI_API_KEY") or ""
         if not key:
             return None
@@ -1288,20 +1290,6 @@ def on_message(msg):
         except Exception:
             pass
     # --- /Processing indicator ---
-    # Local helper to always clean the "Processing…" placeholder
-    ph_edited = False
-    def _del_ph():
-        try:
-            _id = None
-            try:
-                _id = ph_id
-            except Exception:
-                _id = None
-            if _id and not ph_edited:
-                tg("deleteMessage", {"chat_id": chat_id, "message_id": _id})
-        except Exception:
-            pass
-
 
 
     # QuickScan flow
@@ -1533,39 +1521,91 @@ def on_message(msg):
             "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
         },
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
-        "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, dict) else {}), "webintel": web
+        "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, str) else "LP lock: unknown"), "webintel": web
     }
 
+    msg_id = None
+
+
     try:
-        # Prefer editing the placeholder to avoid a second message
+
+
         if 'ph_id' in locals() and ph_id:
-            _ed = tg('editMessageText', {
-                'chat_id': chat_id,
-                'message_id': ph_id,
-                'text': quick,
-                'parse_mode': 'MarkdownV2',
-                'reply_markup': build_keyboard(chat_id, 0, links)
-            })
-            ph_edited = True
+
+
+            _ed = tg('editMessageText', {'chat_id': chat_id, 'message_id': ph_id, 'text': quick, 'parse_mode': 'MarkdownV2', 'reply_markup': build_keyboard(chat_id, 0, links)})
+
+
             msg_id = ph_id if isinstance(_ed, dict) else None
+
+
         else:
+
+
             sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
+
+
             msg_id = sent.get('result', {}).get('message_id') if sent.get('ok') else None
-    except Exception as e:
+
+
+    except Exception as _e_send_quick:
+
+
         try:
-            print('SEND_QUICK (edit/send) error:', e)
+
+
+            print('SEND_QUICK error:', _e_send_quick)
+
+
         except Exception:
+
+
             pass
-        # Fallback: send plain text without Markdown
+
+
+        # Plaintext fallback (strip Markdown)
+
+
         try:
-            _plain = re.sub(r'[\\`*_\[\]()~>#+\-=|{}.!]', '', quick)
+
+
+            import re as _re
+
+
+            _plain = _re.sub(r'[\\`*_\[\]()~>#+\-=|{}.!]', '', quick)
+
+
             sent = tg('sendMessage', {'chat_id': chat_id, 'text': _plain})
-            msg_id = sent.get('result', {}).get('message_id') if isinstance(sent, dict) and sent.get('ok') else None
+
+
+            if isinstance(sent, dict) and sent.get('ok'):
+
+
+                msg_id = sent.get('result', {}).get('message_id')
+
+
         except Exception:
+
+
             msg_id = None
-    _del_ph()
 
 
+    # cleanup placeholder if it was a separate message
+
+
+    try:
+
+
+        if 'ph_id' in locals() and ph_id and (msg_id is None or msg_id != ph_id):
+
+
+            tg('deleteMessage', {'chat_id': chat_id, 'message_id': ph_id})
+
+
+    except Exception:
+
+
+        pass
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
         try:
@@ -1590,7 +1630,6 @@ def on_message(msg):
         except Exception:
             pass
     # --- /Remove processing indicator ---
-    _del_ph()
     register_scan(chat_id)
     return jsonify({"ok": True})
 
