@@ -1094,6 +1094,7 @@ def webhook():
 
 def _generate_whypp_ai_enriched(market: dict, why_text: str, webintel: dict, onchain: dict | None) -> str | None:
     try:
+        import os
         if os.getenv('WHYPP_ENABLED','0') != '1':
             return None
         key = os.getenv("OPENAI_API_KEY") or ""
@@ -1290,6 +1291,72 @@ def on_message(msg):
         except Exception:
             pass
     # --- /Processing indicator ---
+    # Safe sender that prefers editing the placeholder; falls back to plain text
+    def _send_or_edit_quick(quick_text: str, links: dict) -> int | None:
+        msg_id = None
+        # Try edit with MarkdownV2 first
+        try:
+            if 'ph_id' in locals() and ph_id:
+                _ed = tg('editMessageText', {
+                    'chat_id': chat_id,
+                    'message_id': ph_id,
+                    'text': quick_text,
+                    'parse_mode': 'MarkdownV2',
+                    'reply_markup': build_keyboard(chat_id, 0, links)
+                })
+                if isinstance(_ed, dict) and _ed.get('ok'):
+                    return ph_id
+        except Exception as _e1:
+            try:
+                print('EDIT mdv2 failed:', _e1)
+            except Exception:
+                pass
+        # Try edit without parse_mode
+        try:
+            if 'ph_id' in locals() and ph_id:
+                _ed2 = tg('editMessageText', {
+                    'chat_id': chat_id,
+                    'message_id': ph_id,
+                    'text': quick_text,
+                    'reply_markup': build_keyboard(chat_id, 0, links)
+                })
+                if isinstance(_ed2, dict) and _ed2.get('ok'):
+                    return ph_id
+        except Exception as _e2:
+            try:
+                print('EDIT plain failed:', _e2)
+            except Exception:
+                pass
+        # Send as a new message with MarkdownV2; if fails, send plain
+        try:
+            sent = send_message(chat_id, quick_text, reply_markup=build_keyboard(chat_id, 0, links))
+            if isinstance(sent, dict) and sent.get('ok'):
+                msg_id = sent.get('result', {}).get('message_id')
+        except Exception as _e3:
+            try:
+                print('SEND mdv2 failed:', _e3)
+            except Exception:
+                pass
+            # Plain-text last resort
+            try:
+                import re as _re
+                _plain = _re.sub(r'[\\`*_\[\]()~>#+\-=|{}.!]', '', quick_text)
+                sent2 = tg('sendMessage', {'chat_id': chat_id, 'text': _plain})
+                if isinstance(sent2, dict) and sent2.get('ok'):
+                    msg_id = sent2.get('result', {}).get('message_id')
+            except Exception as _e4:
+                try:
+                    print('SEND plain failed:', _e4)
+                except Exception:
+                    pass
+        # Delete placeholder if we ended up sending a new message
+        try:
+            if 'ph_id' in locals() and ph_id and (msg_id is None or msg_id != ph_id):
+                tg('deleteMessage', {'chat_id': chat_id, 'message_id': ph_id})
+        except Exception:
+            pass
+        return msg_id
+
 
 
     # QuickScan flow
@@ -1524,88 +1591,7 @@ def on_message(msg):
         "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, str) else "LP lock: unknown"), "webintel": web
     }
 
-    msg_id = None
-
-
-    try:
-
-
-        if 'ph_id' in locals() and ph_id:
-
-
-            _ed = tg('editMessageText', {'chat_id': chat_id, 'message_id': ph_id, 'text': quick, 'parse_mode': 'MarkdownV2', 'reply_markup': build_keyboard(chat_id, 0, links)})
-
-
-            msg_id = ph_id if isinstance(_ed, dict) else None
-
-
-        else:
-
-
-            sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
-
-
-            msg_id = sent.get('result', {}).get('message_id') if sent.get('ok') else None
-
-
-    except Exception as _e_send_quick:
-
-
-        try:
-
-
-            print('SEND_QUICK error:', _e_send_quick)
-
-
-        except Exception:
-
-
-            pass
-
-
-        # Plaintext fallback (strip Markdown)
-
-
-        try:
-
-
-            import re as _re
-
-
-            _plain = _re.sub(r'[\\`*_\[\]()~>#+\-=|{}.!]', '', quick)
-
-
-            sent = tg('sendMessage', {'chat_id': chat_id, 'text': _plain})
-
-
-            if isinstance(sent, dict) and sent.get('ok'):
-
-
-                msg_id = sent.get('result', {}).get('message_id')
-
-
-        except Exception:
-
-
-            msg_id = None
-
-
-    # cleanup placeholder if it was a separate message
-
-
-    try:
-
-
-        if 'ph_id' in locals() and ph_id and (msg_id is None or msg_id != ph_id):
-
-
-            tg('deleteMessage', {'chat_id': chat_id, 'message_id': ph_id})
-
-
-    except Exception:
-
-
-        pass
+    msg_id = _send_or_edit_quick(quick, links)
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
         try:
