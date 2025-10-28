@@ -1147,6 +1147,36 @@ def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
 
 
 def render_lp(info: dict, lang: str = "en") -> str:
+    # --- Chain source MUST be market.chain; fallback to info.chain ---
+    _chain_raw = (market.get("chain") or info.get("chain") or "eth")
+    _chain = _chain_raw.lower()
+    chain = {"ethereum":"ethereum","eth":"ethereum","bsc":"bsc","binance":"bsc","polygon":"polygon","matic":"polygon",
+             "arbitrum":"arbitrum","arb":"arbitrum","optimism":"optimism","op":"optimism","base":"base",
+             "avalanche":"avalanche","avax":"avalanche","fantom":"fantom","ftm":"fantom"}.get(_chain, _chain)
+    # Human title per chain
+    _title = {
+        "ethereum": "Ethereum",
+        "bsc": "BSC",
+        "polygon": "Polygon",
+        "arbitrum": "Arbitrum",
+        "optimism": "Optimism",
+        "base": "Base",
+        "avalanche": "Avalanche",
+        "fantom": "Fantom",
+    }
+    chain_title = _title.get(chain, chain.upper())
+    # Explorer host
+    _scan = {
+        "ethereum": "etherscan.io",
+        "bsc": "bscscan.com",
+        "polygon": "polygonscan.com",
+        "arbitrum": "arbiscan.io",
+        "optimism": "optimistic.etherscan.io",
+        "base": "basescan.org",
+        "avalanche": "snowtrace.io",
+        "fantom": "ftmscan.com",
+    }
+    scan_host = _scan.get(chain, "etherscan.io")
     """
     LP-lite v2 renderer (compact, serious, accurate).
     Back-compat: accepts the old "info" dict; if it contains chain + LP token, we compute on-chain.
@@ -1169,7 +1199,7 @@ def render_lp(info: dict, lang: str = "en") -> str:
     def _cap(s: str) -> str:
         s = (s or "").lower()
         return {"eth":"Ethereum","bsc":"BSC","polygon":"Polygon"}.get(s, s.capitalize() if s else "—")
-    lines.append(f"LP lock (lite) — {_cap(chain)}")
+    header = f"LP lock (lite) — {chain_title}"
     status_map = {"burned":"burned","locked-partial":"locked-partial","unlocked":"unlocked","v3-nft":"v3-NFT","unknown":"unknown"}
 
     if data and isinstance(data, dict):
@@ -1293,34 +1323,7 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 asof_fmt = str(_as)
         except Exception:
             asof_fmt = str(asof)
-        # --- Hardened fallback: still render usable details from `market` ---
-        try:
-            pair = _get(market, "pairSymbol", default="—")
-            chain = _fmt_chain(_get(market, "chain"))
-            token = _get(market, "tokenAddress", default="—")
-            pair_addr = _get(market, "pairAddress", default="—")
-            price = _fmt_num(_get(market, "price"), prefix="$")
-            fdv = _fmt_num(_get(market, "fdv"), prefix="$")
-            mc  = _fmt_num(_get(market, "mc" ), prefix="$")
-            liq = _fmt_num(_get(market, "liq"), prefix="$")
-            vol = _fmt_num(_get(market, "vol24h"), prefix="$")
-            chg1  = _fmt_pct(_get(market, "priceChanges", "h1"))
-            chg24 = _fmt_pct(_get(market, "priceChanges", "h24"))
-            asof_fmt = _fmt_time(_get(market, "asof"))
-            minimal = [
-                f"*Details — {pair}* 🟡 (—)",
-                "*Snapshot*",
-                f"• Price: {price}  (—, {chg1}, {chg24})",
-                f"• FDV: {fdv}  • MC: {mc}",
-                f"• Liquidity: {liq}  • 24h Volume: {vol}",
-                f"• Chain: `{chain}`",
-                f"• Token: `{token}`",
-                f"• Pair: `{pair_addr}`",
-                f"• As of: {asof_fmt}",
-            ]
-            return "\n".join(minimal)
-        except Exception:
-            return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
+        return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
 
 
 def render_contract(info: dict, lang: str = "en") -> str:
