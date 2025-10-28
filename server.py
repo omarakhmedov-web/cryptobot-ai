@@ -1,5 +1,16 @@
 import hashlib
-import webintel_lite
+try:
+    import webintel_lite
+except Exception:
+    try:
+        import webintel as webintel_lite
+    except Exception:
+        class _WebintelStub:
+            @staticmethod
+            def build_website_intel(market, known_domains):
+                return ""
+        webintel_lite = _WebintelStub()
+
 import hmac
 import os, json, re, traceback, requests
 from onchain_formatter import format_onchain_text
