@@ -1281,7 +1281,8 @@ def on_message(msg):
     # --- Processing indicator (address-only) ---
     ph_id = None
     if _is_contract_address(text) or re.match(r"^0x[a-fA-F0-9]{64}$", text) or ('http' in text.lower()):
-        ph = send_message(chat_id, "Processing…")
+        tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+        ph = {"ok": False}  # HOTFIX: disable visible placeholder to avoid stuck messages
         ph_id = ph.get("result", {}).get("message_id") if isinstance(ph, dict) and ph.get("ok") else None
         try:
             tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
@@ -1519,7 +1520,7 @@ def on_message(msg):
             "ageDays": market.get("ageDays"), "source": market.get("source"), "sources": market.get("sources"), "asof": market.get("asof")
         },
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
-        "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, str) else "LP lock: unknown"), "webintel": web
+        "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, dict) else {}), "webintel": web
     }
 
     sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
