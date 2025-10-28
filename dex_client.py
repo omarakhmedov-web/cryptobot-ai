@@ -187,4 +187,29 @@ def fetch_market(text: str) -> dict:
     except Exception:
         pass
 
-    return out
+    
+    # --- Enrich missing priceChange from pair endpoint (reliable Δs) ---
+    try:
+        chg = out.get("priceChanges") or {}
+        need = any(chg.get(k) in (None, "-", "—") for k in ("m5","h1","h6","h24"))
+        if need and out.get("pairAddress") and out.get("chain"):
+            dd = _enrich_pair(out["chain"], out["pairAddress"])
+            if isinstance(dd, dict):
+                pc = dd.get("priceChange") or {}
+                for _k in ("m5","h1","h6","h24"):
+                    if chg.get(_k) in (None, "-", "—") and (pc.get(_k) not in (None, "-", "—")):
+                        chg[_k] = pc.get(_k)
+                out["priceChanges"] = chg
+    except Exception:
+        pass
+
+    # propagate website if available in token info
+    try:
+        if not out.get("website"):
+            info = out.get("info") or {}
+            if isinstance(info, dict):
+                w = info.get("website") or info.get("url") or info.get("site")
+                if w: out["website"] = w
+    except Exception:
+        pass
+return out
