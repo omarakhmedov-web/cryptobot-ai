@@ -1540,3 +1540,105 @@ def _wayback_summary(domain: str):
 
     return _cache_put(_wb_cache, key, out)
 # === /D0.2.3 patch ================================================================================
+
+
+# ====== Metridex hardening overrides (auto-appended) ======
+def _mdx_fmt_num(v, prefix=""):
+    try:
+        if v is None: return "—"
+        n = float(v)
+        a = abs(n)
+        if a >= 1_000_000_000: s = f"{n/1_000_000_000:.2f}B"
+        elif a >= 1_000_000:   s = f"{n/1_000_000:.2f}M"
+        elif a >= 1_000:       s = f"{n/1_000:.2f}K"
+        else:                  s = f"{n:.6f}" if a < 1 else f"{n:.2f}"
+        return prefix + s
+    except Exception:
+        return "—"
+
+def _mdx_fmt_pct(v):
+    try:
+        if v in (None, "—", "-"): return "—"
+        n = float(v)
+        arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
+        return f"{arrow} {n:+.2f}%"
+    except Exception:
+        return "—"
+
+def _mdx_fmt_chain(ch):
+    m = (str(ch or "—").lower())
+    mp = {"eth":"Ethereum","ethereum":"Ethereum","bsc":"BSC","binance smart chain":"BSC",
+          "polygon":"Polygon","matic":"Polygon","arbitrum":"Arbitrum","arb":"Arbitrum",
+          "optimism":"Optimism","op":"Optimism","base":"Base","avalanche":"Avalanche",
+          "avax":"Avalanche","fantom":"Fantom","ftm":"Fantom"}
+    return mp.get(m, m.capitalize() if m and m != "—" else "—")
+
+def _mdx_fmt_time(ts_secs):
+    try:
+        ts = int(ts_secs)
+        if ts > 10_000_000_000: ts //= 1000
+        import datetime as _dt
+        return _dt.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return "—"
+
+def render_details(market: dict, verdict=None, webintel=None, lang: str="en"):
+    # Never return 'temporarily unavailable' — always produce a compact snapshot
+    m = market or {}
+    pair = m.get("pairSymbol") or "—"
+    price = _mdx_fmt_num(m.get("price"), prefix="$")
+    fdv   = _mdx_fmt_num(m.get("fdv"),   prefix="$")
+    mc    = _mdx_fmt_num(m.get("mc"),    prefix="$")
+    liq   = _mdx_fmt_num(m.get("liq"),   prefix="$")
+    vol   = _mdx_fmt_num(m.get("vol24h"),prefix="$")
+    ch    = m.get("priceChanges") or {}
+    ch1   = _mdx_fmt_pct(ch.get("h1"))
+    ch6   = _mdx_fmt_pct(ch.get("h6"))
+    ch24  = _mdx_fmt_pct(ch.get("h24"))
+    chain = _mdx_fmt_chain(m.get("chain"))
+    tok   = (m.get("tokenAddress") or "—").lower()
+    pair_addr = (m.get("pairAddress") or "—").lower()
+    asof  = _mdx_fmt_time(m.get("asOf") or m.get("asof"))
+    lines = [
+        f"*Details — {pair}* 🟡 (—)",
+        "*Snapshot*",
+        f"• Price: {price}  (—, {ch1}, {ch6}, {ch24})",
+        f"• FDV: {fdv}  • MC: {mc}",
+        f"• Liquidity: {liq}  • 24h Volume: {vol}",
+        f"• Chain: `{chain}`",
+        f"• Token: `{tok}`",
+        f"• Pair: `{pair_addr}`",
+        f"• As of: {asof}",
+    ]
+    return "\n".join(lines)
+
+def render_lp(info: dict | None, market: dict | None, lang: str="en"):
+    i = info or {}
+    m = market or {}
+    ch = (m.get("chain") or i.get("chain") or "ethereum")
+    header = {"ethereum":"Ethereum","eth":"Ethereum","bsc":"BSC","polygon":"Polygon",
+              "arbitrum":"Arbitrum","optimism":"Optimism","base":"Base",
+              "avalanche":"Avalanche","fantom":"Fantom"}.get(str(ch).lower(), str(ch).upper())
+    lines = [f"LP lock (lite) — {header}"]
+    burned = i.get("burnedPct"); locked = i.get("lockedPct")
+    if burned is None and locked is None and str(i.get("status","")).lower()=="unknown":
+        lines.append("Status: unknown")
+    if burned is not None:
+        try: lines.append(f"Burned: {float(burned):.2f}%")
+        except Exception: lines.append(f"Burned: {burned}")
+    if locked is not None:
+        try:
+            locked_by = i.get("lockedBy") or "—"
+            lines.append(f"Locked: {float(locked):.2f}% via {locked_by}")
+        except Exception:
+            lines.append(f"Locked: {locked}")
+    lp_addr = (i.get("lpToken") or i.get("lpAddress") or m.get("pairAddress") or "—")
+    lines.append(f"LP token: {lp_addr}")
+    # Minimal links
+    holders = i.get("holdersUrl") or ""
+    if holders:
+        lines.append(f"Links: Holders (Scan)")
+    data_src = i.get("dataSource") or "—"
+    lines.append(f"Data source: {data_src}")
+    return "\n".join(lines)
+# ====== /overrides ======
