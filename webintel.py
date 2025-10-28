@@ -290,3 +290,138 @@ def analyze_website(url: Optional[str], *, domain_block: Optional[Dict[str, Any]
 
     cache_set(key, json.dumps(out), TTL)
     return out
+
+
+# ========================= OVERRIDES (2025-10-28) =============================
+# Safer RDAP with country & expires; WHOIS toggle via env; domain age calc.
+import os as _os
+from typing import Optional, Dict, Any, Tuple
+
+WEBINTEL_ENABLE_WHOIS = _os.getenv('WEBINTEL_ENABLE_WHOIS', '1') in ('1','true','yes','on')
+
+def _rdap_whois(host: str) -> Dict[str, Any]:
+    """Fetch WHOIS via RDAP. Returns created/registrar/country/expires best-effort."""
+    if not WEBINTEL_ENABLE_WHOIS:
+        return {"created": None, "registrar": None, "country": None, "expires": None}
+    try:
+        r = _rq.get(f"https://rdap.org/domain/{host}", timeout=_WE_TIMEOUT)
+        if not r.ok:
+            return {"created": None, "registrar": None, "country": None, "expires": None}
+        j = r.json()
+        created = None
+        expires = None
+        registrar = None
+        country = None
+
+        # events → created/expires
+        for ev in (j.get("events") or []):
+            try:
+                act = str(ev.get("eventAction") or "").lower()
+                dt  = ev.get("eventDate") or ""
+                if isinstance(dt, str) and len(dt) >= 10:
+                    if act in ("registration","registered","creation"):
+                        created = dt[:10]
+                    if act in ("expiration","expires","expiry"):
+                        expires = dt[:10]
+            except Exception:
+                pass
+
+        # entities → registrar name & country (best-effort via vcardArray adr/fn)
+        for ent in (j.get("entities") or []):
+            try:
+                roles = [str(x).lower() for x in (ent.get("roles") or [])]
+                v = ent.get("vcardArray") or []
+                items = v[1] if isinstance(v, list) and len(v) > 1 else []
+                # registrar 'fn'
+                if any("registrar" in rr for rr in roles):
+                    for it in items:
+                        if it and it[0] == "fn" and len(it) > 3 and not registrar:
+                            registrar = it[3]
+                # address → country
+                for it in items:
+                    if it and it[0] == "adr" and len(it) > 3:
+                        try:
+                            # vCard ADR: ['', {}, 'text', ['','','','city','region','code','country']]
+                            adr = it[3]
+                            cand = None
+                            if isinstance(adr, list) and len(adr) >= 7:
+                                cand = adr[-1]
+                            elif isinstance(adr, dict):
+                                cand = adr.get("country-name")
+                            if cand and not country:
+                                country = cand
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        return {"created": created, "registrar": registrar, "country": country, "expires": expires}
+    except Exception:
+        return {"created": None, "registrar": None, "country": None, "expires": None}
+
+def analyze_website(url: Optional[str], *, domain_block: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Website intelligence with graceful fallbacks.
+    Returns:
+      {
+        "whois": {"created": str|None, "registrar": str|None, "country": str|None, "expires": str|None, "age_days": int|None},
+        "ssl": {"ok": bool|None, "expires": str|None, "issuer": str|None, "_server": str|None, "_hsts": str|None},
+        "wayback": {"first": str|None},
+      }
+    """
+    if not url:
+        return {"whois": {"created": None, "registrar": None, "country": None, "expires": None, "age_days": None},
+                "ssl": {"ok": None, "expires": None, "issuer": None},
+                "wayback": {"first": None}}
+
+    url_n = normalize_url(url)
+    key = f"webintel:{url_n}"
+    cached = cache_get(key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
+
+    host = derive_domain(url_n)
+    out: Dict[str, Any] = {
+        "whois": {"created": None, "registrar": None, "country": None, "expires": None, "age_days": None},
+        "ssl": {"ok": None, "expires": None, "issuer": None},
+        "wayback": {"first": None},
+    }
+
+    if host:
+        # 1) RDAP WHOIS
+        who = _rdap_whois(host)
+        out["whois"].update(who)
+
+        # 2) HEAD probe
+        head = _https_head_probe(host)
+        out["ssl"]["_server"] = head.get("_server")
+        out["ssl"]["_hsts"] = head.get("_hsts")
+
+        # 3) TLS handshake
+        ssl_ok, ssl_exp, issuer_cn = _https_tls_info(host)
+        out["ssl"]["ok"] = ssl_ok if ssl_ok is not None else head.get("ok")
+        out["ssl"]["expires"] = ssl_exp
+        out["ssl"]["issuer"] = issuer_cn
+
+        # 4) Wayback earliest
+        wb = _wayback_first(host)
+        out["wayback"]["first"] = wb
+
+        # 5) Age (days) from created
+        try:
+            from datetime import datetime, timezone
+            c = out["whois"].get("created")
+            if c:
+                dt = datetime.fromisoformat(c.replace("Z","").replace("+00:00",""))
+                out["whois"]["age_days"] = (datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)).days
+        except Exception:
+            out["whois"]["age_days"] = None
+
+    # 6) Deterministic fallback
+    _merge_whois_fallback(out, domain_block)
+
+    cache_set(key, json.dumps(out), TTL)
+    return out
+# ======================= /OVERRIDES (2025-10-28) ==============================
