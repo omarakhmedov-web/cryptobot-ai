@@ -212,4 +212,4 @@ def fetch_market(text: str) -> dict:
                 if w: out["website"] = w
     except Exception:
         pass
-return out
+    return out
