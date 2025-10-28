@@ -1293,7 +1293,34 @@ def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: s
                 asof_fmt = str(_as)
         except Exception:
             asof_fmt = str(asof)
-        return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
+        # --- Hardened fallback: still render usable details from `market` ---
+        try:
+            pair = _get(market, "pairSymbol", default="—")
+            chain = _fmt_chain(_get(market, "chain"))
+            token = _get(market, "tokenAddress", default="—")
+            pair_addr = _get(market, "pairAddress", default="—")
+            price = _fmt_num(_get(market, "price"), prefix="$")
+            fdv = _fmt_num(_get(market, "fdv"), prefix="$")
+            mc  = _fmt_num(_get(market, "mc" ), prefix="$")
+            liq = _fmt_num(_get(market, "liq"), prefix="$")
+            vol = _fmt_num(_get(market, "vol24h"), prefix="$")
+            chg1  = _fmt_pct(_get(market, "priceChanges", "h1"))
+            chg24 = _fmt_pct(_get(market, "priceChanges", "h24"))
+            asof_fmt = _fmt_time(_get(market, "asof"))
+            minimal = [
+                f"*Details — {pair}* 🟡 (—)",
+                "*Snapshot*",
+                f"• Price: {price}  (—, {chg1}, {chg24})",
+                f"• FDV: {fdv}  • MC: {mc}",
+                f"• Liquidity: {liq}  • 24h Volume: {vol}",
+                f"• Chain: `{chain}`",
+                f"• Token: `{token}`",
+                f"• Pair: `{pair_addr}`",
+                f"• As of: {asof_fmt}",
+            ]
+            return "\n".join(minimal)
+        except Exception:
+            return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
 
 
 def render_contract(info: dict, lang: str = "en") -> str:
