@@ -1289,6 +1289,7 @@ def on_message(msg):
             pass
     # --- /Processing indicator ---
     # Local helper to always clean the "Processing…" placeholder
+    ph_edited = False
     def _del_ph():
         try:
             _id = None
@@ -1296,7 +1297,7 @@ def on_message(msg):
                 _id = ph_id
             except Exception:
                 _id = None
-            if _id:
+            if _id and not ph_edited:
                 tg("deleteMessage", {"chat_id": chat_id, "message_id": _id})
         except Exception:
             pass
@@ -1535,9 +1536,35 @@ def on_message(msg):
         "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, dict) else {}), "webintel": web
     }
 
-    sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
-    msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
+    try:
+        # Prefer editing the placeholder to avoid a second message
+        if 'ph_id' in locals() and ph_id:
+            _ed = tg('editMessageText', {
+                'chat_id': chat_id,
+                'message_id': ph_id,
+                'text': quick,
+                'parse_mode': 'MarkdownV2',
+                'reply_markup': build_keyboard(chat_id, 0, links)
+            })
+            ph_edited = True
+            msg_id = ph_id if isinstance(_ed, dict) else None
+        else:
+            sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
+            msg_id = sent.get('result', {}).get('message_id') if sent.get('ok') else None
+    except Exception as e:
+        try:
+            print('SEND_QUICK (edit/send) error:', e)
+        except Exception:
+            pass
+        # Fallback: send plain text without Markdown
+        try:
+            _plain = re.sub(r'[\\`*_\[\]()~>#+\-=|{}.!]', '', quick)
+            sent = tg('sendMessage', {'chat_id': chat_id, 'text': _plain})
+            msg_id = sent.get('result', {}).get('message_id') if isinstance(sent, dict) and sent.get('ok') else None
+        except Exception:
+            msg_id = None
     _del_ph()
+
 
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
