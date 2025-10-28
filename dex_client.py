@@ -1,4 +1,8 @@
-# MDX_PATCH_2025_10_17 v4 — DS timeout=6s
+# dex_client.py — Metridex market resolver (v0.4.2-SAFE)
+# Goal: resolve ANY valid ERC-20 token address to a "market" dict for QuickScan/Details.
+# - Uses DS proxy if provided (DEXSCREENER_PROXY_BASE / DS_PROXY_URL / DEX_BASE), else direct.
+# - Token-first lookup, fallback to search, optional enrich of pairCreatedAt.
+# - Returns COMPAT keys expected by server/report builders.
 import os, re, time
 import requests
 
@@ -6,13 +10,11 @@ HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SECONDS", "6"))
 
 def _build_bases():
     bases = []
-    # Prefer explicit proxy (Render env: DS_PROXY_URL or DEXSCREENER_PROXY_BASE)
     proxy = os.getenv("DS_PROXY_URL") or os.getenv("DEXSCREENER_PROXY_BASE") or os.getenv("DEX_BASE") or ""
     if proxy:
         proxy = proxy.strip().rstrip("/")
         if proxy and proxy not in bases:
             bases.append(proxy)
-    # Optional comma-separated list
     env_list = os.getenv("DEXSCREENER_BASES", "")
     for tok in (t.strip().rstrip("/") for t in env_list.split(",") if t.strip()):
         if tok and tok not in bases:
@@ -21,16 +23,14 @@ def _build_bases():
     for canon in ("https://api.dexscreener.com", "https://io.dexscreener.com", "https://cdn.dexscreener.com"):
         if canon not in bases:
             bases.append(canon)
-
-    # Enforce proxy-only if requested
-    if str(os.getenv("DEXSCREENER_FORCE_PROXY", "0")).strip() in ("1", "true", "yes"):
-        bases = [b for b in bases if not b.startswith("https://api.dexscreener.com") and not b.startswith("https://io.dexscreener.com") and not b.startswith("https://cdn.dexscreener.com")]
+    if str(os.getenv("DEXSCREENER_FORCE_PROXY", "0")).strip().lower() in ("1","true","yes"):
+        bases = [b for b in bases if not b.startswith("https://api.dexscreener.com")
+                               and not b.startswith("https://io.dexscreener.com")
+                               and not b.startswith("https://cdn.dexscreener.com")]
     return bases
 
 DS_BASES = _build_bases()
-
-_ADDR40 = re.compile(r"^0x[a-fA-F0-9]{40}$")
-
+_ADDR40 = re.compile(r"0x[a-fA-F0-9]{40}")
 
 def _ds_get_json(path: str):
     last_err = None
@@ -43,28 +43,44 @@ def _ds_get_json(path: str):
         attempt = 0
         while attempt <= retries:
             try:
-                import requests
                 r = requests.get(url, timeout=HTTP_TIMEOUT, headers=headers)
                 if r.ok:
-                    try:
-                        return r.json()
-                    except Exception as e:
-                        last_err = f"Bad JSON from {url}: {e}"
-                        break
-                else:
-                    last_err = f"HTTP {r.status_code} from {url}"
+                    return r.json()
+                last_err = f"HTTP {r.status_code} from {url}"
             except Exception as e:
                 last_err = f"{type(e).__name__}: {e} @ {url}"
             attempt += 1
             if attempt <= retries and delay_ms > 0:
-                import time as _t; _t.sleep(delay_ms/1000.0)
+                time.sleep(delay_ms/1000.0)
     raise RuntimeError(f"DexScreener fetch failed: {last_err}")
 
+def _normalize_chain(ch: str) -> str:
+    ch = (ch or "").lower()
+    m = {
+        "ethereum":"ethereum","eth":"ethereum","1":"ethereum",
+        "bsc":"bsc","binance":"bsc","binance smart chain":"bsc","56":"bsc",
+        "polygon":"polygon","matic":"polygon","137":"polygon",
+        "arbitrum":"arbitrum","arbitrum-one":"arbitrum","42161":"arbitrum",
+        "base":"base","8453":"base",
+        "optimism":"optimism","op":"optimism","10":"optimism",
+        "avalanche":"avalanche","avax":"avalanche","43114":"avalanche",
+        "fantom":"fantom","ftm":"fantom","250":"fantom",
+    }
+    return m.get(ch, ch or "ethereum")
 
-def _fetch_pair_details(chain: str, pair_addr: str) -> dict:
-    """Fetch a single pair's details to enrich missing fields like pairCreatedAt."""
+def _pick_best_pair(pairs):
+    if not isinstance(pairs, list) or not pairs:
+        return None
+    def liq_usd(p):
+        try:
+            return float(((p.get("liquidity") or {}).get("usd")) or 0.0)
+        except Exception:
+            return 0.0
+    return sorted(pairs, key=liq_usd, reverse=True)[0]
+
+def _enrich_pair(chain: str, pair_addr: str):
     chain = _normalize_chain(chain)
-    pair_addr = (pair_addr or '').lower().strip()
+    pair_addr = (pair_addr or "").lower().strip()
     if not (chain and pair_addr):
         return {}
     try:
@@ -78,57 +94,29 @@ def _fetch_pair_details(chain: str, pair_addr: str) -> dict:
         return {}
     return {}
 
-
-def _pick_best_pair(pairs):
-    if not isinstance(pairs, list) or not pairs:
-        return None
-    def _liq_usd(p):
-        try:
-            return float(((p.get('liquidity') or {}).get('usd')) or 0.0)
-        except Exception:
-            return 0.0
-    return sorted(pairs, key=_liq_usd, reverse=True)[0]
-
-def _normalize_chain(ch):
-    ch = (ch or "").lower()
-    mapping = {
-        "ethereum": "ethereum", "eth": "ethereum",
-        "bsc": "bsc", "binance": "bsc", "binance smart chain":"bsc",
-        "polygon": "polygon", "matic": "polygon",
-        "arbitrum": "arbitrum", "arbitrum-one":"arbitrum",
-        "base": "base", "optimism":"optimism", "op":"optimism",
-        "avalanche":"avalanche", "avalanche-c":"avalanche",
-        "fantom":"fantom", "ftm":"fantom",
-    }
-    return mapping.get(ch, ch or "ethereum")
-
-def _num(x, default=0.0):
-    try:
-        return float(x)
-    except Exception:
-        return default
-
 def fetch_market(text: str) -> dict:
-    '''
-    Input: raw text. Extract first 0x-address (40 hex) and query DexScreener.
-    Output: dict with COMPAT keys expected by server (_build_html_report expects these names):
-      price, fdv, mc, liq, vol24h, priceChanges, chain, pairAddress, tokenAddress, pairCreatedAt, links, pairSymbol
-    '''
-    text = (text or "").strip()
-    token = None
-    if _ADDR40.match(text):
-        token = text.lower()
-    if not token:
-        m = re.search(r"0x[a-fA-F0-9]{40}", text)
-        if m:
-            token = m.group(0)
+    """
+    Resolve user input to a market dict. Supports raw token 0x..., URLs with token,
+    and (fallback) pair address via /search.
+    Returns COMPAT keys expected by server:
+      price, fdv, mc, liq, vol24h, priceChanges{m5,h1,h6,h24}, chain, pairAddress,
+      tokenAddress, pairCreatedAt, links, pairSymbol, asOf, source.
+    """
+    raw = (text or "").strip()
+    m = _ADDR40.search(raw)
+    token = m.group(0).lower() if m else None
     if not token:
         return {"ok": False, "reason": "no_token"}
 
-    # Primary endpoint + fallback search
+    # 1) Token endpoint
+    j = None
     try:
         j = _ds_get_json(f"latest/dex/tokens/{token}")
     except Exception:
+        pass
+
+    # 2) Fallback: search endpoint (covers pair inputs, alt-chains, DS quirks)
+    if not isinstance(j, dict) or not (j.get("pairs") or j.get("results") or j.get("data")):
         try:
             j = _ds_get_json(f"latest/dex/search?q={token}")
         except Exception:
@@ -148,21 +136,25 @@ def fetch_market(text: str) -> dict:
     quote = (p.get("quoteToken") or {})
     chain = _normalize_chain(p.get("chainId") or p.get("chain"))
 
-    # Canonical metrics from DS
-    price_usd = _num(p.get("priceUsd"), 0.0)
-    fdv = _num(p.get("fdv"), 0.0)
-    mc = _num(p.get("marketCap"), 0.0)
-    liq_usd = _num((p.get("liquidity") or {}).get("usd"), 0.0)
-    vol24h = _num((p.get("volume") or {}).get("h24"), 0.0)
+    def _num(x, default=0.0):
+        try:
+            return float(x)
+        except Exception:
+            return default
+
+    price_usd = _num(p.get("priceUsd"))
+    fdv = _num(p.get("fdv"))
+    mc = _num(p.get("marketCap"))
+    liq_usd = _num((p.get("liquidity") or {}).get("usd"))
+    vol24h = _num((p.get("volume") or {}).get("h24"))
     changes = (p.get("priceChange") or {})
 
-    # Build COMPAT structure expected by server.py report builders
     out = {
         "ok": True,
+        "source": "DexScreener",
         "pairAddress": p.get("pairAddress") or p.get("pairId") or "",
         "tokenAddress": (base.get("address") or "").lower(),
         "chain": chain,
-        # COMPAT keys (server expects these exact names):
         "price": price_usd,
         "fdv": fdv,
         "mc": mc,
@@ -174,25 +166,24 @@ def fetch_market(text: str) -> dict:
             "h6": changes.get("h6"),
             "h24": changes.get("h24"),
         },
-        # Additional
-        "pairCreatedAt": int(p.get("pairCreatedAt")/1000) if isinstance(p.get("pairCreatedAt"), (int, float)) and p.get("pairCreatedAt") > 10_000_000_000 else p.get("pairCreatedAt"),
+        "pairCreatedAt": p.get("pairCreatedAt"),
         "links": {
             "dexscreener": p.get("url") or "",
             "dexId": p.get("dexId") or "",
         },
-        "pairSymbol": f"{base.get('symbol') or ''}/{quote.get('symbol') or ''}".strip("/"),
+        "pairSymbol": f"{(base.get('symbol') or '').strip()}/{(quote.get('symbol') or '').strip()}".strip("/"),
         "asOf": int(time.time()),
     }
-    
-    # ENRICH_PAIR_CREATED_AT: ensure pairCreatedAt is populated
+
+    # Enrich missing pairCreatedAt (seconds)
     try:
         if not out.get("pairCreatedAt"):
-            _pc = _fetch_pair_details(chain, out.get("pairAddress"))
-            _pcts = _pc.get("pairCreatedAt") or _pc.get("createdAt") or _pc.get("launchedAt")
-            if _pcts:
-                if isinstance(_pcts, (int, float)) and _pcts > 10_000_000_000:
-                    _pcts = int(_pcts // 1000)
-                out["pairCreatedAt"] = _pcts
+            dd = _enrich_pair(chain, out["pairAddress"])
+            ts = dd.get("pairCreatedAt") or dd.get("createdAt") or dd.get("launchedAt")
+            if ts:
+                if isinstance(ts, (int, float)) and ts > 10_000_000_000:
+                    ts = int(ts // 1000)
+                out["pairCreatedAt"] = ts
     except Exception:
         pass
 
