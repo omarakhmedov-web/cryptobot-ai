@@ -1467,16 +1467,16 @@ def on_message(msg):
     # --------------------------------------------------------------------------
     try:
         ch_ = (market.get("chain") or "").lower()
-        _map = {"ethereum":"eth","bsc":"bsc","polygon":"polygon","arbitrum":"arb","optimism":"op","base":"base","avalanche":"avax","fantom":"ftm"}
+        _map = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance":"bsc","polygon":"polygon","matic":"polygon","arbitrum":"arb","arb":"arb","optimism":"op","op":"op","base":"base","avalanche":"avax","avax":"avax","fantom":"ftm","ftm":"ftm"}
         _short = _map.get(ch_, ch_ or "eth")
         pair_addr = market.get("pairAddress") or resolve_pair(_short, market.get("tokenAddress"))
         info = check_lp_lock_v2(_short, pair_addr)
         try:
-            if isinstance(info, dict) and not info.get('chain'):
-                info['chain'] = _short
+            info = info or {}
+            info["chain"] = (market.get("chain") or _short)
+            if not info.get("lpAddress"): info["lpAddress"] = (market.get("pairAddress") or "")
         except Exception:
             pass
-        lp = render_lp(info, DEFAULT_LANG)
     except TypeError:
         lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
     except Exception:
