@@ -1466,9 +1466,32 @@ def on_message(msg):
         _dom = None
     ctx = {"webintel": web or {}, "domain": _dom}
 
-    quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
-    # Reuse same ctx (no re-computation)
-    details = render_details(verdict, market, ctx, DEFAULT_LANG)
+    try:
+        quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+    except Exception as e:
+        try:
+            print('RENDER_QUICK error:', e, traceback.format_exc())
+        except Exception:
+            pass
+        quick = (
+            '*Metridex QuickScan — —* ⚪️ (80)\n'
+            '`—`  •  Price: *—*\n'
+            'FDV: —  •  MC: —  •  Liq: —\n'
+            'Vol 24h: —  •  Δ5m —  •  Δ1h —  •  Δ24h —\n'
+            f'Age: —  •  Source: DexScreener  •  as of ' + _dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+        )
+    try:
+        # Reuse same ctx (no re-computation)
+        details = render_details(verdict, market, ctx, DEFAULT_LANG)
+    except Exception as e:
+        try:
+            print('RENDER_DETAILS error:', e, traceback.format_exc())
+        except Exception:
+            pass
+        details = (
+            'Details temporarily unavailable\n'
+            f'• Pair: —\n• As of: ' + _dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+        )
     why = safe_render_why(verdict, market, DEFAULT_LANG)
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
@@ -1522,8 +1545,50 @@ def on_message(msg):
         "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, dict) else {}), "webintel": web
     }
 
-    sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
-    msg_id = sent.get("result", {}).get("message_id") if sent.get("ok") else None
+    try:
+
+
+        sent = send_message(chat_id, quick, reply_markup=build_keyboard(chat_id, 0, links))
+
+
+        msg_id = sent.get('result', {}).get('message_id') if sent.get('ok') else None
+
+
+    except Exception as e:
+
+
+        try:
+
+
+            print('SEND_QUICK error:', e, traceback.format_exc())
+
+
+        except Exception:
+
+
+            pass
+
+
+        # Best-effort cleanup of placeholder
+
+
+        if 'ph_id' in locals() and ph_id:
+
+
+            try:
+
+
+                tg('deleteMessage', {'chat_id': chat_id, 'message_id': ph_id})
+
+
+            except Exception:
+
+
+                pass
+
+
+        return jsonify({'ok': True})
+
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
         try:
