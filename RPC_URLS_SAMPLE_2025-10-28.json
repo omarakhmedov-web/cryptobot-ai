@@ -1,0 +1,12 @@
+{
+  "ethereum": [
+    "https://eth.llamarpc.com",
+    "https://cloudflare-eth.com"
+  ],
+  "bsc": [
+    "https://bsc-dataseed.binance.org"
+  ],
+  "polygon": [
+    "https://polygon-rpc.com"
+  ]
+}
