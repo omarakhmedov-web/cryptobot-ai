@@ -1835,61 +1835,127 @@ def on_callback(cb):
                      reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
 
     elif action == "WHY":
-        txt = bundle.get("why") or "*Why?*\n• No specific risk factors detected"
+
+
+        # Re-render WHY
+
+        _b = load_bundle(chat_id, msg_id) or {}
+
+        _ver = _b.get("verdict") or verdict
+
+        _mkt = _b.get("market")  or market
+
+        try:
+
+            txt = render_why(_ver, _mkt)
+
+            _b["why"] = txt
+
+            store_bundle(chat_id, msg_id, _b)
+
+        except Exception:
+
+            txt = _b.get("why") or "*Why? unavailable*"
+
         send_message(chat_id, txt, reply_markup=None)
-        answer_callback_query(cb_id, "Why? posted.", False)
+
+        answer_callback_query(cb_id, "Why posted.", False)
 
     elif action == "WHYPP":
-        txt = bundle.get("whypp") or "*Why++* n/a"
+
+
+        # Re-render WHY++
+
+        _b = load_bundle(chat_id, msg_id) or {}
+
+        _ver = _b.get("verdict") or verdict
+
+        _mkt = _b.get("market")  or market
+
+        try:
+
+            txt = render_whypp(_ver, _mkt)
+
+            _b["whypp"] = txt
+
+            store_bundle(chat_id, msg_id, _b)
+
+        except Exception:
+
+            txt = _b.get("whypp") or "*Why++ unavailable*"
+
+        # Split into chunks to avoid Telegram limits
+
         MAX = 3500
+
         if len(txt) <= MAX:
+
             send_message(chat_id, txt, reply_markup=None)
+
         else:
-            chunk = txt[:MAX]
-            txt = txt[MAX:]
-            send_message(chat_id, chunk, reply_markup=None)
-            i = 1
-            while txt:
-                i += 1
-                chunk_part = txt[:MAX]
-                txt = txt[MAX:]
+
+            send_message(chat_id, txt[:MAX], reply_markup=None)
+
+            rest = txt[MAX:]
+
+            i = 2
+
+            while rest:
+
+                chunk = rest[:MAX]
+
+                rest = rest[MAX:]
+
                 prefix = f"Why++ ({i})\n"
-                send_message(chat_id, prefix + chunk_part, reply_markup=None)
+
+                send_message(chat_id, prefix + chunk, reply_markup=None)
+
+                i += 1
+
         answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
         
-    _b = load_bundle(chat_id, msg_id) or {}
-    _mkt = _b.get("market") or market or {}
-    _ctx = dict(ctx or {})
-    # Prefer inspector result saved earlier
-    info = _b.get("lp_info") or _b.get("lp") if isinstance(_b.get("lp"), dict) else None
-    if not isinstance(info, dict):
-        # derive v2 LP token from pairAddress if available
-        _lp = _mkt.get("pairAddress") or _mkt.get("lpToken") or _mkt.get("lpAddress")
-        _chain = _mkt.get("chain") or _mkt.get("chainId") or "eth"
-        info = {"lpToken": _lp, "chain": _chain}
-    try:
-        txt = render_lp(info)
-        _b["lp"] = txt
-        store_bundle(chat_id, msg_id, _b)
-    except Exception:
-        txt = _b.get("lp") or "LP lock: temporarily unavailable"
-    
-text = bundle.get("lp", "LP lock: n/a")
-        _lpdbg("LP.action", cached=bool(text), unknown=("unknown" in str(text).lower()),
-               pair=_short_addr((bundle.get("market") or {}).get("pairAddress"))) 
-        if (not text or "unknown" in str(text).lower()) and isinstance(bundle, dict) and bundle.get("onchain"):
-            try:
-                oc_cached = bundle.get("onchain")
-                info_lp = _lp_info_from_inspector(oc_cached, (bundle.get("market") or {}).get("chain"), (bundle.get("market") or {}).get("pairAddress"))
-                try:
-                    text = render_lp(info_lp, DEFAULT_LANG)
-                except TypeError:
-                    text = render_lp(info_lp, (bundle.get("market") or {}), DEFAULT_LANG)
-            except Exception:
-                pass
-        send_message(chat_id, text, reply_markup=None)
+
+
+        # LP: prefer inspector data from bundle; otherwise render from pairAddress/chain
+
+        _b = load_bundle(chat_id, msg_id) or {}
+
+        _mkt = _b.get("market") or market or {}
+
+        info = None
+
+        if isinstance(_b.get("lp"), dict):
+
+            info = _b.get("lp")
+
+        elif isinstance(_b.get("lp_info"), dict):
+
+            info = _b.get("lp_info")
+
+        if not isinstance(info, dict):
+
+            _lp = _mkt.get("pairAddress") or _mkt.get("lpToken") or _mkt.get("lpAddress")
+
+            _chain = _mkt.get("chain") or _mkt.get("chainId") or "eth"
+
+            info = {"lpToken": _lp, "chain": _chain}
+
+        try:
+
+            txt = render_lp(info)
+
+            _b["lp"] = txt
+
+            store_bundle(chat_id, msg_id, _b)
+
+        except Exception:
+
+            txt = _b.get("lp") or "LP lock: temporarily unavailable"
+
+        send_message(chat_id, txt, reply_markup=None)
+
         answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
