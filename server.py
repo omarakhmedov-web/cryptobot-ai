@@ -73,6 +73,7 @@ except Exception:
 
         # If some keys still missing, try compact _rdap_more
         try:
+            domain = _host_from_url(site_url)
             more = _rdap_more(domain)
             for k in ("expires","registrarIANA","status","rdap_flags","country"):
                 if more.get(k) and (who.get(k) in (None, "—")):
@@ -432,17 +433,17 @@ def _rdap_more(domain: str):
 def _tls_expires_quick(domain: str):
     def _one(host):
         try:
-            ctx = ssl.create_default_context()
+            ctx = _ssl.create_default_context()
             with socket.create_connection((host, 443), timeout=2.5) as sock:
                 with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                     cert = ssock.getpeercert()
             if cert and "notAfter" in cert:
                 try:
-                    return dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                    return dt.__dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
                 except Exception:
                     # Fallback keep as string; try common ISO
                     try:
-                        return dt.datetime.fromisoformat(cert["notAfter"][:19])
+                        return _dt.datetime.fromisoformat(cert["notAfter"][:19])
                     except Exception:
                         return None
         except Exception:
@@ -1607,6 +1608,46 @@ def on_message(msg):
     ctx = {"webintel": web or {}, "domain": _dom}
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+
+    # === EARLY SEND (avoid long wait on LP/on-chain) ===
+    _early_links = dict(market.get("links") or {})
+    try:
+        _chain_e = (market.get("chain") or "").lower()
+        _token_e = market.get("tokenAddress") or ""
+        _pair_e  = market.get("pairAddress") or ""
+
+        # Scan link
+        if _chain_e and _token_e and not _early_links.get("scan"):
+            _scan_bases_e = {
+                "ethereum": "https://etherscan.io/token/",
+                "eth": "https://etherscan.io/token/",
+                "bsc": "https://bscscan.com/token/",
+                "binance": "https://bscscan.com/token/",
+                "polygon": "https://polygonscan.com/token/",
+                "matic": "https://polygonscan.com/token/",
+                "arbitrum": "https://arbiscan.io/token/",
+                "arb": "https://arbiscan.io/token/",
+                "base": "https://basescan.org/token/",
+                "optimism": "https://optimistic.etherscan.io/token/",
+                "op": "https://optimistic.etherscan.io/token/",
+                "avalanche": "https://snowtrace.io/token/",
+                "avax": "https://snowtrace.io/token/",
+                "fantom": "https://ftmscan.com/token/",
+                "ftm": "https://ftmscan.com/token/",
+            }
+            _base_scan_e = _scan_bases_e.get(_chain_e)
+            if _base_scan_e:
+                _early_links["scan"] = _base_scan_e + _token_e
+
+        # DexScreener link
+        if _chain_e and _pair_e and not _early_links.get("dexscreener"):
+            _early_links["dexscreener"] = f"https://dexscreener.com/{_chain_e}/{_pair_e}"
+    except Exception:
+        pass
+
+    msg_id = _send_or_edit_quick(quick, _early_links)
+    # === /EARLY SEND ===
+
     # Reuse same ctx (no re-computation)
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
@@ -1683,8 +1724,8 @@ def on_message(msg):
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
         "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, str) else "LP lock: unknown"), "webintel": web
     }
-
-    msg_id = _send_or_edit_quick(quick, links)
+    if not msg_id:
+        msg_id = _send_or_edit_quick(quick, links)
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
         try:
