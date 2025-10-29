@@ -1,17 +1,4 @@
 import hashlib
-def _is_provisional_text(s: str | None) -> bool:
-    if not isinstance(s, str): 
-        return True
-    ss = s.strip().lower()
-    return (
-        ss.startswith("*details will appear in a moment") or
-        ss.startswith("*why?*") and "computing…" in ss or
-        ss.startswith("*why++*") and "computing…" in ss or
-        ss == "lp lock: pending" or
-        ss == "lp lock: n/a" or
-        ss == "n/a"
-    )
-
 import os
 import traceback
 try:
@@ -86,6 +73,7 @@ except Exception:
 
         # If some keys still missing, try compact _rdap_more
         try:
+            domain = _host_from_url(site_url)
             more = _rdap_more(domain)
             for k in ("expires","registrarIANA","status","rdap_flags","country"):
                 if more.get(k) and (who.get(k) in (None, "—")):
@@ -261,32 +249,7 @@ def can_scan(chat_id: int):
 
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
-
-# --- Safe keyboard wrapper to avoid silent failures on edit/send ---
-try:
-    from buttons import build_keyboard as _buttons_build_keyboard
-except Exception:
-    _buttons_build_keyboard = None
-
-def build_keyboard(chat_id, msg_id, links, ctx=None):
-    """Safe wrapper over buttons.build_keyboard. Falls back to minimal nav."""
-    try:
-        if callable(_buttons_build_keyboard):
-            return _buttons_build_keyboard(chat_id, msg_id, links, ctx=ctx)
-    except Exception as _kb_e:
-        try:
-            print("build_keyboard failed, using minimal:", _kb_e)
-        except Exception:
-            pass
-    # Minimal keyboard: Copy to input + Open in DEX/Scan if provided
-    try:
-        token = (links or {}).get("token") or ((links or {}).get("scan") or "").split("/")[-1]
-    except Exception:
-        token = None
-    return _mk_copy_keyboard(token, links or {})
-
 from cache import cache_get, cache_set
-from concurrent.futures import ThreadPoolExecutor
 try:
     from dex_client import fetch_market
 except Exception as _e:
@@ -470,17 +433,17 @@ def _rdap_more(domain: str):
 def _tls_expires_quick(domain: str):
     def _one(host):
         try:
-            ctx = ssl.create_default_context()
+            ctx = _ssl.create_default_context()
             with socket.create_connection((host, 443), timeout=2.5) as sock:
                 with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                     cert = ssock.getpeercert()
             if cert and "notAfter" in cert:
                 try:
-                    return dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                    return dt.__dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
                 except Exception:
                     # Fallback keep as string; try common ISO
                     try:
-                        return dt.datetime.fromisoformat(cert["notAfter"][:19])
+                        return _dt.datetime.fromisoformat(cert["notAfter"][:19])
                     except Exception:
                         return None
         except Exception:
@@ -1277,27 +1240,6 @@ Write **Why++** with 8–12 bullets:
         try: print("WHYPP AI error:", _e_ai)
         except Exception: pass
         return None
-# ---- LP renderer compatibility wrapper ----
-def _render_lp_compat(info, market=None, lang=None):
-    try:
-        if lang is None:
-            lang = DEFAULT_LANG  # may exist in globals
-    except Exception:
-        lang = "en"
-    # Try modern 3-arg signature: (info, market, lang)
-    try:
-        return _render_lp_compat(info, market, lang)
-    except TypeError:
-        pass
-    # Try 2-arg signature: (info, lang)
-    try:
-        return _render_lp_compat(info, lang)
-    except TypeError:
-        pass
-    # Try legacy 1-arg signature: (info)
-    return _render_lp_compat(info)
-
-
 
 def on_message(msg):
     lp = {}
@@ -1486,16 +1428,13 @@ def on_message(msg):
         except Exception:
             pass
         return msg_id
+
+
+
     # QuickScan flow
     try:
-        def _fm_call(arg):
-            return fetch_market(arg) or {}
-        to = float(os.getenv("FETCH_TIMEOUT_SEC","7.0"))
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_fm_call, text)
-            market = fut.result(timeout=to)
+        market = fetch_market(text) or {}
     except Exception as e:
-
         print('QUICKSCAN ERROR (fetch_market)', e, traceback.format_exc())
         market = {}
 
@@ -1668,88 +1607,51 @@ def on_message(msg):
         _dom = None
     ctx = {"webintel": web or {}, "domain": _dom}
 
+    quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
 
+    # === EARLY SEND (avoid long wait on LP/on-chain) ===
+    _early_links = dict(market.get("links") or {})
     try:
+        _chain_e = (market.get("chain") or "").lower()
+        _token_e = market.get("tokenAddress") or ""
+        _pair_e  = market.get("pairAddress") or ""
 
-        try:
-            quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
-        except Exception:
-            _pair = (market.get("pairSymbol") or "—")
-            _asof = market.get("asof")
-            _asof_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(_asof)) if _asof else "—"
-            quick = "*QuickScan temporarily unavailable*\n• Pair: " + str(_pair) + "\n• As of: " + _asof_str
+        # Scan link
+        if _chain_e and _token_e and not _early_links.get("scan"):
+            _scan_bases_e = {
+                "ethereum": "https://etherscan.io/token/",
+                "eth": "https://etherscan.io/token/",
+                "bsc": "https://bscscan.com/token/",
+                "binance": "https://bscscan.com/token/",
+                "polygon": "https://polygonscan.com/token/",
+                "matic": "https://polygonscan.com/token/",
+                "arbitrum": "https://arbiscan.io/token/",
+                "arb": "https://arbiscan.io/token/",
+                "base": "https://basescan.org/token/",
+                "optimism": "https://optimistic.etherscan.io/token/",
+                "op": "https://optimistic.etherscan.io/token/",
+                "avalanche": "https://snowtrace.io/token/",
+                "avax": "https://snowtrace.io/token/",
+                "fantom": "https://ftmscan.com/token/",
+                "ftm": "https://ftmscan.com/token/",
+            }
+            _base_scan_e = _scan_bases_e.get(_chain_e)
+            if _base_scan_e:
+                _early_links["scan"] = _base_scan_e + _token_e
 
-    except Exception as _e_rq:
+        # DexScreener link
+        if _chain_e and _pair_e and not _early_links.get("dexscreener"):
+            _early_links["dexscreener"] = f"https://dexscreener.com/{_chain_e}/{_pair_e}"
+    except Exception:
+        pass
 
-        try:
+    msg_id = _send_or_edit_quick(quick, _early_links)
+    # === /EARLY SEND ===
 
-            print('RENDER_QUICK ERROR', _e_rq)
-
-            import traceback as _tb
-
-            print(_tb.format_exc())
-
-        except Exception:
-
-            pass
-
-        _pair = market.get('pairSymbol') or market.get('pair') or '—'
-
-        _asof = market.get('asOf') or market.get('asof')
-
-        try:
-
-            _asof = int(_asof)
-
-            if _asof > 10_000_000_000:
-
-                _asof = int(_asof // 1000)
-
-        except Exception:
-
-            _asof = None
-
-        _asof_str = time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(_asof)) if _asof else '—'
-
-        quick = '*Details temporarily unavailable*\n• Pair: ' + str(_pair) + '\n• As of: ' + _asof_str + ''
     # Reuse same ctx (no re-computation)
-    try:
-
-        details = render_details(verdict, market, ctx, DEFAULT_LANG)
-
-        why = safe_render_why(verdict, market, DEFAULT_LANG)
-
-        whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
-
-    except Exception as e:
-
-        try:
-
-            print('[MDX v2.6] render_details/safe_render_* failed:', e)
-
-        except Exception:
-
-            pass
-
-        _asof = (market or {}).get('asof')
-
-        _pair = (market or {}).get('pairSymbol')
-
-        try:
-
-            import time
-
-            _asof_str = time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(_asof)) if _asof else '—'
-
-        except Exception:
-
-            _asof_str = '—'
-
-        details = '*Details temporarily unavailable* | Pair: ' + str(_pair) + ' | As of: ' + _asof_str
-
-        why = '*Why temporarily unavailable*'
-
-        whypp = '*Why++ temporarily unavailable*'
+    details = render_details(verdict, market, ctx, DEFAULT_LANG)
+    why = safe_render_why(verdict, market, DEFAULT_LANG)
+    whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
 
     # --- AI Why++ enrichment (OpenAI) ----------------------------------------
     try:
@@ -1781,10 +1683,10 @@ def on_message(msg):
         _lpdbg('LP.init', chain=_short, pair=_short_addr(market.get('pairAddress')),
                oc_ok=(isinstance(oc_for_lp, dict) and oc_for_lp.get('ok')))
         try:
-            lp = _render_lp_compat(info, DEFAULT_LANG)
+            lp = render_lp(info, DEFAULT_LANG)
         except TypeError:
             try:
-                lp = _render_lp_compat(info, market, DEFAULT_LANG)
+                lp = render_lp(info, market, DEFAULT_LANG)
             except Exception:
                 lp = 'LP lock: unknown'
         if not lp or 'unknown' in str(lp).lower():
@@ -1797,34 +1699,18 @@ def on_message(msg):
                 except Exception:
                     pass
                 try:
-                    lp = _render_lp_compat(info2, DEFAULT_LANG)
+                    lp = render_lp(info2, DEFAULT_LANG)
                 except TypeError:
-                    lp = _render_lp_compat(info2, market, DEFAULT_LANG)
+                    lp = render_lp(info2, market, DEFAULT_LANG)
             except Exception:
                 lp = 'LP lock: unknown'
     except TypeError:
-        lp = _render_lp_compat({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
+        lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
     except Exception:
-        lp = _render_lp_compat({"provider":"lite-burn-check","lpAddress": pair_addr or market.get("pairAddress"), "until": "—"}, DEFAULT_LANG)
-    # Prepare LP-info dict for reuse in callbacks (no extra RPC on LP button)
-    lp_info_bundle = None
-    try:
-        _cand = locals().get('info')
-        if isinstance(_cand, dict):
-            lp_info_bundle = _cand
-    except Exception:
-        pass
-    try:
-        _cand2 = locals().get('info2')
-        if isinstance(_cand2, dict) and _cand2:
-            lp_info_bundle = _cand2
-    except Exception:
-        pass
-
+        lp = render_lp({"provider":"lite-burn-check","lpAddress": pair_addr or market.get("pairAddress"), "until": "—"}, DEFAULT_LANG)
 
     links = (market.get("links") or {})
     bundle = {
-        "lp_info": lp_info_bundle,
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
         "reasons": list(getattr(verdict, "reasons", []) or []),
         "market": {
@@ -1838,8 +1724,8 @@ def on_message(msg):
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
         "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, str) else "LP lock: unknown"), "webintel": web
     }
-
-    msg_id = _send_or_edit_quick(quick, links)
+    if not msg_id:
+        msg_id = _send_or_edit_quick(quick, links)
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
         try:
@@ -1977,114 +1863,44 @@ def on_callback(cb):
                      reply_markup=build_keyboard(chat_id, orig_msg_id, links, ctx="details"))
 
     elif action == "WHY":
-
-
-        # Re-render WHY
-
-        _b = load_bundle(chat_id, msg_id) or {}
-
-        _ver = _b.get("verdict") or verdict
-
-        _mkt = _b.get("market")  or market
-
-        try:
-
-            txt = render_why(_ver, _mkt)
-
-            _b["why"] = txt
-
-            store_bundle(chat_id, msg_id, _b)
-
-        except Exception:
-
-            txt = _b.get("why") or "*Why? unavailable*"
-
+        txt = bundle.get("why") or "*Why?*\n• No specific risk factors detected"
         send_message(chat_id, txt, reply_markup=None)
-
-        answer_callback_query(cb_id, "Why posted.", False)
+        answer_callback_query(cb_id, "Why? posted.", False)
 
     elif action == "WHYPP":
-
-
-        # Re-render WHY++
-
-        _b = load_bundle(chat_id, msg_id) or {}
-
-        _ver = _b.get("verdict") or verdict
-
-        _mkt = _b.get("market")  or market
-
-        try:
-
-            txt = render_whypp(_ver, _mkt)
-
-            _b["whypp"] = txt
-
-            store_bundle(chat_id, msg_id, _b)
-
-        except Exception:
-
-            txt = _b.get("whypp") or "*Why++ unavailable*"
-
-        # Split into chunks to avoid Telegram limits
-
+        txt = bundle.get("whypp") or "*Why++* n/a"
         MAX = 3500
-
         if len(txt) <= MAX:
-
             send_message(chat_id, txt, reply_markup=None)
-
         else:
-
-            send_message(chat_id, txt[:MAX], reply_markup=None)
-
-            rest = txt[MAX:]
-
-            i = 2
-
-            while rest:
-
-                chunk = rest[:MAX]
-
-                rest = rest[MAX:]
-
-                prefix = f"Why++ ({i})\n"
-
-                send_message(chat_id, prefix + chunk, reply_markup=None)
-
+            chunk = txt[:MAX]
+            txt = txt[MAX:]
+            send_message(chat_id, chunk, reply_markup=None)
+            i = 1
+            while txt:
                 i += 1
-
+                chunk_part = txt[:MAX]
+                txt = txt[MAX:]
+                prefix = f"Why++ ({i})\n"
+                send_message(chat_id, prefix + chunk_part, reply_markup=None)
         answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
-        # LP: reuse inspector lp_lock_lite if present; else minimal info derived from market
-        _b = load_bundle(chat_id, msg_id) or {}
-        _mkt = _b.get('market') or market or {}
-        info = None
-        try:
-            _oc = _b.get('onchain') if isinstance(_b, dict) else None
-            _lpinfo = (_oc or {}).get('lp_lock_lite') if isinstance(_oc, dict) else None
-            if isinstance(_lpinfo, dict) and _lpinfo:
-                info = _lpinfo
-        except Exception:
-            info = None
-        if not isinstance(info, dict):
-            if isinstance(_b.get('lp_info'), dict):
-                info = _b.get('lp_info')
-        if not isinstance(info, dict):
-            _lp = _mkt.get('pairAddress') or _mkt.get('lpToken') or _mkt.get('lpAddress')
-            _chain = _mkt.get('chain') or _mkt.get('chainId') or 'eth'
-            info = {'lpToken': _lp, 'chain': _chain}
-        try:
-            txt = _render_lp_compat(info, _mkt, DEFAULT_LANG)
-            _b['lp'] = txt
-            if isinstance(info, dict):
-                _b['lp_info'] = info
-            store_bundle(chat_id, msg_id, _b)
-        except Exception:
-            txt = _b.get('lp') or 'LP lock: temporarily unavailable'
-        send_message(chat_id, txt, reply_markup=None)
-        answer_callback_query(cb_id, 'LP lock posted.', False)
+        text = bundle.get("lp", "LP lock: n/a")
+        _lpdbg("LP.action", cached=bool(text), unknown=("unknown" in str(text).lower()),
+               pair=_short_addr((bundle.get("market") or {}).get("pairAddress"))) 
+        if (not text or "unknown" in str(text).lower()) and isinstance(bundle, dict) and bundle.get("onchain"):
+            try:
+                oc_cached = bundle.get("onchain")
+                info_lp = _lp_info_from_inspector(oc_cached, (bundle.get("market") or {}).get("chain"), (bundle.get("market") or {}).get("pairAddress"))
+                try:
+                    text = render_lp(info_lp, DEFAULT_LANG)
+                except TypeError:
+                    text = render_lp(info_lp, (bundle.get("market") or {}), DEFAULT_LANG)
+            except Exception:
+                pass
+        send_message(chat_id, text, reply_markup=None)
+        answer_callback_query(cb_id, "LP lock posted.", False)
 
     elif action == "REPORT":
         try:
@@ -2179,9 +1995,9 @@ def on_callback(cb):
             try:
                 info_lp = _lp_info_from_inspector(oc, chain, mkt.get('pairAddress'))
                 try:
-                    new_lp = _render_lp_compat(info_lp, DEFAULT_LANG)
+                    new_lp = render_lp(info_lp, DEFAULT_LANG)
                 except TypeError:
-                    new_lp = _render_lp_compat(info_lp, mkt, DEFAULT_LANG)
+                    new_lp = render_lp(info_lp, mkt, DEFAULT_LANG)
                 _lpdbg('ONCHAIN.lp_refresh', used_cache=True, pair=_short_addr(mkt.get('pairAddress')), empty=not bool(new_lp))
                 if isinstance(bundle, dict):
                     bundle['lp'] = new_lp
