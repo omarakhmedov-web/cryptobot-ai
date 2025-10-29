@@ -1310,67 +1310,6 @@ def render_lp(info: dict, lang: str = "en") -> str:
         lines.append("Links: UNCX | TeamFinance")
     lines.append("Data source: —")
     return "\n".join(lines)
-def render_details(verdict, market: Dict[str, Any], ctx: Dict[str, Any], lang: str = "en") -> str:
-    try:
-        print("[MDX v2.6] render_details() called", flush=True)
-        return _render_details_impl(verdict, market, ctx, lang)
-    except Exception as _e:
-        import traceback as _tb
-        try:
-            _tb.print_exc()
-        except Exception:
-            pass
-        try:
-            pair = (market or {}).get("pair") or "—"
-            asof = (market or {}).get("asof") or "n/a"
-        except Exception:
-            pair, asof = "—", "n/a"
-        print(f"[MDX v2.6] render_details FAILSAFE: {type(_e).__name__}: {_e}", flush=True)
-        try:
-            print(f"[MDX v2.6] ctx: pair={pair}, asof={asof}", flush=True)
-        except Exception:
-            pass
-        try:
-            _as = asof
-            if isinstance(_as, (int,float)):
-                ts = int(_as)
-                # detect ms
-                if ts > 10**12:
-                    ts = ts // 1000
-                asof_fmt = __import__("datetime").datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC")
-            else:
-                asof_fmt = str(_as)
-        except Exception:
-            asof_fmt = str(asof)
-        # Hardened fallback: still render minimal snapshot from `market`
-        try:
-            pair = _get(market, "pairSymbol", default="—")
-            chain = _fmt_chain(_get(market, "chain"))
-            token = _get(market, "tokenAddress", default="—")
-            pair_addr = _get(market, "pairAddress", default="—")
-            price = _fmt_num(_get(market, "price"), prefix="$")
-            fdv = _fmt_num(_get(market, "fdv"), prefix="$")
-            mc  = _fmt_num(_get(market, "mc" ), prefix="$")
-            liq = _fmt_num(_get(market, "liq"), prefix="$")
-            vol = _fmt_num(_get(market, "vol24h"), prefix="$")
-            chg1  = _fmt_pct(_get(market, "priceChanges", "h1"))
-            chg24 = _fmt_pct(_get(market, "priceChanges", "h24"))
-            asof_fmt = _fmt_time(_get(market, "asof"))
-            minimal = [
-                f"*Details — {pair}* 🟡 (—)",
-                "*Snapshot*",
-                f"• Price: {price}  (—, {chg1}, {chg24})",
-                f"• FDV: {fdv}  • MC: {mc}",
-                f"• Liquidity: {liq}  • 24h Volume: {vol}",
-                f"• Chain: `{chain}`",
-                f"• Token: `{token}`",
-                f"• Pair: `{pair_addr}`",
-                f"• As of: {asof_fmt}",
-            ]
-            return "\n".join(minimal)
-        except Exception:
-            return f"*Details temporarily unavailable*\n• Pair: {pair}\n• As of: {asof_fmt}"
-
 
 def render_contract(info: dict, lang: str = "en") -> str:
     """
@@ -1631,35 +1570,6 @@ def _mdx_fmt_time(ts_secs):
     except Exception:
         return "—"
 
-def render_details(market: dict, verdict=None, webintel=None, lang: str="en"):
-    # Never return 'temporarily unavailable' — always produce a compact snapshot
-    m = market or {}
-    pair = m.get("pairSymbol") or "—"
-    price = _mdx_fmt_num(m.get("price"), prefix="$")
-    fdv   = _mdx_fmt_num(m.get("fdv"),   prefix="$")
-    mc    = _mdx_fmt_num(m.get("mc"),    prefix="$")
-    liq   = _mdx_fmt_num(m.get("liq"),   prefix="$")
-    vol   = _mdx_fmt_num(m.get("vol24h"),prefix="$")
-    ch    = m.get("priceChanges") or {}
-    ch1   = _mdx_fmt_pct(ch.get("h1"))
-    ch6   = _mdx_fmt_pct(ch.get("h6"))
-    ch24  = _mdx_fmt_pct(ch.get("h24"))
-    chain = _mdx_fmt_chain(m.get("chain"))
-    tok   = (m.get("tokenAddress") or "—").lower()
-    pair_addr = (m.get("pairAddress") or "—").lower()
-    asof  = _mdx_fmt_time(m.get("asOf") or m.get("asof"))
-    lines = [
-        f"*Details — {pair}* 🟡 (—)",
-        "*Snapshot*",
-        f"• Price: {price}  (—, {ch1}, {ch6}, {ch24})",
-        f"• FDV: {fdv}  • MC: {mc}",
-        f"• Liquidity: {liq}  • 24h Volume: {vol}",
-        f"• Chain: `{chain}`",
-        f"• Token: `{tok}`",
-        f"• Pair: `{pair_addr}`",
-        f"• As of: {asof}",
-    ]
-    return "\n".join(lines)
 
 def render_lp(info: dict | None, market: dict | None, lang: str="en"):
     i = info or {}
@@ -1695,68 +1605,41 @@ def render_lp(info: dict | None, market: dict | None, lang: str="en"):
 
 
 # === ROBUST render_details WRAPPER (last definition wins) ===
-def render_details(arg1, arg2, arg3, lang: str = "en") -> str:
-    """
-    Accepts both legacy and new signatures:
-      (verdict, market, ctx, lang)  ← correct
-      (market, verdict, webintel, lang)  ← legacy
-    and maps them to _render_details_impl(verdict, market, ctx, lang).
-    """
-    verdict = None
-    market = None
-    ctx = None
 
-    # Heuristics
+
+def render_details(arg1, arg2, arg3, lang: str = "en") -> str:
+    """Unified wrapper to support both legacy and new signatures.
+    Accepts (verdict, market, ctx, lang) or (market, verdict, webintel, lang).
+    """
     try:
-        # If arg2 looks like a market dict (has price/liquidity/pair keys), prefer (verdict, market, ctx)
-        if isinstance(arg2, dict) and any(k in arg2 for k in ("pairSymbol","pairAddress","price","liq","fdv","mc","links","asof")):
+        # Heuristics to detect argument order
+        # Case A: first is verdict (dict or object with .score), second is market (dict)
+        if isinstance(arg2, dict) and (isinstance(arg1, dict) or hasattr(arg1, 'score') or hasattr(arg1, 'level')):
             verdict, market, ctx = arg1, arg2, (arg3 or {})
-        # Else if arg1 looks like market dict → legacy order
-        elif isinstance(arg1, dict) and any(k in arg1 for k in ("pairSymbol","pairAddress","price","liq","fdv","mc","links","asof")):
-            market, verdict, ctx = arg1, (arg2 if arg2 is not None else None), (arg3 or {})
+        # Case B: first is market dict, second is verdict
+        elif isinstance(arg1, dict) and (isinstance(arg2, dict) or hasattr(arg2, 'score') or hasattr(arg2, 'level')):
+            verdict, market, ctx = arg2, arg1, (arg3 or {})
         else:
-            # Fallback: trust the new signature
             verdict, market, ctx = arg1, (arg2 if isinstance(arg2, dict) else {}), (arg3 or {})
     except Exception:
         verdict, market, ctx = arg1, (arg2 if isinstance(arg2, dict) else {}), (arg3 or {})
-
     try:
         print("[MDX v2.6] render_details() unified wrapper", flush=True)
         return _render_details_impl(verdict, market, ctx, lang)
-    except Exception as _e:
-        # Safe minimal fallback (no helper calls)
-        try:
-            mkt = market if isinstance(market, dict) else {}
-            pair_sym = mkt.get("pairSymbol") or mkt.get("pair") or "—"
-            price = mkt.get("price")
-            fdv = mkt.get("fdv")
-            mc  = mkt.get("mc")
-            liq = mkt.get("liq")
-            vol = mkt.get("vol24h") or mkt.get("vol")
-            pc  = mkt.get("priceChanges") or {}
-            ch1 = pc.get("h1")
-            ch24= pc.get("h24")
-            token = mkt.get("tokenAddress") or "—"
-            pair_addr = mkt.get("pairAddress") or "—"
-            asof_val = mkt.get("asof")
+    except Exception:
+        # Minimal fallback to never crash callback
+        pair_sym = (market or {}).get('pairSymbol') or (market or {}).get('pair') or '—'
+        price = (market or {}).get('price')
+        ch = (market or {}).get('priceChanges') or {}
+        ch1 = ch.get('h1'); ch6 = ch.get('h6'); ch24 = ch.get('h24')
+        def _s(v):
             try:
-                from datetime import datetime as _dt
-                asof_fmt = _dt.utcfromtimestamp(int(asof_val)/1000.0).strftime("%Y-%m-%d %H:%M UTC") if asof_val else "n/a"
+                return f"{float(v):.2f}%"
             except Exception:
-                asof_fmt = "n/a"
-            parts = []
-            parts.append(f"*Details — {pair_sym}* 🟡 (—)")
-            parts.append("*Snapshot*")
-            parts.append(f"• Price: {price if price is not None else '—'}  (—, {ch1 if ch1 is not None else '—'}, {ch24 if ch24 is not None else '—'})")
-            parts.append(f"• FDV: {fdv if fdv is not None else '—'}  • MC: {mc if mc is not None else '—'}")
-            parts.append(f"• Liquidity: {liq if liq is not None else '—'}  • 24h Volume: {vol if vol is not None else '—'}")
-            parts.append("*Token*")
-            parts.append(f"• Chain: {mkt.get('chain') or '—'}")
-            parts.append(f"• Address: {token}")
-            parts.append("*Pair*")
-            parts.append(f"• Address: {pair_addr}")
-            parts.append(f"• As of: {asof_fmt}")
-            return "\\n".join(parts)
-        except Exception:
-            return "*Details temporarily unavailable*"
-# === /WRAPPER ===
+                return '—'
+        snapshot = [
+            f"*Details — {pair_sym}* {_pick_color(verdict, market)} ({_score(verdict)})",
+            "*Snapshot*",
+            f"• Price: {price if price is not None else '—'}  ({_s(ch1)}, {_s(ch6)}, {_s(ch24)})",
+        ]
+        return "\n".join(snapshot)
