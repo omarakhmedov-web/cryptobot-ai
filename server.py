@@ -1255,6 +1255,16 @@ Write **Why++** with 8–12 bullets:
 # ---- LP renderer compatibility wrapper ----
 
 def _render_lp_compat(info, market=None, lang=None):
+    # Accept pre-rendered strings and non-dict inputs gracefully
+    try:
+        if isinstance(info, str):
+            # Already rendered text
+            return info
+        if not isinstance(info, dict):
+            info = {}
+    except Exception:
+        info = {}
+
     # Back-compat: allow call signature (info, lang)
     if isinstance(market, str) and lang is None:
         lang, market = market, None
@@ -1988,7 +1998,17 @@ def on_callback(cb):
 
                 i += 1
 
-        answer_callback_query(cb_id, "Why++ posted.", False)
+        answer_callback_query
+        # If LP in bundle is already rendered string, return it as-is (back-compat)
+        _lp_raw = _b.get("lp")
+        if isinstance(_lp_raw, str) and _lp_raw.strip():
+            try:
+                send_message(chat_id, _lp_raw, reply_markup=None)
+                answer_callback_query(cb_id, "LP lock shown.", False)
+            except Exception:
+                pass
+            return jsonify({"ok": True})
+(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
         
