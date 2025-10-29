@@ -1253,14 +1253,12 @@ Write **Why++** with 8–12 bullets:
         except Exception: pass
         return None
 # ---- LP renderer compatibility wrapper ----
-
 def _render_lp_compat(info, market=None, lang=None):
     # Back-compat: allow call signature (info, lang)
     if isinstance(market, str) and lang is None:
         lang, market = market, None
     """Compatibility wrapper that builds a minimal LP-lite info dict and delegates
     to renderers_mdx.render_lp(info, lang) without any extra RPC calls.
-
     - `info`: dict that may already contain keys like lpAddress/lpToken, burnedPct, lockedPct, lockedBy, chain.
     - `market`: optional market dict used only to *fill gaps* (chain/pairAddress).
     - `lang`: language code; defaults to env DEFAULT_LANG or 'en'.
@@ -1268,22 +1266,20 @@ def _render_lp_compat(info, market=None, lang=None):
     try:
         if lang is None:
             try:
-                lang = DEFAULT_LANG  # provided at module level
+                lang = DEFAULT_LANG
             except Exception:
                 lang = "en"
         p = dict(info or {})
-        # Safe helpers
         def _looks_addr(a):
             return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
         def _chain_norm(x):
             v = (str(x) if x is not None else "").strip().lower()
             mp = {"1":"eth","eth":"eth","ethereum":"eth","56":"bsc","bsc":"bsc","bnb":"bsc","137":"polygon","matic":"polygon","polygon":"polygon"}
             return mp.get(v, v or "eth")
-        # Fill from market if missing
         if isinstance(market, dict):
             ch = p.get("chain") or p.get("network") or p.get("chainId")
             if not ch:
-                ch = market.get("chain") or market.get("network") or market.get("chainId")
+                ch = (market.get("chain") or market.get("network") or market.get("chainId"))
             if ch:
                 p["chain"] = _chain_norm(ch)
             lp = p.get("lpAddress") or p.get("lpToken") or p.get("address")
@@ -1291,22 +1287,16 @@ def _render_lp_compat(info, market=None, lang=None):
                 cand = (market.get("pairAddress") or market.get("pair") or market.get("lpAddress"))
                 if _looks_addr(cand):
                     p["lpAddress"] = cand
-        # Minimal provider tag for downstream renderer
         p.setdefault("provider", p.get("provider") or "lp-lite")
-        # Ensure we don't accidentally pass complex nested objects that could cause renderer issues
-        # Keep only expected primitive fields if present
         safe = {}
         for k in ("provider","chain","lpAddress","lpToken","address","burnedPct","burned_pct","lockedPct","lockedBy"):
             if k in p:
                 safe[k] = p[k]
-        # Keep nested 'data' (from inspector) but only with allowed keys
         if isinstance(p.get("data"), dict):
             d = p["data"]
-            safe["data"] = {kk: d.get(kk) for kk in ("burnedPct","burned_pct","lockedPct","lockedBy") if kk in d}
-        # Prefer lpAddress over lpToken in output
+            safe["data"] = {kk: d.get(kk) for kk in ("burnedPct","burned_pct","lockedPct","lockedBy","holdersUrl","uncxUrl","teamfinanceUrl","dataSource") if kk in d}
         if not _looks_addr(safe.get("lpAddress")) and _looks_addr(safe.get("lpToken")):
             safe["lpAddress"] = safe["lpToken"]
-        # Delegate to MDX renderer (2-arg signature)
         from renderers_mdx import render_lp as _render_lp_mdx
         return _render_lp_mdx(safe, lang)
     except Exception as _e:
@@ -1314,17 +1304,16 @@ def _render_lp_compat(info, market=None, lang=None):
             print("[LP] compat error:", _e)
         except Exception:
             pass
-        # Fail gracefully with a compact fallback text
         lp_addr = None
         try:
-            lp_addr = info.get("lpAddress") or info.get("lpToken") or (market.get("pairAddress") if isinstance(market, dict) else None)
+            lp_addr = (info or {}).get("lpAddress") or (info or {}).get("lpToken") or ((market or {}).get("pairAddress") if isinstance(market, dict) else None)
         except Exception:
             pass
         return "\n".join([
             "LP lock (lite)",
-            f"Status: unknown",
-            f"Burned: —",
-            f"Locked: —",
+            "Status: unknown",
+            "Burned: —",
+            "Locked: —",
             f"LP token: {lp_addr or '—'}",
             "Data source: —",
         ])
@@ -1539,6 +1528,13 @@ def on_message(msg):
     try:
         _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
         _now = market.get("asOf") or int(time.time())
+        # normalize milliseconds to seconds when needed
+        try:
+            _now = int(_now)
+            if _now > 10_000_000_000:
+                _now = int(_now // 1000)
+        except Exception:
+            _now = int(time.time())
 
         # If _ts missing, pull from DexScreener pairs endpoint (one-shot, 5s)
         if not _ts:
@@ -1775,7 +1771,7 @@ def on_message(msg):
 
     msg_id = _send_or_edit_quick(quick, links)
     if msg_id:
-        store_bundle(chat_id, msg_id, bundle)
+        store_bundle(chat_id, orig_msg_id, bundle)
         try:
             # WATCHLITE: remember last token per chat for /watch without args
             watchlite.note_quickscan(chat_id, bundle, msg_id)
@@ -1915,7 +1911,7 @@ def on_callback(cb):
 
         # Re-render WHY
 
-        _b = load_bundle(chat_id, msg_id) or {}
+        _b = load_bundle(chat_id, orig_msg_id) or {}
 
         _ver = _b.get("verdict") or verdict
 
@@ -1927,7 +1923,7 @@ def on_callback(cb):
 
             _b["why"] = txt
 
-            store_bundle(chat_id, msg_id, _b)
+            store_bundle(chat_id, orig_msg_id, _b)
 
         except Exception:
 
@@ -1942,7 +1938,7 @@ def on_callback(cb):
 
         # Re-render WHY++
 
-        _b = load_bundle(chat_id, msg_id) or {}
+        _b = load_bundle(chat_id, orig_msg_id) or {}
 
         _ver = _b.get("verdict") or verdict
 
@@ -1954,7 +1950,7 @@ def on_callback(cb):
 
             _b["whypp"] = txt
 
-            store_bundle(chat_id, msg_id, _b)
+            store_bundle(chat_id, orig_msg_id, _b)
 
         except Exception:
 
@@ -1996,7 +1992,7 @@ def on_callback(cb):
 
         # LP: prefer inspector data from bundle; otherwise render from pairAddress/chain
 
-        _b = load_bundle(chat_id, msg_id) or {}
+        _b = load_bundle(chat_id, orig_msg_id) or {}
 
         _mkt = _b.get("market") or market or {}
 
@@ -2024,7 +2020,7 @@ def on_callback(cb):
 
             _b["lp"] = txt
 
-            store_bundle(chat_id, msg_id, _b)
+            store_bundle(chat_id, orig_msg_id, _b)
 
         except Exception:
 
@@ -2136,7 +2132,7 @@ def on_callback(cb):
                     bundle['onchain'] = oc
                     # persist updated bundle for future callbacks
                     try:
-                        store_bundle(chat_id, msg_id, bundle)
+                        store_bundle(chat_id, orig_msg_id, bundle)
                     except Exception:
                         pass
             except Exception:
