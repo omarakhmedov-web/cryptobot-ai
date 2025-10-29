@@ -1613,39 +1613,109 @@ def render_details(market: dict, verdict=None, webintel=None, lang: str="en"):
     return "\n".join(lines)
 
 def render_lp(info: dict | None, market: dict | None, lang: str="en"):
-    i = info or {}
-    m = market or {}
-    ch = (m.get("chain") or i.get("chain") or "ethereum")
-    header = {"ethereum":"Ethereum","eth":"Ethereum","bsc":"BSC","polygon":"Polygon",
-              "arbitrum":"Arbitrum","optimism":"Optimism","base":"Base",
-              "avalanche":"Avalanche","fantom":"Fantom"}.get(str(ch).lower(), str(ch).upper())
-    lines = [f"LP lock (lite) — {header}"]
-    burned = i.get("burnedPct"); locked = i.get("lockedPct")
-    if burned is None and locked is None and str(i.get("status","")).lower()=="unknown":
-        lines.append("Status: unknown")
-    if burned is not None:
-        try: lines.append(f"Burned: {float(burned):.2f}%")
-        except Exception: lines.append(f"Burned: {burned}")
-    if locked is not None:
+
+    """
+    LP-lite renderer (fixed). Robust against missing fields and external errors.
+    Normalizes statuses and never raises exceptions; returns a compact textual block.
+    Inputs accepted in `info`:
+      - chain/network/chainId
+      - lpAddress/lpToken/address/token
+      - Optional precomputed: status, burnedPct, lockedPct, lockedBy, holdersUrl, uncxUrl, teamfinanceUrl, dataSource
+    """
+    try:
+        from lp_lite_v2 import check_lp_lock_v2  # optional
+    except Exception:
+        check_lp_lock_v2 = None
+
+    p = info or {}
+    chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
+    lp_token = (p.get("lpAddress") or p.get("lpToken") or p.get("address") or p.get("token") or "—")
+
+    def _cap(s: str) -> str:
+        s = (s or "").lower()
+        return {"eth":"Ethereum","ethereum":"Ethereum","bsc":"BSC","binance smart chain":"BSC",
+                "polygon":"Polygon","matic":"Polygon"}.get(s, s.capitalize() if s else "—")
+
+    def _is_addr(a) -> bool:
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+
+    # Prefer precomputed payload when present
+    data = None
+    try:
+        if isinstance(p.get("status"), str) or ("burnedPct" in p or "lockedPct" in p):
+            data = dict(p)
+        elif _is_addr(lp_token) and callable(check_lp_lock_v2):
+            data = check_lp_lock_v2(chain, lp_token)
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        data = {}
+
+    status_in = str(data.get("status") or "").strip().lower()
+    burned = data.get("burnedPct")
+    locked = data.get("lockedPct")
+    lk_by  = data.get("lockedBy") or "—"
+    holders_url = data.get("holdersUrl") or ""
+    uncx_url    = data.get("uncxUrl") or "https://app.unicrypt.network/"
+    team_url    = data.get("teamfinanceUrl") or "https://app.team.finance/"
+    source      = data.get("dataSource") or "on-chain (ERC-20)"
+    lp_addr     = data.get("lpToken") or lp_token
+
+    def _to_float(x):
         try:
-            locked_by = i.get("lockedBy") or "—"
-            lines.append(f"Locked: {float(locked):.2f}% via {locked_by}")
+            return float(x) if x is not None else None
         except Exception:
-            lines.append(f"Locked: {locked}")
-    lp_addr = (i.get("lpToken") or i.get("lpAddress") or m.get("pairAddress") or "—")
-    lines.append(f"LP token: {lp_addr}")
-    # Minimal links
-    holders = i.get("holdersUrl") or ""
-    if holders:
-        lines.append(f"Links: Holders (Scan)")
-    data_src = i.get("dataSource") or "—"
-    lines.append(f"Data source: {data_src}")
+            return None
+
+    burned_val = _to_float(burned)
+    locked_val = _to_float(locked)
+
+    # Normalize status
+    status = "unknown"
+    if status_in in ("burned", "burnt"):
+        status = "burned"
+    elif status_in in ("locked", "locked-full"):
+        status = "locked"
+    elif status_in in ("partial", "locked-partial", "partially-locked"):
+        status = "locked-partial"
+    elif status_in in ("unlocked", "open"):
+        status = "unlocked"
+    elif status_in in ("v3-nft", "v3", "nft"):
+        status = "v3-NFT"
+
+    # Heuristics when status isn't provided
+    if status == "unknown":
+        if locked_val is not None:
+            if locked_val <= 0:
+                status = "unlocked"
+            elif locked_val >= 100:
+                status = "locked"
+            elif 0 < locked_val < 100 and lk_by not in ("", None, "—"):
+                status = "locked-partial"
+
+    # Business rule (из требования Омара):
+    # locked == 0 → unlocked
+    # 0 < locked < 100 and lockedBy exists → locked-partial
+    # (остальное — как нормализовано выше)
+
+    lines = []
+    lines.append(f"LP lock (lite) — {_cap(chain)}")
+    lines.append(f"Status: {status}")
+    b_txt = "—" if burned_val is None else f"{burned_val:.2f}%"
+    lines.append(f"Burned: {b_txt}  (0xdead + 0x0)")
+    l_txt = "—" if locked_val is None else f"{locked_val:.2f}%"
+    via = lk_by if lk_by not in (None, "", "—") else "—"
+    lines.append(f"Locked: {l_txt} via {via}")
+    lines.append(f"LP token: {lp_addr or '—'}")
+    links = []
+    if holders_url or (_is_addr(lp_addr) and _cap(chain) == "Ethereum"):
+        links.append("Holders (Etherscan)")
+    links.append("UNCX")
+    links.append("TeamFinance")
+    lines.append("Links: " + " | ".join(links))
+    lines.append(f"Data source: {source}")
     return "\n".join(lines)
-# ====== /overrides ======
 
-
-
-# === ROBUST render_details WRAPPER (last definition wins) ===
 def render_details(arg1, arg2, arg3, lang: str = "en") -> str:
     """
     Accepts both legacy and new signatures:
