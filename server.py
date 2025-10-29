@@ -1713,9 +1713,39 @@ def on_message(msg):
 
         quick = '*Details temporarily unavailable*\n• Pair: ' + str(_pair) + '\n• As of: ' + _asof_str + ''
     # Reuse same ctx (no re-computation)
-    details = render_details(verdict, market, ctx, DEFAULT_LANG)
-    why = safe_render_why(verdict, market, DEFAULT_LANG)
-    whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
+    try:
+
+        details = render_details(verdict, market, ctx, DEFAULT_LANG)
+
+        why = safe_render_why(verdict, market, DEFAULT_LANG)
+
+        whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
+
+    except Exception as e:
+
+        _log_exc = globals().get('print', print)
+
+        _log_exc('[MDX v2.6] render_details/safe_render_* failed:', e)
+
+        _asof = (market or {}).get('asof')
+
+        _pair = (market or {}).get('pairSymbol')
+
+        try:
+
+            import time
+
+            _asof_str = time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(_asof)) if _asof else '—'
+
+        except Exception:
+
+            _asof_str = '—'
+
+        details = '*Details temporarily unavailable* | Pair: ' + str(_pair) + ' | As of: ' + _asof_str
+
+        why = '*Why temporarily unavailable*'
+
+        whypp = '*Why++ temporarily unavailable*'
 
     # --- AI Why++ enrichment (OpenAI) ----------------------------------------
     try:
