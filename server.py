@@ -1915,7 +1915,7 @@ def on_callback(cb):
 
         # Re-render WHY
 
-        _b = load_bundle(chat_id, msg_id) or {}
+        _b = load_bundle(chat_id, orig_msg_id) or {}
 
         _ver = _b.get("verdict") or verdict
 
@@ -1927,7 +1927,7 @@ def on_callback(cb):
 
             _b["why"] = txt
 
-            store_bundle(chat_id, msg_id, _b)
+            store_bundle(chat_id, orig_msg_id, _b)
 
         except Exception:
 
@@ -1942,7 +1942,7 @@ def on_callback(cb):
 
         # Re-render WHY++
 
-        _b = load_bundle(chat_id, msg_id) or {}
+        _b = load_bundle(chat_id, orig_msg_id) or {}
 
         _ver = _b.get("verdict") or verdict
 
@@ -1954,7 +1954,7 @@ def on_callback(cb):
 
             _b["whypp"] = txt
 
-            store_bundle(chat_id, msg_id, _b)
+            store_bundle(chat_id, orig_msg_id, _b)
 
         except Exception:
 
@@ -1996,7 +1996,7 @@ def on_callback(cb):
 
         # LP: prefer inspector data from bundle; otherwise render from pairAddress/chain
 
-        _b = load_bundle(chat_id, msg_id) or {}
+        _b = load_bundle(chat_id, orig_msg_id) or {}
 
         _mkt = _b.get("market") or market or {}
 
@@ -2024,7 +2024,7 @@ def on_callback(cb):
 
             _b["lp"] = txt
 
-            store_bundle(chat_id, msg_id, _b)
+            store_bundle(chat_id, orig_msg_id, _b)
 
         except Exception:
 
@@ -2136,7 +2136,7 @@ def on_callback(cb):
                     bundle['onchain'] = oc
                     # persist updated bundle for future callbacks
                     try:
-                        store_bundle(chat_id, msg_id, bundle)
+                        store_bundle(chat_id, orig_msg_id, bundle)
                     except Exception:
                         pass
             except Exception:
