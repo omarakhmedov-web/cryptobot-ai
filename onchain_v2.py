@@ -1,26 +1,30 @@
-# MDX_PATCH_2025_10_17 v4 — polygon RPCs + timeout 2.5s
-# onchain_v2.py — Metridex On-chain (no proxies, no new ENV)
+# onchain_v2.py — PRODUCTIVE rev (2025-10-29)
+# Goals:
+# - Keep public RPC set but add owner fallback via storage slot 0
+# - Use both EIP-1967 storage slot and implementation() for upgradeable
+# - Robust ABI decoders (string / bool / uint)
+# - Zero-exception policy: helpers return None on failure
+
 from __future__ import annotations
 from typing import Optional, Dict, Any, List
-import json, math
+import json
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
 ZERO = "0x0000000000000000000000000000000000000000"
+DEAD = "0x000000000000000000000000000000000000dead"
 
 # Public RPCs (rate-limited). Keep short but diverse.
 _PUBLIC_RPC = {
     "eth": [
         "https://cloudflare-eth.com",
         "https://rpc.ankr.com/eth",
-        "https://rpc.flashbots.net",
         "https://eth.llamarpc.com",
         "https://ethereum.publicnode.com",
     ],
     "bsc": [
         "https://bsc-dataseed.binance.org",
         "https://rpc.ankr.com/bsc",
-        "https://binance.llamarpc.com",
         "https://bsc.publicnode.com",
     ],
     "polygon": [
@@ -43,7 +47,8 @@ SIG_DECIMALS     = "0x313ce567"
 SIG_OWNER        = "0x8da5cb5b"   # owner()
 SIG_PAUSED       = "0x5c975abb"   # paused()
 
-# EIP-1967 impl slot = keccak256("eip1967.proxy.implementation") - 1
+# Proxy detection
+SIG_IMPL_FN      = "0x5c60da1b"   # implementation()
 EIP1967_IMPL_SLOT = "0x360894A13BA1A3210667C828492DB98DCA3E2076CC3735A920A3CA505D382BBC"
 
 def _norm_chain(c: str) -> str:
@@ -56,21 +61,21 @@ def _norm_chain(c: str) -> str:
 def _pick_rpcs(chain: str, rpc_urls: Optional[List[str]]) -> List[str]:
     if rpc_urls and isinstance(rpc_urls, list) and rpc_urls:
         return rpc_urls
-    return (_PUBLIC_RPC.get(_norm_chain(chain), []) or [] )[:3]
+    return (_PUBLIC_RPC.get(_norm_chain(chain), []) or [] )[:4]
 
 def _jsonrpc_call(rpc: str, method: str, params: list, timeout: float) -> Optional[dict]:
-    payload = {"jsonrpc":"2.0","id":1,"method":method,"params":params}
-    req = Request(rpc, data=json.dumps(payload).encode("utf-8"),
-                  headers={
-                      "Content-Type":"application/json",
-                      "User-Agent":"Metridex/OnChain v2 (+https://metridex.com)",
-                      "Accept":"application/json",
-                  })
     try:
+        payload = {"jsonrpc":"2.0","id":1,"method":method,"params":params}
+        req = Request(rpc, data=json.dumps(payload).encode("utf-8"),
+                      headers={
+                          "Content-Type":"application/json",
+                          "User-Agent":"Metridex/OnChain v2 (+https://metridex.com)",
+                          "Accept":"application/json",
+                      })
         with urlopen(req, timeout=timeout) as resp:
             obj = json.loads(resp.read().decode("utf-8"))
             return obj
-    except (URLError, HTTPError, TimeoutError, ValueError):
+    except Exception:
         return None
 
 def _eth_call(rpc: str, to_addr: str, data: str, timeout: float) -> Optional[str]:
@@ -100,8 +105,7 @@ def _h2i(x: Optional[str]) -> Optional[int]:
     return None
 
 def _decode_uint(hexdata: Optional[str]) -> Optional[int]:
-    v = _h2i(hexdata)
-    return v
+    return _h2i(hexdata)
 
 def _decode_bool(hexdata: Optional[str]) -> Optional[bool]:
     v = _h2i(hexdata)
@@ -112,33 +116,26 @@ def _decode_string(hexdata: Optional[str]) -> Optional[str]:
     if not hexdata or not isinstance(hexdata, str) or not hexdata.startswith("0x"):
         return None
     try:
-        # ABI: dynamic string -> offset at 0x20, length at 0x40
         raw = hexdata[2:]
+        # dynamic string: offset at 0x20, length at 0x40
         if len(raw) >= 128:
-            # bytes from 0x40
             strlen = int(raw[64:128], 16)
             start = 128
             end = start + strlen*2
             b = bytes.fromhex(raw[start:end])
-            return b.decode("utf-8","ignore").strip("\x00")
-        # Fallback: bytes32 padded
+            txt = b.decode("utf-8","ignore").strip("\x00")
+            return txt or None
+        # bytes32 (fallback)
         b = bytes.fromhex(raw[-64:])
-        return b.rstrip(b"\x00").decode("utf-8","ignore") or None
+        txt = b.rstrip(b"\x00").decode("utf-8","ignore")
+        return txt or None
     except Exception:
         return None
-
-def _try_each(rpcs: List[str], fn, *args):
-    for rpc in rpcs:
-        out = fn(rpc, *args)
-        if out is not None:
-            return out
-    return None
 
 def _format_supply(total: Optional[int], decimals: Optional[int]) -> Optional[str]:
     if total is None or decimals is None: return None
     try:
         val = total / (10 ** int(decimals))
-        # compact formatting
         if val >= 1_000_000_000:
             return f"{val/1_000_000_000:.3f}B"
         if val >= 1_000_000:
@@ -150,46 +147,77 @@ def _format_supply(total: Optional[int], decimals: Optional[int]) -> Optional[st
 def check_contract_v2(chain: str, token: str, rpc_urls: Optional[List[str]] = None,
                       timeout_s: float = 2.5) -> Dict[str, Any]:
     rpcs = _pick_rpcs(chain, rpc_urls)
+
     # Presence
-    code = _try_each(rpcs, _eth_get_code, token, timeout_s)
-    code_present = bool(code and code != "0x")
-    # ERC-20 fields
-    name_hex    = _try_each(rpcs, _eth_call, token, SIG_NAME, timeout_s)
-    sym_hex     = _try_each(rpcs, _eth_call, token, SIG_SYMBOL, timeout_s)
-    dec_hex     = _try_each(rpcs, _eth_call, token, SIG_DECIMALS, timeout_s)
-    ts_hex      = _try_each(rpcs, _eth_call, token, SIG_TOTAL_SUPPLY, timeout_s)
+    code = None
+    for rpc in rpcs:
+        code = _eth_get_code(rpc, token, timeout_s)
+        if code is not None:
+            break
+    code_present = bool(code and code not in ("0x", "0x0"))
 
-    name        = _decode_string(name_hex)
-    symbol      = _decode_string(sym_hex)
-    decimals    = _decode_uint(dec_hex)
-    total       = _decode_uint(ts_hex)
+    # ERC-20 core
+    name_hex = sym_hex = dec_hex = ts_hex = None
+    for rpc in rpcs:
+        name_hex = name_hex or _eth_call(rpc, token, SIG_NAME, timeout_s)
+        sym_hex  = sym_hex  or _eth_call(rpc, token, SIG_SYMBOL, timeout_s)
+        dec_hex  = dec_hex  or _eth_call(rpc, token, SIG_DECIMALS, timeout_s)
+        ts_hex   = ts_hex   or _eth_call(rpc, token, SIG_TOTAL_SUPPLY, timeout_s)
+        if (name_hex and sym_hex) or (dec_hex is not None):
+            break
 
-    # Ownable / paused
-    owner_hex   = _try_each(rpcs, _eth_call, token, SIG_OWNER, timeout_s)
-    paused_hex  = _try_each(rpcs, _eth_call, token, SIG_PAUSED, timeout_s)
-    owner       = "—"
-    renounced   = None
-    if owner_hex and len(owner_hex) >= 66:
-        owner_addr = "0x" + owner_hex[-40:]
-        owner = owner_addr
-        renounced = (owner_addr.lower() == ZERO.lower())
+    name     = _decode_string(name_hex)
+    symbol   = _decode_string(sym_hex)
+    decimals = _decode_uint(dec_hex)
+    total    = _decode_uint(ts_hex)
 
-    paused      = _decode_bool(paused_hex)
+    # Owner / paused
+    owner = None
+    for rpc in rpcs:
+        owner_hex = _eth_call(rpc, token, SIG_OWNER, timeout_s)
+        if owner_hex and len(owner_hex) >= 66:
+            owner_addr = "0x" + owner_hex[-40:]
+            owner = owner_addr.lower()
+            break
+    if not owner:
+        # fallback: storage slot 0
+        for rpc in rpcs:
+            slot0 = _eth_get_storage_at(rpc, token, "0x0", timeout_s)
+            if slot0 and len(slot0) >= 66:
+                owner = ("0x" + slot0[-40:]).lower()
+                break
+    renounced = (owner == ZERO) if owner else None
 
-    # EIP-1967 proxy detection
-    impl_hex    = _try_each(rpcs, _eth_get_storage_at, token, EIP1967_IMPL_SLOT, timeout_s)
-    upgradeable = bool(impl_hex and impl_hex != "0x" and int(impl_hex,16) != 0)
+    paused = None
+    for rpc in rpcs:
+        paused_hex = _eth_call(rpc, token, SIG_PAUSED, timeout_s)
+        if paused_hex is not None:
+            paused = _decode_bool(paused_hex)
+            break
 
-    info: Dict[str, Any] = {
+    # Upgradeable via EIP-1967 storage OR implementation()
+    upgradeable = None
+    for rpc in rpcs:
+        impl_slot = _eth_get_storage_at(rpc, token, EIP1967_IMPL_SLOT, timeout_s)
+        if impl_slot and impl_slot not in ("0x", "0x0") and int(impl_slot, 16) != 0:
+            upgradeable = True
+            break
+        impl_hex = _eth_call(rpc, token, SIG_IMPL_FN, timeout_s)
+        if impl_hex and impl_hex not in ("0x", "0x0") and int(impl_hex, 16) != 0:
+            upgradeable = True
+            break
+    if upgradeable is None:
+        upgradeable = False
+
+    return {
         "codePresent": code_present,
         "name": name,
         "symbol": symbol,
         "decimals": decimals,
         "totalSupply": total,
         "totalDisplay": _format_supply(total, decimals),
-        "owner": owner,
+        "owner": owner or "—",
         "renounced": renounced,
         "paused": paused,
         "upgradeable": upgradeable,
     }
-    return info
