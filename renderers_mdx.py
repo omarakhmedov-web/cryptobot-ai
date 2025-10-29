@@ -1081,8 +1081,28 @@ def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
         uniq.append(_normalize_reason_text(r))
         if len(uniq) >= 3:
             break
+    # Fallback: synthesize from market
     if not uniq:
-        return "*Why?*\n• No specific risk factors detected"
+        m = market or {}
+        try:
+            age = _get(m, "ageDays")
+            ch24 = _get(m, "priceChanges","h24")
+            liq = _get(m, "liq")
+            if isinstance(age,(int,float)) and age >= 7:
+                uniq.append(_age_bucket_label(age))
+            if isinstance(ch24,(int,float)):
+                lbl = _delta24h_positive_label(ch24)
+                if lbl: uniq.append(lbl)
+            if isinstance(liq,(int,float)) and liq > 0:
+                uniq.append(f"Liquidity present (${liq:,.0f})")
+        except Exception:
+            pass
+        if not uniq:
+            uniq = ["No standout risk signals from market data"]
+    header = "*Why?*"
+    lines = [f"• {r}" for r in uniq]
+    return "
+".join([header] + lines)
     header = "*Why?*"
     lines = [f"• {r}" for r in uniq]
     return "\n".join([header] + lines)
