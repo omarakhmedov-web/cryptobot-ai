@@ -159,6 +159,33 @@ def _format_supply(total: Optional[int], decimals: Optional[int]) -> Optional[st
     except Exception:
         return None
 
+
+# === Built-in defaults for LP lockers (used if LP_LOCKER_ADDRESSES is not set) ===
+DEFAULT_LOCKERS = {
+    "eth": {
+        # UNCX Uniswap V2
+        "UNCX": ["0x663A5C229c09b049E36dCc11a9B0d4a8Eb9db214"],
+        # Team Finance (TrustSwap) ETH
+        "TeamFinance": ["0xe2fE530C047F2d85298B07D9333C05737f1435fb"]
+    },
+    "bsc": {
+        # UNCX PancakeSwap V2
+        "UNCX": ["0xC765bddB93b0D1c1A88282BA0fa6B2d00E3e0c83"],
+        # Team Finance BSC
+        "TeamFinance": ["0x0C89C0407775dd89B12918B9c0aa42Bf96518820"],
+        # PinkLock (popular lockers on BSC)
+        "PinkLockV1": ["0x7Ee058420e5937496F5a2096f04cAa7721cF70CC"],
+        "PinkLockV2": ["0x407993575c91Ce7643A4D4cCacc9A98c36EE1BbE"]
+    },
+    "polygon": {
+        # UNCX QuickSwap V2 + Uniswap V2 on Polygon
+        "UNCX-QuickSwap": ["0xaDB2437e6F65682B85F814fBc12FeC0508A7B1D0"],
+        "UNCX-UniswapV2": ["0x939d71ADe0Bf94d3F8cf578413bF2a2f248BF58b"],
+        # Team Finance Polygon
+        "TeamFinance": ["0x3eF7442dF454bA6b7C1deEc8DdF29Cfb2d6e56c7"]
+    }
+}
+
 # ===== Honeypot caching (kept) =====
 _HP_CACHE: Dict[tuple, tuple] = {}
 _HP_TTL = 120.0
