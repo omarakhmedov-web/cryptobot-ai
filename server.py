@@ -1253,26 +1253,81 @@ Write **Why++** with 8–12 bullets:
         except Exception: pass
         return None
 # ---- LP renderer compatibility wrapper ----
+
 def _render_lp_compat(info, market=None, lang=None):
+    # Back-compat: allow call signature (info, lang)
+    if isinstance(market, str) and lang is None:
+        lang, market = market, None
+    """Compatibility wrapper that builds a minimal LP-lite info dict and delegates
+    to renderers_mdx.render_lp(info, lang) without any extra RPC calls.
+
+    - `info`: dict that may already contain keys like lpAddress/lpToken, burnedPct, lockedPct, lockedBy, chain.
+    - `market`: optional market dict used only to *fill gaps* (chain/pairAddress).
+    - `lang`: language code; defaults to env DEFAULT_LANG or 'en'.
+    """
     try:
         if lang is None:
-            lang = DEFAULT_LANG  # may exist in globals
-    except Exception:
-        lang = "en"
-    # Try modern 3-arg signature: (info, market, lang)
-    try:
-        return _render_lp_compat(info, market, lang)
-    except TypeError:
-        pass
-    # Try 2-arg signature: (info, lang)
-    try:
-        return _render_lp_compat(info, lang)
-    except TypeError:
-        pass
-    # Try legacy 1-arg signature: (info)
-    return _render_lp_compat(info)
-
-
+            try:
+                lang = DEFAULT_LANG  # provided at module level
+            except Exception:
+                lang = "en"
+        p = dict(info or {})
+        # Safe helpers
+        def _looks_addr(a):
+            return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+        def _chain_norm(x):
+            v = (str(x) if x is not None else "").strip().lower()
+            mp = {"1":"eth","eth":"eth","ethereum":"eth","56":"bsc","bsc":"bsc","bnb":"bsc","137":"polygon","matic":"polygon","polygon":"polygon"}
+            return mp.get(v, v or "eth")
+        # Fill from market if missing
+        if isinstance(market, dict):
+            ch = p.get("chain") or p.get("network") or p.get("chainId")
+            if not ch:
+                ch = market.get("chain") or market.get("network") or market.get("chainId")
+            if ch:
+                p["chain"] = _chain_norm(ch)
+            lp = p.get("lpAddress") or p.get("lpToken") or p.get("address")
+            if not _looks_addr(lp):
+                cand = (market.get("pairAddress") or market.get("pair") or market.get("lpAddress"))
+                if _looks_addr(cand):
+                    p["lpAddress"] = cand
+        # Minimal provider tag for downstream renderer
+        p.setdefault("provider", p.get("provider") or "lp-lite")
+        # Ensure we don't accidentally pass complex nested objects that could cause renderer issues
+        # Keep only expected primitive fields if present
+        safe = {}
+        for k in ("provider","chain","lpAddress","lpToken","address","burnedPct","burned_pct","lockedPct","lockedBy"):
+            if k in p:
+                safe[k] = p[k]
+        # Keep nested 'data' (from inspector) but only with allowed keys
+        if isinstance(p.get("data"), dict):
+            d = p["data"]
+            safe["data"] = {kk: d.get(kk) for kk in ("burnedPct","burned_pct","lockedPct","lockedBy") if kk in d}
+        # Prefer lpAddress over lpToken in output
+        if not _looks_addr(safe.get("lpAddress")) and _looks_addr(safe.get("lpToken")):
+            safe["lpAddress"] = safe["lpToken"]
+        # Delegate to MDX renderer (2-arg signature)
+        from renderers_mdx import render_lp as _render_lp_mdx
+        return _render_lp_mdx(safe, lang)
+    except Exception as _e:
+        try:
+            print("[LP] compat error:", _e)
+        except Exception:
+            pass
+        # Fail gracefully with a compact fallback text
+        lp_addr = None
+        try:
+            lp_addr = info.get("lpAddress") or info.get("lpToken") or (market.get("pairAddress") if isinstance(market, dict) else None)
+        except Exception:
+            pass
+        return "\n".join([
+            "LP lock (lite)",
+            f"Status: unknown",
+            f"Burned: —",
+            f"Locked: —",
+            f"LP token: {lp_addr or '—'}",
+            "Data source: —",
+        ])
 
 def on_message(msg):
     lp = {}
