@@ -841,6 +841,8 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
     if isinstance(l_site, dict):
         l_site = l_site.get("url") or l_site.get("label") or "—"
 
+    country_line = None  # SAFE default to avoid UnboundLocalError
+
     parts: List[str] = []
     parts.append(f"*Details — {pair}* {_pick_color(verdict, market)} ({_score(verdict)})")
 
