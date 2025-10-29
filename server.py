@@ -1252,6 +1252,27 @@ Write **Why++** with 8–12 bullets:
         try: print("WHYPP AI error:", _e_ai)
         except Exception: pass
         return None
+# ---- LP renderer compatibility wrapper ----
+def _render_lp_compat(info, market=None, lang=None):
+    try:
+        if lang is None:
+            lang = DEFAULT_LANG  # may exist in globals
+    except Exception:
+        lang = "en"
+    # Try modern 3-arg signature: (info, market, lang)
+    try:
+        return _render_lp_compat(info, market, lang)
+    except TypeError:
+        pass
+    # Try 2-arg signature: (info, lang)
+    try:
+        return _render_lp_compat(info, lang)
+    except TypeError:
+        pass
+    # Try legacy 1-arg signature: (info)
+    return _render_lp_compat(info)
+
+
 
 def on_message(msg):
     lp = {}
@@ -1655,10 +1676,10 @@ def on_message(msg):
         _lpdbg('LP.init', chain=_short, pair=_short_addr(market.get('pairAddress')),
                oc_ok=(isinstance(oc_for_lp, dict) and oc_for_lp.get('ok')))
         try:
-            lp = render_lp(info, DEFAULT_LANG)
+            lp = _render_lp_compat(info, DEFAULT_LANG)
         except TypeError:
             try:
-                lp = render_lp(info, market, DEFAULT_LANG)
+                lp = _render_lp_compat(info, market, DEFAULT_LANG)
             except Exception:
                 lp = 'LP lock: unknown'
         if not lp or 'unknown' in str(lp).lower():
@@ -1671,15 +1692,15 @@ def on_message(msg):
                 except Exception:
                     pass
                 try:
-                    lp = render_lp(info2, DEFAULT_LANG)
+                    lp = _render_lp_compat(info2, DEFAULT_LANG)
                 except TypeError:
-                    lp = render_lp(info2, market, DEFAULT_LANG)
+                    lp = _render_lp_compat(info2, market, DEFAULT_LANG)
             except Exception:
                 lp = 'LP lock: unknown'
     except TypeError:
-        lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
+        lp = _render_lp_compat({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
     except Exception:
-        lp = render_lp({"provider":"lite-burn-check","lpAddress": pair_addr or market.get("pairAddress"), "until": "—"}, DEFAULT_LANG)
+        lp = _render_lp_compat({"provider":"lite-burn-check","lpAddress": pair_addr or market.get("pairAddress"), "until": "—"}, DEFAULT_LANG)
 
     links = (market.get("links") or {})
     bundle = {
@@ -1944,7 +1965,7 @@ def on_callback(cb):
 
         try:
 
-            txt = render_lp(info)
+            txt = _render_lp_compat(info)
 
             _b["lp"] = txt
 
@@ -2051,9 +2072,9 @@ def on_callback(cb):
             try:
                 info_lp = _lp_info_from_inspector(oc, chain, mkt.get('pairAddress'))
                 try:
-                    new_lp = render_lp(info_lp, DEFAULT_LANG)
+                    new_lp = _render_lp_compat(info_lp, DEFAULT_LANG)
                 except TypeError:
-                    new_lp = render_lp(info_lp, mkt, DEFAULT_LANG)
+                    new_lp = _render_lp_compat(info_lp, mkt, DEFAULT_LANG)
                 _lpdbg('ONCHAIN.lp_refresh', used_cache=True, pair=_short_addr(mkt.get('pairAddress')), empty=not bool(new_lp))
                 if isinstance(bundle, dict):
                     bundle['lp'] = new_lp
