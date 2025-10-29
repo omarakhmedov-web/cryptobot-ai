@@ -1451,6 +1451,13 @@ def on_message(msg):
     try:
         _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
         _now = market.get("asOf") or int(time.time())
+        # normalize ms to s if needed
+        try:
+            _now = int(_now)
+            if _now > 10_000_000_000:
+                _now = int(_now // 1000)
+        except Exception:
+            _now = int(time.time())
 
         # If _ts missing, pull from DexScreener pairs endpoint (one-shot, 5s)
         if not _ts:
@@ -1482,7 +1489,7 @@ def on_message(msg):
             if _ts > 10_000_000_000:  # looks like ms
                 _ts = int(_ts // 1000)
             _age_days = max(0.0, round((_now - int(_ts)) / 86400.0, 2))
-            market["ageDays"] = _age_days
+            market.setdefault(\"ageDays\", _age_days)
     except Exception:
         pass
     # --- /D1 Age ---
@@ -1610,9 +1617,9 @@ def on_message(msg):
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
 
     # === EARLY SEND (avoid long wait on LP/on-chain) ===
-    _early_links = dict(market.get("links") or {})
+    _early_links = dict((market.get("links") or {}))
     try:
-        _chain_e = (market.get("chain") or "").lower()
+        _chain_e = str((market.get("chain") or "")).lower()
         _token_e = market.get("tokenAddress") or ""
         _pair_e  = market.get("pairAddress") or ""
 
@@ -1646,9 +1653,54 @@ def on_message(msg):
         pass
 
     msg_id = _send_or_edit_quick(quick, _early_links)
-    # === /EARLY SEND ===
 
-    # Reuse same ctx (no re-computation)
+    # Provisional bundle (so callbacks don't hit "(no details)")
+    try:
+        _pair_sym = market.get("pairSymbol") or market.get("symbol") or "—"
+        _chain_v  = market.get("chain") or market.get("chainId") or "—"
+        _price    = market.get("price")
+        _fdv      = market.get("fdv")
+        _mc       = market.get("mc")
+        _liq      = market.get("liq") or market.get("liquidity") or market.get("liquidityUSD") or market.get("liquidityUsd")
+        _vol24    = market.get("vol24h") or market.get("volume24h") or market.get("volumeUSD") or market.get("volumeUsd")
+        _changes  = market.get("priceChanges") or {}
+        _asof     = market.get("asof")
+        _age      = market.get("ageDays")
+        _site     = _early_links.get("site")
+
+        _bundle_prov = {
+            "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
+            "reasons": list(getattr(verdict, "reasons", []) or []),
+            "market": {
+                "pairSymbol": _pair_sym, "chain": _chain_v, "price": _price, "fdv": _fdv, "mc": _mc, "liq": _liq,
+                "vol24h": _vol24, "priceChanges": _changes,
+                "tokenAddress": market.get("tokenAddress"), "pairAddress": market.get("pairAddress"),
+                "ageDays": _age, "source": market.get("source"), "sources": market.get("sources"), "asof": _asof
+            },
+            "links": {"dex": _early_links.get("dex"), "scan": _early_links.get("scan"),
+                      "dexscreener": _early_links.get("dexscreener"), "site": _site},
+            "details": "*Details will appear in a moment…*",
+            "why": "*Why?*\n• computing…",
+            "whypp": "*Why++*\n• computing…",
+            "lp": "LP lock: pending",
+            "webintel": {"whois": {"created": None, "registrar": None},
+                         "ssl": {"ok": None, "expires": None, "issuer": None},
+                         "wayback": {"first": None}}
+        }
+        if msg_id:
+            store_bundle(chat_id, msg_id, _bundle_prov)
+            try:
+                tg("editMessageReplyMarkup", {
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "reply_markup": json.dumps(build_keyboard(chat_id, msg_id, _early_links, ctx="quick"))
+                })
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # === /EARLY SEND ===
+        # Reuse same ctx (no re-computation)
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
