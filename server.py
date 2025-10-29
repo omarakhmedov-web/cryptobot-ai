@@ -261,7 +261,32 @@ def can_scan(chat_id: int):
 
 from state import store_bundle, load_bundle
 from buttons import build_keyboard
+
+# --- Safe keyboard wrapper to avoid silent failures on edit/send ---
+try:
+    from buttons import build_keyboard as _buttons_build_keyboard
+except Exception:
+    _buttons_build_keyboard = None
+
+def build_keyboard(chat_id, msg_id, links, ctx=None):
+    """Safe wrapper over buttons.build_keyboard. Falls back to minimal nav."""
+    try:
+        if callable(_buttons_build_keyboard):
+            return _buttons_build_keyboard(chat_id, msg_id, links, ctx=ctx)
+    except Exception as _kb_e:
+        try:
+            print("build_keyboard failed, using minimal:", _kb_e)
+        except Exception:
+            pass
+    # Minimal keyboard: Copy to input + Open in DEX/Scan if provided
+    try:
+        token = (links or {}).get("token") or ((links or {}).get("scan") or "").split("/")[-1]
+    except Exception:
+        token = None
+    return _mk_copy_keyboard(token, links or {})
+
 from cache import cache_get, cache_set
+from concurrent.futures import ThreadPoolExecutor
 try:
     from dex_client import fetch_market
 except Exception as _e:
@@ -1461,13 +1486,16 @@ def on_message(msg):
         except Exception:
             pass
         return msg_id
-
-
-
     # QuickScan flow
     try:
-        market = fetch_market(text) or {}
+        def _fm_call(arg):
+            return fetch_market(arg) or {}
+        to = float(os.getenv("FETCH_TIMEOUT_SEC","7.0"))
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_fm_call, text)
+            market = fut.result(timeout=to)
     except Exception as e:
+
         print('QUICKSCAN ERROR (fetch_market)', e, traceback.format_exc())
         market = {}
 
@@ -1643,7 +1671,13 @@ def on_message(msg):
 
     try:
 
-        quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+        try:
+            quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
+        except Exception:
+            _pair = (market.get("pairSymbol") or "—")
+            _asof = market.get("asof")
+            _asof_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(_asof)) if _asof else "—"
+            quick = "*QuickScan temporarily unavailable*\n• Pair: " + str(_pair) + "\n• As of: " + _asof_str
 
     except Exception as _e_rq:
 
