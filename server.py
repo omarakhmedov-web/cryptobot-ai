@@ -1257,12 +1257,6 @@ def _render_lp_compat(info, market=None, lang=None):
     # Back-compat: allow call signature (info, lang)
     if isinstance(market, str) and lang is None:
         lang, market = market, None
-    """Compatibility wrapper that builds a minimal LP-lite info dict and delegates
-    to renderers_mdx.render_lp(info, lang) without any extra RPC calls.
-    - `info`: dict that may already contain keys like lpAddress/lpToken, burnedPct, lockedPct, lockedBy, chain.
-    - `market`: optional market dict used only to *fill gaps* (chain/pairAddress).
-    - `lang`: language code; defaults to env DEFAULT_LANG or 'en'.
-    """
     try:
         if lang is None:
             try:
@@ -2089,6 +2083,13 @@ def on_callback(cb):
         mkt = (bundle.get('market') if isinstance(bundle, dict) else None) or {}
         # Normalize chain
         chain = (mkt.get('chain') or mkt.get('chainId') or '').strip().lower()
+        # map common names to short codes
+        _map = {
+            'ethereum':'eth','eth':'eth','1':'eth',
+            'binance':'bsc','bnb':'bsc','bsc':'bsc','56':'bsc',
+            'polygon':'polygon','matic':'polygon','137':'polygon'
+        }
+        chain = _map.get(chain, chain)
         if chain.isdigit():
             chain = {'1':'eth','56':'bsc','137':'polygon'}.get(chain, chain)
         if chain in ('matic','pol','poly'):
