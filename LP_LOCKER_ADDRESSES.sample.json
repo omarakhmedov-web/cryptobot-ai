@@ -1,0 +1,23 @@
+{
+  "eth": {
+    "UNCX": [
+      "0x0000000000000000000000000000000000000000"
+    ],
+    "TeamFinance": [
+      "0x0000000000000000000000000000000000000000"
+    ],
+    "PinkLock": []
+  },
+  "bsc": {
+    "UNCX": [],
+    "TeamFinance": [],
+    "DeepLock": []
+  },
+  "polygon": {
+    "UNCX": [],
+    "TeamFinance": []
+  },
+  "default": {
+    "Gempad": []
+  }
+}
