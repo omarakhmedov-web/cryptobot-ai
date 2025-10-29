@@ -1573,7 +1573,7 @@ def on_message(msg):
     except TypeError:
         lp = render_lp({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
     except Exception:
-        lp = "LP lock: unknown"
+        lp = render_lp({"provider":"lite-burn-check","lpAddress": pair_addr or market.get("pairAddress"), "until": "—"}, DEFAULT_LANG)
 
     links = (market.get("links") or {})
     bundle = {
