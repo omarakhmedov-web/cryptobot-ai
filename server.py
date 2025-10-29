@@ -1,4 +1,5 @@
 import hashlib
+import os
 try:
     import webintel_lite
 except Exception:
@@ -259,9 +260,31 @@ except Exception as _e:
             return {'ok': False, 'error': 'market_fetch_unavailable: ' + _err, 'sources': [], 'links': {}}
 
 from risk_engine import compute_verdict
+
+
+# --- Soft telemetry (LP/ONCHAIN), enable with env LOG_LP=1 ---
+try:
+    LOG_LP = int(os.getenv('LOG_LP', '0'))
+except Exception:
+    LOG_LP = 0
+def _lpdbg(event: str, **fields):
+    if not LOG_LP:
+        return
+    try:
+        kv = ' '.join(f"{k}={repr(v)}" for k, v in fields.items() if v is not None)
+        print(f"[LPDBG] {event} {kv}")
+    except Exception:
+        pass
 import onchain_inspector
 
 # === LP-lite helpers for inspector → renderer ===
+def _short_addr(x):
+    try:
+        s = str(x)
+        return s[:6] + '…' + s[-4:] if len(s) > 12 else s
+    except Exception:
+        return str(x)
+
 def _norm_chain_short(x: str) -> str:
     v = (x or '').strip().lower()
     if v.isdigit():
@@ -1615,6 +1638,8 @@ def on_message(msg):
         except Exception as _e_lp:
             oc_for_lp = {}
         info = _lp_info_from_inspector(oc_for_lp, _short, market.get('pairAddress'))
+        _lpdbg('LP.init', chain=_short, pair=_short_addr(market.get('pairAddress')),
+               oc_ok=(isinstance(oc_for_lp, dict) and oc_for_lp.get('ok')))
         try:
             lp = render_lp(info, DEFAULT_LANG)
         except TypeError:
@@ -1623,6 +1648,7 @@ def on_message(msg):
             except Exception:
                 lp = 'LP lock: unknown'
         if not lp or 'unknown' in str(lp).lower():
+            _lpdbg('LP.fallback_v2', chain=_short, pair=_short_addr(market.get('pairAddress')))
             try:
                 info2 = check_lp_lock_v2(_short, market.get('pairAddress'))
                 try:
@@ -1819,6 +1845,8 @@ def on_callback(cb):
 
     elif action == "LP":
         text = bundle.get("lp", "LP lock: n/a")
+        _lpdbg("LP.action", cached=bool(text), unknown=("unknown" in str(text).lower()),
+               pair=_short_addr((bundle.get("market") or {}).get("pairAddress"))) 
         if (not text or "unknown" in str(text).lower()) and isinstance(bundle, dict) and bundle.get("onchain"):
             try:
                 oc_cached = bundle.get("onchain")
@@ -1897,8 +1925,10 @@ def on_callback(cb):
             chain = 'polygon'
         token_addr = mkt.get('tokenAddress')
         # Try cached onchain first
+        _lpdbg('ONCHAIN.hit', chain=chain, token=_short_addr(token_addr), pair=_short_addr((bundle.get('market') or {}).get('pairAddress')))
         oc = (bundle.get('onchain') or None) if isinstance(bundle, dict) else None
         if not oc:
+            _lpdbg('ONCHAIN.fetch', chain=chain, token=_short_addr(token_addr))
             # Try inspector first
             try:
                 oc = onchain_inspector.inspect_token(chain, token_addr, mkt.get('pairAddress'))
@@ -1912,7 +1942,7 @@ def on_callback(cb):
                 from renderers_onchain_v2 import render_onchain_v2
                 info = check_contract_v2(chain, token_addr, timeout_s=2.5)
                 text = render_onchain_v2(chain, token_addr, info)
-                send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, bundle.get('links') if isinstance(bundle, dict) else {}, ctx='onchain'))
+                send_message(chat_id, text, reply_markup=build_keyboard(chat_id, 0, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
                 answer_callback_query(cb_id, 'On-chain ready.', False)
             except Exception as _e2:
                 send_message(chat_id, "On-chain\ninspection failed")
@@ -1926,6 +1956,7 @@ def on_callback(cb):
                     new_lp = render_lp(info_lp, DEFAULT_LANG)
                 except TypeError:
                     new_lp = render_lp(info_lp, mkt, DEFAULT_LANG)
+                _lpdbg('ONCHAIN.lp_refresh', used_cache=True, pair=_short_addr(mkt.get('pairAddress')), empty=not bool(new_lp))
                 if isinstance(bundle, dict):
                     bundle['lp'] = new_lp
                     bundle['onchain'] = oc
@@ -1936,7 +1967,9 @@ def on_callback(cb):
                         pass
             except Exception:
                 pass
-            send_message(chat_id, text, reply_markup=build_keyboard(chat_id, orig_msg_id, bundle.get('links') if isinstance(bundle, dict) else {}, ctx='onchain'))
+            except Exception:
+                pass
+            send_message(chat_id, text, reply_markup=build_keyboard(chat_id, 0, (bundle.get('links') if isinstance(bundle, dict) else {}), ctx='onchain'))
             answer_callback_query(cb_id, 'On-chain ready.', False)
     elif action == "COPY_CA":
         mkt = (bundle.get("market") or {})
