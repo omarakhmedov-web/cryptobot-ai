@@ -1723,9 +1723,13 @@ def on_message(msg):
 
     except Exception as e:
 
-        _log_exc = globals().get('print', print)
+        try:
 
-        _log_exc('[MDX v2.6] render_details/safe_render_* failed:', e)
+            print('[MDX v2.6] render_details/safe_render_* failed:', e)
+
+        except Exception:
+
+            pass
 
         _asof = (market or {}).get('asof')
 
@@ -2053,48 +2057,34 @@ def on_callback(cb):
         answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
-        
-
-
-        # LP: prefer inspector data from bundle; otherwise render from pairAddress/chain
-
+        # LP: reuse inspector lp_lock_lite if present; else minimal info derived from market
         _b = load_bundle(chat_id, msg_id) or {}
-
-        _mkt = _b.get("market") or market or {}
-
+        _mkt = _b.get('market') or market or {}
         info = None
-
-        if isinstance(_b.get("lp"), dict):
-
-            info = _b.get("lp")
-
-        elif isinstance(_b.get("lp_info"), dict):
-
-            info = _b.get("lp_info")
-
-        if not isinstance(info, dict):
-
-            _lp = _mkt.get("pairAddress") or _mkt.get("lpToken") or _mkt.get("lpAddress")
-
-            _chain = _mkt.get("chain") or _mkt.get("chainId") or "eth"
-
-            info = {"lpToken": _lp, "chain": _chain}
-
         try:
-
-            txt = _render_lp_compat(info)
-
-            _b["lp"] = txt
-
-            store_bundle(chat_id, msg_id, _b)
-
+            _oc = _b.get('onchain') if isinstance(_b, dict) else None
+            _lpinfo = (_oc or {}).get('lp_lock_lite') if isinstance(_oc, dict) else None
+            if isinstance(_lpinfo, dict) and _lpinfo:
+                info = _lpinfo
         except Exception:
-
-            txt = _b.get("lp") or "LP lock: temporarily unavailable"
-
+            info = None
+        if not isinstance(info, dict):
+            if isinstance(_b.get('lp_info'), dict):
+                info = _b.get('lp_info')
+        if not isinstance(info, dict):
+            _lp = _mkt.get('pairAddress') or _mkt.get('lpToken') or _mkt.get('lpAddress')
+            _chain = _mkt.get('chain') or _mkt.get('chainId') or 'eth'
+            info = {'lpToken': _lp, 'chain': _chain}
+        try:
+            txt = _render_lp_compat(info, _mkt, DEFAULT_LANG)
+            _b['lp'] = txt
+            if isinstance(info, dict):
+                _b['lp_info'] = info
+            store_bundle(chat_id, msg_id, _b)
+        except Exception:
+            txt = _b.get('lp') or 'LP lock: temporarily unavailable'
         send_message(chat_id, txt, reply_markup=None)
-
-        answer_callback_query(cb_id, "LP lock posted.", False)
+        answer_callback_query(cb_id, 'LP lock posted.', False)
 
     elif action == "REPORT":
         try:
