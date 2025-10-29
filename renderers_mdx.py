@@ -1047,6 +1047,7 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
         except Exception:
             _ci = None
         country_line = (None if _rd_country else (country_label(_ci) if _ci else None))
+    country_line = (None if locals().get('_rd_country') else (country_label(locals().get('_ci')) if locals().get('_ci') else None))
     w_lines = ["*Website intel*"]
     if country_line:
         w_lines.append(f"• {country_line}")
@@ -1064,6 +1065,567 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
     return "\n".join(parts)
 
 
+
+
+def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
+    # Collect up to 3 concise reasons. Fall back to market data if verdict lacks reasons.
+    reasons: List[str] = []
+    # 1) Try from verdict object or dict
+    try:
+        reasons = list(getattr(verdict, "reasons", []) or [])
+    except Exception:
+        try:
+            reasons = list((verdict or {}).get("reasons") or [])
+        except Exception:
+            reasons = []
+    # Deduplicate & clip
+    seen = set()
+    uniq: List[str] = []
+    for r in reasons:
+        if not r:
+            continue
+        rs = str(r).strip()
+        if rs in seen:
+            continue
+        seen.add(rs)
+        uniq.append(rs)
+        if len(uniq) >= 3:
+            break
+
+    # 2) Fallback synthesis from market data
+    if not uniq:
+        m = market or {}
+        age = None
+        try:
+            age = m.get("ageDays", None)
+        except Exception:
+            age = None
+        ch24 = None
+        try:
+            ch24 = ((m.get("priceChanges") or {}).get("h24"))
+        except Exception:
+            ch24 = None
+        liq = None
+        try:
+            liq = m.get("liq") or m.get("liquidity") or m.get("liquidityUSD") or m.get("liquidityUsd")
+        except Exception:
+            liq = None
+
+        # Heuristics
+        if isinstance(age, (int, float)):
+            if age >= 365:
+                uniq.append("Long‑running (>1 year)")
+            elif age >= 30:
+                uniq.append("Established (>30 days)")
+        if isinstance(ch24, (int, float)):
+            try:
+                uniq.append(f"Daily change ≈ {ch24:+.2f}%")
+            except Exception:
+                pass
+        if isinstance(liq, (int, float)) and liq > 0:
+            try:
+                if liq >= 1_000_000:
+                    uniq.append(f"Liquidity present (${liq/1_000_000:.1f}M)")
+                else:
+                    uniq.append(f"Liquidity present (${liq:,.0f})")
+            except Exception:
+                pass
+        if not uniq:
+            uniq = ["No standout risk signals from market data"]
+
+    header = "*Why?*"
+    lines = [f"• {r}" for r in uniq]
+    return "\n".join([header] + lines)
+
+
+def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
+    # Weighted Top-3 positives and Top-3 risks (chain-aware)
+    m = market or {}
+    pos: List[tuple[str,int]] = []
+    risk: List[tuple[str,int]] = []
+
+    def add_pos(label:str, w:int): pos.append((label,w))
+    def add_risk(label:str, w:int): risk.append((label,w))
+
+    t = _tiers(m)
+
+    liq = _get(m, "liq")
+    vol = _get(m, "vol24h")
+    ch24 = _get(m, "priceChanges","h24")
+    age = _get(m, "ageDays")
+    fdv = _get(m, "fdv"); mc = _get(m, "mc")
+
+    try:
+        if isinstance(liq,(int,float)) and liq >= t["LIQ_POSITIVE"]: add_pos(f"Healthy liquidity (${liq:,.0f})", 3)
+        if isinstance(vol,(int,float)) and vol >= t["VOL_ACTIVE"]:   add_pos(f"Active 24h volume (${vol:,.0f})", 2)
+        if isinstance(age,(int,float)) and age >= 7:                 add_pos(_age_bucket_label(age), 2)
+        if isinstance(ch24,(int,float)):
+            _lbl = _delta24h_positive_label(ch24)
+            if _lbl: add_pos(_lbl, 1)
+    except Exception:
+        pass
+
+    try:
+        if liq is None: add_risk("Liquidity unknown", 2)
+        elif isinstance(liq,(int,float)) and liq < t["LIQ_LOW"]: add_risk(f"Low liquidity (${liq:,.0f})", 3)
+        if vol is None: add_risk("24h volume unknown", 1)
+        elif isinstance(vol,(int,float)) and vol < t["VOL_THIN"]: add_risk(f"Thin 24h volume (${vol:,.0f})", 2)
+        if isinstance(ch24,(int,float)):
+            _abs = abs(ch24)
+            if _abs >= 25:
+                add_risk(f"High daily volatility (|Δ24h| ≈ {_abs:.0f}%)", 3)
+            elif _abs >= 12:
+                add_risk(f"Elevated daily volatility (|Δ24h| ≈ {_abs:.0f}%)", 2)
+        if age is None: add_risk("Pair age unknown", 2)
+        elif isinstance(age,(int,float)) and age < 1: add_risk("Newly created pair (<1d)", 3)
+        if isinstance(fdv,(int,float)) and isinstance(mc,(int,float)) and mc>0 and fdv/mc>5:
+            add_risk(f"FDV/MC high (~{fdv/mc:.1f}x)", 1)
+    except Exception:
+        pass
+
+    pos = sorted(pos, key=lambda x: (-x[1], x[0]))[:3]
+    risk = sorted(risk, key=lambda x: (-x[1], x[0]))[:3]
+
+    lines = ["*Why++*"]
+    if pos:
+        lines.append("_Top positives_")
+        for label, w in pos:
+            lines.append(f"• {label} (w={w})")
+    if risk:
+        lines.append("_Top risks_")
+        for label, w in risk:
+            lines.append(f"• {label} (w={w})")
+    return "\n".join(lines).replace("\n", "\n")
+
+
+def render_lp(info: dict, lang: str = "en") -> str:
+    """
+    LP-lite v2 renderer (compact, serious, accurate).
+    Back-compat: accepts the old "info" dict; if it contains chain + LP token, we compute on-chain.
+    Otherwise, we will format whatever is present in "info" and mark unknowns.
+    """
+    p = info or {}
+    chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
+    lp_token = (p.get("lpAddress") or p.get("lpToken") or p.get("address") or p.get("token") or "—")
+    def _looks_addr(a: str) -> bool:
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+
+    data = None
+    if _looks_addr(lp_token):
+        try:
+            data = check_lp_lock_v2(chain, lp_token)
+        except Exception:
+            data = None
+
+    lines = []
+    def _cap(s: str) -> str:
+        s = (s or "").lower()
+        return {"eth":"Ethereum","bsc":"BSC","polygon":"Polygon"}.get(s, s.capitalize() if s else "—")
+    lines.append(f"LP lock (lite) — {_cap(chain)}")
+    status_map = {"burned":"burned","locked-partial":"locked-partial","unlocked":"unlocked","v3-nft":"v3-NFT","unknown":"unknown"}
+
+    if data and isinstance(data, dict):
+        status = status_map.get(str(data.get("status")),"unknown")
+        if status == "v3-NFT":
+            lines.append("Burned: n/a (v3/NFT)")
+            lines.append("Locked: n/a (v3/NFT)")
+        else:
+            burned = data.get("burnedPct")
+            locked = data.get("lockedPct")
+            # Correct LP status normalization
+            try:
+                _locked_val = float(locked) if locked is not None else None
+            except Exception:
+                _locked_val = None
+            _locked_by = (data.get("lockedBy") or "").strip()
+            if status != "v3-NFT" and _locked_val is not None:
+                if _locked_val <= 0.0:
+                    status = "unlocked"
+                elif 0.0 < _locked_val < 100.0 and _locked_by not in ("", "—"):
+                    status = "locked-partial"
+            # Normalize status based on lockedPct and provider
+            try:
+                _locked_val = float(locked) if locked is not None else None
+            except Exception:
+                _locked_val = None
+            lk_by = data.get("lockedBy") or "—"
+            if status != "v3-NFT":
+                if _locked_val is not None:
+                    if _locked_val <= 0.0:
+                        status = "unlocked"
+                    elif _locked_val < 100.0 and lk_by != "—":
+                        status = "locked-partial"
+                    # else keep prior status
+                elif _locked_val >= 100.0:
+                    status = "locked"
+
+            lines.append(f"Status: {status}")
+            def _fmt_pct(x):
+                try:
+                    return f"{float(x):.2f}%"
+                except Exception:
+                    return "—"
+            lines.append(f"Burned: {_fmt_pct(burned)}  (0xdead + 0x0)")
+            lk_by = data.get("lockedBy") or "—"
+            lines.append(f"Locked: {_fmt_pct(locked)} via {lk_by}")
+        lp_disp = data.get("lpToken") or lp_token
+        lines.append(f"LP token: {lp_disp}")
+        links = []
+        # Label scan by chain
+        _chain_norm = (chain or "").lower()
+        _scan_label = "Explorer"
+        if "eth" in _chain_norm:
+            _scan_label = "Etherscan"
+        elif "bsc" in _chain_norm or "binance" in _chain_norm:
+            _scan_label = "BscScan"
+        elif "polygon" in _chain_norm:
+            _scan_label = "Polygonscan"
+        if data.get("holdersUrl"): links.append(f"Holders ({_scan_label})")
+        if data.get("uncxUrl"): links.append("UNCX")
+        if data.get("teamfinanceUrl"): links.append("TeamFinance")
+        if links:
+            lines.append("Links: " + " | ".join(links))
+        ds = data.get("dataSource") or "—"
+        lines.append(f"Data source: {ds}")
+        return "\n".join(lines)
+
+    # Fallback legacy formatting without compute
+    burned_pct = p.get("burnedPct")
+    locked_pct = p.get("lockedPct")
+    def _fmt_pct2(v):
+        try: return f"{float(v):.2f}%"
+        except Exception: return "—"
+    status = "unknown"
+    try:
+        if burned_pct is not None and float(burned_pct) >= 95.0:
+            status = "burned"
+        elif locked_pct is not None and float(locked_pct) > 0:
+            status = "locked-partial"
+        elif locked_pct is not None and float(locked_pct) == 0:
+            status = "unlocked"
+    except Exception:
+        pass
+    lines.append(f"Status: {status}")
+    lines.append(f"Burned: {_fmt_pct2(burned_pct) if burned_pct is not None else '—'}")
+    lines.append(f"Locked: {_fmt_pct2(locked_pct) if locked_pct is not None else '—'}")
+    lines.append(f"LP token: {lp_token}")
+    if chain not in (None, "—", "", "-") and lp_token not in (None, "—", "", "-"):
+        lines.append("Links: UNCX | TeamFinance")
+    lines.append("Data source: —")
+    return "\n".join(lines)
+# [fix] removed legacy render_details defs
+
+def render_contract(info: dict, lang: str = "en") -> str:
+    """
+    CONTRACT block (On-chain) — compact, production-ready.
+    Uses renderers_onchain_v2 if available; otherwise graceful fallback.
+    Expected keys in `info`: chain/network/chainId, token/tokenAddress/address.
+    """
+    p = info or {}
+    chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
+    token = (p.get("token") or p.get("tokenAddress") or p.get("address") or "—")
+    def _looks_addr(a: str) -> bool:
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+    if _render_onchain_v2 and _looks_addr(token):
+        try:
+            return _render_onchain_v2(chain, token)
+        except Exception:
+            pass
+    # Fallback minimal block (no on-chain calls)
+    lines = []
+    lines.append("On-chain")
+    lines.append("Contract code: —")
+    lines.append("Token: — (—)")
+    lines.append("Decimals: —")
+    lines.append("Total supply: —")
+    lines.append("Owner: —")
+    lines.append("Renounced: —")
+    lines.append("Paused: —  Upgradeable: —")
+    lines.append("MaxTx: —  MaxWallet: —")
+    return "\n".join(lines)
+
+
+def render_security(info: dict, lang: str = "en") -> str:
+    """
+    Unified Security block: LP (burn/lock) + Contract (owner/renounced/paused/upgradeable).
+    Keys in `info`:
+      - chain/network/chainId
+      - lpAddress|lpToken
+      - tokenAddress|token|address
+    """
+    p = info or {}
+    chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
+    lp_addr = (p.get("lpAddress") or p.get("lpToken"))
+    tk_addr = (p.get("tokenAddress") or p.get("token") or p.get("address"))
+
+    def _looks_addr(a: str) -> bool:
+        return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
+
+    def _cap(s: str) -> str:
+        s = (s or "").lower()
+        return {"eth":"Ethereum","bsc":"BSC","polygon":"Polygon","arb":"Arbitrum","op":"Optimism","base":"Base"}.get(s, s.capitalize() if s else "—")
+
+    # Header
+    lines = [f"Security — {_cap(chain)}"]
+
+    # LP subsection
+    lp_line = "LP: —"
+    try:
+        if 'check_lp_lock_v2' in globals() and _looks_addr(lp_addr):
+            lp = check_lp_lock_v2(chain, lp_addr)  # safe-fallback already defined above in this file
+            burned = lp.get("burnedPct")
+            locked = lp.get("lockedPct")
+            def _fmt_pct(x):
+                try: return f"{float(x):.2f}%"
+                except Exception: return "—"
+            via = lp.get("lockedBy") or "—"
+            lp_line = f"LP: Burned {_fmt_pct(burned)} • Locked {_fmt_pct(locked)} via {via}"
+    except Exception:
+        pass
+    lines.append(lp_line)
+
+    # Contract subsection
+    ct_line = "Contract: —"
+    try:
+        if '_check_contract_v2' in globals() and _check_contract_v2 and _looks_addr(tk_addr):
+            ct = _check_contract_v2(chain, tk_addr)
+            owner = ct.get("owner") or "—"
+            ren = "True" if ct.get("renounced") is True else ("False" if ct.get("renounced") is False else "—")
+            paused = "True" if ct.get("paused") is True else ("False" if ct.get("paused") is False else "—")
+            up = ct.get("upgradeable")
+            up_str = "True ⚠️" if up is True else ("False" if up is False else "—")
+            ct_line = f"Contract: Owner {owner} • Renounced {ren} • Paused {paused} • Upgradeable {up_str}"
+    except Exception:
+        pass
+    lines.append(ct_line)
+
+    return "\n".join(lines)
+
+
+# === Added for compatibility: sanitize_market_fields ========================
+def sanitize_market_fields(mkt: dict | None):
+    """Return market dict with guaranteed keys used by diagnostics, without mutation."""
+    m = dict(mkt or {})
+    # Normalize typical fields to avoid KeyError in diagnostics
+    m.setdefault("pairAddress", m.get("pair") or m.get("pair_address"))
+    m.setdefault("tokenAddress", m.get("token") or m.get("token_address"))
+    m.setdefault("chainId", m.get("chain") or m.get("network") or "eth")
+    m.setdefault("ageMs", m.get("ageMs") or m.get("age") or None)
+    return m
+
+
+# === Added for compatibility: age_label ====================================
+def age_label(ms: int | None) -> str:
+    """Convert milliseconds to a compact label like "~2.1 d". Returns "—" if unknown."""
+    try:
+        v = int(ms) if ms is not None else 0
+    except Exception:
+        v = 0
+    if v <= 0:
+        return "—"
+    # milliseconds -> days with one decimal if < 3 days; otherwise integer
+    days = v / (1000 * 60 * 60 * 24)
+    if days < 3:
+        return f"~{days:.1f} d"
+    return f"~{round(days)} d"
+
+
+# === D0.2.3 Wayback deterministic patch (no new ENV; one-file change) =============================
+def _normalize_domain(raw: str) -> str:
+    try:
+        s = (raw or "").strip().lower()
+        # Remove scheme if present
+        if s.startswith("http://") or s.startswith("https://"):
+            from urllib.parse import urlparse
+            p = urlparse(s)
+            s = p.netloc or p.path
+        # Strip path if any sneaks in
+        s = s.split("/")[0]
+        # Drop leading wildcards and www.
+        s = s.lstrip("*.")
+        if s.startswith("www."):
+            s = s[4:]
+        return s
+    except Exception:
+        return (raw or "").strip().lower()
+
+def _wayback_summary(domain: str):
+    # Deterministic + normalized Wayback probing with soft-retry and TTL cache.
+    if not _WAYBACK_SUMMARY or not isinstance(domain, str):
+        return None
+
+    dom = _normalize_domain(domain)
+    key = f"wb:{dom}"
+    cached = _cache_get(_wb_cache, key)
+    if cached is not None:
+        return cached
+
+    out = {"ok": False, "first": None, "last": None, "url": f"https://web.archive.org/web/*/{dom}"}
+    try:
+        base = "https://web.archive.org/cdx/search/cdx"
+        common = {"url": dom, "output": "json", "fl": "timestamp", "filter": "statuscode:200", "from": "19960101", "to": "99991231"}
+
+        # Helper: GET with soft-retry
+        def _get(params):
+            try:
+                r = _rq.get(base, params=params, timeout=_WAYBACK_TIMEOUT_S)
+                if getattr(r, "ok", False):
+                    return r
+            except Exception:
+                pass
+            # Soft retry
+            try:
+                import time as _t
+                _t.sleep(0.35)
+                r = _rq.get(base, params=params, timeout=_WAYBACK_TIMEOUT_S)
+                return r if getattr(r, "ok", False) else None
+            except Exception:
+                return None
+
+        # 1) Earliest (ascending, limit=1)
+        r1 = _get({**common, "sort": "ascending", "limit": "1"})
+        if r1 is not None:
+            try:
+                j1 = r1.json()
+                if isinstance(j1, list) and len(j1) >= 2 and isinstance(j1[1], list) and j1[1]:
+                    ts1 = j1[1][0]
+                    out["first"] = f"{ts1[0:4]}-{ts1[4:6]}-{ts1[6:8]}"
+            except Exception:
+                pass
+
+        # 2) Latest (descending, limit=1)
+        r2 = _get({**common, "sort": "descending", "limit": "1"})
+        if r2 is not None:
+            try:
+                j2 = r2.json()
+                if isinstance(j2, list) and len(j2) >= 2 and isinstance(j2[1], list) and j2[1]:
+                    ts2 = j2[1][0]
+                    out["last"] = f"{ts2[0:4]}-{ts2[4:6]}-{ts2[6:8]}"
+            except Exception:
+                pass
+
+        # 3) Fallback for missing 'first': if latest exists, try fetching a small ascending page without strict limit
+        if (out["first"] is None) and (out["last"] is not None):
+            r3 = _get({**common, "sort": "ascending", "limit": "50"})  # small page to avoid heavy calls
+            if r3 is not None:
+                try:
+                    j3 = r3.json()
+                    # pick earliest timestamp from rows (skip header row)
+                    if isinstance(j3, list) and len(j3) >= 2:
+                        # rows are [["timestamp"], ["YYYY..."], ["YYYY..."], ...]
+                        for row in j3[1:]:
+                            if isinstance(row, list) and row:
+                                ts1b = row[0]
+                                out["first"] = f"{ts1b[0:4]}-{ts1b[4:6]}-{ts1b[6:8]}"
+                                break
+                except Exception:
+                    pass
+
+        # 4) Deterministic finalization: if still no 'first' but we do have 'last', set first=last
+        if (out["first"] is None) and (out["last"] is not None):
+            out["first"] = out["last"]
+
+        out["ok"] = bool(out["first"] or out["last"])
+    except Exception:
+        # Keep deterministic output shape; ok remains False.
+        pass
+
+    return _cache_put(_wb_cache, key, out)
+# === /D0.2.3 patch ================================================================================
+
+
+# ====== Metridex hardening overrides (auto-appended) ======
+def _mdx_fmt_num(v, prefix=""):
+    try:
+        if v is None: return "—"
+        n = float(v)
+        a = abs(n)
+        if a >= 1_000_000_000: s = f"{n/1_000_000_000:.2f}B"
+        elif a >= 1_000_000:   s = f"{n/1_000_000:.2f}M"
+        elif a >= 1_000:       s = f"{n/1_000:.2f}K"
+        else:                  s = f"{n:.6f}" if a < 1 else f"{n:.2f}"
+        return prefix + s
+    except Exception:
+        return "—"
+
+def _mdx_fmt_pct(v):
+    try:
+        if v in (None, "—", "-"): return "—"
+        n = float(v)
+        arrow = "▲" if n > 0 else ("▼" if n < 0 else "•")
+        return f"{arrow} {n:+.2f}%"
+    except Exception:
+        return "—"
+
+def _mdx_fmt_chain(ch):
+    m = (str(ch or "—").lower())
+    mp = {"eth":"Ethereum","ethereum":"Ethereum","bsc":"BSC","binance smart chain":"BSC",
+          "polygon":"Polygon","matic":"Polygon","arbitrum":"Arbitrum","arb":"Arbitrum",
+          "optimism":"Optimism","op":"Optimism","base":"Base","avalanche":"Avalanche",
+          "avax":"Avalanche","fantom":"Fantom","ftm":"Fantom"}
+    return mp.get(m, m.capitalize() if m and m != "—" else "—")
+
+def _mdx_fmt_time(ts_secs):
+    try:
+        ts = int(ts_secs)
+        if ts > 10_000_000_000: ts //= 1000
+        import datetime as _dt
+        return _dt.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return "—"
+
+# [fix] removed legacy render_details defs
+
+def render_lp(info: dict | None, market: dict | None, lang: str="en"):
+    i = info or {}
+    m = market or {}
+    ch = (m.get("chain") or i.get("chain") or "ethereum")
+    header = {"ethereum":"Ethereum","eth":"Ethereum","bsc":"BSC","polygon":"Polygon",
+              "arbitrum":"Arbitrum","optimism":"Optimism","base":"Base",
+              "avalanche":"Avalanche","fantom":"Fantom"}.get(str(ch).lower(), str(ch).upper())
+    lines = [f"LP lock (lite) — {header}"]
+    burned = i.get("burnedPct"); locked = i.get("lockedPct")
+    if burned is None and locked is None and str(i.get("status","")).lower()=="unknown":
+        lines.append("Status: unknown")
+    if burned is not None:
+        try: lines.append(f"Burned: {float(burned):.2f}%")
+        except Exception: lines.append(f"Burned: {burned}")
+    if locked is not None:
+        try:
+            locked_by = i.get("lockedBy") or "—"
+            lines.append(f"Locked: {float(locked):.2f}% via {locked_by}")
+        except Exception:
+            lines.append(f"Locked: {locked}")
+    lp_addr = (i.get("lpToken") or i.get("lpAddress") or m.get("pairAddress") or "—")
+    lines.append(f"LP token: {lp_addr}")
+    # Minimal links
+    holders = i.get("holdersUrl") or ""
+    if holders:
+        lines.append(f"Links: Holders (Scan)")
+    data_src = i.get("dataSource") or "—"
+    lines.append(f"Data source: {data_src}")
+    return "\n".join(lines)
+# ====== /overrides ======
+
+
+
+# === ROBUST render_details WRAPPER (last definition wins) ===
+# [fix] removed legacy render_details defs
+
+
+# === Unified render_details wrapper (no circular imports) ===
+def render_details(arg1, arg2, arg3, lang: str = 'en') -> str:
+    """Accepts (verdict, market, ctx, lang) or (market, verdict, webintel, lang)."""
+    try:
+        if isinstance(arg2, dict) and (isinstance(arg1, dict) or hasattr(arg1, 'score') or hasattr(arg1, 'level')):
+            verdict, market, ctx = arg1, arg2, (arg3 or {})
+        elif isinstance(arg1, dict) and (isinstance(arg2, dict) or hasattr(arg2, 'score') or hasattr(arg2, 'level')):
+            verdict, market, ctx = arg2, arg1, (arg3 or {})
+        else:
+            verdict, market, ctx = arg1, (arg2 if isinstance(arg2, dict) else {}), (arg3 or {})
+    except Exception:
+        verdict, market, ctx = arg1, (arg2 if isinstance(arg2, dict) else {}), (arg3 or {})
+    return _render_details_impl(verdict, market, ctx, lang)
 
 
 def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
