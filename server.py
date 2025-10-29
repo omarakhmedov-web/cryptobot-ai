@@ -1,5 +1,6 @@
 import hashlib
 import os
+import traceback
 try:
     import webintel_lite
 except Exception:
