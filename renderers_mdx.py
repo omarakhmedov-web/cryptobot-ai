@@ -1063,49 +1063,78 @@ def _render_details_impl(verdict, market: Dict[str, Any], ctx: Dict[str, Any], l
 
 
 
+
 def render_why(verdict, market: Dict[str, Any], lang: str = "en") -> str:
-    # Take up to 3 key reasons, deduplicated, with normalization (age/delta wording).
+    # Collect up to 3 concise reasons. Fall back to market data if verdict lacks reasons.
     reasons: List[str] = []
+    # 1) Try from verdict object or dict
     try:
         reasons = list(getattr(verdict, "reasons", []) or [])
     except Exception:
-        reasons = list((verdict or {}).get("reasons") or [])
+        try:
+            reasons = list((verdict or {}).get("reasons") or [])
+        except Exception:
+            reasons = []
+    # Deduplicate & clip
     seen = set()
     uniq: List[str] = []
     for r in reasons:
-        if not r: 
+        if not r:
             continue
-        if r in seen: 
+        rs = str(r).strip()
+        if rs in seen:
             continue
-        seen.add(r)
-        uniq.append(_normalize_reason_text(r))
+        seen.add(rs)
+        uniq.append(rs)
         if len(uniq) >= 3:
             break
-    # Fallback: synthesize from market
+
+    # 2) Fallback synthesis from market data
     if not uniq:
         m = market or {}
+        age = None
         try:
-            age = _get(m, "ageDays")
-            ch24 = _get(m, "priceChanges","h24")
-            liq = _get(m, "liq")
-            if isinstance(age,(int,float)) and age >= 7:
-                uniq.append(_age_bucket_label(age))
-            if isinstance(ch24,(int,float)):
-                lbl = _delta24h_positive_label(ch24)
-                if lbl: uniq.append(lbl)
-            if isinstance(liq,(int,float)) and liq > 0:
-                uniq.append(f"Liquidity present (${liq:,.0f})")
+            age = m.get("ageDays", None)
         except Exception:
-            pass
+            age = None
+        ch24 = None
+        try:
+            ch24 = ((m.get("priceChanges") or {}).get("h24"))
+        except Exception:
+            ch24 = None
+        liq = None
+        try:
+            liq = m.get("liq") or m.get("liquidity") or m.get("liquidityUSD") or m.get("liquidityUsd")
+        except Exception:
+            liq = None
+
+        # Heuristics
+        if isinstance(age, (int, float)):
+            if age >= 365:
+                uniq.append("Long‑running (>1 year)")
+            elif age >= 30:
+                uniq.append("Established (>30 days)")
+        if isinstance(ch24, (int, float)):
+            try:
+                uniq.append(f"Daily change ≈ {ch24:+.2f}%")
+            except Exception:
+                pass
+        if isinstance(liq, (int, float)) and liq > 0:
+            try:
+                if liq >= 1_000_000:
+                    uniq.append(f"Liquidity present (${liq/1_000_000:.1f}M)")
+                else:
+                    uniq.append(f"Liquidity present (${liq:,.0f})")
+            except Exception:
+                pass
         if not uniq:
             uniq = ["No standout risk signals from market data"]
-    header = "*Why?*"
-    lines = [f"• {r}" for r in uniq]
-    return "
-".join([header] + lines)
+
     header = "*Why?*"
     lines = [f"• {r}" for r in uniq]
     return "\n".join([header] + lines)
+
+
 def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     # Weighted Top-3 positives and Top-3 risks (chain-aware)
     m = market or {}
