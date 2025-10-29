@@ -1,5 +1,24 @@
 # MDX_PATCH_2025_10_17 v4 — inspector polygon RPCs + timeout 2.5s
 import os, json, typing, time, re
+
+# Built-in DEFAULT_LOCKERS when LP_LOCKER_ADDRESSES not set
+DEFAULT_LOCKERS = {
+    "eth": {
+        "UNCX": ["0x663A5C229c09b049E36dCc11a9B0d4a8Eb9db214"],
+        "TeamFinance": ["0xe2fE530C047F2d85298B07D9333C05737f1435fb"]
+    },
+    "bsc": {
+        "UNCX": ["0xC765bddB93b0D1c1A88282BA0fa6B2d00E3e0c83"],
+        "TeamFinance": ["0x0C89C0407775dd89B12918B9c0aa42Bf96518820"],
+        "PinkLockV1": ["0x7Ee058420e5937496F5a2096f04cAa7721cF70CC"],
+        "PinkLockV2": ["0x407993575c91Ce7643A4D4cCacc9A98c36EE1BbE"]
+    },
+    "polygon": {
+        "UNCX-QuickSwap": ["0xaDB2437e6F65682B85F814fBc12FeC0508A7B1D0"],
+        "UNCX-UniswapV2": ["0x939d71ADe0Bf94d3F8cf578413bF2a2f248BF58b"],
+        "TeamFinance": ["0x3eF7442dF454bA6b7C1deEc8DdF29Cfb2d6e56c7"]
+    }
+}
 from typing import Optional, Dict, Any, Tuple
 from copy import deepcopy
 import requests
@@ -530,25 +549,6 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
         "honeypot_meta": hp_meta,
     }
     # Post-formatting
-
-    # LP lock (lite) — if pair (v2 LP token) provided, compute lightweight metrics
-    try:
-        if pair and rpc_to_use:
-            try:
-                lp = _lp_lock_lite(rpc_to_use, pair, short)
-            except Exception:
-                lp = {}
-            if isinstance(lp, dict) and any(v not in (None, 0, 0.0, "", {}) for v in [
-                lp.get("burned_pct"),
-                (lp.get("lockers") or {}).get("UNCX"),
-                (lp.get("lockers") or {}).get("TeamFinance"),
-                lp.get("top_holder_pct")
-            ]):
-                out["lp_lock_lite"] = lp
-    except Exception:
-        # Non-fatal
-        pass
-
     try:
         out["totalDisplay"] = _format_supply(total, decimals)  # if available in this module
     except Exception:
@@ -570,3 +570,37 @@ def build_onchain_payload(chain_short: str, token_address: str, pair_address: Op
         return {"ok": False, "error": str(e), "chain": (chain_short or "").lower(), "token": token_address}
 
 TIMEOUT_SECONDS = 2.5  # MDX_PATCH_2025_10_17 v4
+
+
+def _canon_chain_key(s: str) -> str:
+    s = (s or "").strip().lower()
+    if s in ("eth","ethereum","mainnet"): return "eth"
+    if s in ("bsc","bnb","binance-smart-chain"): return "bsc"
+    if s in ("polygon","matic"): return "polygon"
+    return s
+
+def _locker_config_for_chain(chain_short: str):
+    import os, json
+    cfg = (os.getenv("LP_LOCKER_ADDRESSES") or "").strip()
+    out = {}
+    def _add_from(src):
+        for name, addrs in (src or {}).items():
+            if not isinstance(addrs, list): 
+                continue
+            out.setdefault(name, [])
+            for a in addrs:
+                if isinstance(a, str) and a.lower().startswith("0x") and len(a) >= 42:
+                    a2 = "0x" + a.lower().replace("0x","")[-40:]
+                    if a2 not in out[name]:
+                        out[name].append(a2)
+    if cfg:
+        try:
+            j = json.loads(cfg)
+            ch_map = j.get(_canon_chain_key(chain_short)) or j.get(chain_short) or {}
+            def_map = j.get("default") or {}
+            _add_from(def_map); _add_from(ch_map)
+        except Exception:
+            pass
+    if not out:
+        _add_from(DEFAULT_LOCKERS.get(_canon_chain_key(chain_short)) or {})
+    return out
