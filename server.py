@@ -1,4 +1,17 @@
 import hashlib
+def _is_provisional_text(s: str | None) -> bool:
+    if not isinstance(s, str): 
+        return True
+    ss = s.strip().lower()
+    return (
+        ss.startswith("*details will appear in a moment") or
+        ss.startswith("*why?*") and "computing…" in ss or
+        ss.startswith("*why++*") and "computing…" in ss or
+        ss == "lp lock: pending" or
+        ss == "lp lock: n/a" or
+        ss == "n/a"
+    )
+
 import os
 import traceback
 try:
@@ -73,7 +86,6 @@ except Exception:
 
         # If some keys still missing, try compact _rdap_more
         try:
-            domain = _host_from_url(site_url)
             more = _rdap_more(domain)
             for k in ("expires","registrarIANA","status","rdap_flags","country"):
                 if more.get(k) and (who.get(k) in (None, "—")):
@@ -433,17 +445,17 @@ def _rdap_more(domain: str):
 def _tls_expires_quick(domain: str):
     def _one(host):
         try:
-            ctx = _ssl.create_default_context()
+            ctx = ssl.create_default_context()
             with socket.create_connection((host, 443), timeout=2.5) as sock:
                 with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                     cert = ssock.getpeercert()
             if cert and "notAfter" in cert:
                 try:
-                    return dt.__dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                    return dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
                 except Exception:
                     # Fallback keep as string; try common ISO
                     try:
-                        return _dt.datetime.fromisoformat(cert["notAfter"][:19])
+                        return dt.datetime.fromisoformat(cert["notAfter"][:19])
                     except Exception:
                         return None
         except Exception:
@@ -1451,13 +1463,6 @@ def on_message(msg):
     try:
         _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
         _now = market.get("asOf") or int(time.time())
-        # normalize ms->s if needed
-        try:
-            _now = int(_now)
-            if _now > 10_000_000_000:
-                _now = int(_now // 1000)
-        except Exception:
-            _now = int(time.time())
 
         # If _ts missing, pull from DexScreener pairs endpoint (one-shot, 5s)
         if not _ts:
@@ -1489,7 +1494,7 @@ def on_message(msg):
             if _ts > 10_000_000_000:  # looks like ms
                 _ts = int(_ts // 1000)
             _age_days = max(0.0, round((_now - int(_ts)) / 86400.0, 2))
-            market.setdefault("ageDays", _age_days)
+            market["ageDays"] = _age_days
     except Exception:
         pass
     # --- /D1 Age ---
@@ -1615,94 +1620,7 @@ def on_message(msg):
     ctx = {"webintel": web or {}, "domain": _dom}
 
     quick = render_quick(verdict, market, ctx, DEFAULT_LANG)
-
-    # === EARLY SEND (avoid long wait on LP/on-chain) ===
-    _early_links = dict(market.get("links") or {})
-    try:
-        _chain_e = str((market.get("chain") or "")).lower()
-        _token_e = market.get("tokenAddress") or ""
-        _pair_e  = market.get("pairAddress") or ""
-
-        # Scan link
-        if _chain_e and _token_e and not _early_links.get("scan"):
-            _scan_bases_e = {
-                "ethereum": "https://etherscan.io/token/",
-                "eth": "https://etherscan.io/token/",
-                "bsc": "https://bscscan.com/token/",
-                "binance": "https://bscscan.com/token/",
-                "polygon": "https://polygonscan.com/token/",
-                "matic": "https://polygonscan.com/token/",
-                "arbitrum": "https://arbiscan.io/token/",
-                "arb": "https://arbiscan.io/token/",
-                "base": "https://basescan.org/token/",
-                "optimism": "https://optimistic.etherscan.io/token/",
-                "op": "https://optimistic.etherscan.io/token/",
-                "avalanche": "https://snowtrace.io/token/",
-                "avax": "https://snowtrace.io/token/",
-                "fantom": "https://ftmscan.com/token/",
-                "ftm": "https://ftmscan.com/token/",
-            }
-            _base_scan_e = _scan_bases_e.get(_chain_e)
-            if _base_scan_e:
-                _early_links["scan"] = _base_scan_e + _token_e
-
-        # DexScreener link
-        if _chain_e and _pair_e and not _early_links.get("dexscreener"):
-            _early_links["dexscreener"] = f"https://dexscreener.com/{_chain_e}/{_pair_e}"
-    except Exception:
-        pass
-
-    msg_id = _send_or_edit_quick(quick, _early_links)
-
-    # Provisional bundle: ensure callbacks have something to read
-    try:
-        _bundle_prov = {
-            "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
-            "reasons": list(getattr(verdict, "reasons", []) or []),
-            "market": {
-                "pairSymbol": market.get("pairSymbol") or market.get("symbol") or "—",
-                "chain": market.get("chain") or market.get("chainId") or "—",
-                "price": market.get("price"),
-                "fdv": market.get("fdv"),
-                "mc": market.get("mc"),
-                "liq": market.get("liq") or market.get("liquidity") or market.get("liquidityUSD") or market.get("liquidityUsd"),
-                "vol24h": market.get("vol24h") or market.get("volume24h") or market.get("volumeUSD") or market.get("volumeUsd"),
-                "priceChanges": market.get("priceChanges") or {},
-                "tokenAddress": market.get("tokenAddress"),
-                "pairAddress": market.get("pairAddress"),
-                "ageDays": market.get("ageDays"),
-                "source": market.get("source"),
-                "sources": market.get("sources"),
-                "asof": market.get("asof")
-            },
-            "links": {
-                "dex": _early_links.get("dex"),
-                "scan": _early_links.get("scan"),
-                "dexscreener": _early_links.get("dexscreener"),
-                "site": _early_links.get("site")
-            },
-            "details": "*Details will appear in a moment…*",
-            "why": "*Why?*\n• computing…",
-            "whypp": "*Why++*\n• computing…",
-            "lp": "LP lock: pending",
-            "webintel": {"whois": {"created": None, "registrar": None},
-                         "ssl": {"ok": None, "expires": None, "issuer": None},
-                         "wayback": {"first": None}}
-        }
-        if msg_id:
-            store_bundle(chat_id, msg_id, _bundle_prov)
-            try:
-                tg("editMessageReplyMarkup", {
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "reply_markup": json.dumps(build_keyboard(chat_id, msg_id, _early_links, ctx="quick"))
-                })
-            except Exception:
-                pass
-    except Exception:
-        pass
-    # === /EARLY SEND ===
-        # Reuse same ctx (no re-computation)
+    # Reuse same ctx (no re-computation)
     details = render_details(verdict, market, ctx, DEFAULT_LANG)
     why = safe_render_why(verdict, market, DEFAULT_LANG)
     whypp = safe_render_whypp(verdict, market, DEFAULT_LANG)
@@ -1778,8 +1696,8 @@ def on_message(msg):
         "links": {"dex": links.get("dex"), "scan": links.get("scan"), "dexscreener": links.get("dexscreener"), "site": links.get("site")},
         "details": details, "why": why, "whypp": whypp, "lp": (lp if isinstance(lp, str) else "LP lock: unknown"), "webintel": web
     }
-    if not msg_id:
-        msg_id = _send_or_edit_quick(quick, links)
+
+    msg_id = _send_or_edit_quick(quick, links)
     if msg_id:
         store_bundle(chat_id, msg_id, bundle)
         try:
@@ -1940,7 +1858,25 @@ def on_callback(cb):
         answer_callback_query(cb_id, "Why++ posted.", False)
 
     elif action == "LP":
-        text = bundle.get("lp", "LP lock: n/a")
+        
+    _b = load_bundle(chat_id, msg_id) or {}
+    _mkt = _b.get("market") or market or {}
+    _ctx = dict(ctx or {})
+    # Prefer inspector result saved earlier
+    info = _b.get("lp_info") or _b.get("lp") if isinstance(_b.get("lp"), dict) else None
+    if not isinstance(info, dict):
+        # derive v2 LP token from pairAddress if available
+        _lp = _mkt.get("pairAddress") or _mkt.get("lpToken") or _mkt.get("lpAddress")
+        _chain = _mkt.get("chain") or _mkt.get("chainId") or "eth"
+        info = {"lpToken": _lp, "chain": _chain}
+    try:
+        txt = render_lp(info)
+        _b["lp"] = txt
+        store_bundle(chat_id, msg_id, _b)
+    except Exception:
+        txt = _b.get("lp") or "LP lock: temporarily unavailable"
+    
+text = bundle.get("lp", "LP lock: n/a")
         _lpdbg("LP.action", cached=bool(text), unknown=("unknown" in str(text).lower()),
                pair=_short_addr((bundle.get("market") or {}).get("pairAddress"))) 
         if (not text or "unknown" in str(text).lower()) and isinstance(bundle, dict) and bundle.get("onchain"):
