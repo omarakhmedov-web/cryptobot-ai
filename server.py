@@ -1738,9 +1738,25 @@ def on_message(msg):
         lp = _render_lp_compat({"provider":"lite-burn-check","lpAddress": market.get("pairAddress"), "until": "—"})
     except Exception:
         lp = _render_lp_compat({"provider":"lite-burn-check","lpAddress": pair_addr or market.get("pairAddress"), "until": "—"}, DEFAULT_LANG)
+    # Prepare LP-info dict for reuse in callbacks (no extra RPC on LP button)
+    lp_info_bundle = None
+    try:
+        _cand = locals().get('info')
+        if isinstance(_cand, dict):
+            lp_info_bundle = _cand
+    except Exception:
+        pass
+    try:
+        _cand2 = locals().get('info2')
+        if isinstance(_cand2, dict) and _cand2:
+            lp_info_bundle = _cand2
+    except Exception:
+        pass
+
 
     links = (market.get("links") or {})
     bundle = {
+        "lp_info": lp_info_bundle,
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
         "reasons": list(getattr(verdict, "reasons", []) or []),
         "market": {
