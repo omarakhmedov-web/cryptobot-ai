@@ -1997,8 +1997,19 @@ def on_callback(cb):
                 send_message(chat_id, prefix + chunk, reply_markup=None)
 
                 i += 1
+                i += 1
 
-        answer_callback_query
+        answer_callback_query(cb_id, "Why++ posted.", False)
+
+    elif action == "LP":
+        
+
+        # LP: prefer inspector data from bundle; otherwise render from pairAddress/chain
+
+        _b = load_bundle(chat_id, orig_msg_id) or {}
+
+        _mkt = _b.get("market") or market or {}
+
         # If LP in bundle is already rendered string, return it as-is (back-compat)
         _lp_raw = _b.get("lp")
         if isinstance(_lp_raw, str) and _lp_raw.strip():
@@ -2008,17 +2019,6 @@ def on_callback(cb):
             except Exception:
                 pass
             return jsonify({"ok": True})
-(cb_id, "Why++ posted.", False)
-
-    elif action == "LP":
-        
-
-
-        # LP: prefer inspector data from bundle; otherwise render from pairAddress/chain
-
-        _b = load_bundle(chat_id, orig_msg_id) or {}
-
-        _mkt = _b.get("market") or market or {}
 
         info = None
 
