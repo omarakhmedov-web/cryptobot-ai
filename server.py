@@ -1802,6 +1802,43 @@ def on_message(msg):
     return jsonify({"ok": True})
 
 
+
+def _safe_pair_address(bundle, fallback_pair=None):
+    """Best-effort server-side extraction of pair address for LP actions.
+    Prefers values persisted in bundle; falls back to sanitized input if needed.
+    """
+    try:
+        if not isinstance(bundle, dict):
+            bundle = {}
+        # Try canonical locations
+        market = bundle.get("market") or {}
+        pair = (market.get("pair") or {}) if isinstance(market, dict) else {}
+        addr = (pair.get("address") or "").strip() if isinstance(pair, dict) else ""
+        if not addr:
+            # try links storage
+            links = bundle.get("links") or {}
+            addr = (links.get("pair") or links.get("pairAddress") or "").strip()
+        if not addr and fallback_pair:
+            # final resort: sanitize fallback (hex address expected)
+            cand = str(fallback_pair).strip()
+            if isinstance(cand, str) and cand.startswith("0x") and len(cand) in (42, 66):
+                addr = cand
+        return addr or ""
+    except Exception:
+        return (fallback_pair or "") or ""
+
+
+def _lp_info_cached(oc, chain_short, pair_addr, bundle):
+    """Return lp_lock_lite from bundle if present; otherwise query inspector."""
+    try:
+        b = bundle or {}
+        lp = (b.get("lp_lock_lite") or (b.get("verdict") or {}).get("lp_lock_lite"))
+        if isinstance(lp, dict) and lp:
+            return lp
+    except Exception:
+        pass
+    return _lp_info_from_inspector(oc, chain_short, pair_addr)
+
 def on_callback(cb):
 
 
@@ -1847,6 +1884,12 @@ def on_callback(cb):
 
     bundle = load_bundle(chat_id, orig_msg_id) or {}
     links = bundle.get("links")
+    # --- Back-compat shims for legacy references ---
+    market = (bundle.get('market') or {})
+    _b = bundle
+    mkt = market
+    links = (links or {})
+    # --- /Back-compat shims ---
 
     
     if action == "WATCHLIST":
@@ -1994,6 +2037,8 @@ def on_callback(cb):
         
 
 
+        # Ensure safe server-side pair address
+        pair_addr = _safe_pair_address(bundle, fallback_pair=kv.get('pair'))
         # LP: prefer inspector data from bundle; otherwise render from pairAddress/chain
 
         _b = load_bundle(chat_id, orig_msg_id) or {}
