@@ -2033,16 +2033,24 @@ def on_callback(cb):
 
         answer_callback_query(cb_id, "Why++ posted.", False)
 
-    elif action == "LP":
+    elif action in ('LP','LP_LOCK','LOCK','LPLOCK'):
+
         
 
 
         # Ensure lp_info present via cache/inspector
         if 'pair_addr' not in locals():
-            pair_addr = _safe_pair_address(bundle, fallback_pair=kv.get('pair'))
+            pair_addr = _safe_pair_address(bundle, fallback_pair=(kv.get('pair') if 'kv' in locals() and isinstance(kv, dict) else None))
         lp_info = _lp_info_cached(oc, chain_short, pair_addr, bundle)
+        if not pair_addr:
+            try:
+                answer_callback_query(cb_id, 'LP: pair not found', False)
+                send_message(chat_id, '*LP lock:* unknown — pair address not found', 'MarkdownV2')
+            except Exception:
+                pass
+            return
         # Ensure safe server-side pair address
-        pair_addr = _safe_pair_address(bundle, fallback_pair=kv.get('pair'))
+        pair_addr = _safe_pair_address(bundle, fallback_pair=(kv.get('pair') if 'kv' in locals() and isinstance(kv, dict) else None))
         # LP: prefer inspector data from bundle; otherwise render from pairAddress/chain
 
         _b = load_bundle(chat_id, orig_msg_id) or {}
