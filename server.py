@@ -2037,6 +2037,10 @@ def on_callback(cb):
         
 
 
+        # Ensure lp_info present via cache/inspector
+        if 'pair_addr' not in locals():
+            pair_addr = _safe_pair_address(bundle, fallback_pair=kv.get('pair'))
+        lp_info = _lp_info_cached(oc, chain_short, pair_addr, bundle)
         # Ensure safe server-side pair address
         pair_addr = _safe_pair_address(bundle, fallback_pair=kv.get('pair'))
         # LP: prefer inspector data from bundle; otherwise render from pairAddress/chain
