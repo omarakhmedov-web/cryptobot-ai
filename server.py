@@ -1919,7 +1919,7 @@ def on_callback(cb):
 
         _ver = _b.get("verdict") or verdict
 
-        _mkt = _b.get("market")  or market
+        _mkt = _b.get("market")  or _b.get("market")
 
         try:
 
@@ -1946,7 +1946,7 @@ def on_callback(cb):
 
         _ver = _b.get("verdict") or verdict
 
-        _mkt = _b.get("market")  or market
+        _mkt = _b.get("market")  or _b.get("market")
 
         try:
 
@@ -1998,7 +1998,7 @@ def on_callback(cb):
 
         _b = load_bundle(chat_id, orig_msg_id) or {}
 
-        _mkt = _b.get("market") or market or {}
+        _mkt = _b.get("market") or _b.get("market") or {}
 
         info = None
 
