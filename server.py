@@ -2123,27 +2123,125 @@ def on_callback(cb):
                 answer_callback_query(cb_id, 'On-chain failed.', False)
         else:
 
-            # --- On-chain enrichment: fill decimals/totalSupply if inspector lacks them (no extra UI changes) ---
+            # --- On-chain enrichment & normalization (scoped) ---
             try:
-                _need_enrich = (oc.get('decimals') in (None, '—')) or (oc.get('totalSupply') in (None, '—')) or (str(oc.get('totalSupply') or '').strip() == '')
-                if _need_enrich:
+                def _first_nonempty(*vals):
+                    for _v in vals:
+                        if _v is None: 
+                            continue
+                        if isinstance(_v, str) and _v.strip() == "":
+                            continue
+                        if _v == "—":
+                            continue
+                        return _v
+                    return None
+
+                # 1) Try to improve missing fields via lightweight v2 inspector (kept tiny)
+                try:
+                    need_enrich = (oc.get("decimals") in (None, "—")) or (oc.get("totalSupply") in (None, "—", ""))
+                    if need_enrich:
+                        try:
+                            from onchain_v2 import check_contract_v2
+                            v2 = check_contract_v2(chain, token_addr, timeout_s=2.5)
+                        except Exception:
+                            v2 = None
+                        if isinstance(v2, dict):
+                            tok = v2.get("token") or {}
+                            cand_dec = _first_nonempty(
+                                tok.get("decimals"),
+                                v2.get("decimals"),
+                                tok.get("erc20", {}).get("decimals"),
+                                oc.get("token", {}).get("decimals"),
+                                oc.get("erc20_decimals"),
+                                mkt.get("decimals") if isinstance(mkt, dict) else None,
+                            )
+                            cand_sup = _first_nonempty(
+                                tok.get("totalSupply"),
+                                v2.get("totalSupply"),
+                                v2.get("supply"),
+                                oc.get("token", {}).get("totalSupply"),
+                                oc.get("supply"),
+                                oc.get("total_supply"),
+                                oc.get("totalSupply"),
+                            )
+                            if cand_dec is not None:
+                                oc["decimals"] = cand_dec
+                            if cand_sup is not None:
+                                oc["totalSupply"] = cand_sup
+                                oc["total_supply"] = cand_sup
+                except Exception:
+                    pass
+
+                # 2) Coalesce again from all known locations (even if v2 failed)
+                dec = _first_nonempty(
+                    oc.get("decimals"),
+                    oc.get("token", {}).get("decimals"),
+                    oc.get("erc20_decimals"),
+                    oc.get("tokenInfo", {}).get("decimals"),
+                    mkt.get("decimals") if isinstance(mkt, dict) else None,
+                )
+                if dec is not None:
                     try:
-                        from onchain_v2 import check_contract_v2
-                        _v2 = check_contract_v2(chain, token_addr, timeout_s=2.5)
-                        _tok2 = (_v2.get('token') or {}) if isinstance(_v2, dict) else {}
-                        _dec2 = _tok2.get('decimals') if isinstance(_tok2, dict) else (_v2.get('decimals') if isinstance(_v2, dict) else None)
-                        _sup2 = _tok2.get('totalSupply') if isinstance(_tok2, dict) else ((_v2.get('totalSupply') or _v2.get('supply')) if isinstance(_v2, dict) else None)
-                        if _dec2 is not None:
-                            oc['decimals'] = _dec2
-                        if _sup2 is not None:
-                            # set multiple keys for downstream compatibility
-                            oc['totalSupply'] = _sup2
-                            oc['total_supply'] = _sup2
+                        dec = int(dec)
+                    except Exception:
+                        dec = None
+                if dec is not None:
+                    oc["decimals"] = dec
+
+                raw_sup = _first_nonempty(
+                    oc.get("totalSupply"),
+                    oc.get("total_supply"),
+                    oc.get("supply"),
+                    oc.get("token", {}).get("totalSupply"),
+                )
+
+                # 3) If we have both supply + decimals, compute human-friendly string like "999982.336B"
+                def _format_with_suffix(x):
+                    try:
+                        x = float(x)
+                    except Exception:
+                        return None
+                    suffix = ""
+                    base = x
+                    if x >= 1_000_000_000_000:
+                        base = x / 1_000_000_000_000
+                        suffix = "T"
+                    elif x >= 1_000_000_000:
+                        base = x / 1_000_000_000
+                        suffix = "B"
+                    elif x >= 1_000_000:
+                        base = x / 1_000_000
+                        suffix = "M"
+                    elif x >= 1_000:
+                        base = x / 1_000
+                        suffix = "K"
+                    out = f"{base:.3f}".rstrip("0").rstrip(".") + suffix
+                    return out
+
+                if raw_sup is not None and dec is not None:
+                    try:
+                        # Convert big ints in string to scaled float
+                        if isinstance(raw_sup, str):
+                            raw_sup_clean = raw_sup.strip()
+                            if raw_sup_clean.isdigit():
+                                sup_int = int(raw_sup_clean)
+                            else:
+                                sup_int = int(float(raw_sup_clean))
+                        else:
+                            sup_int = int(raw_sup)
+                        scaled = sup_int / (10 ** dec) if dec is not None else float(sup_int)
+                        human = _format_with_suffix(scaled)
+                        if human:
+                            # Preserve original in *_raw, show formatted in totalSupply
+                            oc["totalSupply_raw"] = sup_int
+                            oc["totalSupply"] = human
+                            oc["total_supply"] = human
                     except Exception:
                         pass
+
             except Exception:
                 pass
-            # --- /On-chain enrichment ---
+            # --- /On-chain enrichment & normalization ---
 
             text = format_onchain_text(oc, mkt)
             # Refresh LP in bundle from inspector result (no extra RPC)
