@@ -2122,6 +2122,29 @@ def on_callback(cb):
                 send_message(chat_id, "On-chain\ninspection failed")
                 answer_callback_query(cb_id, 'On-chain failed.', False)
         else:
+
+            # --- On-chain enrichment: fill decimals/totalSupply if inspector lacks them (no extra UI changes) ---
+            try:
+                _need_enrich = (oc.get('decimals') in (None, '—')) or (oc.get('totalSupply') in (None, '—')) or (str(oc.get('totalSupply') or '').strip() == '')
+                if _need_enrich:
+                    try:
+                        from onchain_v2 import check_contract_v2
+                        _v2 = check_contract_v2(chain, token_addr, timeout_s=2.5)
+                        _tok2 = (_v2.get('token') or {}) if isinstance(_v2, dict) else {}
+                        _dec2 = _tok2.get('decimals') if isinstance(_tok2, dict) else (_v2.get('decimals') if isinstance(_v2, dict) else None)
+                        _sup2 = _tok2.get('totalSupply') if isinstance(_tok2, dict) else ((_v2.get('totalSupply') or _v2.get('supply')) if isinstance(_v2, dict) else None)
+                        if _dec2 is not None:
+                            oc['decimals'] = _dec2
+                        if _sup2 is not None:
+                            # set multiple keys for downstream compatibility
+                            oc['totalSupply'] = _sup2
+                            oc['total_supply'] = _sup2
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # --- /On-chain enrichment ---
+
             text = format_onchain_text(oc, mkt)
             # Refresh LP in bundle from inspector result (no extra RPC)
             try:
