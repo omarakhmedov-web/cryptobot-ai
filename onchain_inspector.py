@@ -37,6 +37,22 @@ SIG_IMPL_FN      = "0x5c60da1b"   # implementation()
 
 EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 
+
+
+def _is_proxy(rpc: str, addr: str) -> bool:
+    try:
+        slot = _get_storage_at(rpc, addr, EIP1967_IMPL_SLOT)
+        if isinstance(slot, str) and slot.startswith("0x"):
+            # any non-zero storage at impl slot is a proxy indicator
+            try:
+                v = int(slot, 16)
+                return v != 0
+            except Exception:
+                return bool(slot and slot != "0x")
+        return False
+    except Exception:
+        return False
+
 # ===== RPC Resolution =====
 CHAIN_RPC_ENV = {
     "eth": "ETH_RPC_URL_PRIMARY",
@@ -555,6 +571,10 @@ def inspect_token(chain_short: str, token_address: str, pair_address: Optional[s
         pass
 
     _INSPECT_CACHE[key] = (now, deepcopy(out))
+
+
+
+    
     return out
 
 
