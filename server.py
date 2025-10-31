@@ -1945,6 +1945,49 @@ def on_callback(cb):
         except Exception:
             pass
         return jsonify({"ok": True})
+        if action == "LP":
+                # Render LP lock (lite) using cached bundle data without extra RPC.
+                try:
+                    _b = load_bundle(chat_id, orig_msg_id) or load_bundle(chat_id, current_msg_id) or {}
+                except Exception:
+                    _b = {}
+                _mkt = _b.get("market") or {}
+                _chain = ((_mkt.get("chainId") or _mkt.get("chain") or "") or "").strip().lower()
+                try:
+                    _pair = _safe_pair_address(_b) or ""
+                except Exception:
+                    _pair = ""
+                _oc = _b.get("oc") or _b.get("onchain") or (_b.get("verdict") or {}).get("onchain") or {}
+                _lp = _lp_info_cached(_oc, _chain, _pair, _b) or {}
+                _status = _lp.get("status") or "unknown"
+                _locked = _lp.get("lockedPct")
+                _locked_s = f"{_locked:.2f}%" if isinstance(_locked, (int,float)) else ("—" if _locked is None else str(_locked))
+                _by = _lp.get("lockedBy") or "—"
+                _burn = _lp.get("burnedPct")
+                _burn_s = f"{_burn:.2f}%" if isinstance(_burn, (int,float)) else ("—" if _burn is None else str(_burn))
+                _prov = _lp.get("provider") or "inspector"
+                lp_lines = ["*LP lock (lite)*"]
+                if _status:
+                    lp_lines.append(f"Status: *{_status}*")
+                lp_lines.append(f"Locked: {_locked_s}")
+                if _by and _by != "—":
+                    lp_lines.append(f"Locked by: `{_by}`")
+                if _burn is not None:
+                    lp_lines.append(f"Burned: {_burn_s}")
+                lp_lines.append(f"Source: {_prov}")
+                txt = "\n".join(lp_lines)
+                try:
+                    _b["lp_lock_lite"] = _lp
+                    store_bundle(chat_id, orig_msg_id, _b)
+                except Exception:
+                    pass
+                try:
+                    answer_callback_query(cb_id, "LP lock info ready.", False)
+                except Exception:
+                    pass
+                send_message(chat_id, txt, reply_markup=None)
+                return jsonify({"ok": True})
+
 
 
 
