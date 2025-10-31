@@ -2187,3 +2187,28 @@ def render_details(arg1, arg2, arg3, lang: str = 'en') -> str:
     except Exception:
         verdict, market, ctx = arg1, (arg2 if isinstance(arg2, dict) else {}), (arg3 or {})
     return _render_details_impl(verdict, market, ctx, lang)
+
+
+# --- Added helper for pluralization of Sources label ---
+def _label_sources(src):
+    try:
+        s = str(src or '')
+        if ',' in s:
+            return 'Sources: ' + s
+        return 'Source: ' + s
+    except Exception:
+        return 'Source: ' + str(src or '')
+
+
+# --- Added LP status normalization to align with spec ---
+def _lp_status_norm(locked_pct, locked_by=None):
+    try:
+        v = float(locked_pct if locked_pct is not None else 0)
+    except Exception:
+        v = 0.0
+    lb = (locked_by or '').strip()
+    if v <= 0:
+        return 'unlocked'
+    if 0 < v < 100 and lb:
+        return 'locked-partial'
+    return 'locked'
