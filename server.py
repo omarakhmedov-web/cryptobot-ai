@@ -1848,16 +1848,10 @@ def on_callback(cb):
     chat_id = msg.get("chat", {}).get("id")
 
     # --- WATCHLITE intercept: UNWATCH_T, MUTE/UNMUTE ---
-    try:
-        if watchlite.handle_callback(cb):
-            return jsonify({"ok": True})
-    except Exception as _e_wl_cb:
-        try:
-            print("WATCHLITE handle_callback error:", _e_wl_cb)
-        except Exception:
-            pass
-    # --- /WATCHLITE intercept ---
-    current_msg_id = msg.get("message_id")
+    # --- WATCHLITE intercept: UNWATCH_T, MUTE/UNMUTE ---
+    if watchlite.handle_callback(cb):
+        return jsonify({'ok': True})
+
 
     m = parse_cb(data)
     if not m:
