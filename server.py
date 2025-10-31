@@ -1625,14 +1625,7 @@ def on_message(msg):
         elif "quickswap" in _dexId and _chain == "polygon":
             _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
 
-    
-        else:
-            if _chain in ("ethereum","base","arbitrum","polygon","optimism"):
-                _links["dex"] = f"https://app.uniswap.org/explore/tokens/{_chain}/{_token}"
-            elif _chain in ("bsc","binance"):
-                _links["dex"] = f"https://pancakeswap.finance/swap?outputCurrency={_token}"
-            elif _chain == "polygon":
-                _links["dex"] = f"https://quickswap.exchange/#/swap?outputCurrency={_token}"
+    # Discover project website if missing (DexScreener fallback)
     if not _links.get("site"):
         try:
             _site_guess = _discover_site_via_ds(_chain, _pair, _token, timeout=6)
@@ -1663,7 +1656,7 @@ def on_message(msg):
             if ts:
                 if ts < 10**12:
                     ts *= 1000
-                age_days = (time.time()*1000 - ts) / (1000*60*60*24)
+                age_days = (time.time() - (ts/1000 if ts and ts>10_000_000_000 else ts)) / (60*60*24)
                 if age_days < 0:
                     age_days = 0
                 market["ageDays"] = round(age_days, 2)
@@ -1866,18 +1859,19 @@ def on_callback(cb):
     # --- /WATCHLITE intercept ---
     current_msg_id = msg.get("message_id")
 
+
+
+    
+    if action == "LP":
+
+    
+        return _reply_lp_lite(chat_id, orig_msg_id, current_msg_id, cb_id)
     m = parse_cb(data)
     if not m:
         answer_callback_query(cb_id, "Unsupported action", True)
         return jsonify({"ok": True})
     action, orig_msg_id, orig_chat_id = m
 
-    # Normalize synonymous actions
-    _act = (action or "").upper().replace("-", "_")
-    if _act in {"LPLOCK","LP_LOCK","LP_LITE","LPLOCK_LITE","LPLOCKLITE"}:
-        action = "LP"
-    else:
-        action = _act
     if orig_msg_id == 0:
         orig_msg_id = current_msg_id
 
@@ -1958,43 +1952,6 @@ def on_callback(cb):
         except Exception:
             pass
         return jsonify({"ok": True})
-    if action == "LP":
-        try:
-            _b = load_bundle(chat_id, orig_msg_id) or load_bundle(chat_id, current_msg_id) or {}
-        except Exception:
-            _b = {}
-        _mkt = _b.get("market") or {}
-        _chain = ((_mkt.get("chainId") or _mkt.get("chain") or "") or "").strip().lower()
-        try:
-            _pair = _safe_pair_address(_b) or ""
-        except Exception:
-            _pair = ""
-        _oc = _b.get("oc") or _b.get("onchain") or (_b.get("verdict") or {}).get("onchain") or {}
-        _lp = _lp_info_cached(_oc, _chain, _pair, _b) or {}
-        _status = _lp.get("status") or "unknown"
-        _locked = _lp.get("lockedPct")
-        _locked_s = f"{_locked:.2f}%" if isinstance(_locked,(int,float)) else ("—" if _locked is None else str(_locked))
-        _by = _lp.get("lockedBy") or "—"
-        _burn = _lp.get("burnedPct")
-        _burn_s = f"{_burn:.2f}%" if isinstance(_burn,(int,float)) else ("—" if _burn is None else str(_burn))
-        _prov = _lp.get("provider") or "inspector"
-        lines = ["*LP lock (lite)*", f"Status: *{_status}*", f"Locked: {_locked_s}"]
-        if _by and _by != "—":
-            lines.append(f"Locked by: `{_by}`")
-        if _burn is not None:
-            lines.append(f"Burned: {_burn_s}")
-        lines.append(f"Source: {_prov}")
-        try:
-            _b["lp_lock_lite"] = _lp; store_bundle(chat_id, orig_msg_id, _b)
-        except Exception:
-            pass
-        try:
-            answer_callback_query(cb_id, "LP lock info ready.", False)
-        except Exception:
-            pass
-        send_message(chat_id, "\n".join(lines), reply_markup=None)
-        return jsonify({"ok": True})
-
 
 
 
@@ -2919,3 +2876,39 @@ except NameError:
     _np_create_invoice = _np_create_invoice_smart
 
 # D0: ensure Share button present via buttons.build_keyboard(links['share'])
+
+
+def _reply_lp_lite(chat_id, orig_msg_id, current_msg_id, cb_id=None):
+    try:
+        b = load_bundle(chat_id, orig_msg_id) or load_bundle(chat_id, current_msg_id) or {}
+    except Exception:
+        b = {}
+    mkt = b.get("market") or {}
+    oc  = b.get("oc") or b.get("onchain") or (b.get("verdict") or {}).get("onchain") or {}
+    chain = str((mkt.get("chainId") or mkt.get("chain") or "")).strip().lower()
+    try:
+        pair_addr = _safe_pair_address(b) or ""
+    except Exception:
+        pair_addr = ""
+    lp = _lp_info_cached(oc, chain, pair_addr, b) or {}
+    data = lp.get("data") if isinstance(lp.get("data"), dict) else lp
+    locked = data.get("lockedPct")
+    burned = data.get("burnedPct")
+    by     = data.get("lockedBy") or "—"
+    status = "unknown"
+    if isinstance(locked, (int, float)):
+        if locked <= 0: status = "unlocked"
+        elif locked < 100 and by and by != "—": status = "locked-partial"
+        elif locked >= 100: status = "locked"
+    locked_s = f"{locked:.2f}%" if isinstance(locked,(int,float)) else "—"
+    burned_s = f"{burned:.2f}%" if isinstance(burned,(int,float)) else ("—" if burned is None else str(burned))
+    provider = lp.get("provider") or "inspector-lp-lite"
+    lines = ["*LP lock (lite)*", f"Status: *{status}*", f"Locked: {locked_s}"]
+    if by and by != "—": lines.append(f"Locked by: `{by}`")
+    if burned is not None: lines.append(f"Burned: {burned_s}")
+    lines.append(f"Source: {provider}")
+    if cb_id:
+        try: answer_callback_query(cb_id, "LP lock info ready.", False)
+        except Exception: pass
+    send_message(chat_id, "\n".join(lines), reply_markup=None)
+    return jsonify({"ok": True})
