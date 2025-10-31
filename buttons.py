@@ -1,175 +1,183 @@
+# === D0 PATCH (buttons) ===
+# Build: 2025-10-23 17:46:48 UTC
+# - Top row actions: QuickScan / Watchlist / Premium / Community
+# - Share button label unified: "Share this scan"
+# - Idempotent: safe to re-apply
+
 # -*- coding: utf-8 -*-
-"""Metridex inline keyboard (full)
-Preserves rich layout/context while aligning action names with server:
-- Why++  -> WHYPP
-- Copy CA -> COPY_CA
-- Deltas  -> DELTA_M5 / DELTA_1H / DELTA_6H / DELTA_24H
-- LP      -> LP
-- Why     -> WHY
-- Details -> DETAILS
-"""
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 def _cb(chat_id: int, msg_id: int, action: str) -> str:
-    # Server callback format: v1:<ACTION>:<msgId>:<chatId>
     mid = str(msg_id if msg_id is not None else 0)
     cid = str(chat_id if chat_id is not None else 0)
     return f"v1:{action}:{mid}:{cid}"
 
-def _is_ds(url: Optional[str]) -> bool:
+def build_keyboard(chat_id: int,
+                   msg_id: int,
+                   links: Optional[Dict[str, Any]] = None,
+                   ctx: str = "quick") -> Dict[str, Any]:
+    """
+    ctx:
+      - "start" / "info": pricing/help keyboard before user scans anything
+      - "quick": short scan window
+      - "details": after 'More details'
+      - "onchain": after 'On-chain'
+    """
+    links = links or {}
+
+    # --- Link aliases normalization (robust to legacy variants) ---
+    _L = dict(links or {})
+    def _first(*keys):
+        for k in keys:
+            v = _L.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+    links = {
+        "dex": _first("dex","DEX","swap","swap_url","DEX_URL","open_in_dex"),
+        "scan": _first("scan","SCAN","scan_url","SCAN_URL","explorer","explorer_url"),
+        "dexscreener": _first("dexscreener","ds","DS","dexscreener_url","DS_URL"),
+        "share": _first("share","share_url","SHARE_URL"),
+        "deep_report": _first("deep_report","DEEP_URL","deep_url"),
+        "day_pass": _first("day_pass","DAY_URL","day_url"),
+        "pro": _first("pro","PRO_URL"),
+        "teams": _first("teams","TEAMS_URL"),
+        "help": _first("help","HELP_URL","site","SITE_URL","help_url"),
+    }
+
+    rows: list[list[Dict[str, Any]]] = []
+
+    def is_ds(url: Optional[str]) -> bool:
+        try:
+            return "dexscreener.com" in (url or "").lower()
+        except Exception:
+            return False
+
+    # ---------------- START / INFO ----------------
+    if ctx in ("start", "info"):
+        deep_report = links.get("deep_report")
+        day_pass    = links.get("day_pass")
+        pro         = links.get("pro")
+        teams       = links.get("teams")
+        help_url    = links.get("help")
+
+        row1 = []
+        if deep_report: row1.append({"text": "🔍 Deep report — $3", "url": deep_report})
+        if day_pass:    row1.append({"text": "⏱ Day Pass — $9", "url": day_pass})
+        if row1: rows.append(row1)
+
+        row2 = []
+        if pro:   row2.append({"text": "⚙️ Pro — $29", "url": pro})
+        if teams: row2.append({"text": "👥 Teams — from $99", "url": teams})
+        if row2: rows.append(row2)
+
+        if help_url:
+            rows.append([{"text": "ℹ️ How it works?", "url": help_url}])
+
+        # Top row: Quick actions
     try:
-        return "dexscreener.com" in (url or "").lower()
+        _help = (links.get("help") or "https://metridex.com/help")
+        rows.insert(0, [
+    {"text": "Watchlist", "callback_data": _cb(chat_id, msg_id, "WATCHLIST")},
+    {"text": "Community", "url": "https://x.com/MetridexBot"},
+])
     except Exception:
-        return False
+        pass
+    # ---------------- COMMON NAV (DEX/Scan/DS) ----------------
+    dex_url  = links.get("dex") or None
+    scan_url = links.get("scan") or None
+    ds_url   = links.get("dexscreener") or None
 
-def _nav_rows(links: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
-    rows: List[List[Dict[str, Any]]] = []
-    dex_url  = (links.get("dex") or "").strip() or None
-    scan_url = (links.get("scan") or "").strip() or None
-    ds_url   = (links.get("dexscreener") or "").strip() or None
-
-    nav: List[Dict[str, Any]] = []
-    if dex_url and not _is_ds(dex_url):
+    # Primary nav row (DEX + Scan). Keep DEX only if it's a real swap UI (not DexScreener).
+    nav = []
+    if dex_url and not is_ds(dex_url):
         nav.append({"text": "🟢 Open in DEX", "url": dex_url})
     if scan_url:
         nav.append({"text": "🔎 Open in Scan", "url": scan_url})
     if nav:
         rows.append(nav)
 
-    ds_link = ds_url or (dex_url if _is_ds(dex_url) else None)
+    # Separate DexScreener row (distinct from DEX)
+    ds_link = ds_url or (dex_url if is_ds(dex_url) else None)
     if ds_link:
         rows.append([{"text": "🟢 Open on DexScreener", "url": ds_link}])
-    return rows
 
-def _delta_row(chat_id: int, msg_id: int) -> List[Dict[str, Any]]:
-    return [
+    # ---------------- CONTEXT-SPECIFIC ACTIONS ----------------
+    if ctx == "quick":
+        # Optional Share link
+        share = (links or {}).get("share")
+        if share:
+            rows.append([{"text": "🔗 Share this scan", "url": share}])
+        rows.append([{"text": "📄 More details", "callback_data": _cb(chat_id, msg_id, "DETAILS")}])
+        rows.append([
+            {"text": "❓ Why?",  "callback_data": _cb(chat_id, msg_id, "WHY")},
+            {"text": "ℹ️ Why++","callback_data": _cb(chat_id, msg_id, "WHYPP")},
+        ])
+        rows.append([{"text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN")}])
+        rows.append([{"text": "📋 Copy CA",  "callback_data": _cb(chat_id, msg_id, "COPY_CA")}])
+        rows.append([
+            {"text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT")},
+            {"text": "📄 Report (PDF)",  "callback_data": _cb(chat_id, msg_id, "REPORT_PDF")},
+        ])
+        rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
+
+    elif ctx == "details":
+        share = (links or {}).get("share")
+        if share:
+            rows.append([{"text": "🔗 Share this scan", "url": share}])
+        # Keep only Copy CA here to avoid duplicate DEX/Scan; DS/DEX/Scan come from common nav above
+        rows.append([{"text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA")}])
+
+        rows.append([
+            {"text": "❓ Why?",  "callback_data": _cb(chat_id, msg_id, "WHY")},
+            {"text": "ℹ️ Why++","callback_data": _cb(chat_id, msg_id, "WHYPP")},
+        ])
+        rows.append([{"text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN")}])
+        rows.append([
+            {"text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT")},
+            {"text": "📄 Report (PDF)",  "callback_data": _cb(chat_id, msg_id, "REPORT_PDF")},
+        ])
+        rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
+
+    elif ctx == "onchain":
+        share = (links or {}).get("share")
+        if share:
+            rows.append([{"text": "🔗 Share this scan", "url": share}])
+        # On-chain view retains navigation + insights
+        rows.append([
+            {"text": "❓ Why?",  "callback_data": _cb(chat_id, msg_id, "WHY")},
+            {"text": "ℹ️ Why++","callback_data": _cb(chat_id, msg_id, "WHYPP")},
+        ])
+        rows.append([{"text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA")}])
+        rows.append([
+            {"text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT")},
+            {"text": "📄 Report (PDF)",  "callback_data": _cb(chat_id, msg_id, "REPORT_PDF")},
+        ])
+        rows.append([{"text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP")}])
+
+    # ---------------- DELTA ROW (bottom) ----------------
+    rows.append([
         {"text": "Δ 5m",  "callback_data": _cb(chat_id, msg_id, "DELTA_M5")},
         {"text": "Δ 1h",  "callback_data": _cb(chat_id, msg_id, "DELTA_1H")},
         {"text": "Δ 6h",  "callback_data": _cb(chat_id, msg_id, "DELTA_6H")},
         {"text": "Δ 24h", "callback_data": _cb(chat_id, msg_id, "DELTA_24H")},
-    ]
-
-def build_keyboard(chat_id: int,
-                   msg_id: int,
-                   links: Optional[Dict[str, Any]] = None,
-                   ctx: str = "quick") -> Dict[str, List[List[Dict[str, Any]]]]:
-    """Return Telegram reply_markup dict.
-    ctx: 'start' | 'info' | 'quick' | 'details' | 'onchain'
-    links can include: dex, scan, dexscreener, share, deep_report, day_pass, pro, teams, help
-    """
-    links = links or {}
-    rows: List[List[Dict[str, Any]]] = []
-
-    # --- Top utility row (consistent) ---
-    rows.append([
-        {"text": "Watchlist", "callback_data": _cb(chat_id, msg_id, "WATCHLIST")},
-        {"text": "Community", "url": "https://x.com/MetridexBot"},
     ])
 
-    # --- START / INFO context: pricing/help rows (as in your original long file) ---
-    if ctx in ("start", "info"):
-        deep_report = links.get("deep_report")
-        day_pass    = links.get("day_pass")
-        pro         = links.get("pro")
-        teams       = links.get("teams")
-        help_url    = links.get("help") or "https://metridex.com/help"
+    # Cleanup: hide Δ-row in welcome contexts
 
-        row1: List[Dict[str, Any]] = []
-        if deep_report: row1.append({"text": "🔍 Deep report — $3", "url": deep_report})
-        if day_pass:    row1.append({"text": "⏱ Day Pass — $9", "url": day_pass})
-        if row1: rows.append(row1)
+    if ctx in ('start', 'info', None):
 
-        row2: List[Dict[str, Any]] = []
-        if pro:   row2.append({"text": "⚙️ Pro — $29", "url": pro})
-        if teams: row2.append({"text": "👥 Teams — from $99", "url": teams})
-        if row2: rows.append(row2)
+        _rows = []
 
-        if help_url:
-            rows.append([{ "text": "ℹ️ How it works?", "url": help_url }])
+        for _r in rows:
 
-        # Navigation (DEX/Scan/DS) if available
-        rows.extend(_nav_rows(links))
+            if any(isinstance(_b, dict) and str(_b.get('text','')).strip().startswith('Δ') for _b in _r):
 
-        # In start/info we скрываем дельты
-        return {"inline_keyboard": rows}
+                continue
 
-    # --- COMMON navigation row(s) (DEX / Scan / DexScreener) ---
-    rows.extend(_nav_rows(links))
+            _rows.append(_r)
 
-    # --- QUICK context ---
-    if ctx == "quick":
-        share = links.get("share")
-        if share:
-            rows.append([{ "text": "🔗 Share this scan", "url": share }])
+        rows = _rows
 
-        rows.append([{ "text": "📄 More details", "callback_data": _cb(chat_id, msg_id, "DETAILS") }])
 
-        rows.append([
-            {"text": "❓ Why?",   "callback_data": _cb(chat_id, msg_id, "WHY")},
-            {"text": "📘 Why++",  "callback_data": _cb(chat_id, msg_id, "WHYPP")},
-        ])
-
-        rows.append([{ "text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN") }])
-        rows.append([{ "text": "📋 Copy CA",  "callback_data": _cb(chat_id, msg_id, "COPY_CA") }])
-
-        # Reports (if enabled)
-        rows.append([
-            {"text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT")},
-            {"text": "📄 Report (PDF)",  "callback_data": _cb(chat_id, msg_id, "REPORT_PDF")},
-        ])
-
-        rows.append([{ "text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP") }])
-
-        rows.append(_delta_row(chat_id, msg_id))
-        return {"inline_keyboard": rows}
-
-    # --- DETAILS context ---
-    if ctx == "details":
-        share = links.get("share")
-        if share:
-            rows.append([{ "text": "🔗 Share this scan", "url": share }])
-
-        rows.append([{ "text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA") }])
-
-        rows.append([
-            {"text": "❓ Why?",   "callback_data": _cb(chat_id, msg_id, "WHY")},
-            {"text": "📘 Why++",  "callback_data": _cb(chat_id, msg_id, "WHYPP")},
-        ])
-
-        rows.append([{ "text": "🧪 On-chain", "callback_data": _cb(chat_id, msg_id, "ONCHAIN") }])
-
-        rows.append([
-            {"text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT")},
-            {"text": "📄 Report (PDF)",  "callback_data": _cb(chat_id, msg_id, "REPORT_PDF")},
-        ])
-
-        rows.append([{ "text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP") }])
-
-        rows.append(_delta_row(chat_id, msg_id))
-        return {"inline_keyboard": rows}
-
-    # --- ONCHAIN context ---
-    if ctx == "onchain":
-        share = links.get("share")
-        if share:
-            rows.append([{ "text": "🔗 Share this scan", "url": share }])
-
-        rows.append([
-            {"text": "❓ Why?",   "callback_data": _cb(chat_id, msg_id, "WHY")},
-            {"text": "📘 Why++",  "callback_data": _cb(chat_id, msg_id, "WHYPP")},
-        ])
-
-        rows.append([{ "text": "📋 Copy CA", "callback_data": _cb(chat_id, msg_id, "COPY_CA") }])
-
-        rows.append([
-            {"text": "🧾 Report (HTML)", "callback_data": _cb(chat_id, msg_id, "REPORT")},
-            {"text": "📄 Report (PDF)",  "callback_data": _cb(chat_id, msg_id, "REPORT_PDF")},
-        ])
-
-        rows.append([{ "text": "🔒 LP lock (lite)", "callback_data": _cb(chat_id, msg_id, "LP") }])
-
-        rows.append(_delta_row(chat_id, msg_id))
-        return {"inline_keyboard": rows}
-
-    # Fallback
     return {"inline_keyboard": rows}
