@@ -1066,7 +1066,7 @@ def send_document(chat_id: int, filename: str, content_bytes: bytes, caption: st
     return tg("sendDocument", payload, files=files)
 
 def parse_cb(data: str):
-    m = re.match(r"^v1:(\w+):(\-?\d+):(\-?\d+)$", data or "")
+    m = re.match(r"^v1:([^:]+):(-?\d+):(-?\d+)$", data or "")
     if not m: return None
     return m.group(1), int(m.group(2)), int(m.group(3))
 
@@ -1656,7 +1656,7 @@ def on_message(msg):
             if ts:
                 if ts < 10**12:
                     ts *= 1000
-                age_days = (time.time() - (ts/1000 if ts and ts>10_000_000_000 else ts)) / (60*60*24)
+                age_days = (time.time()*1000 - ts) / (1000*60*60*24)
                 if age_days < 0:
                     age_days = 0
                 market["ageDays"] = round(age_days, 2)
@@ -1859,19 +1859,15 @@ def on_callback(cb):
     # --- /WATCHLITE intercept ---
     current_msg_id = msg.get("message_id")
 
-
-
-    
-    if action == "LP":
-
-    
-        return _reply_lp_lite(chat_id, orig_msg_id, current_msg_id, cb_id)
     m = parse_cb(data)
     if not m:
         answer_callback_query(cb_id, "Unsupported action", True)
         return jsonify({"ok": True})
     action, orig_msg_id, orig_chat_id = m
 
+
+    if action == "LP":
+        return _reply_lp_lite(chat_id, orig_msg_id, current_msg_id, cb_id)
     if orig_msg_id == 0:
         orig_msg_id = current_msg_id
 
