@@ -74,3 +74,27 @@ def load_providers_map() -> dict:
     except Exception:
         pass
     return {}
+
+# --- Added: explorer_providers utility (safe default) ---
+def explorer_providers(chain: str):
+    """Return list of explorer provider configs for the given chain.
+    Reads providers_free.json if available; otherwise returns safe defaults.
+    Each item: {"name": "Etherscan", "base": "https://api.etherscan.io", "scan": "https://etherscan.io"}
+    """
+    import json, os
+    chain = (chain or "").lower()
+    defaults = {
+        "ethereum": [{"name":"Etherscan","base":"https://api.etherscan.io","scan":"https://etherscan.io"}],
+        "bsc":      [{"name":"BscScan","base":"https://api.bscscan.com","scan":"https://bscscan.com"}],
+        "polygon":  [{"name":"Polygonscan","base":"https://api.polygonscan.com","scan":"https://polygonscan.com"}],
+    }
+    path = os.path.join(os.path.dirname(__file__), "providers_free.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            out = data.get(chain) or data.get(chain.upper()) or []
+            if isinstance(out, list) and out:
+                return out
+    except Exception:
+        pass
+    return defaults.get(chain, [])
