@@ -2212,3 +2212,22 @@ def _lp_status_norm(locked_pct, locked_by=None):
     if 0 < v < 100 and lb:
         return 'locked-partial'
     return 'locked'
+
+
+# === OMEGA-713K: LP status helper (no '—' placeholders) ===
+def _lp_status_label(locked_pct, burned_pct):
+    try:
+        lp_locked = float(locked_pct) if locked_pct is not None else 0.0
+    except Exception:
+        lp_locked = 0.0
+    try:
+        lp_burned = float(burned_pct) if burned_pct is not None else 0.0
+    except Exception:
+        lp_burned = 0.0
+    if lp_locked <= 0.0 and lp_burned <= 0.0:
+        return "unlocked"
+    if 0.0 < lp_locked < 100.0:
+        return "locked-partial"
+    if lp_locked >= 100.0:
+        return "locked"
+    return "unknown"
