@@ -1539,6 +1539,9 @@ def on_message(msg):
     try:
         _ts = market.get("pairCreatedAt") or market.get("launchedAt") or market.get("createdAt")
         _now = market.get("asOf") or int(time.time())
+        # Normalize ms-asOf to seconds
+        if isinstance(_now, (int, float)) and _now > 10_000_000_000:
+            _now = int(_now // 1000)
 
         # If _ts missing, pull from DexScreener pairs endpoint (one-shot, 5s)
         if not _ts:
@@ -1847,7 +1850,9 @@ def on_callback(cb):
     msg = cb.get("message") or {}
     chat_id = msg.get("chat", {}).get("id")
 
-    # --- WATCHLITE intercept: UNWATCH_T, MUTE/UNMUTE ---
+    
+    current_msg_id = msg.get("message_id") or 0
+# --- WATCHLITE intercept: UNWATCH_T, MUTE/UNMUTE ---
     # --- WATCHLITE intercept: UNWATCH_T, MUTE/UNMUTE ---
     if watchlite.handle_callback(cb):
         return jsonify({'ok': True})
