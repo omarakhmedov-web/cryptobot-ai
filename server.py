@@ -1275,15 +1275,12 @@ def _render_lp_compat(info, market=None, lang=None):
     if isinstance(market, str) and lang is None:
         lang, market = market, None
     """Compatibility wrapper that builds a minimal LP-lite info dict and delegates
-    to renderers_mdx.render_lp(info, lang) without any extra RPC calls.
-    - `info`: dict that may already contain keys like lpAddress/lpToken, burnedPct, lockedPct, lockedBy, chain.
-    - `market`: optional market dict used only to *fill gaps* (chain/pairAddress).
-    - `lang`: language code; defaults to env DEFAULT_LANG or 'en'.
+    to renderer.render_lp(info, market, lang) without any extra RPC calls.
     """
     try:
         if lang is None:
             try:
-                lang = DEFAULT_LANG  # provided at module level
+                lang = DEFAULT_LANG
             except Exception:
                 lang = "en"
         # Normalize inputs
@@ -1306,21 +1303,32 @@ def _render_lp_compat(info, market=None, lang=None):
                 p["lpAddress"] = cand
         if "chain" not in p or not p.get("chain"):
             p["chain"] = _chain_norm(info_d.get("chain") or market_d.get("chain") or market_d.get("chainId"))
-
         # Provider marker
         p.setdefault("provider", "inspector-lp-lite")
 
-        # Delegate to renderer
+        # Pick renderer module (_mdx or renderers_mdx)
+        rmod = None
         try:
-            return renderers_mdx.render_lp(p, lang)  # must exist in module scope
-        except Exception as _e_rlp:
+            rmod = renderers_mdx  # type: ignore[name-defined]
+        except Exception:
             try:
-                print("[LP] render_lp error:", _e_rlp)
+                rmod = _mdx  # type: ignore[name-defined]
             except Exception:
-                pass
+                rmod = None
+
+        # Delegate to renderer if available
+        if rmod and hasattr(rmod, "render_lp"):
+            try:
+                return rmod.render_lp(p, market_d, lang)
+            except Exception as _e_rlp:
+                try:
+                    print("[LP] render_lp error:", _e_rlp)
+                except Exception:
+                    pass
+
         # Fallback compact text
         lp_addr = p.get("lpAddress") if _looks_addr(p.get("lpAddress")) else None
-        return "\n".join([
+        return "\\n".join([
             "*LP lock (lite)*",
             "Status: *unknown*",
             "Locked: —",
@@ -1332,7 +1340,7 @@ def _render_lp_compat(info, market=None, lang=None):
             print("[LP] compat error:", _e_lp)
         except Exception:
             pass
-        return "\n".join([
+        return "\\n".join([
             "*LP lock (lite)*",
             "Status: *unknown*",
             "Locked: —",
