@@ -46,6 +46,10 @@ SIG_DECIMALS     = "0x313ce567"
 # Ownable/Pauser selectors
 SIG_OWNER        = "0x8da5cb5b"   # owner()
 SIG_PAUSED       = "0x5c975abb"   # paused()
+SIG_MAXTX_1     = "0xe386e5d0"   # maxTxAmount()
+SIG_MAXTX_2     = "0x4b750334"   # _maxTxAmount()
+SIG_MAXWALLET_1 = "0x7e1d6f92"   # maxWallet()
+SIG_MAXWALLET_2 = "0x2e1a7d4d"   # _maxWallet()"
 
 # Proxy detection
 SIG_IMPL_FN      = "0x5c60da1b"   # implementation()
@@ -195,6 +199,39 @@ def check_contract_v2(chain: str, token: str, rpc_urls: Optional[List[str]] = No
             paused = _decode_bool(paused_hex)
             break
 
+
+    # If no paused() selector present in bytecode, treat as not paused
+    if paused is None:
+        code_l = (code or "").lower() if isinstance(code, str) else ""
+        if code_l and (SIG_PAUSED[2:].lower() not in code_l):
+            paused = False
+    # Limits (best-effort). If selectors absent in bytecode -> explicit 0
+    max_tx = None
+    max_wallet = None
+    code_l = (code or "").lower() if isinstance(code, str) else ""
+    if code_l:
+        if not ( (SIG_MAXTX_1[2:].lower() in code_l) or (SIG_MAXTX_2[2:].lower() in code_l) ):
+            max_tx = 0
+        if not ( (SIG_MAXWALLET_1[2:].lower() in code_l) or (SIG_MAXWALLET_2[2:].lower() in code_l) ):
+            max_wallet = 0
+    for rpc in rpcs:
+        if max_tx in (None, 0):
+            for sel in (SIG_MAXTX_1, SIG_MAXTX_2):
+                v = _eth_call(rpc, token, sel, timeout_s)
+                iv = _decode_uint(v)
+                if iv:
+                    max_tx = iv
+                    break
+            if max_tx not in (None, 0):
+                pass
+        if max_wallet in (None, 0):
+            for sel in (SIG_MAXWALLET_1, SIG_MAXWALLET_2):
+                v = _eth_call(rpc, token, sel, timeout_s)
+                iv = _decode_uint(v)
+                if iv:
+                    max_wallet = iv
+                    break
+
     # Upgradeable via EIP-1967 storage OR implementation()
     upgradeable = None
     for rpc in rpcs:
@@ -218,6 +255,7 @@ def check_contract_v2(chain: str, token: str, rpc_urls: Optional[List[str]] = No
         "totalDisplay": _format_supply(total, decimals),
         "owner": owner or "—",
         "renounced": renounced,
-        "paused": paused,
-        "upgradeable": upgradeable,
+        "paused": paused,        "upgradeable": upgradeable,
+        "maxTx": max_tx,
+        "maxWallet": max_wallet,
     }
