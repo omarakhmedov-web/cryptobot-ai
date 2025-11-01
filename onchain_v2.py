@@ -39,6 +39,10 @@ _PUBLIC_RPC = {
 
 # ERC-20 selectors
 SIG_TOTAL_SUPPLY = "0x18160ddd"
+# EIP-1967 beacon slot: bytes32(keccak256('eip1967.proxy.beacon') - 1)
+EIP1967_BEACON_SLOT = "0x" + (int.from_bytes(
+    bytes.fromhex("A3F0AD74E5423AEBFD80D3EF4346578335A9A72EAEEE59FF6CB3582B35133D50"), "big"
+ ) - 1).to_bytes(32, "big").hex()
 SIG_NAME         = "0x06fdde03"
 SIG_SYMBOL       = "0x95d89b41"
 SIG_DECIMALS     = "0x313ce567"
@@ -245,6 +249,19 @@ def check_contract_v2(chain: str, token: str, rpc_urls: Optional[List[str]] = No
             break
     if upgradeable is None:
         upgradeable = False
+    # Beacon proxy detection (OpenZeppelin): read EIP-1967 beacon slot and optional implementation() from beacon
+    try:
+        if upgradeable is False:
+            for rpc in rpcs:
+                beacon_hex = _eth_get_storage_at(rpc, token, EIP1967_BEACON_SLOT, timeout_s)
+                if beacon_hex and len(beacon_hex) >= 66 and int(beacon_hex[-40:],16) != 0:
+                    upgradeable = True
+                    # Optional sanity: try calling implementation() on beacon (0x5c60da1b)
+                    _ = _eth_call(rpc, "0x"+beacon_hex[-40:], "0x5c60da1b", timeout_s)
+                    break
+    except Exception:
+        pass
+
 
 
     # --- normalization (ensure renderer never sees '—' when code is present) ---
