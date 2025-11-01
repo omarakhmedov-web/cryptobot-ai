@@ -2137,8 +2137,9 @@ def render_lp(info: dict | None, market: dict | None, lang: str="en"):
               "avalanche":"Avalanche","fantom":"Fantom"}.get(str(ch).lower(), str(ch).upper())
     lines = [f"LP lock (lite) — {header}"]
     burned = i.get("burnedPct"); locked = i.get("lockedPct")
-    if burned is None and locked is None and str(i.get("status","")).lower()=="unknown":
-        lines.append("Status: unknown")
+    if burned is None and locked is None:
+        st = str(i.get("status","")).strip().lower()
+        lines.append(f"Status: {i.get('status')}" if st and st != "unknown" else "Status: unknown")
     if burned is not None:
         try: lines.append(f"Burned: {float(burned):.2f}%")
         except Exception: lines.append(f"Burned: {burned}")
