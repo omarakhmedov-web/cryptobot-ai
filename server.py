@@ -1166,6 +1166,22 @@ def webhook():
         return jsonify({'ok': False, 'err': 'bad secret header'}), 403
     try:
         upd = request.get_json(force=True, silent=True) or {}
+        # --- D0: Anti-duplicate delivery guard (update_id-based) ---
+        try:
+            updid = upd.get("update_id")
+        except Exception:
+            updid = None
+        try:
+            ttl = int(os.getenv("DUPLICATE_TTL_SEC","120") or 120)
+        except Exception:
+            ttl = 120
+        if isinstance(updid, int):
+            k = f"upd:{updid}"
+            if cache_get(k):
+                return jsonify({"ok": True, "duplicate": True})
+            cache_set(k, "1", ttl)
+        # --- /Anti-duplicate guard ---
+
         if "message" in upd: return on_message(upd["message"])
         if "edited_message" in upd: return on_message(upd["edited_message"])
         if "callback_query" in upd: return on_callback(upd["callback_query"])
