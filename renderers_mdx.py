@@ -1198,122 +1198,102 @@ def render_whypp(verdict, market: Dict[str, Any], lang: str = "en") -> str:
     return "\n".join(lines).replace("\n", "\n")
 
 
+
 def render_lp(info: dict, lang: str = "en") -> str:
     """
     LP-lite v2 renderer (compact, serious, accurate).
-    Back-compat: accepts the old "info" dict; if it contains chain + LP token, we compute on-chain.
-    Otherwise, we will format whatever is present in "info" and mark unknowns.
+    D1.4 tweak: if precomputed data is present in info["data"], use it (avoid extra RPC).
+    Back-compat: if chain + LP token present and no data provided, we compute on-chain.
     """
     p = info or {}
     chain = (p.get("chain") or p.get("network") or p.get("chainId") or "eth")
     lp_token = (p.get("lpAddress") or p.get("lpToken") or p.get("address") or p.get("token") or "—")
+
     def _looks_addr(a: str) -> bool:
         return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
 
-    data = None
-    if _looks_addr(lp_token):
+    # Prefer precomputed data from inspector/server if available
+    data = p.get("data") if isinstance(p.get("data"), dict) else None
+    # If not provided, compute only when we have an address
+    if data is None and _looks_addr(lp_token):
         try:
             data = check_lp_lock_v2(chain, lp_token)
         except Exception:
             data = None
 
-    lines = []
-    def _cap(s: str) -> str:
-        s = (s or "").lower()
-        return {"eth":"Ethereum","bsc":"BSC","polygon":"Polygon"}.get(s, s.capitalize() if s else "—")
-    lines.append(f"LP lock (lite) — {_cap(chain)}")
-    status_map = {"burned":"burned","locked-partial":"locked-partial","unlocked":"unlocked","v3-nft":"v3-NFT","unknown":"unknown"}
+    # Helper to read fields from either top-level or nested data
+    def _getf(k, default=None):
+        if isinstance(data, dict) and k in data:
+            return data.get(k)
+        return p.get(k, default)
 
-    if data and isinstance(data, dict):
-        status = status_map.get(str(data.get("status")),"unknown")
-        if status == "v3-NFT":
-            lines.append("Burned: n/a (v3/NFT)")
-            lines.append("Locked: n/a (v3/NFT)")
-        else:
-            burned = data.get("burnedPct")
-            locked = data.get("lockedPct")
-            # Correct LP status normalization
-            try:
-                _locked_val = float(locked) if locked is not None else None
-            except Exception:
-                _locked_val = None
-            _locked_by = (data.get("lockedBy") or "").strip()
-            if status != "v3-NFT" and _locked_val is not None:
-                if _locked_val <= 0.0:
-                    status = "unlocked"
-                elif 0.0 < _locked_val < 100.0 and _locked_by not in ("", "—"):
-                    status = "locked-partial"
-            # Normalize status based on lockedPct and provider
-            try:
-                _locked_val = float(locked) if locked is not None else None
-            except Exception:
-                _locked_val = None
-            lk_by = data.get("lockedBy") or "—"
-            if status != "v3-NFT":
-                if _locked_val is not None:
-                    if _locked_val <= 0.0:
-                        status = "unlocked"
-                    elif _locked_val < 100.0 and lk_by != "—":
-                        status = "locked-partial"
-                    # else keep prior status
-                elif _locked_val >= 100.0:
-                    status = "locked"
+    # Build text lines
+    lines = ["*LP lock (lite)*"]
 
-            lines.append(f"Status: {status}")
-            def _fmt_pct(x):
-                try:
-                    return f"{float(x):.2f}%"
-                except Exception:
-                    return "—"
-            lines.append(f"Burned: {_fmt_pct(burned)}  (0xdead + 0x0)")
-            lk_by = data.get("lockedBy") or "—"
-            lines.append(f"Locked: {_fmt_pct(locked)} via {lk_by}")
-        lp_disp = data.get("lpToken") or lp_token
-        lines.append(f"LP token: {lp_disp}")
-        links = []
-        # Label scan by chain
-        _chain_norm = (chain or "").lower()
-        _scan_label = "Explorer"
-        if "eth" in _chain_norm:
-            _scan_label = "Etherscan"
-        elif "bsc" in _chain_norm or "binance" in _chain_norm:
-            _scan_label = "BscScan"
-        elif "polygon" in _chain_norm:
-            _scan_label = "Polygonscan"
+    # V3 / NFT case detection
+    status_map = {"3": "v3-NFT", "v3": "v3-NFT", "v3-nft": "v3-NFT"}
+    status = "unknown"
+    if isinstance(data, dict):
+        status = status_map.get(str(data.get("status")).lower(), "unknown") if data.get("status") is not None else "unknown"
+
+    if status == "v3-NFT":
+        lines.extend([
+            "Status: v3-NFT",
+            "Burned: n/a (v3/NFT)",
+            "Locked: n/a (v3/NFT)"
+        ])
+    else:
+        burned = _getf("burnedPct")
+        locked = _getf("lockedPct")
+        locked_by = (_getf("lockedBy") or "—")
+        # Normalize status if we have lockedPct
+        try:
+            locked_val = float(locked) if locked is not None else None
+        except Exception:
+            locked_val = None
+        if locked_val is not None:
+            if locked_val <= 0.0:
+                status = "unlocked"
+            elif 0.0 < locked_val < 100.0 and locked_by not in ("", "—"):
+                status = "locked-partial"
+            else:
+                status = "locked"
+        lines.append(f"Status: {status}")
+        def _fmt_pct(x):
+            try:
+                return f"{float(x):.2f}%"
+            except Exception:
+                return "—"
+        # Burned/Locked lines
+        lines.append(f"Burned: {_fmt_pct(burned)}  (0xdead + 0x0)")
+        lines.append(f"Locked: {_fmt_pct(locked)} via {locked_by}")
+
+    # LP token line
+    lp_disp = data.get("lpToken") if isinstance(data, dict) and data.get("lpToken") else (lp_token or "—")
+    lines.append(f"LP token: {lp_disp}")
+
+    # Links (if present in computed/provided data)
+    links = []
+    _chain_norm = (chain or "").lower()
+    _scan_label = "Explorer"
+    if "eth" in _chain_norm:
+        _scan_label = "Etherscan"
+    elif "bsc" in _chain_norm or "binance" in _chain_norm:
+        _scan_label = "BscScan"
+    elif "polygon" in _chain_norm:
+        _scan_label = "Polygonscan"
+    if isinstance(data, dict):
         if data.get("holdersUrl"): links.append(f"Holders ({_scan_label})")
         if data.get("uncxUrl"): links.append("UNCX")
         if data.get("teamfinanceUrl"): links.append("TeamFinance")
-        if links:
-            lines.append("Links: " + " | ".join(links))
-        ds = data.get("dataSource") or "—"
-        lines.append(f"Data source: {ds}")
-        return "\n".join(lines)
+    if links:
+        lines.append("Links: " + " | ".join(links))
 
-    # Fallback legacy formatting without compute
-    burned_pct = p.get("burnedPct")
-    locked_pct = p.get("lockedPct")
-    def _fmt_pct2(v):
-        try: return f"{float(v):.2f}%"
-        except Exception: return "—"
-    status = "unknown"
-    try:
-        if burned_pct is not None and float(burned_pct) >= 95.0:
-            status = "burned"
-        elif locked_pct is not None and float(locked_pct) > 0:
-            status = "locked-partial"
-        elif locked_pct is not None and float(locked_pct) == 0:
-            status = "unlocked"
-    except Exception:
-        pass
-    lines.append(f"Status: {status}")
-    lines.append(f"Burned: {_fmt_pct2(burned_pct) if burned_pct is not None else '—'}")
-    lines.append(f"Locked: {_fmt_pct2(locked_pct) if locked_pct is not None else '—'}")
-    lines.append(f"LP token: {lp_token}")
-    if chain not in (None, "—", "", "-") and lp_token not in (None, "—", "", "-"):
-        lines.append("Links: UNCX | TeamFinance")
-    lines.append("Data source: —")
-    return "\n".join(lines)
-# [fix] removed legacy render_details defs
+    # Data source
+    ds = (p.get("provider") or (data.get("dataSource") if isinstance(data, dict) else None) or "—")
+    lines.append(f"Source: {ds}")
+    return "\\n".join(lines)
+
 
 def render_contract(info: dict, lang: str = "en") -> str:
     """
