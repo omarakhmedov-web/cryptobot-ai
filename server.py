@@ -1683,15 +1683,6 @@ def on_message(msg):
     verdict = compute_verdict(market)
     # --- precompute website intel and pass into ctx so renderers can show it ---
     links = (market.get("links") or {})
-    # D1.4: preserve structured LP info to avoid repeated RPC on LP callback
-    try:
-        _lp_info_for_bundle = None
-        if isinstance(locals().get("info"), dict) and locals().get("info"):
-            _lp_info_for_bundle = locals().get("info")
-        elif isinstance(locals().get("info2"), dict) and locals().get("info2"):
-            _lp_info_for_bundle = locals().get("info2")
-    except Exception:
-        _lp_info_for_bundle = None
     web = {
 
         "whois": {"created": None, "registrar": None},
@@ -1787,8 +1778,6 @@ def on_message(msg):
 
     links = (market.get("links") or {})
     bundle = {
-        "lp_info": (_lp_info_for_bundle if isinstance(locals().get("_lp_info_for_bundle"), dict) else None),
-        "lp_lock_lite": (_lp_info_for_bundle if isinstance(locals().get("_lp_info_for_bundle"), dict) else None),
         "verdict": {"level": getattr(verdict, "level", None), "score": getattr(verdict, "score", None)},
         "reasons": list(getattr(verdict, "reasons", []) or []),
         "market": {
@@ -2096,28 +2085,6 @@ def on_callback(cb):
 
             info = _b.get("lp_info")
 
-
-        # D1.4: also try lp_lock_lite and cached inspector result (bundle-first)
-        if not isinstance(info, dict):
-            if isinstance(_b.get("lp_lock_lite"), dict):
-                info = _b.get("lp_lock_lite")
-            else:
-                try:
-                    oc = (_b.get("verdict") or {})
-                except Exception:
-                    oc = {}
-                try:
-                    chain_short = (_b.get("market") or {}).get("chain") or "eth"
-                except Exception:
-                    chain_short = "eth"
-                try:
-                    pair_addr = _safe_pair_address(_b)
-                except Exception:
-                    pair_addr = None
-                try:
-                    info = _lp_info_cached(oc, chain_short, pair_addr, _b)
-                except Exception:
-                    pass
         if not isinstance(info, dict):
 
             _lp = _mkt.get("pairAddress") or _mkt.get("lpToken") or _mkt.get("lpAddress")
@@ -2128,7 +2095,36 @@ def on_callback(cb):
 
         try:
 
-            txt = _render_lp_compat(info)
+            txt = 
+# D1.4C: enrich LP info if missing burned/locked numeric values
+try:
+    def _need_enrich(d):
+        if not isinstance(d, dict): return True
+        _d = d.get("data") if isinstance(d.get("data"), dict) else d
+        bv = _d.get("burnedPct"); lv = _d.get("lockedPct")
+        try: _ = float(bv) if bv is not None else None
+        except Exception: bv = None
+        try: _ = float(lv) if lv is not None else None
+        except Exception: lv = None
+        return (bv is None) and (lv is None)
+    if _need_enrich(info):
+        _b_mkt = _b.get("market") or {}
+        _pair = _b_mkt.get("pairAddress") or _b_mkt.get("lpToken") or _b_mkt.get("lpAddress")
+        _chain = _b_mkt.get("chain") or _b_mkt.get("chainId") or "eth"
+        if _pair:
+            try:
+                _data = check_lp_lock_v2(_chain, _pair)
+                if isinstance(_data, dict) and _data:
+                    if not isinstance(info, dict): info = {}
+                    info.setdefault("provider", "lp-lite")
+                    info.setdefault("chain", _chain)
+                    info.setdefault("lpAddress", _pair)
+                    info["data"] = _data
+            except Exception:
+                pass
+except Exception:
+    pass
+_render_lp_compat(info)
 
             _b["lp"] = txt
 
