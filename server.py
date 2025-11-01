@@ -1276,7 +1276,6 @@ def _render_lp_compat(info, market=None, lang=None):
         lang, market = market, None
     """Compatibility wrapper that builds a minimal LP-lite info dict and delegates
     to renderers_mdx.render_lp(info, lang) without any extra RPC calls.
-
     - `info`: dict that may already contain keys like lpAddress/lpToken, burnedPct, lockedPct, lockedBy, chain.
     - `market`: optional market dict used only to *fill gaps* (chain/pairAddress).
     - `lang`: language code; defaults to env DEFAULT_LANG or 'en'.
@@ -1287,64 +1286,58 @@ def _render_lp_compat(info, market=None, lang=None):
                 lang = DEFAULT_LANG  # provided at module level
             except Exception:
                 lang = "en"
-        p = dict(info or {})
-        # Safe helpers
-        def _looks_addr(a):
+        # Normalize inputs
+        info_d = info if isinstance(info, dict) else {}
+        market_d = market if isinstance(market, dict) else {}
+
+        # Helpers
+        def _looks_addr(a: str) -> bool:
             return isinstance(a, str) and a.startswith("0x") and len(a) >= 10
         def _chain_norm(x):
             v = (str(x) if x is not None else "").strip().lower()
-            mp = {"1":"eth","eth":"eth","ethereum":"eth","56":"bsc","bsc":"bsc","bnb":"bsc","137":"polygon","matic":"polygon","polygon":"polygon"}
-            return mp.get(v, v or "eth")
-        # Fill from market if missing
-        if isinstance(market, dict):
-            ch = p.get("chain") or p.get("network") or p.get("chainId")
-            if not ch:
-                ch = market.get("chain") or market.get("network") or market.get("chainId")
-            if ch:
-                p["chain"] = _chain_norm(ch)
-            lp = p.get("lpAddress") or p.get("lpToken") or p.get("address")
-            if not _looks_addr(lp):
-                cand = (market.get("pairAddress") or market.get("pair") or market.get("lpAddress"))
-                if _looks_addr(cand):
-                    p["lpAddress"] = cand
-        # Minimal provider tag for downstream renderer
-        p.setdefault("provider", p.get("provider") or "lp-lite")
-        # Ensure we don't accidentally pass complex nested objects that could cause renderer issues
-        # Keep only expected primitive fields if present
-        safe = {}
-        for k in ("provider","chain","lpAddress","lpToken","address","burnedPct","burned_pct","lockedPct","lockedBy"):
-            if k in p:
-                safe[k] = p[k]
-        # Keep nested 'data' (from inspector) but only with allowed keys
-        if isinstance(p.get("data"), dict):
-            d = p["data"]
-            safe["data"] = {kk: d.get(kk) for kk in ("burnedPct","burned_pct","lockedPct","lockedBy") if kk in d}
-        # Prefer lpAddress over lpToken in output
-        if not _looks_addr(safe.get("lpAddress")) and _looks_addr(safe.get("lpToken")):
-            safe["lpAddress"] = safe["lpToken"]
-        # Delegate to MDX renderer (2-arg signature)
-        from renderers_mdx import render_lp as _render_lp_mdx
-        return _render_lp_mdx(safe, lang)
-    except Exception as _e:
+            aliases = {"ethereum":"eth","eth":"eth","bsc":"bsc","binance":"bsc","polygon":"polygon","matic":"polygon"}
+            return aliases.get(v, v or "eth")
+
+        p = dict(info_d or {})
+        # Fill gaps from market
+        if not _looks_addr(p.get("lpAddress")):
+            cand = p.get("lpToken") or market_d.get("pairAddress") or market_d.get("lpToken") or market_d.get("lpAddress")
+            if _looks_addr(cand):
+                p["lpAddress"] = cand
+        if "chain" not in p or not p.get("chain"):
+            p["chain"] = _chain_norm(info_d.get("chain") or market_d.get("chain") or market_d.get("chainId"))
+
+        # Provider marker
+        p.setdefault("provider", "inspector-lp-lite")
+
+        # Delegate to renderer
         try:
-            print("[LP] compat error:", _e)
-        except Exception:
-            pass
-        # Fail gracefully with a compact fallback text
-        lp_addr = None
+            return renderers_mdx.render_lp(p, lang)  # must exist in module scope
+        except Exception as _e_rlp:
+            try:
+                print("[LP] render_lp error:", _e_rlp)
+            except Exception:
+                pass
+        # Fallback compact text
+        lp_addr = p.get("lpAddress") if _looks_addr(p.get("lpAddress")) else None
+        return "\n".join([
+            "*LP lock (lite)*",
+            "Status: *unknown*",
+            "Locked: —",
+            f"LP token: {lp_addr or '—'}",
+            "Source: inspector-lp-lite"
+        ])
+    except Exception as _e_lp:
         try:
-            lp_addr = info.get("lpAddress") or info.get("lpToken") or (market.get("pairAddress") if isinstance(market, dict) else None)
+            print("[LP] compat error:", _e_lp)
         except Exception:
             pass
         return "\n".join([
-            "LP lock (lite)",
-            f"Status: unknown",
-            f"Burned: —",
-            f"Locked: —",
-            f"LP token: {lp_addr or '—'}",
-            "Data source: —",
+            "*LP lock (lite)*",
+            "Status: *unknown*",
+            "Locked: —",
+            "Source: inspector-lp-lite"
         ])
-
 def on_message(msg):
     lp = {}
     details = None
