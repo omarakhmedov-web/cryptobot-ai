@@ -1258,6 +1258,17 @@ def render_lp(info: dict, lang: str = "en") -> str:
                 status = "locked-partial"
             else:
                 status = "locked"
+                # Heuristic: if Locked% is unknown, infer from Burned%
+        if status == "unknown":
+            try:
+                _burned_val = float(burned) if burned is not None else None
+            except Exception:
+                _burned_val = None
+            if _burned_val is not None:
+                if _burned_val >= 95.0:
+                    status = "burned"
+                elif _burned_val > 0.0:
+                    status = "burned-partial"
         lines.append(f"Status: {status}")
         def _fmt_pct(x):
             try:
