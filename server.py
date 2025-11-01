@@ -1276,6 +1276,7 @@ def _render_lp_compat(info, market=None, lang=None):
         lang, market = market, None
     """Compatibility wrapper that builds a minimal LP-lite info dict and delegates
     to renderer.render_lp(info, market, lang) without any extra RPC calls.
+    Normalizes shapes from lp_lite_v2 (data={...}) to flat keys expected by render_lp().
     """
     try:
         if lang is None:
@@ -1296,6 +1297,13 @@ def _render_lp_compat(info, market=None, lang=None):
             return aliases.get(v, v or "eth")
 
         p = dict(info_d or {})
+        # Flatten lp_lite_v2 shape: move keys from p["data"] to top-level if missing
+        d = p.get("data") if isinstance(p.get("data"), dict) else None
+        if d:
+            for k in ("burnedPct","lockedPct","lockedBy","status","holdersUrl","explorerName","uncxUrl","teamfinanceUrl","dataSource","lpToken"):
+                if k not in p and k in d:
+                    p[k] = d[k]
+
         # Fill gaps from market
         if not _looks_addr(p.get("lpAddress")):
             cand = p.get("lpToken") or market_d.get("pairAddress") or market_d.get("lpToken") or market_d.get("lpAddress")
@@ -1303,8 +1311,12 @@ def _render_lp_compat(info, market=None, lang=None):
                 p["lpAddress"] = cand
         if "chain" not in p or not p.get("chain"):
             p["chain"] = _chain_norm(info_d.get("chain") or market_d.get("chain") or market_d.get("chainId"))
-        # Provider marker
-        p.setdefault("provider", "inspector-lp-lite")
+
+        # Provider marker & sane defaults
+        p.setdefault("provider", p.get("provider") or "inspector-lp-lite")
+        p.setdefault("dataSource", p.get("dataSource") or "on-chain (ERC-20)" if ("burnedPct" in p or "lockedPct" in p) else "—")
+        if "status" not in p:
+            p["status"] = "unknown"
 
         # Pick renderer module (_mdx or renderers_mdx)
         rmod = None
@@ -1330,10 +1342,9 @@ def _render_lp_compat(info, market=None, lang=None):
         lp_addr = p.get("lpAddress") if _looks_addr(p.get("lpAddress")) else None
         return "\\n".join([
             "*LP lock (lite)*",
-            "Status: *unknown*",
-            "Locked: —",
-            f"LP token: {lp_addr or '—'}",
-            "Source: inspector-lp-lite"
+            f"Status: *{(p.get('status') or 'unknown')}*",
+            f"Locked: {('—' if p.get('lockedPct') is None else p.get('lockedPct'))}",
+            f"Source: {p.get('provider') or 'inspector-lp-lite'}"
         ])
     except Exception as _e_lp:
         try:
