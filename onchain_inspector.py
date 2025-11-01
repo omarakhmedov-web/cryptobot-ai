@@ -624,3 +624,237 @@ def _locker_config_for_chain(chain_short: str):
     if not out:
         _add_from(DEFAULT_LOCKERS.get(_canon_chain_key(chain_short)) or {})
     return out
+
+
+# =======================
+# D1 COMPAT PATCH (append-only, non-destructive)
+# Version: 0.4.1-D1-COMPAT (2025-11-01)
+# Rationale:
+#  - Keep the entire original module intact.
+#  - Append a hardened implementation and override ONLY the public entry points:
+#       inspect_token(...), build_onchain_payload(...)
+#  - Do not remove or change any other functions/consts used elsewhere.
+#  - Safe to drop-in; if needed, revert by restoring the original file.
+
+from typing import Dict, Any, Optional, List
+import os, json
+
+try:
+    from cache import cache_get, cache_set
+except Exception:
+    def cache_get(_k: str): return None
+    def cache_set(_k: str, _v: str, _ttl: int=300): return None
+
+try:
+    from web3 import Web3
+except Exception:
+    Web3 = None  # allows graceful degradation
+
+# --- Local helpers (prefixed to avoid clashing with originals) ---
+
+def _d1_canon_chain(c: str) -> str:
+    c = (c or "").strip().lower()
+    if c in ("eth","ethereum"): return "eth"
+    if c in ("bsc","bep20","binance"): return "bsc"
+    if c in ("polygon","matic"): return "polygon"
+    return c or "eth"
+
+def _d1_rpc_candidates_for_chain(chain: str) -> List[str]:
+    short = _d1_canon_chain(chain)
+    out: List[str] = []
+    raw = (os.getenv("RPC_URLS") or "").strip()
+    if raw:
+        try:
+            j = json.loads(raw)
+            arr = j.get(short) or j.get(chain) or []
+            if isinstance(arr, list):
+                out += [str(x).strip() for x in arr]
+        except Exception:
+            pass
+    # Per-chain single envs
+    env_map = {
+        "eth": os.getenv("ETH_RPC_URL","").strip(),
+        "bsc": os.getenv("BSC_RPC_URL","").strip(),
+        "polygon": os.getenv("POLYGON_RPC_URL","").strip(),
+    }
+    if env_map.get(short):
+        out.append(env_map[short])
+    # Public fallbacks
+    public = {
+        "eth": ["https://ethereum.publicnode.com","https://rpc.ankr.com/eth"],
+        "bsc": ["https://bsc.publicnode.com","https://rpc.ankr.com/bsc"],
+        "polygon": ["https://polygon-rpc.com","https://rpc.ankr.com/polygon"],
+    }
+    out += public.get(short, [])
+    # dedup preserve order
+    seen=set(); dedup=[]
+    for u in out:
+        if u and u not in seen: seen.add(u); dedup.append(u)
+    return dedup
+
+def _d1_w3_for(url: str):
+    if not Web3: return None
+    try:
+        return Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": float(os.getenv("RPC_TIMEOUT_SECONDS","8"))}))
+    except Exception:
+        return None
+
+def _d1_eth_call(w3, to_addr: str, data: str):
+    try:
+        payload = {"to": to_addr, "data": data}
+        res = w3.eth.call(payload)
+        if isinstance(res,(bytes,bytearray)): return bytes(res)
+        if isinstance(res,str) and res.startswith("0x"):
+            return bytes.fromhex(res[2:])
+    except Exception:
+        return None
+    return None
+
+def _d1_u32(res):  # uint256 tail
+    if not res: return None
+    try: return int.from_bytes(res[-32:], "big")
+    except Exception: return None
+
+def _d1_bool(res):
+    v = _d1_u32(res)
+    return None if v is None else bool(v)
+
+def _d1_str(res):
+    if not res: return None
+    try:
+        if len(res) >= 64:
+            off = int.from_bytes(res[0:32], "big")
+            if off + 32 <= len(res):
+                ln = int.from_bytes(res[off:off+32], "big")
+                raw = res[off+32:off+32+ln]
+                return raw.decode("utf-8","ignore").strip("\\x00")
+        s = res[-32:].rstrip(b"\\x00").decode("utf-8","ignore")
+        return s if s else None
+    except Exception:
+        return None
+
+# EIP-1967 impl slot
+_EIP1967_IMPL_SLOT = "0x" + (int.from_bytes(
+    bytes.fromhex("360894A13BA1A3210667C828492DB98DCA3E2076CC3735A920A3CA505D382BBC"), "big"
+) - 1).to_bytes(32, "big").hex()
+
+def _d1_get_code_present(w3, addr: str) -> bool:
+    try:
+        code = w3.eth.get_code(addr)
+        return bool(code and len(code)>0)
+    except Exception:
+        return False
+
+def _d1_get_impl(w3, addr: str):
+    try:
+        res = w3.eth.get_storage_at(addr, _EIP1967_IMPL_SLOT)
+        if res and len(res)>=32 and int(res[-20:].hex(), 16)!=0:
+            return "0x" + res[-20:].hex()
+    except Exception:
+        return None
+    return None
+
+# 4-byte selector of mint(address,uint256)
+_SIG_MINT = "40c10f19"
+def _d1_mint_sig(w3, addr: str):
+    try:
+        code = w3.eth.get_code(addr)
+        return _SIG_MINT.encode() in code.hex().encode()
+    except Exception:
+        return None
+
+# --- D1 public overrides ------------------------------------------------------
+
+def inspect_token(chain_short: str, token_address: str, pair_address: Optional[str] = None) -> Dict[str, Any]:
+    chain = _d1_canon_chain(chain_short)
+    token = (token_address or "").strip()
+    pair  = (pair_address or "").strip() if pair_address else ""
+    if not (isinstance(token, str) and token.startswith("0x") and len(token)==42):
+        return {"ok": False, "chain": chain, "token": token_address, "error": "invalid token address"}
+
+    # cache
+    ck = f"oc:{chain}:{token}"
+    cached = cache_get(ck)
+    if cached:
+        try:
+            j = json.loads(cached); j["cacheHit"] = True; return j
+        except Exception:
+            pass
+
+    out: Dict[str, Any] = {
+        "ok": False,
+        "chain": chain, "token": token, "pair": pair or None,
+        "codePresent": False, "name": None, "symbol": None, "decimals": None, "totalSupply": None,
+        "owner": None, "renounced": None, "paused": None,
+        "proxy": None, "implementation": None, "hasMintSignature": None,
+        "maxTx": None, "maxWallet": None,
+        "errors": [],
+    }
+
+    if Web3 is None:
+        out["errors"].append("web3-not-installed"); return out
+
+    w3 = None
+    for url in _d1_rpc_candidates_for_chain(chain):
+        w3 = _d1_w3_for(url)
+        if w3: break
+    if not w3:
+        out["errors"].append("no-rpc"); return out
+
+    # Selectors
+    DEC="0x313ce567"; NAME="0x06fdde03"; SYM="0x95d89b41"; SUP="0x18160ddd"; OWN="0x8da5cb5b"; PAU="0x5c975abb"
+    MAXTX=["0xe386e5d0","0x4b750334"]; MAXW=["0x7e1d6f92","0x2e1a7d4d"]
+
+    try: out["codePresent"] = _d1_get_code_present(w3, token)
+    except Exception as e: out["errors"].append(f"code:{e}")
+    try: out["decimals"] = _d1_u32(_d1_eth_call(w3, token, DEC))
+    except Exception as e: out["errors"].append(f"decimals:{e}")
+    try: out["name"] = _d1_str(_d1_eth_call(w3, token, NAME))
+    except Exception as e: out["errors"].append(f"name:{e}")
+    try: out["symbol"] = _d1_str(_d1_eth_call(w3, token, SYM))
+    except Exception as e: out["errors"].append(f"symbol:{e}")
+    try: out["totalSupply"] = _d1_u32(_d1_eth_call(w3, token, SUP))
+    except Exception as e: out["errors"].append(f"supply:{e}")
+
+    try:
+        owner = _d1_eth_call(w3, token, OWN)
+        if owner and len(owner)>=32:
+            addr = "0x" + owner[-20:].hex()
+            out["owner"] = Web3.to_checksum_address(addr)
+            out["renounced"] = (int(owner[-20:].hex(),16) == 0)
+    except Exception as e: out["errors"].append(f"owner:{e}")
+
+    try: out["paused"] = _d1_bool(_d1_eth_call(w3, token, PAU))
+    except Exception as e: out["errors"].append(f"paused:{e}")
+
+    try:
+        impl = _d1_get_impl(w3, token)
+        out["implementation"] = impl; out["proxy"] = bool(impl)
+    except Exception as e: out["errors"].append(f"proxy:{e}")
+
+    try: out["hasMintSignature"] = _d1_mint_sig(w3, token)
+    except Exception as e: out["errors"].append(f"mintsig:{e}")
+
+    try:
+        for sel in MAXTX:
+            v = _d1_u32(_d1_eth_call(w3, token, sel))
+            if v: out["maxTx"]=v; break
+    except Exception as e: out["errors"].append(f"maxTx:{e}")
+    try:
+        for sel in MAXW:
+            v = _d1_u32(_d1_eth_call(w3, token, sel))
+            if v: out["maxWallet"]=v; break
+    except Exception as e: out["errors"].append(f"maxWallet:{e}")
+
+    out["ok"] = bool(out.get("codePresent") or out.get("decimals") is not None or out.get("name") or out.get("symbol"))
+
+    try: cache_set(ck, json.dumps(out, separators=(",",":")), int(os.getenv("ONCHAIN_CACHE_TTL_SEC","180")))
+    except Exception: pass
+    return out
+
+def build_onchain_payload(chain_short: str, token_address: str, pair_address: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        return inspect_token(chain_short, token_address, pair_address)
+    except Exception as e:
+        return {"ok": False, "chain": _d1_canon_chain(chain_short), "token": token_address, "error": str(e)}
+# ======================= END OF D1 COMPAT PATCH ===============================
