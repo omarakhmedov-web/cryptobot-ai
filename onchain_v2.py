@@ -249,7 +249,7 @@ def check_contract_v2(chain: str, token: str, rpc_urls: Optional[List[str]] = No
 
     # --- normalization (ensure renderer never sees '—' when code is present) ---
     try:
-        if codePresent:
+        if code_present:
             if paused is None:
                 paused = False
             if max_tx is None:
