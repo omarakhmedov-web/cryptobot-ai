@@ -2094,39 +2094,42 @@ def on_callback(cb):
             info = {"lpToken": _lp, "chain": _chain}
 
         try:
-
-            txt = 
-# D1.4C: enrich LP info if missing burned/locked numeric values
-try:
-    def _need_enrich(d):
-        if not isinstance(d, dict): return True
-        _d = d.get("data") if isinstance(d.get("data"), dict) else d
-        bv = _d.get("burnedPct"); lv = _d.get("lockedPct")
-        try: _ = float(bv) if bv is not None else None
-        except Exception: bv = None
-        try: _ = float(lv) if lv is not None else None
-        except Exception: lv = None
-        return (bv is None) and (lv is None)
-    if _need_enrich(info):
-        _b_mkt = _b.get("market") or {}
-        _pair = _b_mkt.get("pairAddress") or _b_mkt.get("lpToken") or _b_mkt.get("lpAddress")
-        _chain = _b_mkt.get("chain") or _b_mkt.get("chainId") or "eth"
-        if _pair:
-            try:
-                _data = check_lp_lock_v2(_chain, _pair)
-                if isinstance(_data, dict) and _data:
-                    if not isinstance(info, dict): info = {}
-                    info.setdefault("provider", "lp-lite")
-                    info.setdefault("chain", _chain)
-                    info.setdefault("lpAddress", _pair)
-                    info["data"] = _data
-            except Exception:
-                pass
-except Exception:
-    pass
-_render_lp_compat(info)
-
+            # D1.4C: enrich LP info if missing burned/locked numeric values
+            def _need_enrich(d):
+                if not isinstance(d, dict): 
+                    return True
+                _d = d.get("data") if isinstance(d.get("data"), dict) else d
+                bv = _d.get("burnedPct"); lv = _d.get("lockedPct")
+                try:
+                    _ = float(bv) if bv is not None else None
+                except Exception:
+                    bv = None
+                try:
+                    _ = float(lv) if lv is not None else None
+                except Exception:
+                    lv = None
+                return (bv is None) and (lv is None)
+            if _need_enrich(info):
+                _b_mkt = _b.get("market") or {}
+                _pair = _b_mkt.get("pairAddress") or _b_mkt.get("lpToken") or _b_mkt.get("lpAddress")
+                _chain = _b_mkt.get("chain") or _b_mkt.get("chainId") or "eth"
+                if _pair:
+                    try:
+                        _data = check_lp_lock_v2(_chain, _pair)
+                        if isinstance(_data, dict) and _data:
+                            if not isinstance(info, dict):
+                                info = {}
+                            info.setdefault("provider", "lp-lite")
+                            info.setdefault("chain", _chain)
+                            info.setdefault("lpAddress", _pair)
+                            info["data"] = _data
+                    except Exception:
+                        pass
+            txt = _render_lp_compat(info, _mkt, DEFAULT_LANG)
             _b["lp"] = txt
+            store_bundle(chat_id, orig_msg_id, _b)
+        except Exception:
+            txt = _b.get("lp") or "LP lock: temporarily unavailable"
 
             store_bundle(chat_id, orig_msg_id, _b)
 
