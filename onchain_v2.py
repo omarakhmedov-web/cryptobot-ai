@@ -209,15 +209,13 @@ def check_contract_v2(chain: str, token: str, rpc_urls: Optional[List[str]] = No
         code_l = (code or "").lower() if isinstance(code, str) else ""
         if code_l and (SIG_PAUSED[2:].lower() not in code_l):
             paused = False
-    # Limits (best-effort). If selectors absent in bytecode -> explicit 0
+    # Limits (best-effort). If selectors absent in bytecode -> leave as None (unknown)
     max_tx = None
     max_wallet = None
     code_l = (code or "").lower() if isinstance(code, str) else ""
-    if code_l:
-        if not ( (SIG_MAXTX_1[2:].lower() in code_l) or (SIG_MAXTX_2[2:].lower() in code_l) ):
-            max_tx = 0
-        if not ( (SIG_MAXWALLET_1[2:].lower() in code_l) or (SIG_MAXWALLET_2[2:].lower() in code_l) ):
-            max_wallet = 0
+    # NOTE: do NOT force 0 when selector not found; unknown should render as '—' (D1.3)
+    # We will try ABI-based probing in a follow-up step when available.
+    # If selectors are present, direct eth_call attempts below may still populate values.
     for rpc in rpcs:
         if max_tx in (None, 0):
             for sel in (SIG_MAXTX_1, SIG_MAXTX_2):
